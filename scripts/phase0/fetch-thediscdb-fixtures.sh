@@ -32,8 +32,8 @@ mkdir -p "$API"
 find "$DEST" -name 'disc*.json' | while read -r json; do
   hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("ContentHash") or "")' "$json")"
   id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("GlobalDiscId") or "")' "$json")"
-  [ -n "$hash" ] && curl -sS -m 60 "https://thediscdb.com/api/dischash/$hash" -o "$API/dischash-$hash.json"
-  [ -n "$id" ] && curl -sS -m 60 "https://thediscdb.com/api/discid/$id" -o "$API/discid-$id.json"
+  [ -n "$hash" ] && curl -fsS -m 60 "https://thediscdb.com/api/dischash/$hash" -o "$API/dischash-$hash.json"
+  [ -n "$id" ] && curl -fsS -m 60 "https://thediscdb.com/api/discid/$id" -o "$API/discid-$id.json"
   sleep 1
 done
 echo "saved $(ls "$API" | wc -l | tr -d ' ') API responses"
