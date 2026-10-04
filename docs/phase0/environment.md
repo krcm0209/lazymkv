@@ -16,7 +16,7 @@ TMDB_TOKEN : NOT SET
 profiles   : all-tracks=True eng-only=True
 staging    : \\unas-pro\media\lazymkv-staging : write, rename and delete OK
 staging free: 38124.7 GB
-PHASE0-DONE exit=-1
+PHASE0-DONE status=ok exit=-1
 ```
 
 Notes on that output:
@@ -24,8 +24,8 @@ Notes on that output:
 - `java` is blank because MakeMKV's `app_Java` setting is unset; MakeMKV then looks for
   Java itself (Java 8, 1.8.0_471, is installed). Experiment 12 checks whether it is used.
 - `TMDB_TOKEN` had not been set by the owner yet when this was recorded.
-- `PHASE0-DONE exit=-1` is not a failure. The value is the exit code of the last native
-  command, here `makemkvcon64 info disc:9999`, which PowerShell stops early once
+- `status=ok` means the script did not throw. `exit=-1` is not a failure: the value is only
+  the exit code of the last native command, here `makemkvcon64 info disc:9999`, which PowerShell stops early once
   `Get-DiscIndex` has the line it needs.
 - The staging share is reachable only from the owner's desktop session (saved
   credentials). From an SSH session `\\unas-pro\media` gives "Access is denied".

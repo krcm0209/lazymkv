@@ -1,17 +1,27 @@
 # Starts a phase 0 script in the owner's logged-on desktop session, elevated, and returns at once.
-# Saved share credentials and the optical drive are available there. Poll the log for PHASE0-DONE.
-# ArgLine must not contain double quotes; use single quotes around values with spaces.
+# Saved share credentials and the optical drive are available there. Poll the log for PHASE0-DONE
+# (scripts/phase0/wait.sh does that). ArgLine must not contain quotes of either kind.
+# The log's last line is "PHASE0-DONE status=ok|error exit=N". status says whether the script threw;
+# exit is only the exit code of the last native command it ran, which is not a verdict.
 param(
     [Parameter(Mandatory)][string]$Script,
     [string]$ArgLine = '',
     [Parameter(Mandatory)][string]$Log
 )
+$ErrorActionPreference = 'Stop'
 $full = "C:\lazymkv\src\scripts\phase0\$Script"
 if (-not (Test-Path $full)) { throw "no such script: $full" }
+$task = Get-ScheduledTask -TaskName 'lazymkv-phase0' -ErrorAction SilentlyContinue
+if ($task -and $task.State -eq 'Running') {
+    throw 'a phase 0 job is still running; wait for it to finish before starting another'
+}
 New-Item -ItemType Directory -Force (Split-Path $Log) | Out-Null
-Remove-Item $Log -ErrorAction SilentlyContinue
+if (Test-Path $Log) { Remove-Item $Log }
 # The log is written as UTF-8: a plain *> redirect writes UTF-16 in PowerShell 5.1, which findstr (wait.sh) cannot search.
-$inner = "& '$full' $ArgLine *>&1 | Out-File -FilePath '$Log' -Encoding utf8; Add-Content -Path '$Log' -Value ('PHASE0-DONE exit=' + `$LASTEXITCODE)"
+# try/catch/finally: a script that throws still gets its error and the PHASE0-DONE line into the log.
+$inner = "`$status = 'ok'; try { & '$full' $ArgLine *>&1 | Out-File -FilePath '$Log' -Encoding utf8 } " +
+    "catch { `$status = 'error'; Add-Content -Path '$Log' -Value ('ERROR: ' + `$_) } " +
+    "finally { Add-Content -Path '$Log' -Value ('PHASE0-DONE status=' + `$status + ' exit=' + `$LASTEXITCODE) }"
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$inner`""
 $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType Interactive -RunLevel Highest

@@ -2,6 +2,7 @@
 # Start a phase 0 script in the owner's desktop session on the mini PC.
 # Usage: scripts/phase0/job.sh <script.ps1> <log name> [script arguments, without quotes]
 set -euo pipefail
+[ "$#" -ge 2 ] || { echo "usage: scripts/phase0/job.sh <script.ps1> <log name> [arguments]" >&2; exit 2; }
 HOST="${LAZYMKV_BOX:-USER@makemkv-box}"
 SCRIPT="$1"
 LOG="$2"

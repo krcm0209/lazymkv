@@ -12,17 +12,25 @@
 "TMDB_TOKEN : " + $(if ($env:TMDB_TOKEN) { 'set' } else { 'NOT SET' })
 "profiles   : all-tracks=$(Test-Path $AllTracksProfile) eng-only=$(Test-Path $EngProfile)"
 
+# Every step must stop on failure and is then checked, so "OK" is only printed when all three worked.
 $probe = "$Staging\lazymkv-write-test.txt"
+$renamed = "$Staging\lazymkv-write-test-renamed.txt"
 try {
-    New-Item -ItemType Directory -Force $Staging | Out-Null
-    Set-Content $probe 'ok'
-    Rename-Item $probe 'lazymkv-write-test-renamed.txt'
-    Remove-Item "$Staging\lazymkv-write-test-renamed.txt"
+    New-Item -ItemType Directory -Force $Staging -ErrorAction Stop | Out-Null
+    Remove-Item $probe, $renamed -ErrorAction SilentlyContinue
+    Set-Content $probe 'ok' -ErrorAction Stop
+    Rename-Item $probe 'lazymkv-write-test-renamed.txt' -ErrorAction Stop
+    if ((Test-Path $probe) -or -not (Test-Path $renamed)) { throw 'the rename did not take effect' }
+    Remove-Item $renamed -ErrorAction Stop
+    if (Test-Path $renamed) { throw 'the delete did not take effect' }
     "staging    : $Staging : write, rename and delete OK"
 } catch {
     "staging    : $Staging : FAILED: $($_.Exception.Message)"
 }
 Add-Type -Namespace Win32 -Name Disk -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool GetDiskFreeSpaceEx(string path, out ulong freeToCaller, out ulong total, out ulong totalFree);'
 [uint64]$free = 0; [uint64]$total = 0; [uint64]$totalFree = 0
-[Win32.Disk]::GetDiskFreeSpaceEx("$Staging\", [ref]$free, [ref]$total, [ref]$totalFree) | Out-Null
-"staging free: $([math]::Round($free / 1GB, 1)) GB"
+if ([Win32.Disk]::GetDiskFreeSpaceEx("$Staging\", [ref]$free, [ref]$total, [ref]$totalFree)) {
+    "staging free: $([math]::Round($free / 1GB, 1)) GB"
+} else {
+    "staging free: FAILED (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+}

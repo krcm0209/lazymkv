@@ -6,7 +6,9 @@ $AllTracksProfile = "$P0\profiles\all-tracks.mmcp.xml"
 $EngProfile       = "$P0\profiles\eng-only.mmcp.xml"
 
 # Owner-specific values: $Staging, $Drive, $TestLibrary.
+if (-not (Test-Path "$P0\config.ps1")) { throw "missing $P0\config.ps1 (the owner's settings)" }
 . "$P0\config.ps1"
+if (-not $Staging -or -not $Drive) { throw "$P0\config.ps1 must set `$Staging and `$Drive" }
 
 function Resolve-Tool([string]$Name, [string[]]$Fallbacks) {
     $found = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
