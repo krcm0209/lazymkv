@@ -9,20 +9,19 @@ from robot import parse
 def check_run(scan, title, run):
     """The facts for one rip call of `title` that was stopped after 5014."""
     codes = [code for code, _, _ in run.messages]
-    added = {
-        int(params[-1]): params[0]
-        for code, _, params in run.messages
-        if code in (3307, 3308) and len(params) >= 2 and params[-1].isdigit()
-    }
+    added = {}  # title number -> every file added under that number in this run
+    for code, _, params in run.messages:
+        if code in (3307, 3308) and len(params) >= 2 and params[-1].isdigit():
+            added.setdefault(int(params[-1]), set()).add(params[0])
     added_at = [i for i, code in enumerate(codes) if code in (3307, 3308)]
     expected = scan.titles.get(title, {}).get(16)
     saw_5014 = 5014 in codes
-    # Nothing passes by default: a title the scan does not list, and a run with no
-    # 3307/3308 line, are both a "NO".
+    # Nothing passes by default: a title the scan does not list, a run with no 3307/3308
+    # line, and a title number added for two different files are all a "NO".
     before = saw_5014 and bool(added_at) and all(i < codes.index(5014) for i in added_at)
-    match = expected is not None and added.get(title) == expected
+    match = expected is not None and added.get(title) == {expected}
     return {
-        "expected": expected, "added": added.get(title), "match": match, "saw_5014": saw_5014,
+        "expected": expected, "added": "/".join(sorted(added.get(title, ()))) or None, "match": match, "saw_5014": saw_5014,
         "before": before, "n3308": codes.count(3308), "n3309": codes.count(3309),
     }
 

@@ -43,12 +43,15 @@ def main(root):
         print(f"{disc.name:<40} {str(meta.get('format')):<7} hash={by_hash:<6} discid={by_id}")
     answered = [by_hash for by_hash, _ in rows if by_hash in ("hit", "miss")]
     unanswered = len(rows) - len(answered)
+    id_failed = sum(1 for _, by_id in rows if by_id == "failed")
     either = sum(1 for by_hash, by_id in rows if "hit" in (by_hash, by_id))
     print(f"\nTheDiscDB knows {answered.count('hit')} of {len(answered)} discs by fingerprint")
     print(f"by fingerprint or disc ID: {either} of {len(rows)} discs")
     if unanswered:
         print(f"{unanswered} fingerprint lookups failed or were not made; they are not counted as misses")
-    return 0 if rows and not unanswered else 1
+    if id_failed:
+        print(f"{id_failed} disc ID lookups failed; the combined figure may be too low")
+    return 0 if rows and not unanswered and not id_failed else 1
 
 
 if __name__ == "__main__":

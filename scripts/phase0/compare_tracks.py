@@ -31,7 +31,8 @@ def expected_rows(scan, title, selection):
             continue
         kind = TYPE.get(a.get(1), a.get(1))
         flags = int(a.get(22, "0") or 0)
-        lang = norm_lang(a.get(3) or a.get(28))
+        lang_raw = a.get(3) or a.get(28) or "und"
+        lang = norm_lang(lang_raw)
         if "MVC" in a.get(6, ""):
             continue
         if selection == "eng":
@@ -40,7 +41,7 @@ def expected_rows(scan, title, selection):
             if kind == "subtitles" and lang != "eng":
                 continue
         rows.append(
-            {"stream": stream, "type": kind, "lang": lang, "codec": a.get(6, ""),
+            {"stream": stream, "type": kind, "lang": lang, "lang_raw": lang_raw, "codec": a.get(6, ""),
              "out": a.get(41, ""), "ch": a.get(14, ""), "flags": flags}
         )
     return rows
@@ -49,6 +50,7 @@ def expected_rows(scan, title, selection):
 def file_rows(ident):
     return [
         {"id": t["id"], "type": t["type"], "lang": norm_lang(t["properties"].get("language")),
+         "lang_raw": t["properties"].get("language", "und"),
          "codec": t["codec"], "ch": t["properties"].get("audio_channels", ""),
          "tags": sorted(k for k in t["properties"] if k.startswith("tag_"))}
         for t in ident["tracks"]
@@ -56,8 +58,10 @@ def file_rows(ident):
 
 
 def same_track(w, g):
-    """Type and language must agree; for audio, so must the channel count when both sides state it."""
-    if (w["type"], w["lang"]) != (g["type"], g["lang"]):
+    """Type must agree; language too, except on video; audio channel counts when both sides state one."""
+    if w["type"] != g["type"]:
+        return False
+    if w["type"] != "video" and w["lang"] != g["lang"]:
         return False
     if w["type"] == "audio" and str(w["ch"]) and str(g["ch"]):
         return str(w["ch"]) == str(g["ch"])
@@ -105,14 +109,14 @@ def main():
     for i in range(max(len(want), len(got))):
         w = want[i] if i < len(want) else None
         g = got[i] if i < len(got) else None
-        left = f"{w['stream']:>2} {w['type']:<9} {w['lang']:<4} {w['codec']:<12} out={w['out']:<8} ch={w['ch']:<2} f={w['flags']}" if w else ""
-        right = f"{g['id']:>2} {g['type']:<9} {g['lang']:<4} {g['codec']} ch={g['ch']}" if g else ""
+        left = f"{w['stream']:>2} {w['type']:<9} {w['lang_raw']:<4} {w['codec']:<12} out={w['out']:<8} ch={w['ch']:<2} f={w['flags']}" if w else ""
+        right = f"{g['id']:>2} {g['type']:<9} {g['lang_raw']:<4} {g['codec']} ch={g['ch']}" if g else ""
         print(f"{left:<54} | {right}")
 
     verdicts, n = checks(want, got, scan.titles[args.title], ident)
     print()
     print(f"TRACK COUNT      scan={len(want)} file={len(got)}")
-    print(f"ORDER MATCH      {yes_no(verdicts['order'])} (type, language and audio channels, position by position)")
+    print(f"ORDER MATCH      {yes_no(verdicts['order'])} (type, language except on video, audio channels; position by position)")
     print(f"CHAPTERS         scan={n['scan_chapters']} file={n['file_chapters']}")
     print(f"DURATION         scan={n['scan_seconds']}s file={n['file_seconds']:.1f}s")
     print(f"VIDEO TRACKS     {sum(1 for g in got if g['type'] == 'video')}")

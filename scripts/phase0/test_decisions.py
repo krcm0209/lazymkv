@@ -95,6 +95,14 @@ class Exp02(TempDir):
         self.assertIn("match=yes", out)
         self.assertIn("added-before-5014=NO", out)
 
+    def test_no_when_a_title_number_is_added_for_two_files(self):
+        self.write("scan.txt", SCAN)
+        run = ADDED.format(f="00002.mpls", n=0) + ADDED.format(f="00001.mpls", n=0) + SAVING
+        self.write("exp02/title-0.txt", run)
+        ok, out = quiet(exp02_check.main, self.dir)
+        self.assertFalse(ok)
+        self.assertIn("rip #0=00001.mpls/00002.mpls match=NO", out)
+
     def test_no_without_runs(self):
         self.write("scan.txt", SCAN)
         ok, out = quiet(exp02_check.main, self.dir)
@@ -148,6 +156,10 @@ class CompareTracks(unittest.TestCase):
         verdicts = self.verdicts("fra", [("video", "und", None), ("audio", "fre", 8), ("audio", "fre", 2)])
         self.assertTrue(verdicts["order"])
 
+    def test_the_language_of_a_video_track_is_not_compared(self):
+        verdicts = self.verdicts("eng", [("video", "eng", None), ("audio", "eng", 8), ("audio", "eng", 2)])
+        self.assertTrue(verdicts["order"])
+
     def test_chapter_count_and_duration_are_checked(self):
         verdicts = self.verdicts(
             "eng", [("video", "und", None), ("audio", "eng", 8), ("audio", "eng", 2)], chapters=1, seconds=500
@@ -192,11 +204,33 @@ class HitRate(TempDir):
         self.assertIn("TheDiscDB knows 0 of 0 discs by fingerprint", out)
         self.assertIn("3 fingerprint lookups failed or were not made", out)
 
+    def test_a_failed_disc_id_lookup_is_reported(self):
+        self.disc("a", "dischash 404\ndiscid 429\n", '{"title": "Not Found"}', "rate limited")
+        code, out = quiet(hit_rate.main, self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn("hash=miss", out)
+        self.assertIn("discid=failed", out)
+        self.assertIn("1 disc ID lookups failed", out)
+
+    def test_a_200_answer_that_is_not_a_disc_record_is_a_failure(self):
+        self.disc("a", "dischash 200\n", '{"errors": "x"}')
+        code, out = quiet(hit_rate.main, self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn("hash=failed", out)
+
+    def test_a_recording_without_a_status_file_is_not_a_miss(self):
+        self.write("a/meta.json", '{"format": "DVD"}')
+        self.write("a/thediscdb-hash.json", '{"titles": [{"index": 0}]}')
+        code, out = quiet(hit_rate.main, self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn("hash=n/a", out)
+        self.assertIn("TheDiscDB knows 0 of 0 discs by fingerprint", out)
+
 
 class ParseLines(unittest.TestCase):
     def test_only_a_newline_ends_a_line(self):
-        scan = robot.parse('﻿TINFO:0,2,0,"A B"\r\nTINFO:0,9,0,"0:10:00"\r\n')
-        self.assertEqual(scan.titles[0][2], "A B")
+        scan = robot.parse('\ufeffTINFO:0,2,0,"A\u2028B"\r\nTINFO:0,9,0,"0:10:00"\r\n')
+        self.assertEqual(scan.titles[0][2], "A\u2028B")
         self.assertEqual(scan.titles[0][9], "0:10:00")
 
 
