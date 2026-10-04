@@ -32,7 +32,7 @@ Decisions (D) made during design:
 - D6. Track selection approach "A": rip every track of each chosen title, decide from the ripped file, write the final file with one remux. Selecting tracks at rip time is a later fast path (section 16).
 - D7. The owner views the machine only on its own monitor. Remote Desktop behaviour is not a requirement.
 - D8. A later Linux or macOS port is possible, so OS-specific behaviour sits behind interfaces.
-- D9. Defaults, each a setting (section 14):
+- D9. Defaults (the first three are settings in section 14):
   - when ordering audio, a lossy track with more channels comes before a lossless track with fewer (R3 read literally), recorded as a note on the job. Exception: the guards in 8.6 always apply;
   - for non-English works the original language is the first and default audio track;
   - a TMDb-only identification may file automatically;
@@ -71,7 +71,7 @@ When the owner chooses Quit in the tray menu, the UI tells the engine and exits;
 
 | Crate | Purpose | Depends on |
 |---|---|---|
-| `core` | Pure logic: robot-output parser, disc model, reconciler, title planner, track planner, subtitle classifier, namer, confidence and disposition, job state reducer, language table | nothing OS-specific |
+| `core` | Pure logic: robot-output parser, disc model, fingerprint and disc-ID functions (over a file listing and file bytes handed in), reconciler, title planner, track planner, subtitle classifier, namer, confidence and disposition, job state reducer, language and codec tables | nothing OS-specific |
 | `platform` | Traits and the Windows implementation (4.3) | `core` types |
 | `tools` | Drivers for `makemkvcon`, `mkvmerge`, `ffprobe`: build command lines, run under a watchdog, stream parsed output | `core`, `platform` |
 | `clients` | TheDiscDB, TMDb, Home Assistant webhook, generic webhook | `core` |
@@ -123,7 +123,7 @@ Newline-delimited JSON over the pipe. Every message is `{ "v": 1, "type": ..., "
 
 - **Fingerprint**: TheDiscDB's content hash of the disc, computed from file sizes by porting TheDiscDB's open-source implementation (Blu-ray and UHD: the `BDMV/STREAM` files; DVD: the `VIDEO_TS` `.VOB`, `.IFO` and `.BUP` files). It is the canonical key for a physical disc pressing.
 - **Disc ID**: for Blu-ray and UHD, the SHA-1 of the bytes of `AACS/Unit_Key_RO.inf` (falling back to the copy under `AACS/DUPLICATE`); for DVD, libdvdread's disc ID over the IFO files. Used for TheDiscDB lookups alongside the fingerprint.
-- **Job ID**: `<fingerprint>-<n>`, where `n` starts at 1 and increases each time the owner chooses "rip again" for that disc.
+- **Job ID**: `<fingerprint>-<n>`, where `n` is one more than the highest `n` of any earlier job for that fingerprint (1 for the first).
 - **Title key**: `t<NN>-<source>`, where `NN` is the title's order in the plan and `<source>` is the source file stem (for example `t00-00800`), or `title<original title number>` on DVD.
 
 Paths:
@@ -141,6 +141,8 @@ Paths:
 
 Job state is written atomically (temporary file, then rename).
 
+A remembered-decisions file holds the TMDb ID and kind; for each title its source file, segment map, duration, role (feature, cut with edition name, episode numbers, or ignored); and audio and subtitle overrides keyed by the stream's signature (type, language, codec, channels, position among identical streams). Titles are matched by source file, segment map and duration within 2 s, never by title key. A remembered decision sets the confidence it covers to 1.00.
+
 ## 6. Pipeline
 
 One disc is in the disc phase at a time. One job is in the file phase at a time (`file_phase_concurrency`, default 1), in first-in first-out order, with `mkvmerge` and `ffprobe` at below-normal priority. The file phase of earlier discs runs while the next disc rips. Jobs waiting for review occupy neither the drive nor the file-phase slot.
@@ -151,10 +153,10 @@ One disc is in the disc phase at a time. One job is in the file phase at a time 
 2. **Fingerprint and job lookup.** Compute the fingerprint and disc ID, read the volume label and the disc name from `BDMV/META/DL/bdmt_*.xml`, and copy the small navigation files (`BDMV/PLAYLIST/*.mpls`, `BDMV/index.bdmv`, `BDMV/MovieObject.bdmv`, DVD `*.IFO`) into the job folder. Then:
    - a job for this fingerprint that has not finished its disc phase, or failed with `MediaReadError`, resumes (only titles not yet verified are ripped);
    - a job that is past the disc phase (file phase, held for review, or filed) sends `already_ripped` and ejects, unless the owner armed "rip again" for it, in which case a new job starts;
-   - otherwise a new job starts. A new job applies any remembered decisions for the fingerprint.
+   - otherwise (including when the earlier job was discarded) a new job starts. A new job applies any remembered decisions for the fingerprint.
 3. **Database lookup.** TheDiscDB by disc ID and by fingerprint (8.1), while the scan runs.
 4. **Scan.** `makemkvcon64 -r --messages=-stdout --progress=-same --minlength=<minlength_s> --cache=<cache_mb> --profile=<job profile> info disc:N`. The same flags are used for every later call on this disc, because MakeMKV's title numbers depend on them. The scan records whether MakeMKV reported using a Java runtime.
-5. **Identify and plan.** Decide the disc kind (8.2), pick the structural candidates (8.3), run the TMDb match (8.1), then fix the plan: the titles to rip, the mode (6.2 or 6.3), and the three confidences. Check staging free space (section 7). Persist the plan with its evidence.
+5. **Identify and plan.** Decide the disc kind (8.2), pick the structural candidates (8.3), run the TMDb match (8.1), then fix the plan: the titles to rip, the mode (6.2 or 6.3), and the identity and title confidences. Check staging free space (section 7). Persist the plan with its evidence.
 
 ### 6.2 Direct mode
 
@@ -172,16 +174,16 @@ Used when title confidence is below `auto_threshold` (an unknown disc with rival
 7. **Eject and notify** as in 6.2 step 8. The job enters `NeedsReview`.
 8. **After approval** (section 11): `info file:<backup>` lists the copy's titles; each title the owner assigned is matched to the disc-time scan by source file, segment map and duration, then extracted with `mkv file:<backup> <index> <staging>\<job id>\extract\<title key>\` and verified as in 6.2 step 7. The disc-time scan, with its labels, stays the reference for planning and review; the copy is used only for extraction.
 
-If the copy fails on a read error, the job fails with `MediaReadError`. When the disc is inserted again (in either drive) the copy restarts from scratch. If it fails a second time, the job switches to Direct mode for every candidate title that passed the filters in 8.3, most likely first.
+If the copy fails on a read error, the job fails with `MediaReadError`. When the disc is inserted again (in either drive) the copy restarts from scratch. If it fails a second time, the job switches at once, while the disc is still in the drive, to Direct mode for every title that passes the candidate filter (8.2), most likely first; a note records the switch.
 
 ### 6.4 File phase
 
 9. **Inspect.** `ffprobe -show_streams` on the staged file by its path: exact audio profile (Atmos, DTS:X, DTS-HD MA versus High Resolution) and channel layout. This reads the header and a few frames.
-10. **Subtitle evidence.** Skipped when the title has exactly one English subtitle stream. Otherwise extract every subtitle stream to a small file (`mkvmerge -o <evidence file> -D -A -s <ids> <raw>`; one full read of the staged file) and read each stream's events with `ffprobe -show_packets` on that small file. This yields line counts and start times for 8.7.
+10. **Subtitle evidence.** Skipped when the title has exactly one English subtitle stream. Otherwise extract every subtitle stream to a small file (`mkvmerge -o <evidence file> -D -A -s <ids> <raw>`; one full read of the staged file) and read each stream's packets from that small file (`ffprobe -show_entries packet=pts_time,duration_time,size -of json`, one call per stream). This yields the event counts and start times for 8.7.
 11. **Decide** tracks (8.6, 8.7) and disposition (8.8). A pure function of the scan, the probes, the database answers and settings.
 12. **Disposition gate.** A job with any review reason, or any confidence below `auto_threshold`, enters `NeedsReview` and stops here until approved.
 13. **Remux.** `mkvmerge` writes the partial final file with the kept tracks, their order, languages, flags and names (8.10).
-14. **Verify and file.** `mkvmerge -J` on the partial file must match the decision exactly and the source duration within 2 s. Then rename it into its final path (8.9); the rename is always within one library root. The job records the exact path, size and modification time of the file it filed.
+14. **Verify and file.** `mkvmerge -J` on the partial file must match the decision exactly and the source duration within 2 s. Then rename it into its final path (8.9); the rename is always within one library root. The job records, for each file it filed, the exact path, size and modification time.
 15. **Notify** `filed`. The raw rip or disc copy is kept for `retention_days` as an undo.
 
 ## 7. Storage
@@ -191,84 +193,100 @@ If the copy fails on a read error, the job fails with `MediaReadError`. When the
 - Setup tests each root with a write, rename and delete inside it.
 - **Space checks.** Before a Direct rip: the sum of the planned titles' sizes plus 5%. Before a whole-disc copy: the disc size plus 2%. Before extraction and before a remux: the size of the files to be written plus 5%. When staging and a library share a volume, the needs are added.
 - **Short of space, or share unavailable:** the job waits (`AwaitingSpace` or `AwaitingShare`) and sends `waiting`. During the disc phase the disc stays in the tray for as long as the wait lasts. A share that drops mid-rip fails that title; lazymkv waits for the share and re-rips the title.
-- **Overwriting.** lazymkv never overwrites a library file it did not create in the same job. A path collision with any other file adds the review reason `path_collision`. Re-finalising a job (section 11) may replace only the file recorded for that job, and only if its size and modification time still match the record: the new file is written and verified as a partial file, then replaces the old one. If the new decision gives a different path, the new file is filed first and the job's old file is then deleted.
+- **Overwriting.** lazymkv never overwrites a library file it did not create in the same job. A path collision with any other file adds the review reason `path_collision`. Re-finalising a job (section 11) may replace only the file recorded for that job, and only if its size and modification time still match the record: the new file is written and verified as a partial file, then replaces the old one. If the new decision gives a different path, the new file is filed first and the job's old file is then deleted. A recorded file that no longer matches its record is left alone: a same-path decision then raises `path_collision`, and a different-path decision files the new file and adds the note `old_file_kept`.
 - **Retention.** A cleanup task in the engine deletes the raw data of `Filed` jobs older than `retention_days`, counted from when they were filed. When space is short it deletes oldest-first among `Filed` jobs only. Data of held, failed and in-progress jobs is never deleted automatically; if only such data remains, new discs wait in `AwaitingSpace`.
 
 ## 8. Decision rules
 
 ### 8.1 Identification
 
-| Step | Evidence | Identity confidence |
-|---|---|---|
-| 1 | A remembered decision for this fingerprint | 1.00 |
-| 2 | TheDiscDB match on both the disc ID and the fingerprint | 0.99 |
-| 3 | TheDiscDB match on one of them | 0.95 |
-| 4 | TMDb search on the disc's own name: a unique result whose runtime check passes | 0.90 |
-| 5 | TMDb search with several plausible results, or a failed runtime check | 0.50 |
-| 6 | Nothing | 0 |
+| Step | Evidence | Identity confidence | Review reason |
+|---|---|---|---|
+| 1 | A remembered decision for this fingerprint | 1.00 | |
+| 2 | TheDiscDB match on both the disc ID and the fingerprint | 0.99 | |
+| 3 | TheDiscDB match on one of them | 0.95 | |
+| 4 | TMDb search on the disc's own name: exactly one plausible result, and the runtime check passes | 0.90 | |
+| 5 | TMDb search with several plausible results, or a failed runtime check | 0.50 | `identity_ambiguous` |
+| 6 | Nothing | 0 | `identity_unknown` |
 
-- TheDiscDB is queried at `https://thediscdb.com/api/discid/{id}` (returns an array) and `https://thediscdb.com/api/dischash/{hash}` (returns one object); both are anonymous. A match supplies a TMDb ID, which is then fetched from TMDb for title, year and original language. If the entry has no TMDb ID, TMDb is searched with the entry's title and year.
-- The disc's own name is the `bdmt` disc name, else the volume label cleaned by replacing underscores with spaces and removing disc numbers (`DISC 1`, `D1`), season markers, region and format tags, and trailing years.
-- Runtime check for movies: the structural main candidate (8.3) is within 3% of the TMDb runtime. For TV: a unique TMDb series match whose typical episode runtime is within 15% of the disc's episode-length titles.
-- When `tmdb_only_autofile` is off, step 4 is capped at 0.84.
+- TheDiscDB is queried at `https://thediscdb.com/api/discid/{id}` (returns an array) and `https://thediscdb.com/api/dischash/{hash}` (returns one object); both are anonymous. A match supplies a TMDb ID. If the entry has no TMDb ID, TMDb is searched with the entry's title and year.
+- The TMDb record is fetched with its external IDs and supplies title, year, original language, runtime, the IMDb and TVDB IDs and, for TV, seasons and episodes with runtimes.
+- The disc's own name is the `bdmt` disc name, else the volume label. Before cleaning, a season number and a disc number are parsed from it and kept as evidence. Cleaning replaces underscores with spaces and removes disc numbers (`DISC 1`, `D1`), season markers, region and format tags, and trailing years.
+- A TMDb search result is plausible when its title or original title equals the cleaned name after case-folding and removing punctuation. Only the first page of results is considered.
+- Runtime check for movies: at least one planned feature or cut (8.3, 8.4), or the longest rival when none is planned, is within 3% of the TMDb runtime. For TV: the median episode runtime of the parsed season (of the whole series when no season was parsed) is within 15% of the median duration of the disc's episode-length groups (8.2).
+- When `tmdb_only_autofile` is off, step 4 is capped at 0.84 and adds `identity_ambiguous`.
 - TMDb needs the owner's API key, shows TMDb attribution in the UI, and caches responses for at most six months.
-- If TheDiscDB or TMDb cannot be reached, the disc phase proceeds on structure alone; the job then waits in `AwaitingLookup`, retrying hourly, before the file phase decides anything that needs the answer.
+- If TheDiscDB or TMDb cannot be reached, the disc phase never waits: planning proceeds on structure alone and the lookup is recorded as pending. After eject the job waits in `AwaitingLookup`, retrying hourly, before the file phase decides anything.
+- TheDiscDB's response fields (which title is the main movie, item types, season and episode numbers, per-title source file, segment map, size and duration, per-track type, language, codec name, channels and description) are mapped from responses saved in phase 0. A track description means commentary when it contains "comment"; audio description when it contains "audio desc", "descriptive", "DVS" or "visually impaired"; SDH when it contains "SDH" or "hearing" (all case-insensitive).
 
 ### 8.2 Disc kind
 
-TheDiscDB states it when it knows the disc. Otherwise the disc is TV when, after the filters in 8.3 steps 1 and 2, three or more titles have durations within 15% of each other and each lasts between 15 and 75 minutes; or when the disc name contains a season or disc-of-series marker. Otherwise it is a movie.
+The **candidate filter** discards menu loops (titles with no audio stream, with more than one chapter every two minutes, or whose segment map repeats one clip) and titles shorter than `minlength_s`. The remaining titles are **grouped** by identical segment map; a group's duration is that of its titles.
+
+TheDiscDB states the kind when it knows the disc. Otherwise the disc is TV when three or more groups each last between 15 and 75 minutes and the longest of them is at most 15% longer than the shortest; or when the disc's name, before cleaning, contains a season marker (`season`, `series` or `s` followed by a number). A disc number alone never makes a disc TV. Otherwise it is a movie.
 
 ### 8.3 Movie titles
 
 Database titles are matched to scan titles on source file name and segment map, then exact size and duration within 2 s. MakeMKV title numbers are never used for matching. MakeMKV truncates long segment maps with `...`; when either side is truncated, only the untruncated prefix is compared, together with source file, size and duration.
+
+At planning time nothing has been ripped, so any use of the audio ranking in 8.6 skips its `ffprobe` criterion.
 
 First applicable rule:
 
 1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98.
 2. **Labels.** Used only when the scan reported a Java runtime in use. A label is a title comment that starts `FPL_MainFeature` (optionally preceded by `SEG_`). Its suffix is read from this table:
 
-   | Suffix | Meaning |
-   |---|---|
-   | none | the feature |
-   | `_UR` | unrated cut |
-   | `_R` | theatrical cut (observed on one disc) |
-   | `_EXT` | extended cut |
-   | `_Narrative` | audio-description variant: ignored |
-   | a language code such as `_JPN` | dub variant of the same cut: the variant whose audio covers the wanted languages is used |
-   | anything else | an unnamed cut |
+   | Suffix | Meaning | Edition name |
+   |---|---|---|
+   | none | the feature | Theatrical Cut |
+   | `_R` | theatrical cut (observed on one disc) | Theatrical Cut |
+   | `_UR` | unrated cut | Unrated Cut |
+   | `_EXT` | extended cut | Extended Cut |
+   | `_Narrative` | audio-description variant: ignored | |
+   | a trailing language code such as `_JPN` | dub variant of the same cut | |
+   | anything else | an unnamed cut | |
 
-   - Exactly one labelled cut: 0.90.
-   - Two or more labelled cuts with different recognised suffixes: each is planned as an edition, 0.90.
-   - An unnamed cut, or two labelled titles with the same suffix: 0.60 with the review reason `unnamed_cut`.
+   Labelled titles are grouped by suffix with any trailing language code removed; one group is one cut. Within a cut, the variant whose audio covers the most wanted languages is used, then the one without a language suffix, then the lower title number.
+
+   - Exactly one cut: 0.90.
+   - Two or more cuts with different recognised suffixes: each is planned as an edition, 0.90.
+   - An unnamed cut: 0.60 with the review reason `unnamed_cut`.
 
    Other labelled playlists (for example a copy-disclaimer playlist) are not the feature.
-3. **Structure.**
-   1. Discard menu loops: titles with no audio stream, with more than one chapter every two minutes, or whose segment map repeats one clip.
-   2. Keep titles at least `feature_min_minutes` long (default 45). If none, keep the longest title.
-   3. Group the kept titles by identical segment map. Within a group, prefer the title with chapters (R2), then the one whose audio and subtitle set is the superset, then the one whose best audio track ranks highest under 8.6.
-   4. If the longest group's segment map is the concatenation of other titles' maps, it is a "play all" title: treat the disc as TV (8.5).
-   5. Call a group a rival if its duration is within 10% of the longest group's. Shorter groups are extras and are ignored.
-   6. One rival (the longest group alone): it is the feature, 0.85.
-   7. Several rivals whose segment maps differ in at most a quarter of their segments are cuts or decoys that cannot be told apart without rule 1 or 2: 0.60, review reason `title_ambiguous`.
-   8. Several rivals with largely different content: 0.60, review reason `multiple_features`.
+3. **Structure**, on the groups from 8.2:
+   1. If a group's segment map is the concatenation of two or more other groups' maps, it is a "play all" title: treat the disc as TV (8.5).
+   2. Keep groups at least `feature_min_minutes` long (default 45). If none, keep the longest group.
+   3. Call a kept group a rival if its duration is within 10% of the longest kept group's. Shorter groups are extras and are ignored.
+   4. Within each rival group, choose the title to rip: the one with chapters (R2); then the one whose audio and subtitle streams are a superset of every other title's in the group. If no title is such a superset (the titles carry different audio), the group is ambiguous: 0.60, review reason `title_ambiguous`.
+   5. One rival: it is the feature, 0.85.
+   6. Several rivals. The segment difference of two maps is the number of segments in exactly one of them divided by the length of the longer. If every pair of rivals differs by at most 0.25, they are cuts or decoys that cannot be told apart without rule 1 or 2: 0.60, review reason `title_ambiguous`.
+   7. Otherwise the rivals are largely different content: 0.60, review reason `multiple_features`.
 4. **Runtime sanity.** Once TMDb is known, a feature chosen by rule 3 whose duration is more than 10% from the TMDb runtime drops to 0.60 with `title_ambiguous`.
 
 Duration alone never decides between rivals: decoy playlists can match the real one in duration and size.
 
 ### 8.4 Cuts
 
-Each genuine cut is planned and filed as an edition (D2). Edition names come from TheDiscDB's title for the item or from the label table in 8.3; they are sanitised like titles and capped at 32 characters. When two or more cuts are filed, every one carries an edition name, including the one the database calls the main movie (named "Theatrical Cut" unless the evidence says otherwise).
+Each genuine cut is planned and filed as an edition (D2). Edition names come from TheDiscDB's title for the item, else from the label table in 8.3, else from the owner in review. They are sanitised like titles and capped at 32 characters.
+
+Edition naming is decided per film, not per job, so that copies filed from different discs group correctly:
+
+- a cut the evidence names as anything other than theatrical always carries its edition name, even when it is the only cut on the disc;
+- the theatrical or main cut carries "Theatrical Cut" only when this job files two or more cuts, or when the film's library folder already holds an edition-named file;
+- a later job names a cut the same way an earlier filed copy of that cut was named.
 
 ### 8.5 TV
 
 - **TheDiscDB maps the disc:** each episode title is ripped in Direct mode; "play all" titles are dropped. Title confidence 0.98. Multi-episode titles are filed as multi-episode files as TheDiscDB describes them.
-- **Otherwise:** whole-disc copy and review (`tv_unmapped`), with episode-length titles pre-assigned to episodes by runtime as a suggestion.
-- **Season session:** a record keyed by TMDb show ID and season number, holding the discs seen, the episodes assigned, and the next unassigned episode. A disc joins a session when its identity is confirmed (by TheDiscDB or in review). Suggestions for a later disc start at the session's next unassigned episode. A session closes when every episode is assigned or when the owner closes it.
+- **Otherwise:** title confidence 0.60 with the review reason `tv_unmapped`, so whole-disc copy mode is used. Episode-length titles are pre-assigned to episodes by runtime as a suggestion.
+- **Season session:** a record keyed by TMDb show ID and season number, holding the discs seen, the episodes assigned, and the next unassigned episode. A disc joins a session when its identity is confirmed (by TheDiscDB or in review). A disc finds its session by show ID and the season number parsed from its name (8.1); without a parsed season it uses the show's single open session; failing that, suggestions start at the first episode and review asks for the season. Suggestions start at the session's next unassigned episode. A session closes when every episode is assigned or when the owner closes it.
 - Episode numbers follow TMDb's aired order.
 
 ### 8.6 Audio
 
 **Languages.** Wanted languages are English, plus the original language when TMDb gives one that is not English (R4). TMDb's two-letter code is mapped through a table in `core` to every equivalent three-letter code (for example `fr` to `fre` and `fra`; `cn` to `chi`, `zho` and `yue`), and a stream matches if its code is in the set. A stream's language is its own language code (attribute 3). A stream with no code or `und` is kept and treated as belonging to no language.
+
+**Codecs.** A table in `core` maps MakeMKV's codec names (attributes 5 to 7) to a codec family, a fidelity tier and a display name. Phase 0 completes it from recordings. Channel layout names come from the channel count (attribute 14): 1 is 1.0, 2 is 2.0, 6 is 5.1, 7 is 6.1, 8 is 7.1.
 
 **Position.** "First track of its language" means the lowest disc position among that language's streams that survive step 1.
 
@@ -276,7 +294,7 @@ Each genuine cut is planned and filed as an edition (D2). Edition names come fro
    - streams MakeMKV derived from another stream (flag 2048), such as the AC-3 core of a TrueHD track. These are duplicates MakeMKV synthesises, not separate tracks on the disc;
    - streams flagged director's comments, alternate director's comments or visually impaired (flags 1, 2, 4; set on some DVDs);
    - secondary (picture-in-picture) audio (flag 512);
-   - streams a TheDiscDB track description identifies as commentary, descriptive audio, isolated score or similar. Descriptions are used only when TheDiscDB's track list for the title aligns with the scan's streams as a whole, in order, on type, language, codec and channels, ignoring derived streams on both sides;
+   - streams a TheDiscDB track description identifies as commentary or audio description (8.1). Other described tracks, such as isolated scores, are kept. TheDiscDB's track list carries no flags, so descriptions are used only when it aligns with the scan's streams as a whole, in order, on type, language, codec and channels: the alignment is tried against the scan's full stream list and against the list without derived streams, and exactly one of the two must align completely;
    - streams in a language that is not wanted.
 2. **Keep** every remaining stream: all tracks in the wanted languages, and any stream with no language.
 3. **Rank** the kept tracks within each language, to decide their order. Compare in order:
@@ -291,7 +309,7 @@ Each genuine cut is planned and filed as an edition (D2). Edition names come fro
 4. **Guards**, so that an unconfirmed commentary does not become the first track of its language. These apply whatever the D9 setting:
    - G1: a lossy track at 256 kb/s or less is never placed before a lossless track of the same language;
    - G2: if the top-ranked track is lossy, has two channels or fewer, is not the first track of its language, and beats the first track on channel count but on no later criterion, the first track of the language is placed first instead.
-5. **Order and flags.** Languages in this order: the original language when it is not English and `original_language_first` is on; then English; then streams with no language. Within a language, ranked order. The very first audio track gets the default flag. Tracks in the original language get the original flag; for English works those are the English tracks.
+5. **Order and flags.** Languages in this order: with `original_language_first` on, the original language (when it is not English), then English; with it off, English, then the original language. Streams with no language come last. Within a language, ranked order. The very first audio track gets the default flag. Tracks in the original language get the original flag; for English works those are the English tracks.
 6. **Notes and gaps:**
    - a kept track that is lossy, has two channels or fewer and is not the first track of its language: note `possible_commentary`, naming the track;
    - the first track is lossy while a lossless track of the same language with fewer channels exists: note `lossless_original_available`;
@@ -303,24 +321,50 @@ Track confidence for audio is 0.95, because nothing is dropped on a guess. The t
 
 ### 8.7 English subtitles
 
-Counts and start times come from step 10 of the pipeline. An event is one displayed subtitle; for image subtitles a "show" packet and its "clear" packet are one event. A track is **full** when it has at least 10% as many events as the largest English track.
+Every subtitle stream that no rule below keeps is dropped, including all streams in other languages.
+
+**Set aside first.** These take no part in counting, alignment or grouping:
+
+- derived forced-only streams (flags 4096 and 2048 together). The parent of such a stream is the nearest preceding non-derived subtitle stream of the same language (confirmed in experiment 1);
+- DVD streams flagged director's comments (flags 1 or 2): dropped;
+- the DVD closed-caption stream, which MakeMKV converts to text (output conversion marked lossy, attribute 42).
+
+**Events.** Counts and start times come from step 10 of the pipeline. For text streams each packet is one event. For image streams (PGS, VobSub) a packet larger than `sub_clear_max_bytes` (provisional default 64, set by experiment 6) is one event and smaller packets, which clear the screen, are ignored. A track is **full** when it has at least 10% as many events as the largest English track.
 
 - **Alignment.** `aligned(A, B)` is the share of A's events that start within `subs_tolerance_ms` (default 300) of some event in B. Two full tracks are in the same group when the larger of `aligned(A, B)` and `aligned(B, A)` is at least `subs_same_min` (provisional default 0.70), and in different groups when it is at most `subs_diff_max` (provisional default 0.30). In between: review reason `subtitle_ambiguous`. Experiment 6 replaces the provisional defaults.
-- **Dialogue group.** With one full track, it is the dialogue track. With several, the dialogue group is the one containing the track a non-empty forced-only track was derived from, else the one TheDiscDB describes as subtitles or SDH, else the largest group if it has two or more tracks. If none of these picks a group, review reason `subtitle_ambiguous`.
-- **Regular and SDH.** Keep up to two tracks of the dialogue group. If two, the one with more events is SDH: hearing-impaired flag, named "English (SDH)"; the other is "English". A TheDiscDB description saying SDH overrides the count. A DVD closed-caption track (converted to text by MakeMKV) is SDH by type, is not put through alignment, and is kept when the dialogue group has no SDH track. More than two tracks in the dialogue group: review reason `subtitle_ambiguous`.
-- **Commentary or trivia.** A full track outside the dialogue group is dropped (R6), as is any DVD subtitle stream flagged director's comments.
-- **Forced.** Keep at most one, in this order: the forced-only track MakeMKV derived from a dialogue-group track (flags 4096 and 2048) when it has events; a DVD stream flagged forced (flag 4096 without 2048; whether MakeMKV sets this is checked on the DVD acceptance disc); a separately authored track that is not full and has fewer than 150 events. Flag it forced, name it "English (Forced)".
+- **Dialogue group.** With one full track, it is the dialogue track. With several, the dialogue group is the one containing the parent of a forced-only stream that has events, else the one TheDiscDB describes as subtitles or SDH, else the largest group if it has two or more tracks. If none of these picks a group, review reason `subtitle_ambiguous`.
+- **Regular and SDH.** Keep up to two tracks of the dialogue group. If two, the one with more events is SDH: hearing-impaired flag, named "English (SDH)"; the other is "English". A TheDiscDB description saying SDH overrides the count. The closed-caption stream is SDH by type and is kept when the dialogue group has no SDH track. More than two tracks in the dialogue group: review reason `subtitle_ambiguous`.
+- **Commentary or trivia.** A full track outside the dialogue group is dropped (R6).
+- **Forced.** Keep at most one, in this order: a forced-only stream with events whose parent is the regular dialogue track, then one whose parent is the SDH track; a DVD stream flagged forced (flag 4096 without 2048; whether MakeMKV sets this is checked on the DVD acceptance disc); a separately authored track that is not full and has fewer than 150 events. Flag it forced, name it "English (Forced)".
 - **Other tracks** that are not full and have 150 events or more are dropped, with the note `partial_subtitle_dropped`.
 
-Track confidence for subtitles: 0.95 when flags or database descriptions decide every track; 0.90 with a single English track; 0.85 when alignment decides with clear margins; 0.60 when `subtitle_ambiguous` was raised. The job's track confidence is the lower of the audio and subtitle values.
+Track confidence for subtitles:
+
+| Case | Confidence |
+|---|---|
+| Flags or database descriptions decide every track, or the title has no English subtitle stream | 0.95 |
+| Exactly one full English track | 0.90 |
+| Alignment decides between two or more full tracks, with every pair outside the in-between band | 0.85 |
+| `subtitle_ambiguous` was raised | 0.60 |
+
+The job's track confidence is the lower of the audio and subtitle values.
 
 ### 8.8 Confidence, review reasons and disposition
 
-Identity, title and track confidence are kept separately. Verification and inspection can lower them (for example a failed runtime sanity check); nothing raises them after planning except a review decision, which sets them to 1.00.
+Identity and title confidence are fixed at planning (6.1 step 5). Verification and the runtime sanity check can lower them. Track confidence does not exist until the Decide step (6.4 step 11). A review decision sets the confidences it covers to 1.00; nothing else raises one.
 
 A job files automatically only if it has no review reason and all three confidences are at or above `auto_threshold` (0.85). Otherwise it is held for review with its rip or disc copy kept (D1).
 
-Review reasons: `identity_unknown`, `identity_ambiguous`, `title_ambiguous`, `multiple_features`, `unnamed_cut`, `tv_unmapped`, `original_language_missing`, `no_wanted_audio`, `subtitle_ambiguous`, `path_collision`, `copy_hash_errors`, `verify_failed`.
+| Review reason | Raised by |
+|---|---|
+| `identity_unknown`, `identity_ambiguous` | 8.1 |
+| `title_ambiguous`, `multiple_features`, `unnamed_cut` | 8.3 |
+| `tv_unmapped` | 8.5 |
+| `original_language_missing`, `no_wanted_audio` | 8.6 |
+| `subtitle_ambiguous` | 8.7 |
+| `path_collision` | 7, 8.9 |
+| `copy_hash_errors` | 6.3 |
+| `verify_failed` | 6.2 |
 
 Title confidence below `auto_threshold` at planning time selects whole-disc copy mode.
 
@@ -328,29 +372,37 @@ Limits of D1: a Direct-mode job contains only the titles that were planned. If t
 
 ### 8.9 Naming
 
-Movies: `<movies_root>\Title (Year) {tmdb-ID}\Title (Year) {tmdb-ID} - <Res>.mkv`, where `<Res>` is the video height as `2160p`, `1080p`, `720p`, `576p` or `480p`.
+In the patterns below, `<Res>` is the resolution label and `<Ed>` an edition name.
 
-Versions (D11): both servers treat files in one movie folder named `<folder name> - <label>` as versions of the same film. Every movie file carries its resolution label from the start, so the 1080p disc of a UHD combo pack files beside the 2160p copy without renaming anything. A second copy at the same resolution is still a `path_collision`.
+Movies: `<movies_root>\Title (Year) {tmdb-ID}\Title (Year) {tmdb-ID} - <Res>.mkv`. `<Res>` comes from the height of the first video track: 2000 or more is `2160p`, 1000 or more `1080p`, 700 or more `720p`, 576 `576p`, anything else `480p`.
+
+Versions (D11): both servers treat files in one movie folder named `<folder name> - <label>` as versions of the same film. Every movie file carries its resolution label from the start, so the 1080p disc of a UHD combo pack files beside the 2160p copy without renaming anything. A second copy at the same resolution and edition is a `path_collision`.
 
 Editions, by the `edition_style` setting:
 
 | Style | Layout | Notes |
 |---|---|---|
-| `combined` (default) | same folder: `Title (Year) {tmdb-ID} - <Res> Edition {edition-Edition}.mkv` | intended to give Plex an edition and Jellyfin a version label; unverified until experiment 9 |
-| `plex` | one folder per edition: `Title (Year) {tmdb-ID} {edition-Edition}\Title (Year) {tmdb-ID} {edition-Edition} - <Res>.mkv` | the layout Plex documents; Jellyfin lists each as a separate item |
-| `jellyfin` | same folder: `Title (Year) {tmdb-ID} - <Res> Edition.mkv` | Jellyfin's version picker; Plex treats them as plain versions |
+| `combined` (default) | same folder: `Title (Year) {tmdb-ID} - <Res> <Ed> {edition-<Ed>}.mkv` | intended to give Plex an edition and Jellyfin a version label; unverified until experiment 9 |
+| `plex` | one folder per edition: `Title (Year) {tmdb-ID} {edition-<Ed>}\Title (Year) {tmdb-ID} {edition-<Ed>} - <Res>.mkv` | the layout Plex documents; Jellyfin lists each as a separate item |
+| `jellyfin` | same folder: `Title (Year) {tmdb-ID} - <Res> <Ed>.mkv` | Jellyfin's version picker; Plex treats them as plain versions |
 
 Plex editions need Plex Pass. If experiment 9 shows `combined` misbehaving on either of the owner's servers, the default becomes `plex` when the owner has Plex Pass, else `jellyfin`.
 
 TV: `<tv_root>\Show (Year) {tmdb-ID}\Season 01\Show (Year) - S01E01 - Episode Title.mkv`; multi-episode files use `S01E01-E02`; specials go in `Season 00`. Episode titles are cut to 90 characters.
 
-Title and year always come from the same TMDb record as the ID. With `jellyfin10_compat` on, ` [tmdbid-ID]` is appended identically to folder and file names (Jellyfin 10.x does not read the curly-brace tag; Jellyfin 12 does); when the TMDb ID is between 1900 and 2099, ` [imdbid-ttID]` is used instead, because Jellyfin 10.x reads such a number as a year.
+Title and year always come from the same TMDb record as the ID.
 
-Every path component is sanitised: Unicode-normalised; control characters and `< > : " / \ | ? *` removed or replaced; `[ ] { }` stripped from titles; trailing spaces and periods trimmed; reserved device names guarded; each component capped at 255 bytes. A filed file is never renamed; a changed decision files a new file and removes the job's old one (section 7).
+Jellyfin 10.x does not read the curly-brace tag (Jellyfin 12 does). With `jellyfin10_compat` on, a second tag is inserted immediately after `{tmdb-ID}`:
+
+- movies: ` [tmdbid-ID]`, in the folder name and the file name alike, so the file name still begins with the folder name. Example, `combined` style: `Film (2010) {tmdb-12345} [tmdbid-12345]\Film (2010) {tmdb-12345} [tmdbid-12345] - 2160p Extended Cut {edition-Extended Cut}.mkv`;
+- TV: on the show folder only, never on season folders or episode files;
+- Jellyfin 10.x reads a number between 1900 and 2099 as a year. For such a TMDb ID the tag is ` [imdbid-ttID]` for movies and ` [tvdbid-ID]` for shows; when TMDb gives no such ID the tag is left out and the note `compat_tag_omitted` is recorded.
+
+Every path component is sanitised: Unicode-normalised (NFC); `:` replaced by ` -`; `/ \ | ? * " < >` and control characters removed; `[ ] { }` removed from titles and edition names; repeated spaces collapsed; trailing spaces and periods trimmed; a reserved device name gets `_` appended; each component capped at 255 bytes. A filed file is never renamed; a changed decision files a new file and removes the job's old one (section 7).
 
 ### 8.10 Track metadata in the final file
 
-Order: video; audio as in 8.6; subtitles forced, regular, SDH. Every kept track has a language tag. Flags set through `mkvmerge`: default, forced, hearing-impaired, original. The default subtitle is the forced track when the default audio is English; when the default audio is not English, the regular English track is default and the forced track is not. Audio names follow `<format> <channel layout>`, for example "TrueHD Atmos 7.1". Chapters are kept.
+Order: video; audio as in 8.6; subtitles forced, regular, SDH. A Dolby Vision enhancement layer is kept as MakeMKV outputs it (experiment 1 records whether that is one video track or two). Every kept track has a language tag, except streams with no language. Flags set through `mkvmerge`: default, forced, hearing-impaired, original. The default subtitle is the forced track when the default audio is English; when the default audio is not English, the regular English track is default and the forced track is not. Audio names are the codec display name and the channel layout, for example "TrueHD Atmos 7.1". Chapters are kept.
 
 ## 9. MakeMKV integration
 
@@ -375,7 +427,16 @@ Each job gets a generated conversion profile: a copy of MakeMKV's shipped defaul
 
 ### 9.4 Output parsing
 
-Lines are `MSG`, `PRGC`, `PRGT`, `PRGV`, `DRV`, `TCOUNT`, `CINFO`, `TINFO`, `SINFO`. Quoted fields are parsed tolerating both backslash-escaped and doubled quotes. Text from MakeMKV is display-only: it is never used to build paths, and output files are found by listing the directory.
+Line layouts, with title and stream numbers 0-based:
+
+- `MSG:code,flags,count,"text","format","param"...`
+- `PRGC:code,id,"name"` and `PRGT:code,id,"name"`; `PRGV:current,total,max`
+- `TCOUNT:n`
+- `CINFO:attribute,code,"value"`
+- `TINFO:title,attribute,code,"value"`
+- `SINFO:title,stream,attribute,code,"value"`
+
+Value formats as seen in public logs, confirmed against 2.0.0 recordings in phase 0: duration (9) `H:MM:SS`; size (11) decimal bytes; video size (19) `WxH`; bitrate (13) a number with a unit; segment map (26) a comma-separated list of clip numbers. Quoted fields are parsed tolerating both backslash-escaped and doubled quotes. Text from MakeMKV is display-only: it is never used to build paths, and output files are found by listing the directory.
 
 `DRV:index,state,999,fsflags,"drive name","disc label","device"`: state 0 empty, 1 tray open, 2 disc inserted, 3 loading, 256 no drive, 257 unmounting. On Windows the device field is the drive letter.
 
@@ -414,7 +475,11 @@ Main line: `Detected → Fingerprinted → Scanned → Planned → Ripping` (or 
 
 Other states: `NeedsReview`, `Extracting` (titles being extracted from a disc copy after approval), `AwaitingShare`, `AwaitingSpace`, `AwaitingMakeMkv`, `AwaitingNetwork`, `AwaitingLookup`, `AwaitingTool`, `Failed(class)`, `Discarded`.
 
-The state machine is a pure reducer in `core`: (state, event) gives (new state, actions). The engine performs the actions and feeds results back as events. Every transition is persisted before its actions run.
+The state machine is a pure reducer in `core`: (state, event) gives (new state, actions). The engine performs the actions and feeds results back as events. Every transition is persisted before its actions run. A job in a waiting state stores the state it will return to.
+
+Events: media arrived or removed; fingerprint, scan, plan, title rip, verification, copy, extraction, probe, decision, remux and file verification each finishing or failing (with a failure class); ejected; share lost or back; space short or freed; licence or version message; MakeMKV version changed; network needed; lookup pending or answered; tool missing or found; review approved (with overrides), discarded, retry, rip again, re-finalise; engine restart.
+
+Actions: run scan, rip a title, copy the disc, extract a title, verify a file, eject, probe, extract subtitle evidence, decide, remux, file, notify, start a timer, delete job data.
 
 Transitions beyond the main line:
 
@@ -423,14 +488,15 @@ Transitions beyond the main line:
 | `Planned` | title confidence below threshold | `Copying` |
 | `Copying` | copy complete | `Ejected`, then `NeedsReview` |
 | `Decided` | review reason or low confidence | `NeedsReview` |
-| `NeedsReview` | Approve, Direct job | `Decided` (with the owner's overrides), then `Remuxing` |
-| `NeedsReview` | Approve, disc-copy job | `Extracting`, then `Inspecting` |
+| `NeedsReview`, held after a disc copy with titles not yet extracted | Approve | `Extracting`, then `Inspecting` |
+| `NeedsReview`, held at the disposition gate | Approve | `Decided` (with the owner's overrides), then `Remuxing` |
 | `NeedsReview` | Discard | `Discarded` |
 | any disc-phase state | share unreachable / out of space | `AwaitingShare` / `AwaitingSpace`; back to the interrupted state when resolved |
 | any file-phase state | the same | the same |
 | `Scanned`, `Ripping`, `Copying` | licence or version message | `AwaitingMakeMkv`; back when the installed version or key changes (checked at engine start and at each disc insertion) |
 | `Scanned`, `Ripping`, `Copying` | disc needs a key from the internet | `AwaitingNetwork`; retried every 10 minutes |
-| `Planned`, `Inspecting` | database unreachable | `AwaitingLookup`; retried hourly |
+| `Ejected`, `Inspecting` | a database answer the decision needs is still pending | `AwaitingLookup`; retried hourly. The disc phase never waits for a lookup |
+| `Copying` | second read failure for this job | `Ripping` (Direct mode, 6.3) |
 | any | required tool missing | `AwaitingTool`; back when the self-test finds it |
 | `Ripping`, `Copying` | read failure | `Failed(MediaReadError)`; re-inserting the disc resumes |
 | `Failed(*)` | Retry | the state that failed |
@@ -467,7 +533,8 @@ Every external process runs under `ProcessGuard`.
 - `makemkvcon`: no progress (`PRGV`) for `stall_timeout_s` (default 300), or more than `read_error_rate` (default 20) `MSG:2003` lines in a minute, marks the drive as struggling in the UI. MakeMKV's own retries decide when a title fails.
 - `mkvmerge` remux and extraction: no progress output for `stall_timeout_s`.
 - Header-only calls (`mkvmerge -J`, `ffprobe -show_streams`): a 120-second limit.
-- A blocked read can keep `makemkvcon` from exiting. The engine waits up to `exit_wait_min` (default 30) for it to exit, then kills the process tree, does not eject, and fails the job as `MediaReadError` with the note "process did not exit".
+- If the staging share becomes unreachable during a rip or copy, the engine ends the attempt after `stall_timeout_s` without progress and classifies it as `Output`, not `MediaReadError`.
+- A blocked read can keep `makemkvcon` from exiting. The engine waits up to `exit_wait_min` (default 30) for it to exit, then kills the process tree, does not eject, and, after the share check in 10.2, fails the job as `MediaReadError` with the note "process did not exit".
 
 ## 11. Review queue
 
@@ -476,8 +543,9 @@ A held job keeps, in its job folder and staging: the rip or disc copy, the scan 
 Actions:
 
 - **Set identity**: search TMDb and pick the film or show. For TV this also attaches the disc to a season session.
-- **Assign titles**: map titles to the feature, to named cuts, or to episodes. Disc-copy jobs offer every title that passed the filters in 8.3 steps 1 and 2; Direct jobs offer the titles that were ripped.
-- **Override tracks**: choose which audio and subtitle tracks to keep and their roles.
+- **Assign titles**: map titles to the feature, to named cuts (with an editable edition name), or to episodes. Disc-copy jobs offer every title that passes the candidate filter (8.2); Direct jobs offer the titles that were ripped.
+- **Override tracks**: for audio, choose which tracks to keep, their order and the default track, and mark a kept track as commentary (it is then dropped); for subtitles, choose which tracks to keep and each one's role (forced, regular, SDH).
+- **Resolve collision**: for `path_collision`, keep both (the new file gets a distinguishing label such as `- 2160p 2`), replace the existing file after an explicit confirmation (the old file is moved into the job's staging folder and kept for `retention_days`), or discard.
 - **Approve**: continue with the reviewed decisions (extraction first for disc-copy jobs).
 - **Discard**: delete the job's staging data.
 - **Retry**: for failed jobs.
@@ -527,6 +595,7 @@ Progress is updated at most once a second.
 | `original_language_first` | on | D9: original-language audio first for non-English works |
 | `subs_tolerance_ms` | 300 | start-time tolerance for subtitle alignment |
 | `subs_same_min`, `subs_diff_max` | 0.70, 0.30 | provisional alignment thresholds (experiment 6) |
+| `sub_clear_max_bytes` | 64 | provisional: image-subtitle packets this small clear the screen (experiment 6) |
 | `edition_style` | `combined` | 8.9 |
 | `jellyfin10_compat` | off | add the square-bracket ID tag |
 | `retention_days` | 7 | how long raw data of filed jobs is kept |
@@ -547,7 +616,7 @@ Fixed values, not settings: the 3% and 15% runtime checks, the 2-second duration
 - **`ui`**: GPUI's windowless test harness for the review and settings screens.
 - **Acceptance** on real discs on the target machine, UHD first: a UHD film with Atmos or DTS:X; a UHD or Blu-ray with a commentary track and commentary subtitles; a two-cut disc; a non-English film with an English dub; a disc with decoy playlists; a TV disc; a DVD with a flagged commentary, closed captions and forced subtitles.
 
-Each recording stores the MakeMKV version that produced it.
+**Recordings.** A recording is one directory per disc: `meta.json` (MakeMKV version, disc format, volume label, fingerprint, disc ID, whether Java was in use); `scan.txt` (raw robot output); `files.json` (the path and size of every file on the disc); the `bdmt` file and navigation files; the TheDiscDB and TMDb responses; and, per ripped title, the `mkvmerge -J` output, the `ffprobe` stream output and the subtitle packet lists. A capture script written in phase 0 produces it. The stand-in executables replay `scan.txt` and rip logs with their original timing.
 
 ## 16. Build phases
 
@@ -555,7 +624,7 @@ Each phase gets its own implementation plan and ends with something that runs an
 
 | Phase | Delivers |
 |---|---|
-| 0. Evidence | Installs (section 19); experiments 1 to 11; a corpus of recordings; the stand-in executables; this document updated with the results |
+| 0. Evidence | Installs (section 19); the capture script and recording format (section 15); experiments 1 to 12; a corpus of recordings, with at least five saved TheDiscDB responses per endpoint and three known fingerprint test vectors; the stand-in executables; this document updated with the results |
 | 1. Decision core | `core`, with a command that reads a recording and prints the plan, decisions, confidences and review reasons as JSON. Tested on any OS |
 | 2. Direct-mode engine | `platform` (Windows), `tools`, `clients`, the engine with persistence and notifications, and `lazymkvctl`. A known movie disc goes from insertion to a filed file with no UI |
 | 3. Unsure discs and failures | Whole-disc copy mode, the review data model and its commands through `lazymkvctl`, failure classes, waiting states, watchdogs, resume |
@@ -564,7 +633,7 @@ Each phase gets its own implementation plan and ends with something that runs an
 
 Later features, in rough order of value:
 
-1. Rip-time selection by language. When identity is certain, MakeMKV rips only the wanted-language audio and English subtitles, and a title that then needs no track dropped is finished with in-place flag and name edits and a rename, with no remux. A title that still needs a track dropped (a confirmed commentary, a commentary subtitle) is remuxed as now. Experiment 11 supplies the facts this needs.
+1. Rip-time selection by language. When identity confidence is 0.99 or more, MakeMKV rips only the wanted-language and no-language audio and the English subtitles, writing straight into the library root's partial folder. A title whose ripped tracks need no drop and are already in the order 8.6 and 8.10 require is finished with in-place flag and name edits and a rename, with no remux. Any other title is remuxed as now. Experiment 11 supplies the facts this needs.
 2. Automatic TV episode numbering without a database, including splitting one title into episodes at chapters.
 3. dvdcompare.net as a cross-check on commentary counts and cut runtimes, after asking its maintainers. Its robots.txt blocks AI agents, so sample pages for parser development would be saved by the owner.
 4. Reading `bluray_project.bin` for playlist names, and running disc menus headlessly through libbluray with MakeMKV's libmmbd to observe which playlist a menu entry starts.
@@ -576,17 +645,18 @@ Later features, in rough order of value:
 
 | # | Question | If the answer is no |
 |---|---|---|
-| 1 | Is the job profile honoured in robot mode? Does output track order equal scan order, do output codecs match attributes 41 and 42, and does the output chapter count equal attribute 8? Does MakeMKV write statistics tags (subtitle counts) into its output? | Use MakeMKV's default profile and align tracks on their full attribute signature; an alignment that is not unique becomes `verify_failed`. Without statistics tags, counts come from the evidence extraction (already the design) |
-| 2 | On a disc with angles or duplicate titles, do the `3307`/`3308` title numbers of a rip call equal the index it rips, and do they precede `5014`? | Drop the pre-read guard; drift is caught by verification after the read |
-| 3 | Does `backup --decrypt` to a network path work on a UHD with Java menus, and does `info file:` on the copy list the same titles (source file, segment map, duration) as the disc scan? | Title-unsure discs rip every candidate that passed the 8.3 filters in Direct mode, most likely first, waiting in `AwaitingSpace` if they do not fit |
-| 4 | Ripping a UHD title straight to the owner's share: throughput, memory at `cache_mb` 1024 on 7.8 GB RAM, the messages a share drop produces, and the time of a NAS-to-NAS remux of a UHD title | Lower `cache_mb` to 512, then 256. A slow remux changes no design, only expectations |
-| 5 | With the network disabled, what does MakeMKV report for a UHD it has not seen? Can `AACS/Unit_Key_RO.inf` be read from a mounted UHD in both drives? | `NeedsNetwork` stays `Unknown` until seen. Without the file, lookups use the fingerprint only (identity 0.95 at best from TheDiscDB) |
-| 6 | Does `ffprobe` tell Atmos and DTS:X apart on real rips? On discs with known commentary subtitles, SDH and DVD closed captions, what alignment values separate dialogue from commentary? | Without profile detection, the object-audio criterion in 8.6 is skipped and ties fall to disc order. Without a clean separation, any title with two or more full English tracks raises `subtitle_ambiguous` |
+| 1 | Is the job profile honoured in robot mode? Does output track order equal scan order, do output codecs match attributes 41 and 42, and does the output chapter count equal attribute 8? Does a derived forced-only stream directly follow its parent? On a Dolby Vision UHD, is the output one video track or two? Does MakeMKV write statistics tags (subtitle counts) into its output? | Use MakeMKV's default profile and align tracks on their full attribute signature; an alignment that is not unique becomes `verify_failed`. Without statistics tags, counts come from the evidence extraction (already the design) |
+| 2 | On a disc with angles or duplicate titles: start a rip for every title index, stop each after `5014`, and compare. Do the `3307`/`3308` title numbers equal the index ripped in every run, and do they precede `5014`? | Drop the pre-read guard; drift is caught by verification after the read |
+| 3 | Does `backup --decrypt` to a network path work on a UHD with Java menus, and does `info file:` on the copy list the same titles (source file, segment map, duration) as the disc scan? | Title-unsure discs rip every title that passes the candidate filter (8.2) in Direct mode, most likely first, waiting in `AwaitingSpace` if they do not fit |
+| 4 | Ripping a UHD title straight to the owner's share at `cache_mb` 1024: does free RAM stay above 1 GB and throughput above 25 MB/s? Also record the messages a share drop produces and the time of a NAS-to-NAS remux of a UHD title | Lower `cache_mb` to 512, then 256. A slow remux changes no design, only expectations |
+| 5 | With MakeMKV's network access blocked (a temporary firewall rule added by the owner, so SSH stays up), what does it report for a UHD never scanned on this machine? Run before any other scan of that disc. Can `AACS/Unit_Key_RO.inf` be read from a mounted UHD in both drives? | `NeedsNetwork` stays `Unknown` until seen. Without the file, lookups use the fingerprint only (identity 0.95 at best from TheDiscDB) |
+| 6 | Does `ffprobe` tell Atmos and DTS:X apart on real rips? On at least three discs with two or more English subtitle tracks (including known commentary subtitles, SDH and DVD closed captions): does every same-content pair align at 0.70 or more and every different-content pair at 0.30 or less, and what packet size separates "clear" packets? | Without profile detection, the object-audio criterion in 8.6 is skipped and ties go on to its later criteria. Without a clean separation, any title with two or more full English tracks raises `subtitle_ambiguous` |
 | 7 | Does programmatic eject work on both drives? | The `eject_failed` notification asks the owner to remove the disc |
 | 8 | What encoding and quote escaping does robot output use for a title with non-ASCII characters and quotes? | Decode as UTF-8, replacing invalid bytes; MakeMKV text is display-only already |
-| 9 | On the owner's Plex and Jellyfin: does a single file named with a resolution label show normally, do a 2160p and a 1080p file in one folder show as versions, and do `combined` edition names show correctly? (No disc needed.) | The edition default becomes `plex` or `jellyfin` (8.9). If a lone labelled file misbehaves, the label is added only when a second version is filed, and that case goes to review |
+| 9 | On the owner's Plex and Jellyfin, using short generated test files: does a single file named with a resolution label show normally, do a 2160p and a 1080p file in one folder show as versions, and do `combined` edition names show correctly? (No disc needed.) | The edition default becomes `plex` or `jellyfin` (8.9). If a lone labelled file misbehaves on either server, stop and return to the owner: D11 and 8.9 are revisited before phase 2 |
 | 10 | What share of at least 20 of the owner's discs does TheDiscDB know (fingerprint step only)? | No design change; a low share makes the TMDb-plus-structure route the main one and sets test priorities |
-| 11 | With a profile that selects by language (wanted-language audio, English subtitles, no derived cores, no flagged commentary), does MakeMKV rip exactly the streams predicted from the scan? | The rip-time fast path (section 16) is not built; every title is remuxed |
+| 11 | With a profile that selects by language (wanted-language and no-language audio, English subtitles, no derived cores, no flagged commentary), does MakeMKV rip exactly the streams predicted from the scan, and in what order? | The rip-time fast path (section 16) is not built; every title is remuxed |
+| 12 | On a UHD with Java menus, does the scan report a Java runtime in use (`3344`) and main-feature labels in attribute 49? | Label rule 8.3.2 is unavailable; titles are chosen by database and structure only |
 
 ## 18. Risks
 
@@ -605,7 +675,8 @@ Later features, in rough order of value:
 - A Home Assistant webhook, and optionally a generic webhook URL.
 - Which media servers the owner runs and their versions, and whether Plex Pass is available (for 8.9).
 - Optional: Windows auto-logon, so the logon task starts after a power cut.
-- Discs for phase 0, UHD where possible: a film with Atmos or DTS:X; one with a commentary track and commentary subtitles; a two-cut disc; a disc with decoy playlists; a non-English film; a TV disc; a disc whose title has non-ASCII characters; a DVD with closed captions; and both drives.
+- Discs for phase 0, UHD where possible: a film with Atmos or DTS:X; one with a commentary track and commentary subtitles; a two-cut disc; a disc with decoy playlists; one with Java menus; one with angles or duplicate titles; one never scanned on this machine; a combo pack with its Blu-ray; a non-English film; a TV disc; a disc whose title has non-ASCII characters; a DVD with closed captions; about 20 discs in all for experiment 10; and both drives.
+- Access to both media servers for experiment 9.
 
 ## 20. Sources
 
