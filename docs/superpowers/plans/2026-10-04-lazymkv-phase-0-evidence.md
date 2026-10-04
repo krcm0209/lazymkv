@@ -22,6 +22,7 @@
 - The agent never types a password or token. Share credentials, the TMDb token and the firewall rule in Task 9 are set by the owner.
 - Long jobs (rips, disc copies, remuxes) are started with `scripts/phase0/run-interactive.ps1` so they run in the owner's logged-on desktop session, where the saved share credentials work. They are polled, never waited on in one SSH call. The owner must be logged in at the mini PC's console.
 - A desktop-session job is started with `scripts/phase0/job.sh <script.ps1> <log name> [arguments]` and awaited with `scripts/phase0/wait.sh <log name>` (both written in Task 7). `wait.sh` gives up after about nine minutes with exit code 3; run it in the background and run it again until it prints the log ending in `PHASE0-DONE`. Script arguments must not contain quotes.
+- Never pipe `lazymkv-capture record` into `Select-Object -First`: PowerShell then stops the recorded process early. Pipe it to `Out-Null`.
 - Text printed by MakeMKV is never used to build a path. Output files are found by listing a directory that was empty before the call.
 - Secrets never enter the repository: no TMDb token, no share password, no `Unit_Key_RO.inf` contents (only its SHA-1).
 - The agent must not fetch pages from dvdcompare.net (its robots.txt blocks AI agents).
@@ -899,8 +900,9 @@ pub fn tee_lines(
             break;
         }
         out.write_all(&line)?;
-        echo.write_all(&line)?;
-        echo.flush()?;
+        // The echo is a convenience: a reader that closes the pipe must not stop the recording.
+        let _ = echo.write_all(&line);
+        let _ = echo.flush();
         writeln!(timing, "{{\"n\":{},\"t_ms\":{}}}", count, clock.elapsed_ms())?;
         count += 1;
     }
