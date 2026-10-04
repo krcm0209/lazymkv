@@ -10,7 +10,11 @@ trap 'rm -f "$ARCHIVE"' EXIT
 git ls-files -co --exclude-standard -z | COPYFILE_DISABLE=1 tar --null -T - -czf "$ARCHIVE"
 ssh -o BatchMode=yes "$HOST" '(if exist C:\lazymkv\src rmdir /s /q C:\lazymkv\src) & mkdir C:\lazymkv\src'
 scp -q -o BatchMode=yes "$ARCHIVE" "$HOST:C:/lazymkv/src.tgz"
-ssh -o BatchMode=yes "$HOST" 'tar -xzf C:\lazymkv\src.tgz -C C:\lazymkv\src & del C:\lazymkv\src.tgz'
+ssh -o BatchMode=yes "$HOST" 'tar -xzf C:\lazymkv\src.tgz -C C:\lazymkv\src && del C:\lazymkv\src.tgz'
 if [ "$#" -gt 0 ]; then
-  ssh -o BatchMode=yes "$HOST" "cd /d C:\\lazymkv\\src && set CARGO_TARGET_DIR=C:\\lazymkv\\target&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& $*"
+  status=0
+  ssh -o BatchMode=yes "$HOST" "cd /d C:\\lazymkv\\src && set CARGO_TARGET_DIR=C:\\lazymkv\\target&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& $*" || status=$?
+  # cargo writes Cargo.lock on the mini PC; bring it back so it can be committed.
+  scp -q -o BatchMode=yes "$HOST:C:/lazymkv/src/Cargo.lock" Cargo.lock 2>/dev/null || true
+  exit "$status"
 fi
