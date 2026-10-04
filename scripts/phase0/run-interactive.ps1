@@ -25,7 +25,7 @@ $inner = "`$status = 'ok'; try { & '$full' $ArgLine *>&1 | Out-File -FilePath '$
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$inner`""
 $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType Interactive -RunLevel Highest
-# -ErrorAction Stop is given explicitly: these are module functions and do not see this script's preference.
+# -ErrorAction Stop is explicit so that a failed registration or start can never be followed by "started".
 Register-ScheduledTask -TaskName 'lazymkv-phase0' -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
 Start-ScheduledTask -TaskName 'lazymkv-phase0' -ErrorAction Stop
 "started $Script; log: $Log"
