@@ -47,6 +47,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fake-tools"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
