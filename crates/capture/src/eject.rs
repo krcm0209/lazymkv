@@ -28,6 +28,7 @@ pub fn eject(drive_letter: char) -> Result<(), String> {
         ) -> i32;
         fn CloseHandle(handle: *mut c_void) -> i32;
         fn GetLastError() -> u32;
+        fn GetDriveTypeW(root: *const u16) -> u32;
     }
 
     const GENERIC_READ: u32 = 0x8000_0000;
@@ -39,6 +40,18 @@ pub fn eject(drive_letter: char) -> Result<(), String> {
     const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
     const IOCTL_STORAGE_MEDIA_REMOVAL: u32 = 0x002D_4804;
     const IOCTL_STORAGE_EJECT_MEDIA: u32 = 0x002D_4808;
+    const DRIVE_CDROM: u32 = 5;
+
+    if !drive_letter.is_ascii_alphabetic() {
+        return Err(format!("not a drive letter: {drive_letter}"));
+    }
+    let root: Vec<u16> = format!(r"{drive_letter}:\")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_CDROM {
+        return Err(format!("{drive_letter}: is not an optical drive"));
+    }
 
     let device: Vec<u16> = format!(r"\\.\{drive_letter}:")
         .encode_utf16()
@@ -90,6 +103,17 @@ pub fn eject(drive_letter: char) -> Result<(), String> {
         } else {
             Err(report)
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::eject;
+
+    #[test]
+    fn refuses_a_fixed_drive_and_a_non_letter() {
+        assert!(eject('C').unwrap_err().contains("not an optical drive"));
+        assert!(eject('1').unwrap_err().contains("not a drive letter"));
     }
 }
 

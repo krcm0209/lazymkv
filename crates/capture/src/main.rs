@@ -4,7 +4,6 @@ mod record;
 
 use lazymkv_core::profile::make_job_profile;
 use std::path::Path;
-use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   lazymkv-capture disc --root <path> --label <text> --out <dir>
@@ -61,13 +60,13 @@ fn run(args: &[String]) -> Result<i32, String> {
     }
 }
 
-fn main() -> ExitCode {
+fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
-        Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
+        Ok(code) => std::process::exit(code),
         Err(message) => {
             eprintln!("{message}");
-            ExitCode::from(2)
+            std::process::exit(2)
         }
     }
 }

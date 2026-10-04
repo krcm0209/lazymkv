@@ -40,11 +40,12 @@ pub fn tee_lines(
         if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
+        let arrived_ms = clock.elapsed_ms();
         out.write_all(&line)?;
         // The echo is a convenience: a reader that closes the pipe must not stop the recording.
         let _ = echo.write_all(&line);
         let _ = echo.flush();
-        writeln!(timing, "{{\"n\":{},\"t_ms\":{}}}", count, clock.elapsed_ms())?;
+        writeln!(timing, "{{\"n\":{},\"t_ms\":{}}}", count, arrived_ms)?;
         count += 1;
     }
     out.flush()?;
@@ -113,6 +114,17 @@ mod tests {
         }
     }
 
+    struct BrokenPipe;
+
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed"))
+        }
+    }
+
     #[test]
     fn tee_copies_lines_and_records_their_timing() {
         let input = b"MSG:1005,0,1,\"a\"\nTCOUNT:2\nlast line without newline".to_vec();
@@ -148,5 +160,18 @@ mod tests {
         assert!(exit.contains("\"lines\":1"), "{exit}");
         assert!(with_suffix(&out, ".timing.jsonl").exists());
         assert!(with_suffix(&out, ".stderr").exists());
+    }
+
+    #[test]
+    fn tee_keeps_recording_when_the_echo_reader_is_gone() {
+        let input = b"one\ntwo\n".to_vec();
+        let mut reader = Cursor::new(input.clone());
+        let (mut out, mut timing) = (Vec::new(), Vec::new());
+
+        let lines = tee_lines(&mut reader, &mut out, &mut timing, &mut BrokenPipe, &StepClock(Cell::new(0))).unwrap();
+
+        assert_eq!(lines, 2);
+        assert_eq!(out, input);
+        assert_eq!(String::from_utf8(timing).unwrap().lines().count(), 2);
     }
 }
