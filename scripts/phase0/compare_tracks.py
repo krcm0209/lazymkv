@@ -8,6 +8,21 @@ from robot import duration_seconds, parse
 
 TYPE = {"Video": "video", "Audio": "audio", "Subtitles": "subtitles"}
 
+# ISO 639-2 bibliographic codes and their terminology twins. MakeMKV's scan prints the
+# terminology form (fra, deu); a Matroska file may carry either.
+B_TO_T = {
+    "alb": "sqi", "arm": "hye", "baq": "eus", "bur": "mya", "chi": "zho", "cze": "ces",
+    "dut": "nld", "fre": "fra", "geo": "kat", "ger": "deu", "gre": "ell", "ice": "isl",
+    "mac": "mkd", "mao": "mri", "may": "msa", "per": "fas", "rum": "ron", "slo": "slk",
+    "tib": "bod", "wel": "cym",
+}
+DURATION_TOLERANCE_S = 2
+
+
+def norm_lang(code):
+    code = (code or "und").lower()
+    return B_TO_T.get(code, code)
+
 
 def expected_rows(scan, title, selection):
     rows = []
@@ -16,7 +31,7 @@ def expected_rows(scan, title, selection):
             continue
         kind = TYPE.get(a.get(1), a.get(1))
         flags = int(a.get(22, "0") or 0)
-        lang = a.get(3) or a.get(28) or "und"
+        lang = norm_lang(a.get(3) or a.get(28))
         if "MVC" in a.get(6, ""):
             continue
         if selection == "eng":
@@ -31,6 +46,48 @@ def expected_rows(scan, title, selection):
     return rows
 
 
+def file_rows(ident):
+    return [
+        {"id": t["id"], "type": t["type"], "lang": norm_lang(t["properties"].get("language")),
+         "codec": t["codec"], "ch": t["properties"].get("audio_channels", ""),
+         "tags": sorted(k for k in t["properties"] if k.startswith("tag_"))}
+        for t in ident["tracks"]
+    ]
+
+
+def same_track(w, g):
+    """Type and language must agree; for audio, so must the channel count when both sides state it."""
+    if (w["type"], w["lang"]) != (g["type"], g["lang"]):
+        return False
+    if w["type"] == "audio" and str(w["ch"]) and str(g["ch"]):
+        return str(w["ch"]) == str(g["ch"])
+    return True
+
+
+def checks(want, got, title, ident):
+    """The yes/no answers and the numbers behind them. Nothing passes on empty input."""
+    numbers = {
+        "scan_chapters": int(title.get(8, "0") or 0),
+        "file_chapters": sum(c.get("num_entries", 0) for c in ident.get("chapters", [])),
+        "scan_seconds": duration_seconds(title.get(9, "0:00:00")),
+        "file_seconds": ident.get("container", {}).get("properties", {}).get("duration", 0) / 1e9,
+    }
+    same_count = len(want) == len(got) and len(got) > 0
+    verdicts = {
+        "count": same_count,
+        "order": same_count and all(same_track(w, g) for w, g in zip(want, got)),
+        "video": any(g["type"] == "video" for g in got),
+        "chapters": numbers["scan_chapters"] == numbers["file_chapters"],
+        "duration": numbers["scan_seconds"] > 0
+        and abs(numbers["scan_seconds"] - numbers["file_seconds"]) <= DURATION_TOLERANCE_S,
+    }
+    return verdicts, numbers
+
+
+def yes_no(ok):
+    return "yes" if ok else "no"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("scan")
@@ -42,12 +99,7 @@ def main():
     scan = parse(pathlib.Path(args.scan).read_text(encoding="utf-8", errors="replace"))
     ident = json.loads(pathlib.Path(args.mkvmerge_json).read_text(encoding="utf-8-sig"))
     want = expected_rows(scan, args.title, args.selection)
-    got = [
-        {"id": t["id"], "type": t["type"], "lang": t["properties"].get("language", "und"),
-         "codec": t["codec"], "ch": t["properties"].get("audio_channels", ""),
-         "tags": sorted(k for k in t["properties"] if k.startswith("tag_"))}
-        for t in ident["tracks"]
-    ]
+    got = file_rows(ident)
 
     print(f"{'scan':<54} | file")
     for i in range(max(len(want), len(got))):
@@ -57,18 +109,17 @@ def main():
         right = f"{g['id']:>2} {g['type']:<9} {g['lang']:<4} {g['codec']} ch={g['ch']}" if g else ""
         print(f"{left:<54} | {right}")
 
-    order_ok = [(w["type"], w["lang"]) for w in want] == [(g["type"], g["lang"]) for g in got]
-    title = scan.titles[args.title]
-    file_chapters = sum(c.get("num_entries", 0) for c in ident.get("chapters", []))
-    file_seconds = ident["container"]["properties"].get("duration", 0) / 1e9
+    verdicts, n = checks(want, got, scan.titles[args.title], ident)
     print()
     print(f"TRACK COUNT      scan={len(want)} file={len(got)}")
-    print(f"ORDER MATCH      {'yes' if order_ok else 'no'} (type and language, position by position)")
-    print(f"CHAPTERS         scan={title.get(8, '0')} file={file_chapters}")
-    print(f"DURATION         scan={duration_seconds(title.get(9, '0:00:00'))}s file={file_seconds:.1f}s")
+    print(f"ORDER MATCH      {yes_no(verdicts['order'])} (type, language and audio channels, position by position)")
+    print(f"CHAPTERS         scan={n['scan_chapters']} file={n['file_chapters']}")
+    print(f"DURATION         scan={n['scan_seconds']}s file={n['file_seconds']:.1f}s")
     print(f"VIDEO TRACKS     {sum(1 for g in got if g['type'] == 'video')}")
     print(f"STATISTICS TAGS  {'present' if any(g['tags'] for g in got) else 'absent'}")
-    sys.exit(0 if order_ok and len(want) == len(got) else 1)
+    print("VERDICT          " + " ".join(f"{name}={yes_no(ok)}" for name, ok in verdicts.items()))
+    print("                 codecs are not compared: read the scan's out= column against the file's codec column")
+    sys.exit(0 if all(verdicts.values()) else 1)
 
 
 if __name__ == "__main__":

@@ -6,34 +6,44 @@ import sys
 from robot import parse
 
 
+def check_run(scan, title, run):
+    """The facts for one rip call of `title` that was stopped after 5014."""
+    codes = [code for code, _, _ in run.messages]
+    added = {
+        int(params[-1]): params[0]
+        for code, _, params in run.messages
+        if code in (3307, 3308) and len(params) >= 2 and params[-1].isdigit()
+    }
+    added_at = [i for i, code in enumerate(codes) if code in (3307, 3308)]
+    expected = scan.titles.get(title, {}).get(16)
+    saw_5014 = 5014 in codes
+    # Nothing passes by default: a title the scan does not list, and a run with no
+    # 3307/3308 line, are both a "NO".
+    before = saw_5014 and bool(added_at) and all(i < codes.index(5014) for i in added_at)
+    match = expected is not None and added.get(title) == expected
+    return {
+        "expected": expected, "added": added.get(title), "match": match, "saw_5014": saw_5014,
+        "before": before, "n3308": codes.count(3308), "n3309": codes.count(3309),
+    }
+
+
 def main(recording):
     d = pathlib.Path(recording)
     scan = parse((d / "scan.txt").read_text(encoding="utf-8", errors="replace"))
-    all_ok = True
-    runs = sorted((d / "exp02").glob("title-*.txt"), key=lambda p: int(re.search(r"\d+", p.stem).group()))
+    runs = sorted((d / "exp02").glob("title-[0-9]*.txt"), key=lambda p: int(re.search(r"\d+", p.stem).group()))
+    all_ok = bool(runs)
     for path in runs:
         title = int(re.search(r"\d+", path.stem).group())
-        run = parse(path.read_text(encoding="utf-8-sig", errors="replace"))
-        codes = [code for code, _, _ in run.messages]
-        added = {
-            int(params[-1]): params[0]
-            for code, _, params in run.messages
-            if code in (3307, 3308) and len(params) >= 2 and params[-1].isdigit()
-        }
-        expected = scan.titles.get(title, {}).get(16)
-        saw_5014 = 5014 in codes
-        before = saw_5014 and all(
-            i < codes.index(5014) for i, code in enumerate(codes) if code in (3307, 3308)
-        )
-        match = added.get(title) == expected
-        all_ok = all_ok and saw_5014 and before and match
+        r = check_run(scan, title, parse(path.read_text(encoding="utf-8-sig", errors="replace")))
+        all_ok = all_ok and r["saw_5014"] and r["before"] and r["match"]
         print(
-            f"title {title:>3}: scan source={expected} rip #{title}={added.get(title)} "
-            f"match={'yes' if match else 'NO'} 5014={'yes' if saw_5014 else 'NO'} "
-            f"added-before-5014={'yes' if before else 'NO'} 3308-lines={codes.count(3308)} 3309-lines={codes.count(3309)}"
+            f"title {title:>3}: scan source={r['expected']} rip #{title}={r['added']} "
+            f"match={'yes' if r['match'] else 'NO'} 5014={'yes' if r['saw_5014'] else 'NO'} "
+            f"added-before-5014={'yes' if r['before'] else 'NO'} 3308-lines={r['n3308']} 3309-lines={r['n3309']}"
         )
-    print(f"\nEXPERIMENT 2: {'yes' if all_ok and runs else 'no'} ({len(runs)} titles)")
+    print(f"\nEXPERIMENT 2: {'yes' if all_ok else 'no'} ({len(runs)} titles)")
+    return all_ok
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    sys.exit(0 if main(sys.argv[1]) else 1)

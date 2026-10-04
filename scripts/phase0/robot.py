@@ -47,8 +47,8 @@ class Scan:
 
 def parse(text):
     scan = Scan()
-    for raw in text.splitlines():
-        kind, separator, rest = raw.lstrip("﻿").partition(":")
+    for raw in text.split("\n"):
+        kind, separator, rest = raw.rstrip("\r").lstrip("\ufeff").partition(":")
         if not separator:
             continue
         f = split_fields(rest)
