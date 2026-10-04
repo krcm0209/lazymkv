@@ -121,7 +121,7 @@ Newline-delimited JSON over the pipe. Every message is `{ "v": 1, "type": ..., "
 
 ## 5. Identifiers and paths
 
-- **Fingerprint**: TheDiscDB's content hash of the disc, computed from file sizes by porting TheDiscDB's open-source implementation (Blu-ray and UHD: the `BDMV/STREAM` files; DVD: the `VIDEO_TS` `.VOB`, `.IFO` and `.BUP` files). It is the canonical key for a physical disc pressing.
+- **Fingerprint**: TheDiscDB's content hash of the disc: the MD5 of the file sizes, each as a little-endian 64-bit integer, of the `BDMV/STREAM/*.m2ts` files sorted by name (Blu-ray and UHD) or of every file in `VIDEO_TS` (DVD). It needs only a directory listing. Two independent open-source implementations agree on this; phase 0 checks it against known discs. It is the canonical key for a physical disc pressing.
 - **Disc ID**: for Blu-ray and UHD, the SHA-1 of the bytes of `AACS/Unit_Key_RO.inf` (falling back to the copy under `AACS/DUPLICATE`); for DVD, libdvdread's disc ID over the IFO files. Used for TheDiscDB lookups alongside the fingerprint.
 - **Job ID**: `<fingerprint>-<n>`, where `n` is one more than the highest `n` of any earlier job for that fingerprint (1 for the first).
 - **Title key**: `t<NN>-<source>`, where `NN` is the title's order in the plan and `<source>` is the source file stem (for example `t00-00800`), or `title<original title number>` on DVD.
@@ -149,7 +149,7 @@ One disc is in the disc phase at a time. One job is in the file phase at a time 
 
 ### 6.1 Disc phase, common steps
 
-1. **Detect.** On media arrival, run `makemkvcon64 -r --cache=1 info disc:9999` and read the `DRV` lines. The drive index is matched by the drive letter in the seventh `DRV` field and is resolved again before every `makemkvcon` call; it is never cached.
+1. **Detect.** Media-arrival events are debounced per drive. After an arrival the engine waits `drive_settle_s`, then waits up to `drive_ready_timeout_s` for Windows to mount the volume; a drive that is still not ready is retried, and only then reported. Nothing is ejected or failed on a first probe. Then run `makemkvcon64 -r --cache=1 info disc:9999` once and read the `DRV` lines. The drive index is matched by the drive letter in the seventh `DRV` field and is resolved again before every `makemkvcon` call; it is never cached.
 2. **Fingerprint and job lookup.** Compute the fingerprint and disc ID, read the volume label and the disc name from `BDMV/META/DL/bdmt_*.xml`, and copy the small navigation files (`BDMV/PLAYLIST/*.mpls`, `BDMV/index.bdmv`, `BDMV/MovieObject.bdmv`, DVD `*.IFO`) into the job folder. Then:
    - a job for this fingerprint that has not finished its disc phase, or failed with `MediaReadError`, resumes (only titles not yet verified are ripped);
    - a job that is past the disc phase (file phase, held for review, or filed) sends `already_ripped` and ejects, unless the owner armed "rip again" for it, in which case a new job starts;
@@ -163,7 +163,7 @@ One disc is in the disc phase at a time. One job is in the file phase at a time 
 Used when title confidence is at or above `auto_threshold`.
 
 6. **Rip.** One `mkv disc:N <index> <staging>\<job id>\rip\<title key>\` call per planned title, with the job profile. The directory is emptied first. While the call performs its own disc scan, build the title list from its `MSG:3307` and `MSG:3308` lines and confirm the planned source file still has the planned index before `MSG:5014` (saving begins). On a mismatch: kill the process, re-run the scan to refresh the mapping, and retry, at most twice.
-7. **Verify.** `mkvmerge -J` on the output (a header read): duration within 2 s of the scan, chapter count as the scan reported, and the track list aligned to the scan's stream rows as an ordered match on type, output codec (attributes 41 and 42), language and channels. The alignment carries MakeMKV-only flags (9.5) onto output tracks. A title that fails verification is re-ripped once while the disc is still in; a second failure adds the review reason `verify_failed`.
+7. **Verify.** `mkvmerge -J` on the output (a header read): duration within 2 s of the scan, chapter count as the scan reported, and the track list aligned to the scan's stream rows as an ordered match on type, output codec (attributes 41 and 42), language and channels. The alignment carries MakeMKV-only flags (9.5) onto output tracks. A title that fails verification is re-ripped once while the disc is still in; a second failure adds the review reason `verify_failed`. A title that saved but logged read errors (`MSG:2003`) is kept and adds the review reason `read_errors`, with the error count and offsets.
 8. **Eject and notify.** After `makemkvcon` has exited: eject, and send `disc_done`.
 
 ### 6.3 Whole-disc copy mode
@@ -212,7 +212,8 @@ If the copy fails on a read error, the job fails with `MediaReadError`. When the
 - TheDiscDB is queried at `https://thediscdb.com/api/discid/{id}` (returns an array) and `https://thediscdb.com/api/dischash/{hash}` (returns one object); both are anonymous. A match supplies a TMDb ID. If the entry has no TMDb ID, TMDb is searched with the entry's title and year.
 - The TMDb record is fetched with its external IDs and supplies title, year, original language, runtime, the IMDb and TVDB IDs and, for TV, seasons and episodes with runtimes.
 - The disc's own name is the `bdmt` disc name, else the volume label. Before cleaning, a season number and a disc number are parsed from it and kept as evidence. Cleaning replaces underscores with spaces and removes disc numbers (`DISC 1`, `D1`), season markers, region and format tags, and trailing years.
-- A TMDb search result is plausible when its title or original title equals the cleaned name after case-folding and removing punctuation. Only the first page of results is considered.
+- A TMDb search result is plausible when its title or original title equals the cleaned name after case-folding and removing punctuation. Only the first page of results is considered. Movies and TV are searched together, and a TMDb identity is always the pair of kind and ID, because the two kinds number their records separately.
+- A generic or placeholder name (for example `DVD_VIDEO`, `DISC_1`, `LOGICAL_VOLUME_ID`, `VOLUME_SET_ID`, or a name with no letters) is never searched; identity is then step 6.
 - Runtime check for movies: at least one planned feature or cut (8.3, 8.4), or the longest rival when none is planned, is within 3% of the TMDb runtime. For TV: the median episode runtime of the parsed season (of the whole series when no season was parsed) is within 15% of the median duration of the disc's episode-length groups (8.2).
 - When `tmdb_only_autofile` is off, step 4 is capped at 0.84 and adds `identity_ambiguous`.
 - TMDb needs the owner's API key, shows TMDb attribution in the UI, and caches responses for at most six months.
@@ -364,7 +365,7 @@ A job files automatically only if it has no review reason and all three confiden
 | `subtitle_ambiguous` | 8.7 |
 | `path_collision` | 7, 8.9 |
 | `copy_hash_errors` | 6.3 |
-| `verify_failed` | 6.2 |
+| `verify_failed`, `read_errors` | 6.2 |
 
 Title confidence below `auto_threshold` at planning time selects whole-disc copy mode.
 
@@ -461,6 +462,8 @@ Messages acted on:
 | 5021, 5050, 5052, 5055, 5095 | key or evaluation problems | `Licence` |
 | 5069, 5070, 5079 | backup failed; completed; completed with hash failures | whole-disc copy result (6.3) |
 
+Other projects' logs also show `3032` (region mismatch) and `3303` with `5010` and no titles (the disc's key is unknown to MakeMKV). Phase 0 confirms these and maps them to failure classes; until then they are `Unknown`.
+
 A title rip succeeded only if a rip success summary reporting one title was seen, none of 5003, 5004 or 5037 was seen, and exactly one `.mkv` exists in the title's directory.
 
 ### 9.5 Stream flags
@@ -528,9 +531,10 @@ The tray opens when lazymkv no longer needs the disc: after a successful disc ph
 
 ### 10.4 Watchdogs
 
-Every external process runs under `ProcessGuard`.
+Every external process runs under `ProcessGuard`. Only one `makemkvcon` runs at a time, and the engine checks that no earlier one is still alive before starting another. The self-test and each disc phase also check that the MakeMKV GUI is not running, since it holds the drive and the settings.
 
 - `makemkvcon`: no progress (`PRGV`) for `stall_timeout_s` (default 300), or more than `read_error_rate` (default 20) `MSG:2003` lines in a minute, marks the drive as struggling in the UI. MakeMKV's own retries decide when a title fails.
+- A scan that prints nothing for `stall_timeout_s`, or runs longer than `scan_timeout_min` (default 30; UHD scans with Java analysis can take many minutes), is ended and retried once.
 - `mkvmerge` remux and extraction: no progress output for `stall_timeout_s`.
 - Header-only calls (`mkvmerge -J`, `ffprobe -show_streams`): a 120-second limit.
 - If the staging share becomes unreachable during a rip or copy, the engine ends the attempt after `stall_timeout_s` without progress and classifies it as `Output`, not `MediaReadError`.
@@ -600,6 +604,9 @@ Progress is updated at most once a second.
 | `jellyfin10_compat` | off | add the square-bracket ID tag |
 | `retention_days` | 7 | how long raw data of filed jobs is kept |
 | `file_phase_concurrency` | 1 | simultaneous file-phase jobs |
+| `drive_settle_s` | 10 | wait after a disc arrives before touching the drive |
+| `drive_ready_timeout_s` | 120 | how long to wait for the volume to mount |
+| `scan_timeout_min` | 30 | longest allowed scan |
 | `stall_timeout_s` | 300 | watchdog stall time |
 | `read_error_rate` | 20 | read errors per minute that mark a drive as struggling |
 | `exit_wait_min` | 30 | wait for a stuck `makemkvcon` to exit |
@@ -610,7 +617,7 @@ Fixed values, not settings: the 3% and 15% runtime checks, the 2-second duration
 
 ## 15. Testing
 
-- **`core`**: unit tests over recorded inputs: robot output from the owner's discs and from public logs; `mkvmerge -J` and `ffprobe` output; TheDiscDB and TMDb responses. Every rule in section 8 has a test for its normal case and for each guard, review reason and confidence row. The state reducer has a test per transition and per resume rule.
+- **`core`**: unit tests over recorded inputs: robot output from the owner's discs and from public logs. The main public source is TheDiscDB's data repository (MIT-licensed): about 11,000 real `makemkvcon` scan logs across UHD, Blu-ray and DVD, each with a parsed form and human-labelled title types. A pinned subset serves as parser fixtures, and the labelled titles as ground truth for the title rules in 8.3 and 8.5. Small MIT-licensed scan logs from the riplex and mkvbot projects add Windows-recorded cases. Further inputs: `mkvmerge -J` and `ffprobe` output; TheDiscDB and TMDb responses. Every rule in section 8 has a test for its normal case and for each guard, review reason and confidence row. The state reducer has a test per transition and per resume rule.
 - **`tools` and `engine`**: stand-in executables for `makemkvcon`, `mkvmerge` and `ffprobe` that replay recordings with timing and injected failures (read errors, stalls, index drift, share loss, hash failures). Whole jobs run without a disc.
 - **`clients`**: recorded HTTP responses.
 - **`ui`**: GPUI's windowless test harness for the review and settings screens.
@@ -624,7 +631,7 @@ Each phase gets its own implementation plan and ends with something that runs an
 
 | Phase | Delivers |
 |---|---|
-| 0. Evidence | Installs (section 19); the capture script and recording format (section 15); experiments 1 to 12; a corpus of recordings, with at least five saved TheDiscDB responses per endpoint and three known fingerprint test vectors; the stand-in executables; this document updated with the results |
+| 0. Evidence | Installs (section 19); the capture script and recording format (section 15); experiments 1 to 12; a corpus of recordings, with at least five saved TheDiscDB responses per endpoint and three known fingerprint test vectors; a pinned subset of TheDiscDB's public scan logs; the stand-in executables; this document updated with the results |
 | 1. Decision core | `core`, with a command that reads a recording and prints the plan, decisions, confidences and review reasons as JSON. Tested on any OS |
 | 2. Direct-mode engine | `platform` (Windows), `tools`, `clients`, the engine with persistence and notifications, and `lazymkvctl`. A known movie disc goes from insertion to a filed file with no UI |
 | 3. Unsure discs and failures | Whole-disc copy mode, the review data model and its commands through `lazymkvctl`, failure classes, waiting states, watchdogs, resume |
@@ -650,7 +657,7 @@ Later features, in rough order of value:
 | 3 | Does `backup --decrypt` to a network path work on a UHD with Java menus, and does `info file:` on the copy list the same titles (source file, segment map, duration) as the disc scan? | Title-unsure discs rip every title that passes the candidate filter (8.2) in Direct mode, most likely first, waiting in `AwaitingSpace` if they do not fit |
 | 4 | Ripping a UHD title straight to the owner's share at `cache_mb` 1024: does free RAM stay above 1 GB and throughput above 25 MB/s? Also record the messages a share drop produces and the time of a NAS-to-NAS remux of a UHD title | Lower `cache_mb` to 512, then 256. A slow remux changes no design, only expectations |
 | 5 | With MakeMKV's network access blocked (a temporary firewall rule added by the owner, so SSH stays up), what does it report for a UHD never scanned on this machine? Run before any other scan of that disc. Can `AACS/Unit_Key_RO.inf` be read from a mounted UHD in both drives? | `NeedsNetwork` stays `Unknown` until seen. Without the file, lookups use the fingerprint only (identity 0.95 at best from TheDiscDB) |
-| 6 | Does `ffprobe` tell Atmos and DTS:X apart on real rips? On at least three discs with two or more English subtitle tracks (including known commentary subtitles, SDH and DVD closed captions): does every same-content pair align at 0.70 or more and every different-content pair at 0.30 or less, and what packet size separates "clear" packets? | Without profile detection, the object-audio criterion in 8.6 is skipped and ties go on to its later criteria. Without a clean separation, any title with two or more full English tracks raises `subtitle_ambiguous` |
+| 6 | Does `ffprobe` tell Atmos and DTS:X apart on real rips? On at least three discs with two or more English subtitle tracks (including known commentary subtitles, SDH and DVD closed captions): does every same-content pair align at 0.70 or more and every different-content pair at 0.30 or less, and what packet size separates "clear" packets? | Without profile detection from `ffprobe`, MediaInfo is tried as the detector; failing that, the object-audio criterion in 8.6 is skipped and ties go on to its later criteria. Without a clean separation, any title with two or more full English tracks raises `subtitle_ambiguous` |
 | 7 | Does programmatic eject work on both drives? | The `eject_failed` notification asks the owner to remove the disc |
 | 8 | What encoding and quote escaping does robot output use for a title with non-ASCII characters and quotes? | Decode as UTF-8, replacing invalid bytes; MakeMKV text is display-only already |
 | 9 | On the owner's Plex and Jellyfin, using short generated test files: does a single file named with a resolution label show normally, do a 2160p and a 1080p file in one folder show as versions, and do `combined` edition names show correctly? (No disc needed.) | The edition default becomes `plex` or `jellyfin` (8.9). If a lone labelled file misbehaves on either server, stop and return to the owner: D11 and 8.9 are revisited before phase 2 |
@@ -663,6 +670,7 @@ Later features, in rough order of value:
 - **GPUI Kit churn.** Exact pins, a thin UI, and an engine that does not depend on the UI limit the damage. Free RAM fell to 0.31 GB during the spike build; the real dependency tree is larger.
 - **Commentary on Blu-ray and UHD** has no flag. An unflagged commentary that no database describes stays in the file as an extra audio track (D12); the job carries a `possible_commentary` note when a track looks like one. Commentary subtitles are separated by timing, which can be wrong or send a disc to review.
 - **TheDiscDB coverage** is small and mostly US releases (experiment 10).
+- **Ripping straight to a network share** (D4) is what other auto-rippers advise against: a share that stalls or drops mid-rip costs a full re-read of that title. The share checks, the stall watchdog and the re-rip while the disc is still in the tray are the mitigations; a local staging path remains a setting.
 - **Network cost.** Each UHD title crosses the network two to three times after eject; my unmeasured estimate is 25 to 40 minutes per title (experiment 4).
 - **MakeMKV behaviour** is partly undocumented. Recordings carry version numbers, and the stand-in tools make regressions visible.
 - **Whole-disc copy** is unverified on this setup until experiment 3.
@@ -687,5 +695,7 @@ Later features, in rough order of value:
 - GPUI Kit: https://gpui-kit.com ; tray: https://github.com/domenkozar/gpui-tray
 - MKVToolNix: https://mkvtoolnix.download ; FFmpeg: https://ffmpeg.org
 - Jellyfin and Plex naming documentation.
+- Automatic Ripping Machine (https://github.com/automatic-ripping-machine/automatic-ripping-machine) and sibling projects (Engram, riplex, BluForge, mkvbot, auto-dvd-rippr, medialibrarian), studied for failure modes and operating lessons. No code is taken from Engram (AGPL) or BluForge (non-commercial licence).
+- TheDiscDB data repository (MIT), for scan-log fixtures.
 
 Research notes with per-claim sources and verification verdicts were produced during design on 2026-10-04 and inform sections 8 to 10.
