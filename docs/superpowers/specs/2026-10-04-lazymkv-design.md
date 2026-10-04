@@ -224,7 +224,7 @@ If the copy fails on a read error, the job fails with `MediaReadError`. When the
 
 The **candidate filter** discards menu loops (titles with no audio stream, with more than one chapter every two minutes, or whose segment map repeats one clip) and titles shorter than `minlength_s`. The remaining titles are **grouped** by identical segment map; a group's duration is that of its titles.
 
-TheDiscDB states the kind when it knows the disc. Otherwise the disc is TV when three or more groups each last between 15 and 75 minutes and the longest of them is at most 15% longer than the shortest; or when the disc's name, before cleaning, contains a season marker (`season`, `series` or `s` followed by a number). A disc number alone never makes a disc TV. Otherwise it is a movie.
+TheDiscDB states the kind when it knows the disc. Otherwise the disc is TV when three or more groups each last between 15 and 120 minutes and the longest of them is at most 15% longer than the shortest (the upper bound covers miniseries with feature-length episodes); or when the disc's name, before cleaning, contains a season marker (`season`, `series` or `s` followed by a number). A disc number alone never makes a disc TV. Otherwise it is a movie.
 
 ### 8.3 Movie titles
 
@@ -550,6 +550,7 @@ Actions:
 - **Assign titles**: map titles to the feature, to named cuts (with an editable edition name), or to episodes. Disc-copy jobs offer every title that passes the candidate filter (8.2); Direct jobs offer the titles that were ripped.
 - **Override tracks**: for audio, choose which tracks to keep, their order and the default track, and mark a kept track as commentary (it is then dropped); for subtitles, choose which tracks to keep and each one's role (forced, regular, SDH).
 - **Resolve collision**: for `path_collision`, keep both (the new file gets a distinguishing label such as `- 2160p 2`), replace the existing file after an explicit confirmation (the old file is moved into the job's staging folder and kept for `retention_days`), or discard.
+- **Preview**: open a ripped title in the default player; for a disc-copy job, open the title's stream file from the copy. This is how the owner checks which title is which episode.
 - **Approve**: continue with the reviewed decisions (extraction first for disc-copy jobs).
 - **Discard**: delete the job's staging data.
 - **Retry**: for failed jobs.
