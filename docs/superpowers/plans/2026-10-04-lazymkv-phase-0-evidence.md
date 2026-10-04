@@ -21,7 +21,7 @@
 - Nothing is installed on the mini PC or the Mac without the owner's explicit yes in chat, naming the package.
 - The agent never types a password or token. Share credentials, the TMDb token and the firewall rule in Task 9 are set by the owner.
 - Long jobs (rips, disc copies, remuxes) are started with `scripts/phase0/run-interactive.ps1` so they run in the owner's logged-on desktop session, where the saved share credentials work. They are polled, never waited on in one SSH call. The owner must be logged in at the mini PC's console.
-- A desktop-session job is started with `scripts/phase0/job.sh <script.ps1> <log name> [arguments]` and awaited with `scripts/phase0/wait.sh <log name>` (both written in Task 7). `wait.sh` gives up after about nine minutes with exit code 3; run it in the background and run it again until it prints the log ending in `PHASE0-DONE`. Script arguments must not contain quotes.
+- A desktop-session job is started with `scripts/phase0/job.sh <script.ps1> <log name> [arguments]` and awaited with `scripts/phase0/wait.sh <log name>` (both written in Task 7). `wait.sh` exits 0 when the job finished (it prints the log, which ends in `PHASE0-DONE status=ok exit=N`), 1 when the job's script threw (`status=error`, with an `ERROR:` line), 3 after about nine minutes when the job is still running (run it in the background and run it again), 4 when the job is not running and wrote no `PHASE0-DONE` line, and 5 when the mini PC cannot be reached. `exit=N` is only the exit code of the last native command the script ran, not a verdict. `run-interactive.ps1` refuses to start a job while another is running. Script arguments must not contain quotes.
 - Never pipe `lazymkv-capture record` into `Select-Object -First`: PowerShell then stops the recorded process early. Pipe it to `Out-Null`.
 - Text printed by MakeMKV is never used to build a path. Output files are found by listing a directory that was empty before the call.
 - Secrets never enter the repository: no TMDb token, no share password, no `Unit_Key_RO.inf` contents (only its SHA-1).
@@ -2389,7 +2389,7 @@ scripts/phase0/job.sh setup-check.ps1 setup-check
 scripts/phase0/wait.sh setup-check
 ```
 
-Expected: a `makemkvcon` line containing `MakeMKV v2.0.0`; versions for `mkvmerge` (54 or later) and `ffprobe` (6.1 or later); `drive : D: is MakeMKV disc index 0`; `profiles : all-tracks=True eng-only=True`; `staging ... write, rename and delete OK`; and a final line `PHASE0-DONE exit=`. If the staging line says FAILED, ask the owner to open the share in File Explorer with "remember my credentials" and run this step again. If the log is empty, the owner is not logged in at the console: ask them to log in.
+Expected: a `makemkvcon` line containing `MakeMKV v2.0.0`; versions for `mkvmerge` (54 or later) and `ffprobe` (6.1 or later); `drive : D: is MakeMKV disc index 0`; `profiles : all-tracks=True eng-only=True`; `staging ... write, rename and delete OK`; and a final line `PHASE0-DONE status=ok exit=`. If the staging line says FAILED, ask the owner to open the share in File Explorer with "remember my credentials" and run this step again. If the log is empty, the owner is not logged in at the console: ask them to log in.
 
 - [ ] **Step 9: Write the environment report and the experiment template**
 

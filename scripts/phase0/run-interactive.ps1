@@ -12,8 +12,8 @@ $ErrorActionPreference = 'Stop'
 $full = "C:\lazymkv\src\scripts\phase0\$Script"
 if (-not (Test-Path $full)) { throw "no such script: $full" }
 $task = Get-ScheduledTask -TaskName 'lazymkv-phase0' -ErrorAction SilentlyContinue
-if ($task -and $task.State -eq 'Running') {
-    throw 'a phase 0 job is still running; wait for it to finish before starting another'
+if ($task -and $task.State -in 'Running', 'Queued') {
+    throw 'a phase 0 job is still running; wait for it to finish before starting another (a hung job is ended with: Stop-ScheduledTask -TaskName lazymkv-phase0)'
 }
 New-Item -ItemType Directory -Force (Split-Path $Log) | Out-Null
 if (Test-Path $Log) { Remove-Item $Log }
@@ -25,6 +25,7 @@ $inner = "`$status = 'ok'; try { & '$full' $ArgLine *>&1 | Out-File -FilePath '$
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$inner`""
 $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType Interactive -RunLevel Highest
-Register-ScheduledTask -TaskName 'lazymkv-phase0' -Action $action -Principal $principal -Force | Out-Null
-Start-ScheduledTask -TaskName 'lazymkv-phase0'
+# -ErrorAction Stop is given explicitly: these are module functions and do not see this script's preference.
+Register-ScheduledTask -TaskName 'lazymkv-phase0' -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+Start-ScheduledTask -TaskName 'lazymkv-phase0' -ErrorAction Stop
 "started $Script; log: $Log"
