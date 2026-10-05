@@ -1,4 +1,4 @@
 /target
 .DS_Store
-# Raw per-100-ms level files (about 1 MB each); audio-levels.ps1 recreates them from the rip.
+# Raw audio level files and their side files (up to 0.5 MB each); audio-levels.ps1 recreates them from the rip.
 corpus/owner/*/*/audio-levels-*/*.txt
