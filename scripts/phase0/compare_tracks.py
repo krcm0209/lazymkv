@@ -50,6 +50,29 @@ def expected_rows(scan, title, selection):
     return rows
 
 
+# MakeMKV's own log of the call that wrote the file, as the phase 0 scripts name it.
+RIP_LOG_NAMES = ("rip.txt", "extract.txt")
+
+
+def removed_streams(rip):
+    """Stream numbers MakeMKV left out of the output, from the rip log's MSG:4047 lines.
+
+    MakeMKV drops a forced-only subtitle track that turns out to be empty and says so:
+    "AV sync issue in stream N at T : Forced subtitles track #N turned out to be empty and
+    was removed from output file". Other MSG:4047 lines are not removals.
+    """
+    return {
+        int(params[0])
+        for code, text, params in rip.messages
+        if code == 4047 and "removed from output file" in text and params and params[0].isdigit()
+    }
+
+
+def without_removed(rows, removed):
+    """Split the predicted rows into those still expected in the file and those MakeMKV removed."""
+    return [r for r in rows if r["stream"] not in removed], [r for r in rows if r["stream"] in removed]
+
+
 def file_rows(ident):
     return [
         {"id": t["id"], "type": t["type"], "lang": norm_lang(t["properties"].get("language")),
@@ -101,12 +124,21 @@ def main():
     ap.add_argument("title", type=int)
     ap.add_argument("mkvmerge_json")
     ap.add_argument("--selection", choices=["all", "eng"], default="all")
+    ap.add_argument("--rip-log", help="MakeMKV's log of the rip; default: rip.txt or extract.txt beside the mkvmerge json")
     args = ap.parse_args()
 
     scan = parse(pathlib.Path(args.scan).read_text(encoding="utf-8", errors="replace"))
     ident = json.loads(pathlib.Path(args.mkvmerge_json).read_text(encoding="utf-8-sig"))
     want = expected_rows(scan, args.title, args.selection)
     got = file_rows(ident)
+
+    folder = pathlib.Path(args.mkvmerge_json).parent
+    rip_log = pathlib.Path(args.rip_log) if args.rip_log else next(
+        (folder / name for name in RIP_LOG_NAMES if (folder / name).exists()), None)
+    removed = set()
+    if rip_log:
+        removed = removed_streams(parse(rip_log.read_text(encoding="utf-8", errors="replace")))
+    want, dropped = without_removed(want, removed)
 
     print(f"{'scan':<54} | file")
     for i in range(max(len(want), len(got))):
@@ -118,6 +150,12 @@ def main():
 
     verdicts, n = checks(want, got, scan.titles[args.title], ident)
     print()
+    print(f"RIP LOG          {rip_log if rip_log else 'none found: tracks MakeMKV removed (MSG:4047) are not accounted for'}")
+    for r in dropped:
+        print(f"REMOVED          scan stream {r['stream']} ({r['type']} {r['lang_raw']} {r['codec']} f={r['flags']}): "
+              "MakeMKV left it out of the file (MSG:4047), so it is not expected")
+    for n in sorted(removed - {r["stream"] for r in dropped}):
+        print(f"REMOVED          MSG:4047 names stream {n}, which the prediction does not include")
     print(f"TRACK COUNT      scan={len(want)} file={len(got)}")
     print(f"ORDER MATCH      {yes_no(verdicts['order'])} (type, language except on video, audio channels; position by position)")
     print(f"CHAPTERS         scan={n['scan_chapters']} file={n['file_chapters']}")

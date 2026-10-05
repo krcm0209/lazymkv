@@ -168,6 +168,25 @@ class CompareTracks(unittest.TestCase):
         verdicts = self.verdicts("eng", [("video", "eng", None), ("audio", "eng", 8), ("audio", "eng", 2)])
         self.assertTrue(verdicts["order"])
 
+    def test_a_stream_makemkv_removed_as_empty_is_read_from_the_rip_log(self):
+        removed = 'Forced subtitles track #2 turned out to be empty and was removed from output file'
+        rip = robot.parse(
+            f'MSG:4047,16,3,"AV sync issue in stream 2 at 0:00:00 : {removed}",'
+            f'"AV sync issue in stream %1 at %2 : %3","2","0:00:00","{removed}"\n'
+            'MSG:4047,16,3,"AV sync issue in stream 1 at 0:01:00 : audio gap",'
+            '"AV sync issue in stream %1 at %2 : %3","1","0:01:00","audio gap"\n'
+        )
+        self.assertEqual(compare_tracks.removed_streams(rip), {2})
+
+    def test_a_removed_stream_is_not_expected_in_the_file(self):
+        scan = robot.parse(TRACK_SCAN.format(lang="eng"))
+        file = ident([("video", "und", None), ("audio", "eng", 8)])
+        want, dropped = compare_tracks.without_removed(compare_tracks.expected_rows(scan, 0, "all"), {2})
+        self.assertEqual([r["stream"] for r in dropped], [2])
+        verdicts, _ = compare_tracks.checks(want, compare_tracks.file_rows(file), scan.titles[0], file)
+        self.assertTrue(verdicts["count"])
+        self.assertTrue(verdicts["order"])
+
     def test_chapter_count_and_duration_are_checked(self):
         verdicts = self.verdicts(
             "eng", [("video", "und", None), ("audio", "eng", 8), ("audio", "eng", 2)], chapters=1, seconds=500
