@@ -23,7 +23,9 @@ Notes on that output:
 
 - `java` is blank because MakeMKV's `app_Java` setting is unset; MakeMKV then looks for
   Java itself (Java 8, 1.8.0_471, is installed). Experiment 12 checks whether it is used.
-- `TMDB_TOKEN` had not been set by the owner yet when this was recorded.
+- `TMDB_TOKEN` had not been set by the owner yet when this was recorded. The owner set it on
+  2026-10-05; TMDb accepts it (HTTP 200 from `/3/authentication`) both from an ssh session and
+  from a desktop-session job. The token itself is stored nowhere in this repository.
 - `status=ok` means the script did not throw. `exit=-1` is not a failure: the value is only
   the exit code of the last native command, here `makemkvcon64 info disc:9999`, which PowerShell stops early once
   `Get-DiscIndex` has the line it needs.
