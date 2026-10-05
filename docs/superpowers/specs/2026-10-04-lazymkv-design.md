@@ -15,10 +15,10 @@ Requirements (R):
 
 - R1. Rip only the highest-quality video: the main feature for movies, the episodes for TV. No extras.
 - R2. If two titles are the same except one has chapter markers, take the one with chapters.
-- R3. Keep every audio track in the wanted languages. The best track comes first: generally the one with the most channels; ties go to the track closest to master quality (Atmos/TrueHD, DTS:X/DTS-HD MA, and so on). (Changed by the owner on 2026-10-04 from "one track per wanted language".)
+- R3. Keep every audio track in the wanted languages. The best track comes first: generally the one with the most channels; ties go to the track closest to master quality (Atmos/TrueHD, DTS:X/DTS-HD MA, and so on). (Changed by the owner on 2026-10-04 from "one track per wanted language".) Exact duplicates are dropped (D13).
 - R4. The wanted languages are English, always, and the work's original language when it is not English.
 - R5. Keep English subtitles that transcribe the dialogue (regular and SDH when both exist) and forced English subtitles when available.
-- R6. Never keep commentary subtitles. Drop commentary and audio-description audio when a flag, a picture-in-picture marking or a database entry confirms it; an unconfirmed track is kept (D12).
+- R6. Never keep commentary subtitles. Drop commentary and audio-description audio when a flag, a picture-in-picture marking or a database entry confirms it; an unconfirmed track is kept (D12). The same holds for isolated-score and music-and-effects tracks (D14). What counts as confirmation: D15.
 - R7. When a disc obscures which title or track is which, use the most accurate public data available.
 - R8. File the result automatically, with Jellyfin/Plex cross-compatible naming.
 
@@ -40,6 +40,10 @@ Decisions (D) made during design:
 - D10. Both of the owner's drives read UHD, and most discs will be UHD. UHD is the primary case for design, testing and acceptance.
 - D11. A copy of a film at a different resolution (for example the Blu-ray in a UHD combo pack) is filed beside the existing copy as a version, using the servers' multi-version naming (8.9). It is not sent to review.
 - D12. All audio tracks in the wanted languages are kept. Only tracks confirmed as commentary or audio description are dropped; a track that merely looks like a commentary is kept, with no review. The owner accepts that an unflagged commentary will sometimes stay in the file.
+- D13. (Owner, 2026-10-05.) An audio track that is an exact duplicate of another track of the same title (identical stream packets) is dropped; one copy is kept. Found on the first disc of phase 0: four episodes carry their lossless 5.1 track twice.
+- D14. (Owner, 2026-10-05.) Isolated-score and music-and-effects tracks are not wanted. They are dropped when confirmed, on the same footing as commentary and audio description (R6); an unconfirmed track is kept.
+- D15. (Owner, 2026-10-05.) Stereo width is not a requirement for calling a track unwanted, and a rule based on a track's position on the disc is too brittle to decide it. Whether a track is a commentary, an audio description or a score is judged from flags, database entries and, once experiment 13 has answered yes, the track's content compared with the main track of its language (docs/phase0/experiments/EXP-13-design.md). Until then a track with the commentary pattern is kept; whether it also sends the job to review, against D12's "no review", is still to be decided by the owner.
+- D16. (Owner, 2026-10-05.) Until the content rules are trusted, every rip is run with as much debug logging as the tools offer, and keeps the information needed to tune the rules as more discs go through: the tools' full output, the measures and evidence behind every decision, and enough of each audio track to compute new measures later without the disc. The owner's label for a track, once given, is kept with it.
 
 ## 3. Target environment
 
