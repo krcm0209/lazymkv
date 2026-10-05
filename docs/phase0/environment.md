@@ -62,3 +62,33 @@ As MakeMKV lists them in its `DRV` line:
 - The owner's libraries (never written to in phase 0): `\\unas-pro\media\Movies`, `\\unas-pro\media\Shows`
 - Job profiles: `C:\lazymkv\phase0\profiles\all-tracks.mmcp.xml`, `eng-only.mmcp.xml`
 - Owner settings (not in the repository): `C:\lazymkv\phase0\config.ps1`
+
+## Fingerprint check (Task 8)
+
+The fingerprint and AACS disc ID computed on this machine by `scripts/phase0/record-disc.ps1`
+(drive D:), compared with TheDiscDB (`scripts/phase0/hit_rate.py` and the check in Task 8 Step 7).
+A dischash hit proves the fingerprint; the content_hash of a discid record is an independent check
+of it, and the global_disc_id of a dischash record checks the disc ID.
+
+| Slug | Format | Disc ID | dischash | discid | discid record's content_hash | dischash record's global_disc_id |
+|---|---|---|---|---|---|---|
+| the-office-2005-s3d3-bluray | bluray | yes | hit | miss | none | DIFFERENT |
+
+Outcome: the fingerprint is proven: TheDiscDB knows the-office-2005-s3d3-bluray (bluray) by it.
+The disc ID of the-office-2005-s3d3-bluray differs from TheDiscDB's global_disc_id; reported.
+
+About that difference: our disc ID is the SHA-1 of `AACS/Unit_Key_RO.inf`, and `certutil -hashfile`
+on the mini PC gives the same value for that file and for its `AACS/DUPLICATE` copy, so the value is
+computed correctly. TheDiscDB's `global_disc_id` for this disc (`CC1C9581...D34F`) is not the SHA-1
+of any file under `AACS` or `CERTIFICATE` on this copy. Either TheDiscDB's entry was made from
+another pressing with the same file sizes, or it derives the ID differently. One disc cannot tell
+which; the Blu-ray and UHD discs of Tasks 9 to 15 will (spec 8.1 depends on the answer).
+
+First disc (the-office-2005-s3d3-bluray): volume label in `meta.json` against `vol D:`: same. Navigation-file
+copies in the recording: read-only. Scan job rehearsal (`record-rehearsal`): RESULT ok, 11 titles,
+scan took 0 minutes (24 seconds); the second run was refused.
+
+The owner inserted this disc without naming it. It was identified before MakeMKV ran: the fingerprint
+lookup at TheDiscDB answered "The Office (2005), Season Three Disc Three, 2020 Complete Series
+Blu-ray", and the 8-byte header of `BDMV/index.bdmv` (`INDX0200`) shows a Blu-ray, not a UHD, so it
+could not be Disc A.
