@@ -5860,26 +5860,318 @@ Put the `## Coverage` section from Step 9 (the one made again in Step 11 when CL
     - on not answered, the provisional values stay, marked unconfirmed.
   - The closed-caption findings for spec 8.7: how the stream appears, and whether it aligns with the dialogue tracks.
 
-- [ ] **Step 13: Commit**
+**Experiment 13 (added 2026-10-05).** The owner asked for a content-based way to tell commentary and audio description from the programme's own audio. Steps 13 to 21 measure it on every extra same-language audio track of the titles this task rips. The first two steps and the Office disc's two rips were done on 2026-10-05, when the design was made; their results are in `corpus/owner/the-office-2005-s3d3-bluray/`.
+
+These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by Step 21 below. In them, "the design" is `docs/phase0/experiments/EXP-13-design.md` (this file, committed there by the controller before Task 12 runs). Task 12's header gains:
+
+- **Files:**
+  - Prerequisite, committed by the controller before this task: `docs/phase0/experiments/EXP-13-design.md` (the design).
+  - Modify: `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py`, `scripts/phase0/test_audio_similarity.py` (contents in `docs/phase0/experiments/EXP-13-design.md`, section 6, "Changes to the measurement scripts").
+  - Create: `docs/phase0/experiments/EXP-13-commentary-by-audio.md`.
+  - Create (pulled from the mini PC): `corpus/owner/<slug>/<label>/audio-levels-20ms-<M>-<C...>/`. Its level files are ignored by git; its `streams.json` is committed.
+  - Create (on the Mac): `corpus/owner/<slug>/<label>/audio-content-20ms-<M>-<C...>.txt`.
+  - Append to (on the Mac only): a `## Experiment 13 (Task 12)` section in `corpus/owner/<slug>/notes.md` for every disc measured.
+- **Produces:** `audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> -Cand <stream>[,<stream>...] [-Force]`, run as a job. Its log lines are `levels: <file> main=<M> cand=<C,...> centre=<True|False> ffmpeg_exit=<n> seconds=<s> folder=<folder>`, one `stream <n>: <codec> <channels> ch <layout> <language> frames=<n> md5=<hash>` line per stream, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1.
+
+Placeholders for Steps 15 to 18:
+- **TITLES** is the list of (SLUG, LABEL) pairs whose ripped file has two or more audio streams in one language:
+  - `the-office-2005-s3d3-bluray` with `e16-stereo` and with `rehearsal`;
+  - SLUG_A with `all-tracks` (Task 11);
+  - each NEW with `all-tracks` from Steps 6 to 8;
+  - each pair ripped in Step 19.
+- **M** is the reference stream number and **C** the candidate list, both chosen in Step 15. **CS** is C with hyphens in place of commas.
+- **LOG** is `audio-levels-SLUG-LABEL`, with `-M` appended when one label is measured for two languages, and `-2`, `-3` and so on appended on a repeat.
+
+When `-Force` is right for `audio-levels.ps1`: only to repeat a measurement that failed after its folder was created. That means a `RESULT FAILED:` reason beginning `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `ffmpeg wrote no raw-` or `<series>.txt holds no level`, once the cause has been dealt with. A refusal before that (among them `ffmpeg -layouts printed no table of channel layouts`, `cannot reach the staging share` and `expected one .mkv`) wrote nothing and is repeated without `-Force`. Never over a folder whose run ended `RESULT ok`.
+
+- [ ] **Step 13: Write and test the measurement scripts**
+
+Which disc is in the drive: does not matter (this runs on the Mac).
+
+Replace `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py` and `scripts/phase0/test_audio_similarity.py` with the contents given in `docs/phase0/experiments/EXP-13-design.md`, section 6, "Changes to the measurement scripts". Then:
+
+```bash
+python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
+python3 -c "open('scripts/phase0/audio-levels.ps1', 'rb').read().decode('ascii'); print('audio-levels.ps1 is ASCII')"
+grep -c 'measure_overall=RMS_level' scripts/phase0/audio-levels.ps1
+python3 scripts/phase0/audio_similarity.py corpus/owner/the-office-2005-s3d3-bluray/e16-stereo/audio-levels-1-3; echo "exit=$?"
+```
+
+Expected:
+- the unit tests end `Ran <n> tests` and `OK`, with `<n>` 12 more than before this step (`test_audio_similarity.py` goes from 6 tests to 18);
+- `audio-levels.ps1 is ASCII`;
+- `1`;
+- one line ending `this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>`, and `exit=1`: the first measurement's folder is refused, with no number printed.
+
+A failing test, a `UnicodeDecodeError`, or any measure printed for the old folder is a defect in this step: fix it before going on.
+
+- [ ] **Step 14: Check the measurement script on the mini PC**
+
+Which disc is in the drive: does not matter. Nothing here reads the drive or the share. Run this step only when no phase 0 job is running: `box.sh` replaces `C:\lazymkv\src`, from which jobs run.
+
+```bash
+scripts/box.sh
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Command C:\lazymkv\src\scripts\phase0\audio-levels.ps1).Parameters.Keys\""
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\lazymkv\src\scripts\phase0\audio-levels.ps1 -Slug Bad_Slug -Label x -Main 1 -Cand 3"; echo "exit=$?"
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\lazymkv\src\scripts\phase0\audio-levels.ps1 -Slug the-office-2005-s3d3-bluray -Label e16-stereo -Main 1 -Cand 1"; echo "exit=$?"
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \". C:\lazymkv\src\scripts\phase0\env.ps1; & \$FFMPEG -hide_banner -version | Select-Object -First 1; & \$FFMPEG -hide_banner -muxers | Select-String streamhash; & \$FFMPEG -hide_banner -layouts | Select-String -SimpleMatch 'DECOMPOSITION','5.1(side)'\""
+```
+
+Expected:
+- `box.sh` exits 0.
+- The parameter list begins `Slug`, `Label`, `Main`, `Cand`, `Force`, followed by PowerShell's common parameters. A parse error is a defect in Step 13.
+- The `Bad_Slug` run prints `RESULT FAILED:` with Assert-Slug's rejection, then `exit=1`.
+- The `-Main 1 -Cand 1` run prints `RESULT FAILED: stream 1 is the main stream and cannot also be a candidate`, then `exit=1`, within seconds and before the share is touched.
+- The last command prints `ffmpeg version 9.0.2 ...`, a line containing `streamhash`, a line `NAME` ... `DECOMPOSITION`, and a line `5.1(side)` ... `FL+FR+FC+LFE+SL+SR`. If no `streamhash` line appears, the ffmpeg on the mini PC cannot hash streams: stop and report. If either layout line is missing, audio-levels.ps1 cannot read ffmpeg's table of channel layouts (it would stop with `ffmpeg -layouts printed no table`, or miss the centre channel): stop and report.
+
+- [ ] **Step 15: Choose the reference and the candidates of each title**
+
+Which disc is in the drive: does not matter (this runs on the Mac).
+
+For each (SLUG, LABEL) in TITLES (the Office pairs and SLUG_A first; the recordings must have been pulled with `ffprobe-streams.json` in them):
+
+```bash
+python3 - SLUG LABEL <<'EOF'
+import json, pathlib, sys
+sys.path.insert(0, "scripts/phase0")
+from robot import parse
+slug, label = sys.argv[1], sys.argv[2]
+d = pathlib.Path("corpus/owner") / slug
+rip = json.loads((d / label / "rip-summary.json").read_text(encoding="utf-8-sig"))
+probe = json.loads((d / label / "ffprobe-streams.json").read_text(encoding="utf-8-sig"))
+scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
+flags = [int(a.get(22, "0") or 0) for (t, s), a in sorted(scan.streams.items()) if t == rip["title"] and a.get(1) == "Audio"]
+tmdb = d / "tmdb.json"
+orig = json.loads(tmdb.read_text(encoding="utf-8-sig")).get("original_language") if tmdb.exists() else None
+audio = [s for s in probe["streams"] if s.get("codec_type") == "audio"]
+print(f"{slug}/{label}: title {rip['title']}, {len(audio)} audio streams in the file, {len(flags)} in the scan; TMDb original language: {orig}")
+
+
+def lossless(s):
+    c = str(s.get("codec_name", ""))
+    return c in ("truehd", "mlp", "flac") or c.startswith("pcm") or s.get("profile") == "DTS-HD MA"
+
+
+groups = {}
+for k, s in enumerate(audio):
+    tags = s.get("tags", {})
+    lang = tags.get("language", "und")
+    f = flags[k] if k < len(flags) else None
+    marks = [m for bit, m in ((1, "director-comments"), (2, "alt-director-comments"), (4, "visually-impaired"),
+                              (512, "secondary"), (2048, "derived")) if f is not None and f & bit]
+    print(f"  stream {s['index']}: {s.get('codec_name')} profile={s.get('profile')} {s.get('channels')} ch "
+          f"{s.get('channel_layout')} lang={lang} title={tags.get('title')!r} scan_flags={f} {' '.join(marks)}")
+    groups.setdefault(lang, []).append(s)
+for lang, streams in groups.items():
+    if len(streams) < 2:
+        continue
+    ranked = sorted(streams, key=lambda s: (-int(s.get("channels") or 0), not lossless(s), s["index"]))
+    main, cands = ranked[0]["index"], sorted(s["index"] for s in ranked[1:])
+    print(f"  language {lang}: -Main {main} -Cand {','.join(map(str, cands))}  (folder audio-levels-20ms-{main}-{'-'.join(map(str, cands))})")
+EOF
+```
+
+Expected:
+- One line per audio stream: ffprobe's stream number, codec, profile, channels, layout, language, track name, the scan's flags for that stream (k-th audio stream of the file against the k-th of the scan), and the names of the flags that are set.
+- One `language <xxx>: -Main M -Cand C` line per language with two or more streams. M is the top-ranked stream: most channels, then lossless, then the earlier stream, as in spec 8.6 step 3. Measure the English line and, when the TMDb original language is not English, that language's line. Keep derived cores (`derived`) and flagged streams in C: a core is a real lossy companion of the reference, and a flag is a free label.
+- For the Office disc the lines are `language eng: -Main 1 -Cand 2,3` (e16-stereo) and `language eng: -Main 1 -Cand 2,3,4` (rehearsal).
+
+If the two counts of audio streams differ, match the streams by codec, channels and language by hand, and say so in the report.
+
+- [ ] **Step 16: Measure each title**
+
+Which disc is in the drive: does not matter. The job reads only the ripped file on the share.
+
+For each (SLUG, LABEL) and each language line of Step 15:
+
+```bash
+scripts/phase0/job.sh audio-levels.ps1 LOG -Slug SLUG -Label LABEL -Main M -Cand C
+scripts/phase0/wait.sh LOG
+```
+
+job.sh prints `started audio-levels.ps1; log: C:\lazymkv\phase0\logs\LOG.txt`. If it exits 1 because a phase 0 job is still running, wait for that job with its own wait.sh line first.
+
+What wait.sh's exit codes mean for this job:
+- **0**: check the log against the Expected below.
+- **1**: read the `RESULT FAILED:` line.
+  - Assert-Slug's rejection: SLUG or LABEL is mistyped. Check with `ls corpus/owner/SLUG`, then start again with log `LOG-2`.
+  - `already exists and is kept as evidence`: this title was measured before. Its folder is the evidence: go on with Step 17.
+  - `expected one .mkv in ... found 0` (with or without `the folder does not exist`): the rip is no longer in staging. Ask the owner whether the disc may go back in to rip that title again with `rip-title.ps1` under a new label (for example `e16-again`). If not, write the title down as "not measured: rip deleted" for the report, and go on with the next title.
+  - `the file has no stream`, `is ... not audio`, `is the main stream and cannot also be a candidate` or `a candidate stream is listed twice`: M or C is wrong. Repeat Step 15 for this title, then start again with log `LOG-2`.
+  - An error reading the share (`cannot reach the staging share`, `Cannot find path` or `Access ... is denied`): run `scripts/phase0/job.sh setup-check.ps1 setup-check-LOG` and `scripts/phase0/wait.sh setup-check-LOG`, and proceed as in Step 3.
+  - `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `wrote no raw-` or `holds no level`: pull the recording (`scripts/phase0/pull-recording.sh SLUG`), read `corpus/owner/SLUG/LABEL/audio-levels-20ms-M-CS/ffprobe.txt` (after `ffprobe failed`) or `.../ffmpeg.txt` (otherwise; it is written only once ffmpeg has run), and stop and report. A repeat after the fix adds `-Force` (see "When -Force is right" above).
+  - Any other reason (`ffmpeg not found`, `ffprobe not found`, `ffmpeg -layouts printed no table of channel layouts`, or any other error message from the script or from PowerShell): stop and report with the log, and do not repeat the job before the cause is known.
+- **3**: still running. A Blu-ray episode should take a few minutes; a feature film may take up to an hour (not yet measured). Run wait.sh again, and start nothing else meanwhile. If 90 minutes pass without a DONE line, end ffmpeg (not the job) with `ssh USER@makemkv-box "taskkill /im ffmpeg.exe /f"`, run wait.sh again (it then exits 1), and stop and report.
+- **4**: the job ended without a DONE line: stop and report.
+- **5**: the mini PC cannot be reached. Run wait.sh again once it can.
+
+Expected (exit 0), in the log:
+- `levels: <name>.mkv main=M cand=C centre=<True or False> ffmpeg_exit=0 seconds=<n> folder=audio-levels-20ms-M-CS`. `centre` is True for 5.1 and 7.1 references and False for mono and 2.0 ones. It is also False when ffprobe cannot name the reference's layout (its `stream M:` line shows `unknown` or `<n> channels`): the mixdown is then the dialogue curve; note such a title for the report. A reference whose `stream M:` line shows a layout such as `5.1(side)` or `7.1` with `centre=False` is a defect: stop and report with the log. `seconds` is the cost on the J4125: write it down with the title's running time.
+- One `stream <n>: ...` line for M and for each candidate, with `frames=<n>` (about 50 per second of running time) and `md5=<32 hex characters>`. Candidates whose frame count is more than 1% away from M's are judged on their overlap only; note them.
+- `RESULT ok`, then `PHASE0-DONE status=ok exit=<n>`.
+- For the Office disc: e16-stereo streams 1, 2 and 3 have three different MD5s. In rehearsal, stream 3's MD5 equals stream 1's and stream 4's equals stream 2's, as notes.md found with an MD5 of each stream's packets.
+
+- [ ] **Step 17: Copy the measurements to the Mac and analyse them**
+
+Which disc is in the drive: does not matter (this runs on the Mac).
+
+```bash
+scripts/phase0/pull-recording.sh SLUG
+python3 scripts/phase0/audio_similarity.py corpus/owner/SLUG/LABEL/audio-levels-20ms-M-CS | tee corpus/owner/SLUG/LABEL/audio-content-20ms-M-CS.txt
+```
+
+Expected:
+- `pulled corpus/owner/SLUG (...)`.
+- The analysis begins with the folder, the file name and `measured in <n> s`, then `main stream M: ...; dialogue reference: its centre channel` (or `its mono mixdown (no centre channel)`).
+- Then, for each candidate, either `verdict: duplicate of stream <n>` with its `row:` line, or:
+  - the lag and overlap line;
+  - the `DC ... AG ... tenths ... SMI ... LS ... ADL ... added` line;
+  - the `reverse:` line;
+  - `verdict: <commentary | reference-unclear | ad-pattern | note-commentary | note-ad | keep>` with its meaning, and `not judged: <reason>` when row 3 of the rule applies (or only `verdict: not-judged (too short)` for a track under 20 s);
+  - a `row: | ... |` line for notes.md.
+- Each candidate takes a few seconds for an episode, and under a minute for a feature.
+- For the Office disc, the first check of the whole chain:
+  - e16-stereo stream 3 must come out `commentary`, with DC at most 0.30 and AG at least 0.50. The 16 kHz extracts gave DC 0.03, AG 0.66, tenths 10/10, SMI 0.58, LS 10.1 dB. The 48 kHz decode may differ in the second decimal.
+  - Stream 2 (the derived DTS core) must come out `keep` with DC of 0.90 or more.
+  - In rehearsal, stream 3 must be `duplicate of stream 1`, stream 4 `duplicate of stream 2`, and stream 2 `keep`.
+
+  Any other result means the measurement chain on the mini PC differs from the one in the design: stop and report with both outputs. Do not change a threshold.
+- If audio_similarity.py prints instead one line ending `measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>` (on standard error; it exits 1 and prints no number), the folder was not written completely by the new script: check the path, delete the empty `audio-content-20ms-M-CS.txt` that `tee` created, and go back to Step 16 for this title.
+
+- [ ] **Step 18: Ask the owner what each measured track is, and record it**
+
+Which disc is in the drive: does not matter.
+
+1. For every candidate that is not a duplicate, ask the owner what it is. Give the stream as ffprobe's number and as a player shows it: with one video stream (stream 0), ffprobe's audio stream `<s>` is the player's audio track `<s>` counting from 1; with two video streams (a Dolby Vision enhancement layer), it is track `<s> - 1`. Do not show the verdict first. The owner plays the file from the staging share in a player that lists the audio tracks, at the start, the middle and near the end, and answers with one of:
+   - main programme, lossy companion, derived core, alternate or original mix;
+   - isolated score, M&E, same-language dub, foreign dub, alternate narration;
+   - commentary, partial commentary, audio description, trivia or other speech;
+   - laugh-track version, sing-along, unknown;
+
+   with how the owner knows: listened, packaging, menu, a scan flag, or TheDiscDB.
+2. A derived core (scan flag 2048) and a duplicate by MD5 need no listening: their label is "derived core" or "duplicate".
+3. Then append, to `corpus/owner/SLUG/notes.md` (never replacing what is in it), one section per disc, with one row per measured track:
+
+```markdown
+## Experiment 13 (Task 12)
+
+Extra audio tracks measured against the top-ranked track of their language (`scripts/phase0/audio_similarity.py`;
+full output in `<label>/audio-content-20ms-<M>-<C>.txt`). The owner named each track before seeing the measures.
+Reference streams: <label> stream <M> (<codec> <channels> ch <language>), ...
+
+| File | Track | What the measures say | What the owner says it is |
+|---|---|---|---|
+| <label>/<file name> | <n>: <codec> <channels> ch <language> "<track name>", scan flags <f> | DC <x>, AG <x>, tenths <a>/<b>, SMI <x>, LS <x>: <verdict> | <kind> (<how the owner knows>, <date>) |
+```
+
+   The middle column is the `row:` line's measures and verdict. A duplicate's middle column is `same packets as stream <n>: duplicate`.
+4. For the Office disc, e16-stereo stream 3's owner column is `commentary (listened, 2026-10-05)`. That is already recorded under "Owner's ground truth".
+
+- [ ] **Step 19: Add discs until the experiment's kinds are covered**
+
+Which disc is in the drive: the disc being added, which the owner inserts.
+
+1. Count the labelled tracks so far against the list in the experiment-13 row (the design, section 5, "Experiment 13"). Leave out every track of the Office disc (`the-office-2005-s3d3-bluray`): the thresholds were fitted on two of its tracks, so none of its tracks counts towards any total and it is not one of the discs counted. Count:
+   - commentaries (and how many discs, feature films, and over clearly audible film they come from);
+   - audio descriptions;
+   - programme tracks other than references, and how many of them are separately encoded lossy companions or alternate mixes;
+   - a title whose reference has no centre channel;
+   - a dialogue-heavy or speech-only title;
+   - isolated scores, M&E tracks, second dubs or narrations.
+2. Ask the owner, once per missing kind, for a disc that has it (the design's question 12). Also ask for the Office disc again (the design's question 13): its title 3 should carry a second commentary, and titles 2, 5 and 6 duplicates. Its tracks are measured and reported like any other, and a programme track of it with the commentary verdict still makes the answer no, but they count towards no total (point 1).
+3. For each disc the owner provides:
+   - Run Step 6 (fingerprint, record if new, pull, `summarize_scan.py`). For a disc already recorded (the Office disc), skip the recording.
+   - List the disc's titles with their audio streams by language, derived streams (scan flag 2048, MakeMKV's cores) left out:
+
+     ```bash
+     python3 scripts/phase0/audio_similarity.py --titles corpus/owner/NEW
+     ```
+
+     Expected: a first line `NEW: <n> titles, longest first; TMDb original language: <code or unknown>`, a line `audio: scan stream numbers by language, ...`, then one line per title: its number, running time, segments and `audio <language> <stream numbers>; ...`, and at the end `<- <language> x<n>` when one language has two or more streams, `ripped as <label>` for a title ripped before, and `shares segments with title <t>` for overlapping playlists.
+   - Choose at most 4 titles of the disc, going down the list (longest first) and taking a title only when all of these hold:
+     - its `<-` mark names `eng`, or the original language of the first line (TMDb gives two letters; the scan uses the three-letter code, for example `fr` is `fra` or `fre`);
+     - it is a feature or an episode, not an extra (when unsure, ask the owner);
+     - it has no `ripped as` (other than a failed rip), and it shares no segment with a title already taken (a play-all playlist).
+
+     On a film disc this is normally the feature alone. For the Office disc it is titles 3, 5, 2 and 6 (question 13): titles 0 and 1 are `ripped as` e16-stereo and rehearsal, and title 4 (two segments, no subtitles, only stereo tracks) is taken to be an extra.
+   - For each chosen title T, run Step 7's rip and probe with the label `tT-all-tracks`: `scripts/phase0/job.sh rip-title.ps1 rip-NEW-tT -Slug NEW -Title T -Label tT-all-tracks`, then `probe-title.ps1 ... -Label tT-all-tracks -SkipRemux`. Use Step 7's exit-code handling and its rules for `-Force`.
+   - Pull the recording.
+   - Add (NEW, `tT-all-tracks`) to TITLES and run Steps 15 to 18 for it.
+4. Stop asking when every kind is covered, or when the owner has no disc left of a missing kind. Write each such kind down as "not available: <kind>".
+
+- [ ] **Step 20: Judge the experiment and write the report**
+
+Which disc is in the drive: does not matter.
+
+1. Build the coverage table and the track table from the notes.md sections, with no threshold changed. The coverage table and every total leave out each track of the Office disc (`the-office-2005-s3d3-bluray`), whose S03E16 commentary and S03E15 duplicate the thresholds were fitted on; the track table lists them, marked "fitting disc, not counted".
+   - **False verdict:** a track with the verdict `commentary` that the owner names as programme audio (main programme, lossy companion, derived core, alternate or original mix, isolated score, laugh-track version), or as an ask-kind the owner wants kept (the design's questions 2 to 6). This includes the tracks of the Office disc.
+   - **Answer yes:** every kind in the row is covered without any track of the Office disc, there is no false verdict, and at least one commentary got the verdict on each of at least 3 different discs other than the Office disc.
+   - **Answer no:** any false verdict, on any disc, whatever the coverage. Also no when coverage is met but fewer than 3 discs other than the Office disc had a commentary verdict.
+   - **Not answered:** coverage is not met and there is no false verdict.
+2. Create `docs/phase0/experiments/EXP-13-commentary-by-audio.md` from `docs/phase0/experiments/TEMPLATE.md`. Header:
+   - the date;
+   - every disc measured, with slug, format and the titles;
+   - the MakeMKV version;
+   - `section 17, row 13 (added by this experiment)`.
+3. Right after the header, put `## Coverage`:
+
+```markdown
+## Coverage
+
+| Kind | Needed | Labelled tracks (discs), without the Office disc |
+|---|---|---|
+| Commentary | 8 from 4 discs; 2 on feature films; 1 with the film clearly audible | <n> (<discs>); films <n>; audible film <n> |
+| Audio description | 1 if the owner has one (up to 3) | <n> or "owner has none" |
+| Programme tracks other than the reference | 20, of which 6 separately encoded lossy companions or alternate mixes | <n>; separately encoded <n> |
+| Reference without a centre channel, with an extra track | 1 title | <n> |
+| Dialogue-heavy or speech-only title, with an extra track | 1 title | <n> |
+| Isolated score, M&E, second dub or narration | every one the owner has | <n> |
+
+- not available: <kind>, for each kind the owner could not supply.
+- not counted: every track of the-office-2005-s3d3-bluray (the thresholds were fitted on its S03E16 commentary and S03E15 duplicate).
+```
+
+4. The report must state, under its template headings:
+   - **What was run:**
+     - for each title, the rip label, M and C, the `audio-levels.ps1` command and log name;
+     - the `seconds=` of each run, with the title's running time and file size: the J4125's cost per minute of running time for an episode and for a feature;
+     - the `audio_similarity.py` command.
+   - **What was observed:**
+     - one table row per measured track: file, track, DC, AG, tenths, SMI, LS, ADL, reverse, verdict, the owner's label, and whether the two agree;
+     - every duplicate found by MD5;
+     - every track the rule did not judge, with the reason;
+     - for each owner label, how many tracks got each verdict;
+     - stereo width is not measured; the earlier figures (commentary -41.8 dB by notes.md, -30.3 dB whole-file; duplicate -3.4 dB) are quoted as observations only.
+   - **Answer:**
+     - "yes", "no" or "not answered", by the rules above;
+     - every false verdict, with its measures;
+     - the commentaries found and missed (the recall), with the kind of each miss: film audible, sparse, partial, too few gaps;
+     - what the audio-description tracks got. AD is never dropped by content in this version, whatever it got.
+   - **Consequence for the spec:**
+     - on yes: add row 13 to section 17; in 8.6 step 1, add the duplicate row and the content row behind `drop_commentary_by_audio`; in 8.8, add the review reasons `commentary_detected` and `audio_reference_unclear`; in section 14, add the setting; in 6.4 step 10, the whole-title decode with its measured cost; change D12 and R6 to say that content may confirm a commentary;
+     - on no or not answered: the same spec text, except that the content row only flags for review (`commentary_detected`) and never drops; D12 changes accordingly;
+     - in every case: the duplicate row, and the open questions still open.
+
+- [ ] **Step 21: Commit** (replaces the old Step 13)
 
 Which disc is in the drive: does not matter. Disc A is needed again in Task 13, which starts by asking the owner to put it back.
 
 ```bash
 find corpus/owner -iname '*unit_key*'
 grep -rIl 'eyJhbGciOi' corpus/owner
-git add scripts/phase0/probe-audio.ps1 corpus/owner docs/phase0/experiments
+python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
+git add scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Run experiment 6: audio profiles and subtitle alignment" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiments 6 and 13: audio profiles, subtitle alignment, commentary by audio content" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 Expected:
 - `find` and `grep` print nothing: no AACS unit-key file and no JSON Web Token in any recording. If either prints a path, stop and do not commit.
+- The unit tests end `OK`.
 - `git status --short` lists:
-  - `scripts/phase0/probe-audio.ps1`;
-  - the new files under `corpus/owner/`: Disc A's `ffprobe-audio-deep.json` files and `notes.md`, each added disc's recording and `all-tracks/` folder and `notes.md`, and any `all-tracks-failed-1` copies;
-  - the report.
-
-  `subtitle_alignment.py` and `test_analysis.py` are not listed: the controller committed them as prerequisites.
+  - the four scripts;
+  - the new files under `corpus/owner/`. These are what the old Step 13 listed, plus each `audio-content-20ms-*.txt`, each `audio-levels-20ms-*/streams.json`, the new `tT-all-tracks/` recordings and the `notes.md` changes. No `audio-levels-*/*.txt` file appears: `.gitignore` keeps them out.
+  - both reports.
 - The commit succeeds.
 
 ---
