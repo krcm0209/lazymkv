@@ -37,6 +37,9 @@ try {
         }
     }
     $recorded = Test-Path -LiteralPath "$out\meta.json"
+    if (-not $recorded -and @(Get-ChildItem -LiteralPath $out -Filter '*.exit.json' -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw "$out holds recorded runs but no meta.json (an earlier -Force run stopped part-way); put its meta.json back before running again"
+    }
 
     # The disc may still be spinning up: wait up to two minutes until its root can be listed.
     $ready = $false
@@ -74,7 +77,9 @@ try {
         if ($hashCode -eq '200') {
             try {
                 $hit = Get-Content -LiteralPath "$stage\thediscdb-hash.json" -Raw -ErrorAction Stop | ConvertFrom-Json
-                $tmdbId = $hit.media.external_ids.tmdb
+                $tmdbId = [string]$hit.media.external_ids.tmdb
+                # The ID comes from community data and goes onto a command line next to the token: digits only.
+                if ($tmdbId -notmatch '^\d+$') { $tmdbId = $null }
                 $kind = if ($hit.media.type -eq 'Movie') { 'movie' } else { 'tv' }
             } catch { }
         }

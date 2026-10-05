@@ -138,11 +138,11 @@ class SubsDir(unittest.TestCase):
         self.assertEqual(pairs, [["s0-eng-image", "s1-eng-text", "1.00"]])
 
     def test_inputs_and_a_subs_dir_are_not_mixed(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                self.run_main()
-            with self.assertRaises(SystemExit):
-                self.run_main("a=x.json", "--subs-dir", str(self.dir))
+        for args in ((), ("a=x.json", "--subs-dir", str(self.dir))):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                self.run_main(*args)
+            self.assertIn("give either name=path inputs or --subs-dir", err.getvalue())
 
 
 if __name__ == "__main__":
