@@ -138,7 +138,7 @@ if ($null -ne $summary) {
                 if ($code -eq 3307 -and $line -match ',"([^"]*)","(\d+)"\s*$' -and [int]$Matches[2] -eq $Title) {
                     $summary['rip_source_file'] = $Matches[1]
                 }
-                if ($code -eq 5014 -and $null -eq $summary['saving_started_s'] -and $i -lt $timing.Count -and $timing[$i] -match '"t_ms":(\d+)') {
+                if ($code -in 5014, 5015 -and $null -eq $summary['saving_started_s'] -and $i -lt $timing.Count -and $timing[$i] -match '"t_ms":(\d+)') {
                     $summary['saving_started_s'] = [math]::Round([double]$Matches[1] / 1000, 1)
                 }
             }

@@ -38,6 +38,8 @@
 - Evidence files written by PowerShell are UTF-8 (`-Encoding UTF8`); Python reads them with `encoding="utf-8-sig"`.
 - More than a trivial command on the mini PC is run as a `.ps1` file copied with `scp` and started with `powershell -NoProfile -ExecutionPolicy Bypass -File`; `C:\lazymkv\phase0\config.ps1` is changed by writing the whole file on the Mac and copying it over.
 - Commit commands take the form `git commit -m "<message>" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- The saving message is `MSG:5014`, or `MSG:5015` when a profile is in use. Found on 2026-10-05, on the first real rip: with `--profile`, MakeMKV 2.0.0 prints `MSG:5015` ("Saving %1 titles into directory %2 using profile '%3' from file '%4'") and no `MSG:5014`. Every rip in this plan uses a profile. Wherever a task says `MSG:5014`, read "`MSG:5014` or `MSG:5015`"; the scripts accept both, and their labels (`5014=`, `saw_5014`, `stopped-at-5014`, `added-before-5014`) keep their names and are true for either code. A `codes=` list then ends in 5015. The profile named in the `MSG:5015` line is the proof that MakeMKV used the job profile.
+- MakeMKV removes a forced-only subtitle track that turns out to be empty and says so with `MSG:4047` ("Forced subtitles track #N turned out to be empty and was removed from output file", after `MSG:4007`). Found on the same rip. A ripped file can therefore hold fewer tracks than the scan lists; such a difference is explained, not a failure, when a `MSG:4047` line names the missing stream.
 
 ## Owner inputs needed during execution
 
@@ -3813,7 +3815,7 @@ try {
     # Earlier results are evidence: a run without -Redo refuses to mix with them.
     $have = @{}
     foreach ($found in @(Get-ChildItem -LiteralPath $out -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^title-\d+\.txt$' })) {
-        $have[[int]($found.Name -replace '^title-(\d+)\.txt$', '$1')] = [bool](Select-String -LiteralPath $found.FullName -Pattern '^MSG:5014,' -Quiet)
+        $have[[int]($found.Name -replace '^title-(\d+)\.txt$', '$1')] = [bool](Select-String -LiteralPath $found.FullName -Pattern '^MSG:501[45],' -Quiet)
     }
     if ($have.Count -eq 0) {
         'earlier results: none'
@@ -3907,7 +3909,7 @@ try {
                 $line = $read.Result
                 if ($null -eq $line) { break }
                 $lines.Add($line)
-                if ($line.StartsWith('MSG:5014,')) { $saw5014 = $true; break }
+                if ($line.StartsWith('MSG:5014,') -or $line.StartsWith('MSG:5015,')) { $saw5014 = $true; break }
                 $read = $process.StandardOutput.ReadLineAsync()
             }
             $now = Get-Date
@@ -4525,7 +4527,7 @@ if ($null -ne $summary) {
                 if ($code -eq 3307 -and $line -match ',"([^"]*)","(\d+)"\s*$' -and [int]$Matches[2] -eq $Title) {
                     $summary['rip_source_file'] = $Matches[1]
                 }
-                if ($code -eq 5014 -and $null -eq $summary['saving_started_s'] -and $i -lt $timing.Count -and $timing[$i] -match '"t_ms":(\d+)') {
+                if ($code -in 5014, 5015 -and $null -eq $summary['saving_started_s'] -and $i -lt $timing.Count -and $timing[$i] -match '"t_ms":(\d+)') {
                     $summary['saving_started_s'] = [math]::Round([double]$Matches[1] / 1000, 1)
                 }
             }
@@ -4823,7 +4825,7 @@ If `files` appears as an object with `value` and `Count` fields, or `ram_samples
 Now check the command that Step 8 uses to see when saving begins. Run it on the finished rehearsal recording:
 
 ```bash
-ssh USER@makemkv-box "powershell -NoProfile -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; Get-Content C:\lazymkv\phase0\recordings\SLUG\rehearsal\rip.txt | Where-Object { \$_ -like 'MSG:5014*' }\""
+ssh USER@makemkv-box "powershell -NoProfile -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; Get-Content C:\lazymkv\phase0\recordings\SLUG\rehearsal\rip.txt | Where-Object { \$_ -like 'MSG:501[45]*' }\""
 ```
 
 Expected: the mini PC's current time, then one `MSG:5014,...` line. If the quoting fails, fix it here, not during the share drop.
@@ -5056,7 +5058,7 @@ Expected: `tasklist` prints nothing (if it prints a line, end that process with 
 Every 30 seconds or so, run:
 
 ```bash
-ssh USER@makemkv-box "powershell -NoProfile -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; Get-Content C:\lazymkv\phase0\recordings\SLUG\DROP\rip.txt | Where-Object { \$_ -like 'MSG:5014*' }\""
+ssh USER@makemkv-box "powershell -NoProfile -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; Get-Content C:\lazymkv\phase0\recordings\SLUG\DROP\rip.txt | Where-Object { \$_ -like 'MSG:501[45]*' }\""
 ```
 
 It prints the mini PC's time and, once saving has begun, the `MSG:5014` line. Get-Content can read the file while lazymkv-capture is writing it.
@@ -6303,7 +6305,7 @@ The single quotes are for the Mac shell, which would otherwise delete every back
 MakeMKV scans the disc again before it writes anything; on a UHD with Java menus that takes ten minutes or more. How MakeMKV 2.0.0 reports a profile it cannot use, with a disc inserted, is not known (with no disc it says nothing at all). So watch the messages until saving has begun. Every two minutes or so, run:
 
 ```bash
-ssh USER@makemkv-box "powershell -NoProfile -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; Get-Content C:\lazymkv\phase0\recordings\SLUG_A\eng-only\rip.txt | Where-Object { \$_ -like 'MSG:1009*' -or \$_ -like 'MSG:5014*' -or \$_ -like '*profile*' }\""
+ssh USER@makemkv-box "powershell -NoProfile -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; Get-Content C:\lazymkv\phase0\recordings\SLUG_A\eng-only\rip.txt | Where-Object { \$_ -like 'MSG:1009*' -or \$_ -like 'MSG:501[45]*' -or \$_ -like '*profile*' }\""
 ```
 
 It prints the mini PC's time, then any `MSG:1009` line, the `MSG:5014` line once saving has begun, and any other line that mentions the profile.
@@ -8953,7 +8955,7 @@ STREAM_FORMATS = {
     13: ("bitrate, a number with a unit", r"[\d.]+ \S+"),
     19: ("video size WxH", r"\d+x\d+"),
 }
-TABLE = {1005, 1009, 2003, 2019, 3307, 3308, 3309, 3344, 5003, 5004, 5037, 5005, 5036, 5010, 5014,
+TABLE = {1005, 1009, 2003, 2019, 3307, 3308, 3309, 3344, 5003, 5004, 5037, 5005, 5036, 5010, 5014, 5015,
          5021, 5050, 5052, 5055, 5095, 5069, 5070, 5079}
 seen, extra, versions = {}, {}, set()
 for path in sorted(pathlib.Path(sys.argv[1]).rglob("*.txt")):

@@ -7,7 +7,11 @@ from robot import parse
 
 
 def check_run(scan, title, run):
-    """The facts for one rip call of `title` that was stopped after 5014."""
+    """The facts for one rip call of `title` that was stopped after the saving message.
+
+    The saving message is MSG:5014, or MSG:5015 when a profile is in use (MakeMKV 2.0.0). The
+    printed labels keep the name 5014 and are true for either code.
+    """
     codes = [code for code, _, _ in run.messages]
     added = {}  # title number -> every file added under that number in this run
     for code, _, params in run.messages:
@@ -15,10 +19,11 @@ def check_run(scan, title, run):
             added.setdefault(int(params[-1]), set()).add(params[0])
     added_at = [i for i, code in enumerate(codes) if code in (3307, 3308)]
     expected = scan.titles.get(title, {}).get(16)
-    saw_5014 = 5014 in codes
+    saving_at = [i for i, code in enumerate(codes) if code in (5014, 5015)]
+    saw_5014 = bool(saving_at)
     # Nothing passes by default: a title the scan does not list, a run with no 3307/3308
     # line, and a title number added for two different files are all a "NO".
-    before = saw_5014 and bool(added_at) and all(i < codes.index(5014) for i in added_at)
+    before = saw_5014 and bool(added_at) and all(i < saving_at[0] for i in added_at)
     match = expected is not None and added.get(title) == {expected}
     return {
         "expected": expected, "added": "/".join(sorted(added.get(title, ()))) or None, "match": match, "saw_5014": saw_5014,

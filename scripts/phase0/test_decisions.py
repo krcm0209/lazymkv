@@ -71,6 +71,14 @@ class Exp02(TempDir):
         self.assertTrue(ok)
         self.assertIn("EXPERIMENT 2: yes (2 titles)", out)
 
+    def test_the_saving_message_of_a_profile_rip_counts(self):
+        # With --profile, MakeMKV 2.0.0 prints MSG:5015 where a plain rip prints MSG:5014.
+        self.write("scan.txt", SCAN)
+        self.write("exp02/title-0.txt", BOTH_ADDED.replace("MSG:5014,", "MSG:5015,"))
+        ok, out = quiet(exp02_check.main, self.dir)
+        self.assertTrue(ok)
+        self.assertIn("5014=yes added-before-5014=yes", out)
+
     def test_no_when_the_scan_does_not_list_the_title(self):
         self.write("scan.txt", "")
         self.write("exp02/title-3.txt", SAVING)
