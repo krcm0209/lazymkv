@@ -22,8 +22,9 @@ if (Test-Path $Log) { Remove-Item $Log }
 $inner = "`$status = 'ok'; try { & '$full' $ArgLine *>&1 | Out-File -FilePath '$Log' -Encoding utf8 } " +
     "catch { `$status = 'error'; Add-Content -Path '$Log' -Value ('ERROR: ' + `$_) } " +
     "finally { Add-Content -Path '$Log' -Value ('PHASE0-DONE status=' + `$status + ' exit=' + `$LASTEXITCODE) }"
+# -NonInteractive: a missing mandatory parameter fails the job (status=error) instead of waiting at a hidden prompt.
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$inner`""
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$inner`""
 $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType Interactive -RunLevel Highest
 # -ErrorAction Stop is explicit so that a failed registration or start can never be followed by "started".
 Register-ScheduledTask -TaskName 'lazymkv-phase0' -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null

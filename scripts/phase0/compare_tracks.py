@@ -31,7 +31,10 @@ def expected_rows(scan, title, selection):
             continue
         kind = TYPE.get(a.get(1), a.get(1))
         flags = int(a.get(22, "0") or 0)
-        lang_raw = a.get(3) or a.get(28) or "und"
+        # A stream's language is attribute 3 (spec 8.6). Attribute 28 is the disc's metadata language
+        # ("eng" even on the Chinese subtitles of the pinned John Wick scan), so it stands in only for
+        # video, which has no attribute 3 and whose language is never compared.
+        lang_raw = a.get(3) or (a.get(28) if kind == "video" else None) or "und"
         lang = norm_lang(lang_raw)
         if "MVC" in a.get(6, ""):
             continue

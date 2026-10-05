@@ -38,3 +38,40 @@ function Get-DiscIndex {
 function Get-FreeRamGB {
     [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
 }
+
+$Recordings = "$P0\recordings"
+
+function Assert-Slug([string]$Value) {
+    if ($Value -cnotmatch '^[a-z0-9][a-z0-9-]*$') { throw "bad name '$Value': use lowercase letters, digits and hyphens only" }
+}
+
+function Assert-EmptyDir([string]$Path) {
+    if (-not $Path) { throw 'Assert-EmptyDir: no path given' }
+    New-Item -ItemType Directory -Force -Path $Path -ErrorAction Stop | Out-Null
+    $items = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+    if ($items.Count -gt 0) { throw "$Path is not empty ($($items.Count) entries)" }
+}
+
+# Reads the disc in $Drive with lazymkv-capture only (never MakeMKV); returns its meta.json object and prints nothing.
+function Get-InsertedDisc {
+    if (-not (Test-Path -LiteralPath $CAP)) { throw "missing $CAP; build it with: scripts/box.sh cargo build --release -p lazymkv-capture" }
+    if (@(Get-ChildItem -LiteralPath "${Drive}:\" -ErrorAction SilentlyContinue).Count -eq 0) { throw "no disc is mounted in ${Drive}:" }
+    $dir = "$P0\tmp\disc-check"
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop }
+    New-Item -ItemType Directory -Force -Path $dir -ErrorAction Stop | Out-Null
+    & $CAP disc --root "${Drive}:\" --label check --out $dir | Out-Null
+    $code = $LASTEXITCODE
+    if ($code -ne 0 -or -not (Test-Path -LiteralPath "$dir\meta.json")) { throw "lazymkv-capture disc failed on ${Drive}: (exit $code)" }
+    $meta = Get-Content -LiteralPath "$dir\meta.json" -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+    if (-not $meta.fingerprint) { throw "the disc in ${Drive}: has no fingerprint" }
+    $meta
+}
+
+function Assert-DiscIs([string]$Slug) {
+    Assert-Slug $Slug
+    $file = "$Recordings\$Slug\meta.json"
+    if (-not (Test-Path -LiteralPath $file)) { throw "no $file" }
+    $want = [string](Get-Content -LiteralPath $file -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json).fingerprint
+    $have = [string](Get-InsertedDisc).fingerprint
+    if (-not $want -or $have -ne $want) { throw "the disc in ${Drive}: (fingerprint $have) is not the disc of recording $Slug (recorded fingerprint $(if ($want) { $want } else { 'none' }))" }
+}

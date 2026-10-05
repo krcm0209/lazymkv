@@ -168,6 +168,24 @@ class CompareTracks(unittest.TestCase):
         self.assertFalse(verdicts["chapters"])
         self.assertFalse(verdicts["duration"])
 
+    def test_a_stream_without_a_language_code_is_und_not_the_metadata_language(self):
+        # Attribute 28 is the disc's metadata language ("eng" even on Chinese subtitles); only
+        # attribute 3 names a stream's language, and a stream without one has no language (spec 8.6).
+        scan = robot.parse(
+            'TINFO:0,8,0,"2"\nTINFO:0,9,0,"0:10:00"\n'
+            'SINFO:0,0,1,6201,"Video"\nSINFO:0,0,6,0,"MpegH"\nSINFO:0,0,28,0,"eng"\n'
+            'SINFO:0,1,1,6202,"Audio"\nSINFO:0,1,6,0,"DD"\nSINFO:0,1,14,0,"2"\nSINFO:0,1,28,0,"eng"\n'
+            'SINFO:0,2,1,6203,"Subtitles"\nSINFO:0,2,3,0,"zho"\nSINFO:0,2,6,0,"PGS"\nSINFO:0,2,28,0,"eng"\n'
+            'SINFO:0,3,1,6203,"Subtitles"\nSINFO:0,3,6,0,"PGS"\nSINFO:0,3,28,0,"eng"\n'
+        )
+        want = compare_tracks.expected_rows(scan, 0, "all")
+        self.assertEqual([r["lang"] for r in want], ["eng", "und", "zho", "und"])
+        eng = compare_tracks.expected_rows(scan, 0, "eng")
+        self.assertEqual([r["stream"] for r in eng], [0, 1])
+        file = ident([("video", "und", None), ("audio", "und", 2)])
+        verdicts, _ = compare_tracks.checks(eng, compare_tracks.file_rows(file), scan.titles[0], file)
+        self.assertTrue(verdicts["order"])
+
     def test_an_empty_file_against_an_empty_title_fails(self):
         scan = robot.parse('TINFO:0,9,0,"0:10:00"\n')
         file = ident([], chapters=0, seconds=0)
