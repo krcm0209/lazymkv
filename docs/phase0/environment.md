@@ -78,17 +78,18 @@ Outcome: the fingerprint is proven: TheDiscDB knows the-office-2005-s3d3-bluray 
 The disc ID of the-office-2005-s3d3-bluray differs from TheDiscDB's global_disc_id; reported.
 
 About that difference: our disc ID is the SHA-1 of `AACS/Unit_Key_RO.inf`, and `certutil -hashfile`
-on the mini PC gives the same value for that file and for its `AACS/DUPLICATE` copy, so the value is
-computed correctly. TheDiscDB's `global_disc_id` for this disc (`CC1C9581...D34F`) is not the SHA-1
+on the mini PC gives `meta.json`'s `disc_id` for that file and for its `AACS/DUPLICATE` copy, so the
+SHA-1 step has no bug. That does not show that TheDiscDB derives its ID from this file. TheDiscDB's `global_disc_id` for this disc (`CC1C9581...D34F`) is not the SHA-1
 of any file under `AACS` or `CERTIFICATE` on this copy. Either TheDiscDB's entry was made from
 another pressing with the same file sizes, or it derives the ID differently. One disc cannot tell
-which; the Blu-ray and UHD discs of Tasks 9 to 15 will (spec 8.1 depends on the answer).
+which. The Blu-ray and UHD discs of Tasks 9 to 15 may, if the same comparison (Task 8 Step 7's check)
+is run on each; until then the "disc ID and fingerprint both match" step of spec 8.1 is unproven.
 
 First disc (the-office-2005-s3d3-bluray): volume label in `meta.json` against `vol D:`: same. Navigation-file
 copies in the recording: read-only. Scan job rehearsal (`record-rehearsal`): RESULT ok, 11 titles,
 scan took 0 minutes (24 seconds); the second run was refused.
 
 The owner inserted this disc without naming it. It was identified before MakeMKV ran: the fingerprint
-lookup at TheDiscDB answered "The Office (2005), Season Three Disc Three, 2020 Complete Series
-Blu-ray", and the 8-byte header of `BDMV/index.bdmv` (`INDX0200`) shows a Blu-ray, not a UHD, so it
+lookup at TheDiscDB returned a record for The Office (2005), disc "Season Three Disc Three" of the
+release "2020 Complete Series Blu-ray", and the 8-byte header of `BDMV/index.bdmv` (`INDX0200`) shows a Blu-ray, not a UHD, so it
 could not be Disc A.
