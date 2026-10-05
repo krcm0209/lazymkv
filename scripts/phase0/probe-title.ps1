@@ -36,8 +36,10 @@ try {
     if ($rip.ok -ne $true) { throw "the rip of label $Label did not succeed ($($rip.result)); only a rip whose rip-summary.json says ok is probed" }
 
     # Probe evidence is never replaced without -Force; the rip's own files stay.
-    $ripFiles = 'rip.txt', 'rip.txt.timing.jsonl', 'rip.txt.stderr', 'rip.txt.exit.json', 'free-ram.csv', 'rip-summary.json'
-    $old = @(Get-ChildItem -LiteralPath $rec -Force -ErrorAction Stop | Where-Object { $ripFiles -notcontains $_.Name })
+    # What rip-title.ps1 leaves here, and the audio measurements, are not probe evidence.
+    $ripFiles = 'rip.txt', 'rip.txt.timing.jsonl', 'rip.txt.stderr', 'rip.txt.exit.json', 'rip.txt.makemkv-debug.txt',
+        'free-ram.csv', 'system.csv', 'system-events.json', 'rip-summary.json'
+    $old = @(Get-ChildItem -LiteralPath $rec -Force -ErrorAction Stop | Where-Object { $ripFiles -notcontains $_.Name -and $_.Name -notlike 'audio-levels-*' })
     if ($old.Count -gt 0 -and -not $Force) {
         throw "$rec already holds probe evidence ($(($old | ForEach-Object { $_.Name }) -join ', ')), which is kept; use -Force only where the plan says so"
     }
