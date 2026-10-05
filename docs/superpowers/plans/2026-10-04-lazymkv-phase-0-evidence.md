@@ -39,6 +39,7 @@
 - More than a trivial command on the mini PC is run as a `.ps1` file copied with `scp` and started with `powershell -NoProfile -ExecutionPolicy Bypass -File`; `C:\lazymkv\phase0\config.ps1` is changed by writing the whole file on the Mac and copying it over.
 - Commit commands take the form `git commit -m "<message>" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 - The saving message is `MSG:5014`, or `MSG:5015` when a profile is in use. Found on 2026-10-05, on the first real rip: with `--profile`, MakeMKV 2.0.0 prints `MSG:5015` ("Saving %1 titles into directory %2 using profile '%3' from file '%4'") and no `MSG:5014`. Every rip in this plan uses a profile. Wherever a task says `MSG:5014`, read "`MSG:5014` or `MSG:5015`"; the scripts accept both, and their labels (`5014=`, `saw_5014`, `stopped-at-5014`, `added-before-5014`) keep their names and are true for either code. A `codes=` list then ends in 5015. The profile named in the `MSG:5015` line is the proof that MakeMKV used the job profile.
+- Decision D16 (owner, 2026-10-05): every MakeMKV call runs with `--debug` (`Get-MkFlags` adds it) and its debug log, which MakeMKV 2.0.0 always writes to `%USERPROFILE%\MakeMKV_log.txt`, is kept beside the call's output as `<output>.makemkv-debug.txt` by `Save-MkDebugLog`. With `--debug` the robot output also carries `MSG:1004` and `MSG:1003` lines. Every rip also keeps `system.csv` (CPU load, free RAM and bytes written every 5 s) and `system-events.json` (Windows warnings and errors about storage, USB and the network during the rip). A script that calls MakeMKV without `Get-MkFlags` adds `--debug` and calls `Save-MkDebugLog` itself.
 - MakeMKV removes a forced-only subtitle track that turns out to be empty and says so with `MSG:4047` ("Forced subtitles track #N turned out to be empty and was removed from output file", after `MSG:4007`). Found on the same rip. A ripped file can therefore hold fewer tracks than the scan lists; such a difference is explained, not a failure, when a `MSG:4047` line names the missing stream.
 
 ## Owner inputs needed during execution
@@ -2528,7 +2529,7 @@ try {
     $out = "$Recordings\$Slug"
     $stage = "$P0\tmp\record-$Slug"
     $scan = "$out\$ScanName.txt"
-    $scanFiles = @($scan, "$scan.stderr", "$scan.timing.jsonl", "$scan.exit.json")
+    $scanFiles = @($scan, "$scan.stderr", "$scan.timing.jsonl", "$scan.exit.json", "$scan.makemkv-debug.txt")
 
     # Refuse before anything is created, deleted or started.
     if (-not (Test-Path -LiteralPath $CAP)) { throw "missing $CAP; build it with: scripts/box.sh cargo build --release -p lazymkv-capture" }
@@ -2619,7 +2620,9 @@ try {
         }
         $index = Get-DiscIndex
         $flags = Get-MkFlags
+        $scanStart = Get-Date
         & $CAP record --out $scan -- $MK @flags info "disc:$index" | Out-Null
+        Save-MkDebugLog -Since $scanStart -To "$scan.makemkv-debug.txt"
         $exitJson = [string](Get-Content -LiteralPath "$scan.exit.json" -Raw -ErrorAction SilentlyContinue)
         $raw = [string](Get-Content -LiteralPath $scan -Raw -ErrorAction SilentlyContinue)
         $banner = [regex]::IsMatch($raw, '(?m)^MSG:1005,')
@@ -3065,7 +3068,7 @@ try {
     $files = @($list)
     if ($DriveList) {
         $drives = "$out\$DriveList.txt"
-        $files += @($drives, "$drives.stderr", "$drives.timing.jsonl", "$drives.exit.json")
+        $files += @($drives, "$drives.stderr", "$drives.timing.jsonl", "$drives.exit.json", "$drives.makemkv-debug.txt")
     }
 
     # Refuse before anything is created, deleted or started.
@@ -3089,7 +3092,9 @@ try {
         if (-not $ready) { throw "no readable disc in ${Drive}: after 120 s; MakeMKV was not started" }
         # A recording that already has a meta.json belongs to one disc: the drive listing must be of that disc.
         if (Test-Path -LiteralPath "$out\meta.json") { Assert-DiscIs $Slug }
-        & $CAP record --out $drives -- $MK -r --cache=1 info disc:9999 | Out-Null
+        $listStart = Get-Date
+        & $CAP record --out $drives -- $MK -r --cache=1 --debug info disc:9999 | Out-Null
+        Save-MkDebugLog -Since $listStart -To "$drives.makemkv-debug.txt"
         $exitJson = [string](Get-Content -LiteralPath "$drives.exit.json" -Raw -ErrorAction SilentlyContinue)
         $raw = [string](Get-Content -LiteralPath $drives -Raw -ErrorAction SilentlyContinue)
         $banner = [regex]::IsMatch($raw, '(?m)^MSG:1005,')
@@ -4390,7 +4395,10 @@ Which disc is in the drive: none needed.
 # Rips one title of the disc recorded under -Slug to $Staging\<Slug>\<Label>\ with a job profile, and judges the rip.
 # The evidence goes to $Recordings\<Slug>\<Label>\ (C:\lazymkv\phase0\recordings\<Slug>\<Label>\):
 #   rip.txt with .timing.jsonl, .stderr and .exit.json   MakeMKV's output, recorded by lazymkv-capture
+#   rip.txt.makemkv-debug.txt   MakeMKV's debug log of this run (decision D16)
 #   free-ram.csv       free RAM every 5 s while MakeMKV runs (mini PC clock, MB)
+#   system.csv         every 5 s: CPU load in percent, free RAM in MB, bytes written to the staging folder so far
+#   system-events.json warnings and errors Windows logged about storage, USB and the network during the rip
 #   rip-summary.json   timing, size, throughput, memory and the verdict
 # One label holds one rip. If the label's staging or evidence folder is not empty the run is refused, unless
 # -Force is given: -Force deletes both, but only after Assert-DiscIs has accepted the disc.
@@ -4462,13 +4470,23 @@ try {
     $memFile = "$rec\free-ram.csv"
     Set-Content -LiteralPath $memFile -Value 'time,free_mb' -Encoding UTF8 -ErrorAction Stop
     $summary['free_ram_before_gb'] = Get-FreeRamGB
-    $memJob = Start-Job -ArgumentList $memFile -ScriptBlock {
-        param($file)
+    $sysFile = "$rec\system.csv"
+    Set-Content -LiteralPath $sysFile -Value 'time,cpu_percent,free_mb,written_bytes' -Encoding UTF8 -ErrorAction Stop
+    $memJob = Start-Job -ArgumentList $memFile, $sysFile, $dest -ScriptBlock {
+        param($file, $sys, $folder)
         while ($true) {
+            $time = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $mb = ''
             try {
                 $mb = [int]((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory / 1024)
-                [IO.File]::AppendAllText($file, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ',' + $mb + "`r`n")
+                [IO.File]::AppendAllText($file, $time + ',' + $mb + "`r`n")
             } catch { }
+            # The extra columns never hold up the RAM sample above; an unreadable value stays empty.
+            $cpu = ''
+            try { $cpu = [int]((Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average) } catch { }
+            $written = ''
+            try { $written = [int64]((Get-ChildItem -LiteralPath $folder -File -Force -ErrorAction Stop | Measure-Object -Property Length -Sum).Sum) } catch { }
+            try { [IO.File]::AppendAllText($sys, "$time,$cpu,$mb,$written`r`n") } catch { }
             Start-Sleep -Seconds 5
         }
     }
@@ -4483,6 +4501,8 @@ try {
     $elapsed = ((Get-Date) - $start).TotalSeconds
     $summary['elapsed_s'] = [int]$elapsed
     $ripRan = $true
+    Save-MkDebugLog -Since $start -To "$rec\rip.txt.makemkv-debug.txt"
+    Save-SystemEvents -Since $start -To "$rec\system-events.json"
 } catch {
     $failure = $_.Exception.Message
 }

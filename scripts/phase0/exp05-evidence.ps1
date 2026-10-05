@@ -26,7 +26,7 @@ try {
     $files = @($list)
     if ($DriveList) {
         $drives = "$out\$DriveList.txt"
-        $files += @($drives, "$drives.stderr", "$drives.timing.jsonl", "$drives.exit.json")
+        $files += @($drives, "$drives.stderr", "$drives.timing.jsonl", "$drives.exit.json", "$drives.makemkv-debug.txt")
     }
 
     # Refuse before anything is created, deleted or started.
@@ -50,7 +50,9 @@ try {
         if (-not $ready) { throw "no readable disc in ${Drive}: after 120 s; MakeMKV was not started" }
         # A recording that already has a meta.json belongs to one disc: the drive listing must be of that disc.
         if (Test-Path -LiteralPath "$out\meta.json") { Assert-DiscIs $Slug }
-        & $CAP record --out $drives -- $MK -r --cache=1 info disc:9999 | Out-Null
+        $listStart = Get-Date
+        & $CAP record --out $drives -- $MK -r --cache=1 --debug info disc:9999 | Out-Null
+        Save-MkDebugLog -Since $listStart -To "$drives.makemkv-debug.txt"
         $exitJson = [string](Get-Content -LiteralPath "$drives.exit.json" -Raw -ErrorAction SilentlyContinue)
         $raw = [string](Get-Content -LiteralPath $drives -Raw -ErrorAction SilentlyContinue)
         $banner = [regex]::IsMatch($raw, '(?m)^MSG:1005,')

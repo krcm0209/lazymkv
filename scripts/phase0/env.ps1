@@ -5,10 +5,11 @@ $CAP = 'C:\lazymkv\target\release\lazymkv-capture.exe'
 $AllTracksProfile = "$P0\profiles\all-tracks.mmcp.xml"
 $EngProfile       = "$P0\profiles\eng-only.mmcp.xml"
 
-# Owner-specific values: $Staging, $Drive, $TestLibrary.
+# Owner-specific values: $Staging, $Drive, $TestLibrary, $TuningData.
 if (-not (Test-Path "$P0\config.ps1")) { throw "missing $P0\config.ps1 (the owner's settings)" }
 . "$P0\config.ps1"
 if (-not $Staging -or -not $Drive) { throw "$P0\config.ps1 must set `$Staging and `$Drive" }
+if (-not $TuningData) { throw "$P0\config.ps1 must set `$TuningData (the folder on the share that keeps the tuning dataset)" }
 
 function Resolve-Tool([string]$Name, [string[]]$Fallbacks) {
     $found = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -24,7 +25,45 @@ $FFMPEG    = Resolve-Tool 'ffmpeg.exe'    ($links | ForEach-Object { "$_\ffmpeg.
 $MEDIAINFO = Resolve-Tool 'mediainfo.exe' ($links | ForEach-Object { "$_\mediainfo.exe" })
 
 function Get-MkFlags([string]$Profile = $AllTracksProfile, [int]$CacheMb = 1024) {
-    @('-r', '--messages=-stdout', '--progress=-same', '--minlength=120', "--cache=$CacheMb", "--profile=$Profile")
+    # --debug (decision D16): MakeMKV adds MSG:1003/1004 lines and writes $MkDebugLog; Save-MkDebugLog keeps that file.
+    @('-r', '--messages=-stdout', '--progress=-same', '--debug', '--minlength=120', "--cache=$CacheMb", "--profile=$Profile")
+}
+
+# With --debug, MakeMKV 2.0.0 writes this file anew on every run (a path given to --debug is ignored).
+$MkDebugLog = "$env:USERPROFILE\MakeMKV_log.txt"
+
+# Keeps the debug log of the MakeMKV run that started at $Since beside its recording. Never fails the caller:
+# it returns one line for the job log. The registration key is removed if the log should ever contain it.
+function Save-MkDebugLog([datetime]$Since, [string]$To) {
+    try {
+        $file = Get-Item -LiteralPath $MkDebugLog -ErrorAction Stop
+        if ($file.LastWriteTime -lt $Since) { return "makemkv debug log: none written by this run ($MkDebugLog is older)" }
+        $text = [IO.File]::ReadAllText($file.FullName)
+        $key = [string](Get-ItemProperty 'HKCU:\Software\MakeMKV' -ErrorAction SilentlyContinue).app_Key
+        if ($key -and $text.Contains($key)) { $text = $text.Replace($key, '[app_Key removed]') }
+        [IO.File]::WriteAllText($To, $text, (New-Object Text.UTF8Encoding($false)))
+        "makemkv debug log: $(Split-Path $To -Leaf) $($file.Length) bytes"
+    } catch { "makemkv debug log: NOT SAVED: $($_.Exception.Message)" }
+}
+
+# Keeps the warnings and errors Windows logged since $Since about storage, USB and the network (for a failed
+# read or a lost share). Never fails the caller: it returns one line for the job log.
+function Save-SystemEvents([datetime]$Since, [string]$To) {
+    try {
+        $found = @()
+        foreach ($log in 'System', 'Microsoft-Windows-SmbClient/Connectivity') {
+            $found += @(Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $Since; Level = 1, 2, 3 } -ErrorAction SilentlyContinue)
+        }
+        $wanted = 'cdrom|disk|stor|usb|ntfs|udfs|volmgr|smb|mrxsmb|pnp|scsi|nvme|Kernel-Power|Tcpip|NDIS|NetBT|Netw|e1d|e1r'
+        $kept = @($found | Where-Object { $_.ProviderName -match $wanted } | Sort-Object TimeCreated | ForEach-Object {
+            [ordered]@{
+                time = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'); log = $_.LogName; provider = $_.ProviderName
+                id = $_.Id; level = $_.LevelDisplayName; message = ([string]$_.Message -split "`r?`n")[0]
+            }
+        })
+        Set-Content -LiteralPath $To -Value (ConvertTo-Json @($kept)) -Encoding UTF8 -ErrorAction Stop
+        "system events: $(Split-Path $To -Leaf) $($kept.Count) kept of $($found.Count) warnings and errors since $($Since.ToString('HH:mm:ss'))"
+    } catch { "system events: NOT SAVED: $($_.Exception.Message)" }
 }
 
 # MakeMKV's index for the drive letter in $Drive, read from the seventh DRV field.

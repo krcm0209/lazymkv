@@ -24,7 +24,7 @@ try {
     $out = "$Recordings\$Slug"
     $stage = "$P0\tmp\record-$Slug"
     $scan = "$out\$ScanName.txt"
-    $scanFiles = @($scan, "$scan.stderr", "$scan.timing.jsonl", "$scan.exit.json")
+    $scanFiles = @($scan, "$scan.stderr", "$scan.timing.jsonl", "$scan.exit.json", "$scan.makemkv-debug.txt")
 
     # Refuse before anything is created, deleted or started.
     if (-not (Test-Path -LiteralPath $CAP)) { throw "missing $CAP; build it with: scripts/box.sh cargo build --release -p lazymkv-capture" }
@@ -115,7 +115,9 @@ try {
         }
         $index = Get-DiscIndex
         $flags = Get-MkFlags
+        $scanStart = Get-Date
         & $CAP record --out $scan -- $MK @flags info "disc:$index" | Out-Null
+        Save-MkDebugLog -Since $scanStart -To "$scan.makemkv-debug.txt"
         $exitJson = [string](Get-Content -LiteralPath "$scan.exit.json" -Raw -ErrorAction SilentlyContinue)
         $raw = [string](Get-Content -LiteralPath $scan -Raw -ErrorAction SilentlyContinue)
         $banner = [regex]::IsMatch($raw, '(?m)^MSG:1005,')
