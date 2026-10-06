@@ -6471,7 +6471,7 @@ For each (SLUG, LABEL) read in Steps 25 and 26: Step 24's commands, with ORIG th
 
 Which disc is in the drive: does not matter.
 
-1. For each stream of Step 27, use the owner's answer from Step 5 when there is one (it was given before any verdict). Otherwise ask, without showing the verdict, what each English or no-language stream is: regular, SDH (US style, UK style or closed-caption style), translation, dub transcript, forced, commentary, trivia, lyrics or sing-along, another language, or unknown, and how the owner knows (packaging, menu, track name, player, TheDiscDB). `s<n>` is the n-th subtitle track of the file counting from 0; a player usually counts from 1.
+1. For each stream of Step 27, the last column is what the stream's CONTENT shows (decision D23: packaging and user labels are not ground truth): the controller reads the stream's text in the tuning dataset (never copying it into the repository) and writes `SDH (content: sound cues and speaker labels read)`, `plain dialogue (content: no cue or label)`, `forced (content: ...)`, `commentary subtitles (content: ...)` or `ambiguous (content: ...)`, with the date. The owner is asked only for an `ambiguous` stream, and only to look at the frames, not at the packaging.
 2. Append to `corpus/owner/SLUG/notes.md` (never replacing what is in it), one section per disc, with one row per stream:
 
 ```markdown
