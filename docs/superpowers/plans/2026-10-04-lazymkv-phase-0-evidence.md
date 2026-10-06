@@ -5996,7 +5996,7 @@ When `-Force` is right for `audio-levels.ps1`: only to repeat a measurement that
 
 Which disc is in the drive: does not matter (this runs on the Mac).
 
-The scripts are already in place: the controller applied EXP-13-design.md section 6 (commit 731247d) and then the D16 prerequisite, which changed `audio-levels.ps1` and `audio_similarity.py` again. Then the EXP-13 addendum (EXP-13-design.md section 9, commit b48ad9a with its review fixes ff560af and c68ebba) changed the reference and the reverse test. Do not replace any script, and never copy section 6 of the design over them: that would undo D16 (no proxy, `-Cand` mandatory, no `results()` for the harness). Only check:
+The scripts are already in place: the controller applied EXP-13-design.md section 6 (commit 731247d) and then the D16 prerequisite, which changed `audio-levels.ps1` and `audio_similarity.py` again. Then the EXP-13 addendum (EXP-13-design.md section 9, commit 4ced533 with its review fixes f11059b and ac510c0) changed the reference and the reverse test. Do not replace any script, and never copy section 6 of the design over them: that would undo D16 (no proxy, `-Cand` mandatory, no `results()` for the harness). Only check:
 
 ```bash
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
@@ -6015,7 +6015,7 @@ Expected:
 - one line ending `this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>`, and `exit=1`: the first measurement's folder is refused, with no number printed;
 - `1`; and `ok ...` for each labels file and `ok corpus/owner/audio-fitted.json (1 entries)`.
 
-A failing test, a `0` from any grep, a `UnicodeDecodeError`, or any measure printed for the old folder means the scripts are not the installed ones (commit b48ad9a and its review fixes ff560af and c68ebba; D16 and the EXP-13 addendum): stop and report.
+A failing test, a `0` from any grep, a `UnicodeDecodeError`, or any measure printed for the old folder means the scripts are not the installed ones (commit 4ced533 and its review fixes f11059b and ac510c0; D16 and the EXP-13 addendum): stop and report.
 
 - [ ] **Step 14: Check the measurement script on the mini PC**
 
@@ -6279,7 +6279,7 @@ Which disc is in the drive: does not matter.
      - the commentaries found and missed (the recall), with the kind of each miss: film audible, sparse, partial, too few gaps;
      - what the audio-description tracks got. AD is never dropped by content in this version, whatever it got.
    - **Consequence for the spec:**
-     - on yes: row 13 (in section 17 since b28c273, dub clause since ff560af) stands; in 8.6 step 1, add the duplicate row and the content row behind `drop_commentary_by_audio`; in 8.8, add the review reasons `commentary_detected` and `audio_reference_unclear`; in section 14, add the setting; in 6.4 step 10, the whole-title decode with its measured cost; change D12 and R6 to say that content may confirm a commentary;
+     - on yes: row 13 (in section 17 since b28c273, dub clause since f11059b) stands; in 8.6 step 1, add the duplicate row and the content row behind `drop_commentary_by_audio`; in 8.8, add the review reasons `commentary_detected` and `audio_reference_unclear`; in section 14, add the setting; in 6.4 step 10, the whole-title decode with its measured cost; change D12 and R6 to say that content may confirm a commentary;
      - on no or not answered: the same spec text, except that the content row only flags for review (`commentary_detected`) and never drops; D12 changes accordingly;
      - in every case: the duplicate row, and the open questions still open;
      - in every case also: 8.8's meanings of `audio_reference_unclear` and `commentary_detected` and the new rule row 4b (row 13's wording from EXP-13 addendum 9.5 is already in the spec; D15's rewording is the owner's call, addendum 9.9 question 7).
@@ -6352,7 +6352,7 @@ Expected:
 - one line `<path> has no examples now` per summary.json (two on 2026-10-06: the Office's `e16-stereo` and Pan's `all-tracks`);
 - nothing from the `grep -l`;
 - `2` for `.gitignore`;
-- the unit tests end `Ran <n> tests` and `OK` (`<n>` was 129 when this step ran on 2026-10-06; 172 after the design's review fixes, with experiment 14's 44 tests and experiment 13's tests of commit b48ad9a; more if later tasks add tests);
+- the unit tests end `Ran <n> tests` and `OK` (`<n>` was 129 when this step ran on 2026-10-06; 172 after the design's review fixes, with experiment 14's 44 tests and experiment 13's tests of commit 4ced533; more if later tasks add tests);
 - three lines `... is ASCII`;
 - `0`: no backslash-u escape in either Python file;
 - a count of at least 4 for ocr-subs.ps1;
