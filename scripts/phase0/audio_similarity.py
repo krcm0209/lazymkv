@@ -442,10 +442,11 @@ NO_LANGUAGE = ("", "-", "und", "zxx", "mul", "mis")  # codes that name no langua
 
 # TMDb's two-letter original_language -> the three-letter codes a stream may carry (spec 8.6 "Languages"): every ISO
 # 639-1 code with its ISO 639-2 terminology and bibliographic forms, as ffmpeg 8.1.2's own table (libavformat
-# avlanguage.c) pairs them, the deprecated aliases that table keeps (in, iw, ji, jw, mo), and TMDb's own codes: cn
-# (Cantonese, which discs tag chi or zho), sh (Serbo-Croatian) and xx (no language, TMDB_NO_LANGUAGE). A few entries
-# are wider than ISO 639-2 alone (no, nb, nn, tl, cn, sh, mo): a disc may tag Norwegian nob or nno, Filipino fil. A
-# code missing here leaves the original language unknown: English is then the reference language, and args says so.
+# avlanguage.c) pairs them, including the deprecated aliases it keeps (in, iw, ji, jw, mo, sh). ffmpeg pairs sh with
+# no three-letter code, so hbs, srp, hrv and bos are added by hand, and mol is added to mo. Wider than ISO 639-2:
+# no, nb, nn (a disc may tag Norwegian nob or nno) and tl (Filipino fil). TMDb's own cn (Cantonese: zho, chi, yue)
+# is added; its xx (no language) is TMDB_NO_LANGUAGE, not an entry. A code missing here leaves the original
+# language unknown: English is then the reference language, and args says so.
 ISO639 = {
     "aa": ("aar",), "ab": ("abk",), "ae": ("ave",), "af": ("afr",), "ak": ("aka",), "am": ("amh",), "an": ("arg",),
     "ar": ("ara",), "as": ("asm",), "av": ("ava",), "ay": ("aym",), "az": ("aze",), "ba": ("bak",), "be": ("bel",),
@@ -539,7 +540,7 @@ def reverse_line(m):
         return f"    reverse: {m['rev_gap_s']:.0f} s of gaps, AG {fmt(m['rev_ag'])}"
     if "error" in r:
         return f"    reverse: not judged ({r['error']})"
-    why = not_judged(r)
+    why = not_judged(r).replace("the main track", "this track (the reverse run's reference)")
     return (f"    reverse: {r['gap_s']:.0f} s of gaps, DC {fmt(r['dc'])}, AG {fmt(r['ag'])}, tenths "
             f"{r['tenths_comm']}/{r['tenths']}, SMI {fmt(r['smi'])}, LS {fmt(r['ls_db'], 1)} dB, added {r['added_s']:.0f} s: "
             + ("commentary pattern (the main track looks like a commentary over this one)" if reverse_pattern(m)

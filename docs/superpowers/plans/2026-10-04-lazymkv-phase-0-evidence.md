@@ -6282,7 +6282,7 @@ Which disc is in the drive: does not matter.
      - on yes: add row 13 to section 17; in 8.6 step 1, add the duplicate row and the content row behind `drop_commentary_by_audio`; in 8.8, add the review reasons `commentary_detected` and `audio_reference_unclear`; in section 14, add the setting; in 6.4 step 10, the whole-title decode with its measured cost; change D12 and R6 to say that content may confirm a commentary;
      - on no or not answered: the same spec text, except that the content row only flags for review (`commentary_detected`) and never drops; D12 changes accordingly;
      - in every case: the duplicate row, and the open questions still open;
-     - in every case also: D15's and row 13's wording (EXP-13 addendum 9.5), 8.8's meanings of `audio_reference_unclear` and `commentary_detected`, and the new rule row 4b.
+     - in every case also: 8.8's meanings of `audio_reference_unclear` and `commentary_detected` and the new rule row 4b (row 13's wording from EXP-13 addendum 9.5 is already in the spec; D15's rewording is the owner's call, addendum 9.9 question 7).
 
 - [ ] **Step 21: Add the remaining rips of this task to the tuning dataset (decision D16)**
 
