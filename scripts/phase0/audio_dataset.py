@@ -27,7 +27,8 @@ corpus/owner/<slug>/audio-labels.json (see audio_labels.py), and prints:
   5. labels without a measurement, folders that cannot be read, and the titles not yet in the dataset: every
      successful rip (rip-summary.json or extract-summary.json saying ok) and every measured title without an
      audio-proxy.json in one of its level folders (audio-levels.ps1 writes that file there last, once the title is
-     complete on the share); this is the list of titles the routine still has to add;
+     complete on the share); this is the list of titles the routine still has to add. A rip whose
+     ffprobe-streams.json lists no audio stream has nothing to add: it is named in a note, not as missing;
   6. with --set or --compare, and against the previous snapshot: every labelled track whose verdict changed (an
      unlabelled one only as a count), and the tracks that are gone or new;
   7. RESULT ok, or RESULT FAILED: <reasons>.
@@ -428,7 +429,7 @@ def coverage(tracks, req, titles):
         "partial": sum(1 for t in comm if t["kind"] == "partial-commentary"),
         "ad": sum(1 for t in cnt if t["kind"] == "audio-description"),
         "programme": len(prog), "derived_cores": sum(1 for t in prog if t["kind"] == "derived-core"),
-        "programme_separate": sum(1 for t in prog if t["kind"] != "derived-core"),
+        "programme_separate": sum(1 for t in prog if t["kind"] not in ("derived-core", "dub")),
         "no_centre_titles": len({(t["slug"], t["label"], t["main"]) for t in cnt if not t["ref_fc"]}),
         "dialogue_heavy_titles": len({(t["slug"], t["label"]) for t in cnt if title(t).get("dialogue_heavy") is True}),
         "others": {k: sum(1 for t in cnt if t["kind"] == k) for k in ("isolated-score", "music-effects", "same-language-dub", "alternate-narration")},
@@ -441,7 +442,7 @@ def coverage(tracks, req, titles):
         "cross_comm_pattern": sum(1 for t in comm if t["verdict"] == "commentary-cross-language"),
         "cross_prog": sum(1 for t in prog if t["cross_language"]),
         "swapped": sum(1 for t in judged(tracks) if t["role"] == "candidate" and t["kind"] and t.get("swapped_verdict")),
-        "swap_fails": sum(1 for t in judged(tracks) if t.get("swap_fail")),
+        "swap_fails": sum(1 for t in tracks if t.get("swap_fail")),
     }
     false = sorted({(t["slug"], t["label"], t["stream"]) for t in tracks if t["outcome"] == "FAIL" and t["verdict"] in PATTERN})
     missing = [name for name, have, need in (
@@ -453,7 +454,7 @@ def coverage(tracks, req, titles):
         ("titles whose reference has no centre channel", c["no_centre_titles"], req["no_centre_titles"]),
         ("dialogue-heavy titles", c["dialogue_heavy_titles"], req["dialogue_heavy_titles"])) if have < need]
     if false:
-        answer = f"no: {len(false)} programme track(s) with the commentary verdict"
+        answer = f"no: {len(false)} programme track(s) with the commentary pattern"
     elif missing:
         answer = "not answered: too few " + ", ".join(missing)
     elif c["verdict_discs"] < req["verdict_discs"]:
@@ -546,6 +547,18 @@ def ripped(corpus):
     return out
 
 
+def no_audio(rip_dir):
+    """True when the rip's ffprobe-streams.json lists streams and none of them is audio: the title has nothing to add to
+    the tuning dataset (`args` refuses it with "the file has no audio stream"). False when it lists an audio stream, or
+    is missing or cannot be read."""
+    try:
+        streams = json.loads((pathlib.Path(rip_dir) / "ffprobe-streams.json").read_text(encoding="utf-8-sig")).get("streams")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(streams, list) and bool(streams) and not any(
+        isinstance(s, dict) and s.get("codec_type") == "audio" for s in streams)
+
+
 def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes, proxies, rips=frozenset()):
     """(lines, failures, orphans): failures are the reasons for exit status 1, orphans the labels without a
     measurement."""
@@ -602,7 +615,7 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
               + "; until then such a candidate is never dropped by content)",
               f"  swapped references    {c['swapped']} labelled candidates read the other way round; the programme would get "
               f"the commentary verdict against {c['swap_fails']} of them (addendum 9.3; no number in row 13)",
-              f"  false verdicts        {len(false)} (a programme track with the commentary verdict, on any disc)",
+              f"  false verdicts        {len(false)} (a programme track with the commentary pattern: commentary or commentary-cross-language, on any disc)",
               f"  as it stands: {answer}",
               "  not counted: " + (", ".join(f"{s} {n}" for s, n in sorted(not_counted.items())) or "none")]
     lines += ["", "Disagreements (labelled candidates):"]
@@ -666,9 +679,15 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
     lines += ["", "Folders that cannot be read:"] + ([f"  {u}" for u in unreadable] or ["  none"])
     measured = {(t["slug"], t["label"]) for t in tracks} | {tuple(u.split("/")[:2]) for u in unreadable}
     titles_seen = sorted(measured | set(rips))
+    silent = [(s, l) for s, l in titles_seen if (s, l) not in measured and (s, l) not in proxies
+              and no_audio(pathlib.Path(corpus) / s / l)]
+    titles_seen = [x for x in titles_seen if x not in silent]
     missing = [f"{s}/{l}" + ("" if (s, l) in measured else " (not measured)") for s, l in titles_seen if (s, l) not in proxies]
     lines += ["", f"Titles whose audio is in the tuning dataset (audio-proxy.json): {len(titles_seen) - len(missing)} of "
                   f"{len(titles_seen)} (every successful rip and every measured title)" + (f"; missing: {', '.join(missing)}" if missing else "")]
+    if silent:
+        lines.append("  note: no audio stream (its ffprobe-streams.json lists none), so nothing to add and not missing: "
+                     + ", ".join(f"{s}/{l}" for s, l in silent))
     return lines, failures, orphans
 
 
@@ -792,7 +811,7 @@ def levels_args(slug_dir, label):
     if not ref[2] and ref[1] <= 2 and louder:
         lines.append(f"  note: the reference is a lossy stream of {ref[1]} channel(s), and stream "
                      f"{', '.join(str(a[0]) for a in louder)} with no language code is lossless or has more than 2 "
-                     f"channels: if it is the programme, the reference may be a commentary (EXP-13 addendum 9.6); "
+                     f"channels: if it is the programme, the reference may be a commentary (EXP-13 addendum 9.1); "
                      f"measure as printed and say so in the report")
     for g in groups[1:]:
         lines.append(f"  dataset only: {g[0][3]} is not a wanted language; stream {g[0][0]} against "

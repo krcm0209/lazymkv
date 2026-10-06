@@ -671,6 +671,28 @@ class Joins(unittest.TestCase):
         self.assertIn("dubs                  1 of 3 from 1 of 2 discs; on dialogue-heavy titles 0 of 1; with the commentary "
                       "pattern 1 (what row 13 asks before content may judge a candidate in another language", out)
 
+    def test_a_dub_is_not_a_separately_encoded_programme_track(self):
+        folder(self.c / "disc-u" / "t0", "u1", [(2, [v - 6 for v in MIX], "u2")], langs={1: "spa"},
+               streams=[(1, 6, "dts", "DTS-HD MA", "spa"), (2, 2, "ac3", None, "eng")])
+        (self.c / "disc-u" / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+        write_labels(self.c / "disc-u", [entry("t0", 2, "dub")])
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("programme tracks      1 of 20 other than the reference; separately encoded 0 of 6", out)
+
+    def test_a_rip_without_an_audio_stream_is_noted_not_missing(self):
+        folder(self.c / "disc-v" / "t0", "v1", [(2, COPY, "v2")])
+        (self.c / "disc-v" / "t0" / "audio-levels-20ms-1-2" / "audio-proxy.json").write_text("{}", encoding="utf-8")
+        for label, streams in (("rehearsal", []), ("again", [("ac3", None, 2, "eng")])):
+            probe_file(self.c / "disc-v" / label / "ffprobe-streams.json", streams)
+            (self.c / "disc-v" / label / "rip-summary.json").write_text('{"ok": true, "title": 1}', encoding="utf-8")
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Titles whose audio is in the tuning dataset (audio-proxy.json): 1 of 2 (every successful rip and every "
+                      "measured title); missing: disc-v/again (not measured)", out)
+        self.assertIn("  note: no audio stream (its ffprobe-streams.json lists none), so nothing to add and not missing: "
+                      "disc-v/rehearsal", out)
+
     def test_a_swapped_reference_that_would_drop_the_programme_fails(self):
         rnd = random.Random(5)  # a stem: music cues of 12 s at -30 dB in every 30 s, room tone between them
         stem = [(-30.0 if (t // FPS) % 30 < 12 else -62.0) + rnd.uniform(-1, 1) for t in range(len(MIX))]
@@ -888,6 +910,14 @@ class Routine(unittest.TestCase):
             self.assertTrue(self.jobs(slug, "mono-lossless")[0].endswith("-Main 1 -Cand 2"))
             self.assertTrue(self.jobs(slug, "mono-lossy")[0].endswith("-Main 1 -Cand 2"))
             self.assertTrue(self.jobs(slug, "stereo-later")[0].endswith("-Main 1 -Cand 2,3"))
+
+    def test_args_take_every_code_of_the_original_language(self):
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            slug = pathlib.Path(tmp) / "hk-film"
+            probe_file(slug / "t" / "ffprobe-streams.json",
+                       [("dts", "DTS-HD MA", 6, "chi"), ("ac3", None, 2, "yue"), ("ac3", None, 2, "eng")])
+            (slug / "tmdb.json").write_text('{"original_language": "cn"}', encoding="utf-8")
+            self.assertTrue(self.jobs(slug, "t")[0].endswith("-Main 1 -Cand 2,3"))
 
     def test_args_g1_alone_and_the_notes_on_a_reference_that_may_not_be_the_programme(self):
         with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
