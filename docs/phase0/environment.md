@@ -67,9 +67,10 @@ Notes on that output:
 
 As MakeMKV lists them in its `DRV` line:
 
-- Drive 1 (attached, `D:`): `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`
-- Drive 2: not attached when this was recorded. Its `DRV` line is added in Task 14, when the
-  owner swaps drives.
+- Drive 1 (`D:` in Tasks 7 to 14): `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`
+- Drive 2 (`D:` when attached in Task 14): `BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL`
+- Attached after Task 14: drive 2, at `D:` (`$Drive` in `C:\lazymkv\phase0\config.ps1`,
+  confirmed by the setup check `setup-check-after-drives`).
 
 ## Paths
 

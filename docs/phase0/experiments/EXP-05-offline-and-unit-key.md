@@ -1,7 +1,7 @@
 # Experiment 5: MakeMKV offline on a never-seen UHD, and the AACS unit key file
 
 - Date: 2026-10-06 (mini PC clock; 2026-10-05 evening on the Mac)
-- Disc(s): pans-labyrinth-2006-uhd, UHD (meta.json format bluray; `BDMV/index.bdmv` header `INDX0300`), drive 1 (D:, HL-DT-ST BD-RE BU40N 1.03)
+- Disc(s): pans-labyrinth-2006-uhd, UHD (meta.json format bluray; `BDMV/index.bdmv` header `INDX0300`), drive 1 (D:, HL-DT-ST BD-RE BU40N 1.03) and drive 2 (D:, BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL)
 - MakeMKV version: MakeMKV v2.0.0 win(x64-release)
 - Spec reference: section 17, row 5
 
@@ -91,7 +91,9 @@ Disc ID: `disc_id` is 40 hex characters (`C337194670AF8C954C320875D671653F7EF2C2
 knowing the disc by fingerprint, and its record's `global_disc_id` (`B5F0E23E...`) differs from ours: the same
 DIFFERENT outcome as the first disc (Task 8's check), now on a UHD.
 
-Only drive 1 (D:) was tested. The second-drive half of the question is not run here; Task 14 adds it.
+Second drive (Task 14): Disc A in drive 2 (`D:`, `BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL`), snapshot in
+`corpus/owner/pans-labyrinth-2006-uhd/drive2/snapshot/meta.json`, made by `scripts/phase0/second-drive.ps1`.
+Fingerprint equal to drive 1's: yes. Disc ID in drive 2: read (40 hex characters). Equal to drive 1's: yes.
 
 ## Answer
 
@@ -101,7 +103,9 @@ titles. The only difference is on the online side: `3338 "Downloading latest HK 
 `_private_data.tar`. On this machine a never-seen UHD opened offline and listed the same titles as online; the
 only difference was the online download.
 
-`AACS/Unit_Key_RO.inf` was readable in drive 1 (disc ID computed, and equal to MakeMKV's own `DISCID`).
+`AACS/Unit_Key_RO.inf` was readable in both drives: in drive 1 (disc ID computed, and equal to MakeMKV's own
+`DISCID`) and in drive 2 (Task 14: the file and its `AACS/DUPLICATE` copy listed, 65536 bytes each, and drive 1's
+disc ID computed from it).
 
 Not answered by this disc: what MakeMKV prints when a disc needs a key it does not have and cannot download. That
 needs a UHD whose keys are not in `keydb.cfg`; none of the owner's discs so far has shown it.
@@ -114,5 +118,7 @@ needs a UHD whose keys are not in `keydb.cfg`; none of the owner's discs so far 
 - Section 10.4: the scan watchdog (`scan_timeout_min`) remains the only guard for an offline disc that would hang.
 - Section 8.1: the disc ID is MakeMKV's `DISCID` (confirmed by the debug log); TheDiscDB's `/api/discid/` missed it
   for the second disc in a row while `/api/dischash/` hit. The fingerprint is the primary key.
+- Row 5, second question: `AACS/Unit_Key_RO.inf` was readable in both drives, so row 5's fallback (lookups on a
+  drive without the file use the fingerprint only, identity 0.95 at best from TheDiscDB) is not needed on either.
 - The debug logs (decision D16) confirm the robot output rather than add to it here: their one difference is the
   same `3338` line. They do add `DISCID`, which settled the disc-ID question of Task 8.
