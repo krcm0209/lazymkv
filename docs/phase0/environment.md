@@ -38,6 +38,13 @@ Notes on that output:
 - Intel Celeron J4125, 7.8 GB RAM, 119 GB SSD
 - PowerShell 5.1.26100.9444
 - Rust 1.99.0 (MSVC), sources in `C:\lazymkv\src`, build output in `C:\lazymkv\target`
+- Smart App Control is ENFORCING on the mini PC (registry `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`,
+  `VerifiedAndReputablePolicyState` = 1) as of 2026-10-06 14:14: `cargo` is blocked ("An Application Control policy has
+  blocked this file", os error 4551; Code Integrity events 3077/3118 name `rustup.exe` loading the toolchain's cargo).
+  `rustc --version` still runs, and the already-built `lazymkv-capture.exe` runs in jobs and over ssh. Builds on the
+  mini PC are impossible until the owner decides what to do about the policy (nothing here changes a security setting).
+  Consequence for the product (D17): an unsigned lazymkv.exe would be blocked on such machines; the installer and the
+  executables need code signing (phase 1 design, section 18 risks).
 
 ## Installed for phase 0 (winget, approved by the owner on 2026-10-04)
 
