@@ -17,9 +17,10 @@ rule in docs/phase0/experiments/EXP-13-design.md (section 3, rows 3 to 5 as its 
   LS     the candidate's level spread, 95th minus 50th percentile (small for dense talk)
   ADL    added sound while the main's dialogue runs
 
-Stereo width, codec and track position are not used; the main track's channel layout only decides whether its
-centre channel is the dialogue curve. A folder that audio-levels.ps1 did not write in this form is refused, with a
-one-line message and a non-zero exit, before any number is printed: the first measurement's folders
+Stereo width, codec and track position are not used to judge a candidate; the main track's channel layout only
+decides whether its centre channel is the dialogue curve, and position only the keep-only veto below. A folder
+that audio-levels.ps1 did not write in this form is refused, with a one-line message and a non-zero exit, before any
+number is printed: the first measurement's folders
 (audio-levels-<main>-<cand>, 100 ms frames, full band, no manifest) must be measured again with the new script.
 A folder with a main stream and no candidate (a title measured only for the tuning dataset) has nothing to judge.
 
@@ -37,6 +38,13 @@ original. When its language has a stream that 8.6 places before it (the dub itse
 it is judged against that stream too (the peer run, from the same folder): if the peer run has no commentary verdict,
 the candidate follows a programme track of its own language and gets only note-commentary. Otherwise its verdict is
 commentary-cross-language: keep and flag for review, never dropped by content.
+
+The position veto (row 0 of the rule, owner decision D21): when the folder's main stream is not the first stream of
+its language in the file (streams.json) and that first stream is lossless or has more than two channels, the
+reference choice may be inverted (a score or a commentary ranked above the programme), so no commentary is
+confirmed on the title: every candidate that is not an exact duplicate is reference-unclear (keep, review),
+whatever the forward and reverse runs say. The report prints a 'veto:' line for every folder. Position never
+decides what a track is (D15); the veto only withholds a drop.
 
 For other programs: results(folder, rule) gives the same measures and verdicts as data; RULE holds the decision
 thresholds and CONSTANTS names the module constants of the measures, so that audio_dataset.py can try other values.
@@ -431,6 +439,8 @@ MEANING = {
     "keep": "keep: programme audio, nothing added",
     "not-judged": "keep: no content verdict",
 }
+VETO_MEANING = ("the position veto holds (row 0, D21): the reference may not be the programme, so no commentary is "
+                "confirmed on this title: keep, review (audio_reference_unclear)")
 
 
 def fmt(v, digits=2):
@@ -514,6 +524,66 @@ def placed_first(streams):
     return top
 
 
+def ffprobe_audio(streams):
+    """[(stream, channels, lossless, language, description)] for the audio streams of an ffprobe stream list (a level
+    folder's streams.json, a rip's ffprobe-streams.json), the form placed_first() takes."""
+    out = []
+    for s in streams:
+        if s.get("codec_type") == "audio":
+            tags = s.get("tags") or {}
+            c = str(s.get("codec_name", ""))
+            what = [c, s.get("profile"), f"{s.get('channels')} ch", s.get("channel_layout"), tags.get("title")]
+            out.append((int(s["index"]), int(s.get("channels") or 0), is_lossless(c, s.get("profile")),
+                        tags.get("language") or "und", " ".join(str(w) for w in what if w)))
+    return out
+
+
+def read_streams(folder):
+    """The stream list of a level folder's streams.json (ffprobe's list of the file's streams); None when there is
+    none."""
+    path = pathlib.Path(folder) / "streams.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8-sig")).get("streams", [])
+
+
+def first_of_language(audio, main):
+    """The first stream of `audio` (ffprobe_audio() tuples, in file order) in the language of stream `main`, when it is
+    not `main` itself and is lossless or has more than two channels; None otherwise, and when `main` is not in `audio`.
+    A lossy first stream of two channels or fewer is what G1 and G2 pass over on purpose, so it raises nothing. This is
+    the condition of the position veto (row 0, owner decision D21)."""
+    mine = [a for a in audio if a[0] == main]
+    if not mine:
+        return None
+    first = min((a for a in audio if a[3] == mine[0][3]), key=lambda a: a[0])
+    return None if first[0] == main or not (first[2] or first[1] > 2) else first
+
+
+def position_veto(streams, main):
+    """Row 0 of the rule (EXP-13 addendum 9.5; owner decision D21), for the title whose reference is stream `main`:
+    (holds, why). holds is True when the reference is not the first stream of its language in the file and that first
+    stream is lossless or has more than two channels: the reference choice may be inverted (a score or a commentary
+    ranked above the programme), so the rule confirms no commentary on the title. False when the reference is the first
+    stream of its language, or that first stream is lossy with two channels or fewer; None when it cannot be checked
+    (no streams.json, or stream `main` is not in it). why names the streams. Position never decides what a track is
+    (D15): the veto only withholds a drop."""
+    if streams is None:
+        return None, "not checked: the folder has no streams.json"
+    audio = ffprobe_audio(streams)
+    ref = next((a for a in audio if a[0] == main), None)
+    if ref is None:
+        return None, f"not checked: stream {main} is not an audio stream of streams.json"
+    head = f"the reference, stream {main} ({ref[4]}),"
+    first = min((a for a in audio if a[3] == ref[3]), key=lambda a: a[0])
+    if first[0] == main:
+        return False, f"{head} is the first {ref[3]} stream of the file"
+    if first_of_language(audio, main) is None:
+        return False, (f"{head} is not the first {ref[3]} stream of the file, but stream {first[0]} ({first[4]}), which "
+                       f"comes first, is lossy with two channels or fewer")
+    return True, (f"{head} is not the first {ref[3]} stream of the file: stream {first[0]} ({first[4]}) comes first and "
+                  f"is lossless or has more than two channels, so the reference choice may be inverted")
+
+
 def manifest_stream(info):
     """A manifest line's stream as (stream, channels, lossless, language, description), the form placed_first() takes."""
     n = info.get("cand") or info.get("main")
@@ -562,8 +632,15 @@ def results(folder, rule=RULE, analyse_fn=None):
     {"folder", "manifest", "main" (its manifest fields), "frames", "dialogue" ("fc" or "mix"), "candidates": [
         {"stream", "info" (its manifest fields), "duplicate_of" (a stream number or None), "measures" (None for a
          duplicate), "verdict", "not_judged" (the reason, or ''), "cross_language" ('<cand> against <main>' or ''),
-         "peer" (None, or {"stream", "measures", "verdict"}: the peer run of a cross-language candidate)}]}.
+         "peer" (None, or {"stream", "measures", "verdict"}: the peer run of a cross-language candidate),
+         "before_veto" (None, or the verdict rows 3 to 9 give when the veto replaced it)}],
+     "veto": {"holds" (True, False, or None: not checked), "why" (the reason, naming the streams)}}.
     Raises ValueError with the refusal's reason. analyse_fn(main, cand, dialogue) replaces analyse (a cache, say).
+
+    The position veto (row 0, owner decision D21) is read from the folder's streams.json: when it holds, every
+    candidate that is not an exact duplicate gets reference-unclear (keep, review audio_reference_unclear), whatever
+    rows 3 to 9 say, and "before_veto" keeps what they said. A duplicate stays a duplicate (row 2, not a content
+    verdict).
 
     A cross-language candidate whose verdict would be commentary (addendum 9.2) is judged once more, against the stream
     8.6 places first among the folder's candidates of its own language (duplicates left out), with that stream's mixdown
@@ -583,13 +660,14 @@ def results(folder, rule=RULE, analyse_fn=None):
     if fc and max(fc) <= SILENT_DB:
         fc = []
     mainfo = man["main"] or {}
+    holds, why_veto = position_veto(read_streams(d), int(mainfo["main"])) if mainfo.get("main") else (None, "not checked")
     out = {"folder": str(d), "manifest": man, "main": mainfo, "frames": len(main), "dialogue": "fc" if fc else "mix",
-           "candidates": []}
+           "candidates": [], "veto": {"holds": holds, "why": why_veto}}
     seen = {mainfo["md5"]: mainfo.get("main", "?")} if mainfo.get("md5") else {}
     for c in man["cands"]:
         sid = c.get("cand")
         r = {"stream": sid, "info": c, "duplicate_of": None, "measures": None, "verdict": "duplicate", "not_judged": "",
-             "cross_language": cross_language(mainfo, c), "peer": None}
+             "cross_language": cross_language(mainfo, c), "peer": None, "before_veto": None}
         if c.get("md5") in seen:
             r["duplicate_of"] = seen[c["md5"]]
         else:
@@ -612,6 +690,10 @@ def results(folder, rule=RULE, analyse_fn=None):
             r["peer"] = {"stream": str(peer), "measures": m2, "verdict": v2}
             if v2 != "commentary":
                 r["verdict"] = "note-commentary"
+    if holds:
+        for r in out["candidates"]:
+            if r["duplicate_of"] is None:
+                r["before_veto"], r["verdict"] = r["verdict"], "reference-unclear"
     return out
 
 
@@ -624,6 +706,11 @@ def report(folder):
              f"{mainfo.get('layout', '')} {mainfo.get('language', '')}; dialogue reference: "
              f"{'its centre channel' if res['dialogue'] == 'fc' else 'its mono mixdown (no centre channel)'}; "
              f"{res['frames']} frames ({res['frames'] * FRAME_S / 60:.1f} min)"]
+    veto = res["veto"]
+    lines.append("  veto: " + ("holds (row 0, D21): " + veto["why"] + "; no commentary is confirmed on this title: every "
+                               "candidate is reference-unclear" if veto["holds"]
+                               else f"none (row 0, D21: {veto['why']})" if veto["holds"] is False
+                               else f"{veto['why']} (row 0, D21)"))
     if not res["candidates"]:
         lines.append("  no candidate stream: nothing to judge (measured for the tuning dataset only)")
     label = f"{d.resolve().parent.name}/{man.get('file', d.resolve().name)}"
@@ -648,7 +735,8 @@ def report(folder):
             f"ADL {fmt(m['adl'])}  added {m['added_s']:.0f} s",
             reverse_line(m),
         ] + ([peer_line(r["peer"])] if r["peer"] else []) + [
-            f"    verdict: {v} ({MEANING[v]})" + (f"; not judged: {why}" if why else ""),
+            f"    verdict: {v} (" + (VETO_MEANING + f"; rows 3 to 9 alone: {r['before_veto']}" if r["before_veto"]
+                                  else MEANING[v]) + ")" + (f"; not judged: {why}" if why else ""),
             f"    row: | {label} | {sid} | DC {fmt(m['dc'])}, AG {fmt(m['ag'])}, tenths "
             f"{m['tenths_comm']}/{m['tenths']}, SMI {fmt(m['smi'])}, LS {fmt(m['ls_db'], 1)} | {v} |",
         ]

@@ -755,13 +755,27 @@ class Joins(unittest.TestCase):
                 if t["role"] == "candidate"}
         self.assertEqual((rows[2]["verdict"], rows[2]["swapped_verdict"]), ("reference-unclear", "commentary"))
 
-    def test_a_reference_that_is_not_the_first_stream_of_its_language_is_noted(self):
+    def test_a_vetoed_title_has_its_candidates_reviewed_not_counted_as_commentary_verdicts(self):
+        # D21: the reference (stream 2, lossless) is not the first eng stream, and stream 1 has six channels
         streams = [(1, 6, "dts", "DTS", "eng"), (2, 6, "dts", "DTS-HD MA", "eng"), (3, 2, "ac3", None, "eng")]
         folder(self.c / "disc-q" / "t0", "q2", [(1, COPY, "q1"), (3, COMMENT, "q3")], main=2, streams=streams)
+        write_labels(self.c / "disc-q", [entry("t0", 1, "lossy-companion"), entry("t0", 3, "commentary", film_audible=True)],
+                     {"t0": title("feature")})
         code, out = run([self.c, "--spec", self.spec])
         self.assertEqual(code, 0, out)
-        self.assertIn("note: disc-q/t0/audio-levels-20ms-2-1-3: the reference, stream 2, is not the first eng stream of the "
-                      "file (stream 1, dts DTS 6 ch t1, comes first): question 10's position veto would refuse", out)
+        self.assertIn("note: disc-q/t0/audio-levels-20ms-2-1-3: the position veto holds (row 0, D21): the reference, stream "
+                      "2 (dts DTS-HD MA 6 ch t2), is not the first eng stream of the file: stream 1 (dts DTS 6 ch t1) comes "
+                      "first and is lossless or has more than two channels", out)
+        rows = {line.split()[0]: line.split() for line in section(out, "Kind against verdict").splitlines()[2:]}
+        self.assertEqual(rows["commentary"][2:6], ["0", "0", "0", "1"])  # reviewed (r-unc), not a commentary verdict
+        self.assertEqual(rows["lossy-companion"][2:6], ["0", "0", "0", "1"])  # a keep stays a keep
+        self.assertIn("commentaries          1 of 8, from 1 of 4 discs", out)  # the label still counts ...
+        self.assertIn("commentary verdicts   on 0 of 3 discs", out)  # ... but not as a verdict
+        self.assertIn("false verdicts        0", out)
+        self.assertIn("kept although unwanted, commentary: disc-q/t0 stream 3 (reference-unclear)", out)
+        snap = {t["stream"]: t for t in json.loads((self.c / "audio-dataset.json").read_text(encoding="utf-8"))["tracks"]}
+        self.assertEqual((snap[3]["verdict"], snap[3]["before_veto"]), ("reference-unclear", "commentary"))
+        self.assertTrue(snap[2]["veto"].startswith("the reference, stream 2 (dts DTS-HD MA 6 ch t2), is not the first"))
 
 
 def build_count_corpus(c):

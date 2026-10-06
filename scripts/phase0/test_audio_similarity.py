@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import math
 import pathlib
 import random
@@ -426,6 +427,88 @@ class CrossLanguage(unittest.TestCase):
         self.assertLess(m["dc"], 0.9)
         self.assertLess(m["ag"], 0.10)
         self.assertEqual(sim.verdict(m), "keep")
+
+
+def streams_json(d, streams):
+    """streams.json as audio-levels.ps1 writes it (ffprobe's stream list): [(index, codec, profile, channels, language)]
+    after a video stream 0."""
+    (d / "streams.json").write_text(json.dumps({"streams": [{"index": 0, "codec_type": "video"}] + [
+        {"index": n, "codec_type": "audio", "codec_name": c, "profile": p, "channels": ch, "tags": {"language": lang}}
+        for n, c, p, ch, lang in streams]}), encoding="utf-8")
+
+
+class PositionVeto(unittest.TestCase):
+    """Row 0 of the rule (owner decision D21): a reference that is not the first stream of its language, when that
+    first stream is lossless or has more than two channels, confirms no commentary on the title."""
+
+    @staticmethod
+    def veto(streams, main):
+        audio = [{"index": 0, "codec_type": "video"}] + [
+            {"index": n, "codec_type": "audio", "codec_name": c, "profile": p, "channels": ch, "tags": {"language": lang}}
+            for n, c, p, ch, lang in streams]
+        return sim.position_veto(audio, main)
+
+    def test_it_holds_when_a_lossless_first_stream_is_not_the_reference(self):
+        holds, why = self.veto([(1, "truehd", None, 2, "eng"), (2, "ac3", None, 6, "eng")], 2)  # 8.6 ranks the 5.1 first
+        self.assertIs(holds, True)
+        self.assertEqual(why, "the reference, stream 2 (ac3 6 ch), is not the first eng stream of the file: stream 1 "
+                              "(truehd 2 ch) comes first and is lossless or has more than two channels, so the reference "
+                              "choice may be inverted")
+
+    def test_it_holds_when_a_multichannel_lossy_first_stream_is_not_the_reference(self):
+        holds, why = self.veto([(1, "ac3", None, 6, "eng"), (2, "dts", "DTS-HD MA", 6, "eng")], 2)
+        self.assertIs(holds, True)
+        self.assertIn("stream 1 (ac3 6 ch) comes first", why)
+
+    def test_it_does_not_hold_otherwise(self):
+        self.assertEqual(self.veto([(1, "ac3", None, 2, "eng"), (2, "dts", "DTS", 6, "eng")], 2),
+                         (False, "the reference, stream 2 (dts DTS 6 ch), is not the first eng stream of the file, but "
+                                 "stream 1 (ac3 2 ch), which comes first, is lossy with two channels or fewer"))
+        self.assertEqual(self.veto([(1, "dts", "DTS-HD MA", 6, "eng"), (2, "ac3", None, 2, "eng")], 1),
+                         (False, "the reference, stream 1 (dts DTS-HD MA 6 ch), is the first eng stream of the file"))
+        self.assertIs(self.veto([(1, "ac3", None, 2, "eng")], 1)[0], False)  # a single stream
+        self.assertIs(self.veto([(1, "truehd", None, 8, "fra"), (2, "ac3", None, 6, "spa")], 2)[0], False)  # other language
+        self.assertEqual(sim.position_veto(None, 1), (None, "not checked: the folder has no streams.json"))
+        self.assertIs(self.veto([(2, "ac3", None, 6, "eng")], 5)[0], None)
+        self.assertIsNone(sim.first_of_language([], 1))
+
+    def test_it_never_turns_a_keep_into_a_drop(self):
+        copy = [-100.0] * 3 + [v - 6 for v in MIX[:-3]]  # a quieter, 60 ms late copy of the programme
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            d = pathlib.Path(tmp) / "audio-levels-20ms-2-1-3-4"
+            d.mkdir()
+            level_file(d / "main-mix.txt", MIX)
+            level_file(d / "main-fc.txt", CENTRE)
+            for n, values in ((1, copy), (3, commentary(MIX)), (4, MIX)):
+                level_file(d / f"cand-{n}.txt", values)
+            (d / "manifest.txt").write_text(
+                "# lazymkv audio-levels v2 (experiment 13)\nfile=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400\n"
+                "main=2 codec=dts profile=DTS-HD_MA channels=6 layout=5.1(side) language=eng fc=yes frames=1 md5=aa\n"
+                "cand=1 codec=dts profile=DTS channels=6 layout=5.1(side) language=eng frames=1 md5=bb\n"
+                "cand=3 codec=ac3 profile=- channels=2 layout=stereo language=eng frames=1 md5=cc\n"
+                "cand=4 codec=dts profile=DTS-HD_MA channels=6 layout=5.1(side) language=eng frames=1 md5=aa\n",
+                encoding="utf-8")
+            cache = {}
+            def analyse(main, cand, dialogue):
+                key = (len(main), round(sum(cand), 1), dialogue is None)
+                if key not in cache:
+                    cache[key] = sim.analyse(main, cand, dialogue)
+                return cache[key]
+            free = sim.results(d, analyse_fn=analyse)  # no streams.json: the veto is not checked
+            streams_json(d, [(1, "dts", "DTS", 6, "eng"), (2, "dts", "DTS-HD MA", 6, "eng"), (3, "ac3", None, 2, "eng"),
+                             (4, "dts", "DTS-HD MA", 6, "eng")])
+            vetoed = sim.results(d, analyse_fn=analyse)
+            text = "\n".join(sim.report(d))
+        self.assertEqual(free["veto"]["holds"], None)
+        self.assertEqual([c["verdict"] for c in free["candidates"]], ["keep", "commentary", "duplicate"])
+        self.assertIs(vetoed["veto"]["holds"], True)
+        self.assertEqual([c["verdict"] for c in vetoed["candidates"]], ["reference-unclear", "reference-unclear", "duplicate"])
+        self.assertEqual([c["before_veto"] for c in vetoed["candidates"]], ["keep", "commentary", None])
+        self.assertIn("  veto: holds (row 0, D21): the reference, stream 2 (dts DTS-HD MA 6 ch), is not the first eng "
+                      "stream of the file: stream 1 (dts DTS 6 ch) comes first", text)
+        self.assertIn("verdict: reference-unclear (the position veto holds (row 0, D21): the reference may not be the "
+                      "programme, so no commentary is confirmed on this title: keep, review (audio_reference_unclear); "
+                      "rows 3 to 9 alone: commentary)", text)
 
 
 if __name__ == "__main__":

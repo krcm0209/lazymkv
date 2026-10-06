@@ -22,8 +22,8 @@ corpus/owner/<slug>/audio-labels.json (see audio_labels.py), and prints:
      work's original language, else in English; tmdb.json gives the original language), for a reference the owner
      labelled as unwanted audio, and for a swapped reference: a labelled candidate against which, taken as the
      reference, the programme would get the commentary verdict (the same two runs read the other way round); the
-     unwanted tracks that were kept, by kind; notes (among them every folder whose reference is not the first stream
-     of its language in the file: question 10's position veto would refuse to judge it);
+     unwanted tracks that were kept, by kind; notes (among them every folder the position veto holds for: its
+     reference is not the first stream of its language in the file, so every candidate is reference-unclear, D21);
   5. labels without a measurement, folders that cannot be read, and the titles not yet in the dataset: every
      successful rip (rip-summary.json or extract-summary.json saying ok) and every measured title without an
      audio-proxy.json in one of its level folders (audio-levels.ps1 writes that file there last, once the title is
@@ -157,20 +157,8 @@ class Measurer:
         return m
 
 
-def ffprobe_audio(streams):
-    """[(stream, channels, lossless, language, description)] for the audio streams of an ffprobe stream list."""
-    out = []
-    for s in streams:
-        if s.get("codec_type") == "audio":
-            tags = s.get("tags") or {}
-            c = str(s.get("codec_name", ""))
-            what = [c, s.get("profile"), f"{s.get('channels')} ch", s.get("channel_layout"), tags.get("title")]
-            out.append((int(s["index"]), int(s.get("channels") or 0), is_lossless(c, s.get("profile")),
-                        tags.get("language") or "und", " ".join(str(w) for w in what if w)))
-    return out
-
-
 is_lossless, rank, placed_first = sim.is_lossless, sim.rank, sim.placed_first  # spec 8.6 steps 3 and 4 (the rule's own)
+ffprobe_audio, read_streams = sim.ffprobe_audio, sim.read_streams  # an ffprobe stream list as the rule reads it
 ISO639 = sim.ISO639  # TMDb's two-letter original_language -> three-letter stream codes
 
 
@@ -221,14 +209,6 @@ def find_folders(corpus):
     return out
 
 
-def read_streams(folder):
-    """The folder's streams.json stream list; None when there is none."""
-    path = folder / "streams.json"
-    if not path.is_file():
-        return None
-    return json.loads(path.read_text(encoding="utf-8-sig")).get("streams", [])
-
-
 def audio_positions(streams):
     """{stream: (k, n, title)}: the stream is the k-th of the file's n audio streams (a player's audio track k)."""
     audio = [s for s in streams or [] if s.get("codec_type") == "audio"]
@@ -257,14 +237,10 @@ def reference_problem(streams, main, original=()):
 def first_of_language(streams, main):
     """The first audio stream of the file in the language of stream `main`, as (stream, description), when it is not
     `main` itself and is lossless or has more than two channels (a lossy stereo first stream is what G1 and G2 pass
-    over on purpose); None otherwise, or without streams.json. Question 10's position veto would refuse to judge a
-    folder whose reference is not the first stream of its language."""
-    audio = ffprobe_audio(streams or [])
-    mine = [a for a in audio if a[0] == main]
-    if not mine:
-        return None
-    first = min((a for a in audio if a[3] == mine[0][3]), key=lambda a: a[0])
-    return None if first[0] == main or not (first[2] or first[1] > 2) else (first[0], first[4])
+    over on purpose); None otherwise, or without streams.json. It is the condition of the position veto (row 0, D21:
+    audio_similarity.first_of_language): no candidate of such a folder gets a commentary verdict."""
+    first = sim.first_of_language(ffprobe_audio(streams or []), main)
+    return None if first is None else (first[0], first[4])
 
 
 def peer_row(peer, meas):
@@ -300,13 +276,14 @@ def measure(found, rule, consts, cache):
             problem = reference_problem(streams, main, originals[slug])
             base = {"slug": slug, "label": label, "folder": folder.name, "main": main, "ref_fc": mi.get("fc") == "yes",
                     "ref_problem": problem, "excluded": bool(problem), "secondary": False,
-                    "n_cands": len(res["candidates"]), "ref_first": first_of_language(streams, main)}
+                    "n_cands": len(res["candidates"]), "ref_first": first_of_language(streams, main),
+                    "veto": res["veto"]["why"] if res["veto"]["holds"] else ""}
             order = [(main, mi.get("md5"))] + [(int(c["stream"]), c["info"].get("md5")) for c in res["candidates"]]
             ranks = {n: sum(1 for m, h in order[:k] if h and h == md5) for k, (n, md5) in enumerate(order)}
             tracks.append(dict(base, role="reference", stream=main, md5=mi.get("md5"), md5_rank=0, codec=mi.get("codec"),
                                channels=mi.get("channels"), language=mi.get("language"), position=pos.get(main),
                                verdict=None, measures=None, key=None, not_judged="", duplicate_of=None,
-                               cross_language="", swapped_verdict=None, peer=None))
+                               cross_language="", swapped_verdict=None, peer=None, before_veto=None))
             for c in res["candidates"]:
                 n = int(c["stream"])
                 key = meas.key_of.get(id(c["measures"])) if c["measures"] is not None else None
@@ -317,7 +294,7 @@ def measure(found, rule, consts, cache):
                                    measures=nan_to_none(c["measures"]), key=key, not_judged=c["not_judged"],
                                    duplicate_of=c["duplicate_of"], cross_language=c.get("cross_language", ""),
                                    swapped_verdict=sim.verdict(back, rule) if back is not None else None,
-                                   peer=peer_row(c.get("peer"), meas)))
+                                   peer=peer_row(c.get("peer"), meas), before_veto=c.get("before_veto")))
     # The same stream in several valid folders of one title: each is judged; the table uses the folder with the most
     # candidates (it sees the most of the title's duplicates), the others are marked secondary.
     groups = {}
@@ -653,10 +630,9 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
                 or t["outcome"].startswith("reference labelled"):
             lines.append(f"  note: {where(t)}: {t['outcome']} ({t['kind']}, verdict {t['verdict']})")
     for t in good:
-        if t["role"] == "reference" and t.get("ref_first"):
-            lines.append(f"  note: {t['slug']}/{t['label']}/{t['folder']}: the reference, stream {t['stream']}, is not the "
-                         f"first {t['language']} stream of the file (stream {t['ref_first'][0]}, {t['ref_first'][1]}, comes "
-                         f"first): question 10's position veto would refuse to judge its candidates (EXP-13 addendum 9.3)")
+        if t["role"] == "reference" and t.get("veto"):
+            lines.append(f"  note: {t['slug']}/{t['label']}/{t['folder']}: the position veto holds (row 0, D21): {t['veto']}; "
+                         f"no commentary is confirmed on its candidates: each is reference-unclear")
     shown = set()
     for t in good:
         if t.get("also_in") and (t["slug"], t["label"], t["stream"], t["role"]) not in shown:
@@ -703,13 +679,13 @@ def write_snapshot(path, corpus, tracks, unreadable, rule, consts, overrides, re
     keep = ("slug", "label", "folder", "role", "stream", "main", "md5", "md5_rank", "codec", "channels", "language",
             "ref_fc", "ref_problem", "excluded", "secondary", "verdict", "not_judged", "duplicate_of", "measures", "key",
             "kind", "inherited_from", "counts", "why_not_counted", "outcome", "cross_language", "swapped_verdict",
-            "swap_fail", "peer", "ref_first")
+            "swap_fail", "peer", "ref_first", "veto", "before_veto")
     rows, hidden = [], {}
     for t in tracks:
         row = dict({k: t[k] for k in keep}, owner_label=t["label_entry"])
         if t["role"] == "candidate" and t["kind"] is None:
             hidden[track_key(t)] = row["verdict"]
-            row["verdict"] = row["swapped_verdict"] = None
+            row["verdict"] = row["swapped_verdict"] = row["before_veto"] = None
             if row["peer"]:
                 row["peer"] = dict(row["peer"], verdict=None)
         rows.append(row)
@@ -801,12 +777,11 @@ def levels_args(slug_dir, label):
     if original and why != "the original language":
         lines.append(f"  note: the file has no stream in the original language ({'/'.join(original)}): the reference may "
                      f"not be the programme (an English-only rip of a foreign film can hold only a commentary)")
-    first = min((a for a in audio if a[3] == ref[3]), key=lambda a: a[0])
-    if first[0] != ref[0] and (first[2] or first[1] > 2):  # not a lossy stereo first stream that G1 or G2 passed over
+    first = sim.first_of_language(audio, ref[0])  # not a lossy stereo first stream that G1 or G2 passed over
+    if first is not None:
         lines.append(f"  note: the reference is not the first {ref[3]} stream of the file (stream {first[0]}, {first[4]}, "
-                     f"comes first): if stream {first[0]} is the programme and the reference an isolated score, an M&E "
-                     f"track or a commentary, the candidates are judged against the wrong track (EXP-13 addendum 9.3, "
-                     f"question 10); measure as printed and say so in the report")
+                     f"comes first): the position veto holds (row 0, D21), so no candidate of this title gets a "
+                     f"commentary verdict (each is reference-unclear); measure as printed and say so in the report")
     louder = [a for a in audio if a[3] in NO_LANGUAGE and a[0] != ref[0] and (a[2] or a[1] > 2)]
     if not ref[2] and ref[1] <= 2 and louder:
         lines.append(f"  note: the reference is a lossy stream of {ref[1]} channel(s), and stream "
