@@ -23,6 +23,7 @@ $MKVMERGE  = Resolve-Tool 'mkvmerge.exe'  @('C:\Program Files\MKVToolNix\mkvmerg
 $FFPROBE   = Resolve-Tool 'ffprobe.exe'   ($links | ForEach-Object { "$_\ffprobe.exe" })
 $FFMPEG    = Resolve-Tool 'ffmpeg.exe'    ($links | ForEach-Object { "$_\ffmpeg.exe" })
 $MEDIAINFO = Resolve-Tool 'mediainfo.exe' ($links | ForEach-Object { "$_\mediainfo.exe" })
+$TESSERACT = Resolve-Tool 'tesseract.exe' @('C:\Program Files\Tesseract-OCR\tesseract.exe')
 
 function Get-MkFlags([string]$Profile = $AllTracksProfile, [int]$CacheMb = 1024) {
     # --debug (decision D16): MakeMKV adds MSG:1003/1004 lines and writes $MkDebugLog; Save-MkDebugLog keeps that file.

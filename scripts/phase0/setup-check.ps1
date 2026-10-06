@@ -6,6 +6,7 @@
 "ffprobe    : $FFPROBE : " + $(if ($FFPROBE) { (& $FFPROBE -version | Select-Object -First 1) } else { 'MISSING' })
 "ffmpeg     : $FFMPEG"
 "mediainfo  : $MEDIAINFO : " + $(if ($MEDIAINFO) { (& $MEDIAINFO --Version | Select-Object -Last 1) } else { 'MISSING' })
+"tesseract  : $TESSERACT : " + $(if ($TESSERACT) { (& $TESSERACT --version 2>&1 | Select-Object -First 1) } else { 'MISSING' })
 "java       : " + (Get-ItemProperty 'HKCU:\Software\MakeMKV' -ErrorAction SilentlyContinue).app_Java
 "drive      : ${Drive}: is MakeMKV disc index $(Get-DiscIndex)"
 "free RAM   : $(Get-FreeRamGB) GB"
