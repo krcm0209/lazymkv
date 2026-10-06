@@ -49,6 +49,7 @@ Decisions (D) made during design:
 - D19. (Owner, 2026-10-06.) A subtitle or audio stream's language is taken from the disc's tag; OCR of subtitle text is not used to verify it for now (experiment 14 may still report a mismatch as an observation). This keeps the ASCII-only OCR engine (ocrs) sufficient; the owner allowed a trial of ocrs on the mini PC the same day.
 - D20. (Owner, 2026-10-06.) Subtitle track policy, refining R5 and R6: two English dialogue tracks with the same dialogue and neither SDH: keep one; a regular track and an SDH track: keep both (R5); on a foreign-language film, an English dub transcript ("dubtitles") is kept beside the English translation; lyrics or sing-along tracks and trivia or pop-up text tracks are not wanted and are dropped when confirmed (an unconfirmed one is kept and reviewed, as D12's principle requires). Until experiment 14 answers yes, the text rule only adds reviews to 8.7's decisions and never changes a label or drops a track on its own.
 - D21. (Owner, 2026-10-06.) The audio content rule carries a keep-only veto: when the title's programme reference (the original-language track that 8.6 ranks first) is not the first track of its language on the disc, and that first track is lossless or has more than two channels, the rule confirms no commentary on the title; every candidate is kept and the job carries the review reason audio_reference_unclear. Position never decides what a track is (D15); here it only withholds a drop when the reference choice looks inverted (EXP-13-design.md section 9, question 1). Cost accepted by the owner: a review on discs that place an original mono or stereo mix before a 5.1 remix.
+- D22. (Owner, 2026-10-06.) The OCR engine is ocrs (pure Rust, MIT/Apache code), with its two models embedded in the executable (CC-BY-SA-4.0: the licence text and attribution ship with the app) and nothing downloaded at run time (D17). Chosen after the trial in docs/phase0/ocr-engine-research.md: on the same 600 frames it gave the experiment 14 rule the same measures as Tesseract; it is about ten times slower on a full 1080p frame, so the app OCRs only the subtitle's glyph box, which it has anyway because it decodes the PGS/VobSub bitmaps itself; Tesseract stays the fallback if that does not recover the speed. A pure-Rust engine also keeps `cargo install` seamless for the binary (the end-user path remains the installer that carries ffmpeg and mkvmerge). Tesseract on the mini PC remains phase 0's measuring tool.
 
 
 ## 3. Target environment
@@ -114,6 +115,7 @@ Lookup order: the path in settings, then the folder the app ships them in (D17),
 | MKVToolNix (`mkvmerge.exe`) | header checks, subtitle extraction, remux | 54.0 (track flags used in 8.10) |
 | FFmpeg (`ffprobe.exe`) | audio profile detection, subtitle packet timings | 6.1 (Atmos and DTS:X profile names) |
 | Java runtime | used by MakeMKV to analyse Blu-ray menus | any that MakeMKV accepts |
+| ocrs (Rust crate, compiled in; models embedded) | reading bitmap subtitles for experiment 14's rule (D22) | 0.13.1 pinned |
 
 ### 4.5 IPC protocol
 

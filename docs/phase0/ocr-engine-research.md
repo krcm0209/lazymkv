@@ -294,3 +294,7 @@ the app, which decodes the PGS bitmap itself, would hand ocrs only the glyph box
 removes most of that cost (not measured here; the frames the trial used are kept in the tuning dataset for that
 measurement). Open for the owner: the CC-BY-SA-4.0 reading for shipping the unmodified models with attribution, and
 that the S3 files the ocrs tools download carry no licence of their own (the Hugging Face card does).
+
+## Decision (owner, 2026-10-06)
+
+ocrs is the engine (spec D22): identical rule measures to Tesseract on the trial, pure Rust, bundle-friendly, keeps `cargo install` seamless; the app OCRs only the glyph box to recover the speed; Tesseract is the fallback if that fails. The CC-BY-SA-4.0 attribution and licence text ship with the app; the owner reads the licence.
