@@ -257,6 +257,25 @@ class Rule(unittest.TestCase):
         for n in (0, 1):
             self.assertEqual(v[n], {'role': 'sdh', 'review': 'subtitle_ambiguous', 'note': 'two SDH tracks'})
 
+    def test_unclear_class_is_reviewed_with_suggested_roles(self):
+        def asides():
+            ev = dialogue()
+            for k in range(9):
+                ev[4 + 10 * k]['lines'][0] += ' (FBI)'
+            return ev
+        why = 'some SDH markers (9 events, 0 sound-only, 0 naming a sound)'
+        tracks = measured(track(0, asides()))
+        self.assertEqual(tracks[0]['m']['class'], 'unclear')
+        self.assertEqual(self.decide(tracks, 'en')[0], {'role': 'regular', 'review': 'subtitle_ambiguous', 'note': why})
+        tracks = measured(track(0, sdh_version(dialogue())), track(1, asides()))
+        v = self.decide(tracks, 'en')
+        self.assertEqual(v[0], {'role': 'sdh', 'review': 'subtitle_ambiguous', 'note': why})
+        self.assertEqual(v[1], {'role': 'regular', 'review': 'subtitle_ambiguous', 'note': why})
+        tracks = measured(track(0, dialogue()), track(1, asides()))
+        v = self.decide(tracks, 'en')
+        for n in (0, 1):
+            self.assertEqual(v[n], {'role': 'keep', 'review': 'subtitle_ambiguous', 'note': why})
+
     def test_capital_only_events_in_one_track_name_the_review(self):
         base = dialogue()
         caps = list(base) + [{'start': e['start'] + 2.9, 'dur': 0.4, 'lines': ['KALON BIDUN']} for e in base[10:50:10]]

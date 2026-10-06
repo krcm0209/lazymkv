@@ -659,6 +659,7 @@ def decide(tracks, orig_lang=None):
         elif k in out and not out[k]['review']:
             out[k] = dict(out[k], review='subtitle_ambiguous', note='language of the text unclear')
     # Ambiguous = keep: a track held for review is never dropped, whatever step reviewed it.
+    # Unreachable today, like the drop branch just above: a guard so that no later step can bring back a reviewed drop.
     for k, v in out.items():
         if v['role'] == 'drop' and v['review']:
             out[k] = dict(v, role='keep')
