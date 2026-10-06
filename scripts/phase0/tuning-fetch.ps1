@@ -1,5 +1,6 @@
 # Decision D16: copies one title's part of the tuning dataset ($TuningData\<Slug>\<Label>\: audio-proxy.mka,
-# audio-proxy.json and the audio-levels-20ms-* folders) to C:\lazymkv\phase0\tmp\tuning-fetch\<Slug>\<Label>\, so that
+# audio-proxy.json and the audio-levels-20ms-* folders; with -Text instead only the OCR text of its subtitle tracks,
+# subs-ocr\sub-<n>.ocr.jsonl, written by ocr-subs.ps1) to C:\lazymkv\phase0\tmp\tuning-fetch\<Slug>\<Label>\, so that
 # the Mac can fetch it with scp: the share is reachable only from a job. Needed only when a measure needs the proxies
 # on the Mac; the routine after a rip never runs it.
 # This is the one exception to "only small files on C:" (plan, Global Constraints): one title at a time, at most 2 GB,
@@ -12,6 +13,7 @@
 param(
     [Parameter(Mandatory)][string]$Slug,
     [Parameter(Mandatory)][string]$Label,
+    [switch]$Text,
     [switch]$Force
 )
 . C:\lazymkv\src\scripts\phase0\env.ps1
@@ -33,13 +35,21 @@ try {
     if (-not $TuningData) { throw "`$TuningData is not set (C:\lazymkv\phase0\config.ps1)" }
     if (-not (Test-Path -LiteralPath $TuningData)) { throw "cannot reach the tuning dataset $TuningData" }
     $src = "$TuningData\$Slug\$Label"
-    if (-not (Test-Path -LiteralPath "$src\audio-proxy.json")) { throw "$src holds no complete proxy (no audio-proxy.json)" }
-    $bytes = [long](Get-ChildItem -LiteralPath $src -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum).Sum
+    if ($Text) {
+        # Only the text files: the frames and tesseract's raw output beside them stay on the share.
+        $src = "$src\subs-ocr"
+        $files = @(Get-ChildItem -LiteralPath $src -Filter '*.ocr.jsonl' -File -ErrorAction SilentlyContinue)
+        if ($files.Count -eq 0) { throw "$src holds no OCR text (sub-<n>.ocr.jsonl; run ocr-subs.ps1 first)" }
+    } else {
+        if (-not (Test-Path -LiteralPath "$src\audio-proxy.json")) { throw "$src holds no complete proxy (no audio-proxy.json)" }
+        $files = @(Get-ChildItem -LiteralPath $src -Recurse -File -ErrorAction Stop)
+    }
+    $bytes = [long]($files | Measure-Object -Property Length -Sum).Sum
     if ($bytes -gt $MaxBytes) {
         throw "$src holds $bytes bytes, more than the 2 GB a fetch may put on C:; nothing was copied (the owner copies it from the share another way)"
     }
     $root = "$P0\tmp\tuning-fetch"
-    $dst = "$root\$Slug\$Label"
+    $dst = "$root\$Slug\$Label" + $(if ($Text) { '\subs-ocr' } else { '' })
     $cleanup = "ssh $MacHost `"rmdir /s /q $root`""
     if ((Test-Path -LiteralPath $root) -and -not $Force) {
         throw "$root already exists: an earlier fetch was not deleted after its scp. Delete it from the Mac with: $cleanup (or use -Force)"
@@ -50,8 +60,15 @@ try {
     }
     $made = $root
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) -ErrorAction Stop | Out-Null
-    Copy-Item -LiteralPath $src -Destination $dst -Recurse -ErrorAction Stop
-    $here = Get-Listing $src
+    if ($Text) {
+        New-Item -ItemType Directory -Force -Path $dst -ErrorAction Stop | Out-Null
+        foreach ($file in $files) { Copy-Item -LiteralPath $file.FullName -Destination $dst -ErrorAction Stop }
+        # Same form as Get-Listing (a backslash before each name).
+        $here = @($files | ForEach-Object { "\$($_.Name)=$($_.Length)" } | Sort-Object) -join ' '
+    } else {
+        Copy-Item -LiteralPath $src -Destination $dst -Recurse -ErrorAction Stop
+        $here = Get-Listing $src
+    }
     $there = Get-Listing $dst
     if ($here -ne $there) { throw "the copy in $dst differs from $src" }
     $copied = [long](Get-ChildItem -LiteralPath $dst -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum).Sum
