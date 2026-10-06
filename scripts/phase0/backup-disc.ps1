@@ -15,6 +15,7 @@
 # folder that was empty before the call: the folder itself, or the one folder below it that holds BDMV or VIDEO_TS.
 # The scan succeeded when it finished, printed the MSG:1005 banner and lists at least one title.
 # MakeMKV's exit code is recorded, never judged (spec 9.2). MakeMKV text never builds a path.
+# The copy keeps MakeMKV's debug log and the system events but not the rip scripts' free-RAM/CPU sampler (system.csv); this is a documented D16 exception.
 # The last line is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws.
 param(
     [Parameter(Mandatory)][string]$Slug,

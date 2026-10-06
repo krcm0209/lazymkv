@@ -58,4 +58,5 @@ opened" is read as "the disc was pushed out", the slot-loader's form of the same
 - Wording: the drive kept attached after Task 14 (drive 2) is slot-loading. Section 10.3 ("An open tray therefore
   always means 'insert the next disc'"), D3 ("eject the tray") and `disc_done` ("the tray opened") hold for it with
   "tray opened" read as "disc pushed out"; owner-facing texts should say the disc was ejected, which is true for
-  both kinds of drive.
+  both kinds of drive. Not observed: what drive 2 does when an ejected disc is left in the slot; 10.3's open-tray
+  signal is untested on a slot-loading drive.

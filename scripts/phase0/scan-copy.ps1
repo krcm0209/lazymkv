@@ -22,6 +22,7 @@ param(
 try {
     Assert-Slug $Slug
     Assert-Slug $Name
+    if ($Name -eq 'file' -or $Name -like 'partial-*') { throw "scan-$Name.txt belongs to another script; choose another name" }
     if (-not (Test-Path -LiteralPath $CAP)) { throw "missing $CAP; build it with: scripts/box.sh cargo build --release -p lazymkv-capture" }
     $rec = "$Recordings\$Slug\backup"
     $summaryFile = "$rec\backup-summary.json"
@@ -29,6 +30,7 @@ try {
     $backup = Get-Content -LiteralPath $summaryFile -Raw -ErrorAction Stop | ConvertFrom-Json
     $root = [string]$backup.copy_root
     if (-not $root) { throw "backup-summary.json names no copy_root: the copy did not succeed" }
+    if ([string]$backup.result -like 'FAILED: the copy failed*') { throw "the copy did not succeed ($($backup.result))" }
     if (-not (Test-Path -LiteralPath $root)) { throw "the copy root $root cannot be reached" }
     $out = "$rec\scan-$Name.txt"
     if ((Test-Path -LiteralPath $out) -and -not $Force) { throw "$out already exists and is kept as evidence; choose another name or use -Force" }

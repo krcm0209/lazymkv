@@ -6,12 +6,13 @@
 # Writes to $Recordings\<Slug>\backup\:
 #   scan-partial-<Name>.txt with .timing.jsonl, .stderr and .exit.json   MakeMKV's output (Get-MkFlags)
 #   scan-partial-<Name>.txt.makemkv-debug.txt   MakeMKV's debug log of the run (decision D16)
-#   scan-partial-<Name>.files.txt   one line per copied file: size, a space, the path below the copy's root
+#   scan-partial-<Name>.txt.files.txt   one line per copied file: size, a space, the path below the copy's root
 # -Clips: clip numbers of BDMV\STREAM, as "27-60" or "4,6,9" or both ("1-3,7"); the number is the file's name.
 # Declared [string[]]: run-interactive.ps1 passes arguments inside -Command, where "4,6,9" is an array literal.
 # -SkipPlaylists: playlist numbers ("00055" or "55,120") whose .mpls files are left out of BDMV\PLAYLIST and BDMV\BACKUP\PLAYLIST.
 # An existing scan-partial-<Name>.txt is refused unless -Force is given. The copy on the share is never changed.
-# The last line is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws.
+# The line before the clean-up is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws.
+# Then comes the clean-up line: "partial: deleted <folder>", or "partial: NOT deleted: <folder> (remove it by hand)".
 param(
     [Parameter(Mandatory)][string]$Slug,
     [Parameter(Mandatory)][string]$Name,
@@ -30,6 +31,7 @@ try {
     Assert-Slug $Name
     $clipSpec = ($Clips -join ',')
     if ($clipSpec -notmatch '^\d+(-\d+)?(,\d+(-\d+)?)*$') { throw "-Clips must look like 27-60 or 4,6,9" }
+    if ($SkipPlaylists.Count -gt 0 -and ($SkipPlaylists -join ',') -notmatch '^\d+(,\d+)*$') { throw '-SkipPlaylists must look like 55 or 00055,120' }
     $skipMpls = @(($SkipPlaylists -join ',') -split ',' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ })
     $wanted = @()
     foreach ($part in $clipSpec -split ',') {
@@ -42,6 +44,7 @@ try {
     $backup = Get-Content -LiteralPath $summaryFile -Raw -ErrorAction Stop | ConvertFrom-Json
     $root = [string]$backup.copy_root
     if (-not $root) { throw "backup-summary.json names no copy_root: the copy did not succeed" }
+    if ([string]$backup.result -like 'FAILED: the copy failed*') { throw "the copy did not succeed ($($backup.result))" }
     if (-not (Test-Path -LiteralPath $root)) { throw "the copy root $root cannot be reached" }
     $out = "$rec\scan-partial-$Name.txt"
     if ((Test-Path -LiteralPath $out) -and -not $Force) { throw "$out already exists and is kept as evidence; choose another name or use -Force" }
@@ -73,7 +76,9 @@ try {
         $chosen += $f
     }
     $bytes = [long](($chosen | Measure-Object -Property Length -Sum).Sum)
-    if ($bytes -gt $MaxBytes) { throw "the partial copy would hold $bytes bytes, more than the 2 GB allowed on C:; choose fewer clips" }
+    # Partial copies kept earlier with -Keep (under other names) count against the same 2 GB on C:.
+    $kept = [long]((Get-ChildItem -LiteralPath "$P0\tmp" -Directory -Filter 'partial-*' -ErrorAction SilentlyContinue | Get-ChildItem -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum)
+    if ($bytes + $kept -gt $MaxBytes) { throw "the partial copy would hold $bytes bytes, and $kept bytes of earlier kept partial copies are in $P0\tmp, more than the 2 GB allowed on C:; choose fewer clips or remove the kept copies" }
     $clipsFound = @($chosen | Where-Object { $_.FullName.Substring($base.Length).TrimStart('\').ToUpper() -like 'BDMV\STREAM\*' }).Count
     "partial: $($chosen.Count) files, $bytes bytes ($clipsFound stream clips of $($wanted.Count) asked; NoJava=$NoJava; skipped playlists=$($skipMpls -join ',')) from $root to $dest"
 
@@ -113,6 +118,6 @@ try {
 } finally {
     if ($partial -and -not $Keep -and (Test-Path -LiteralPath $partial)) {
         Remove-Item -LiteralPath $partial -Recurse -Force -ErrorAction SilentlyContinue
-        "partial: deleted $partial"
+        if (Test-Path -LiteralPath $partial) { "partial: NOT deleted: $partial (remove it by hand)" } else { "partial: deleted $partial" }
     }
 }

@@ -13,6 +13,7 @@
 # non-empty .mkv in the staging folder; where both name one, the same source file for the title in this run
 # (MSG:3307) as in scan-file.txt (TINFO attribute 16); and mkvmerge -J exits 0 or 1 and lists at least one track.
 # MakeMKV's exit code is recorded, never judged (spec 9.2). MakeMKV text never builds a path.
+# The extraction keeps MakeMKV's debug log and the system events but not the rip scripts' free-RAM/CPU sampler (system.csv); this is a documented D16 exception.
 # The last line is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws.
 param(
     [Parameter(Mandatory)][string]$Slug,

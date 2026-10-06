@@ -104,8 +104,8 @@ titles. The only difference is on the online side: `3338 "Downloading latest HK 
 only difference was the online download.
 
 `AACS/Unit_Key_RO.inf` was readable in both drives: in drive 1 (disc ID computed, and equal to MakeMKV's own
-`DISCID`) and in drive 2 (Task 14: the file and its `AACS/DUPLICATE` copy listed, 65536 bytes each, and drive 1's
-disc ID computed from it).
+`DISCID`) and in drive 2 (Task 14: the file and its `AACS/DUPLICATE` copy listed, 65536 bytes each, and the same disc
+ID as drive 1 computed from it).
 
 Not answered by this disc: what MakeMKV prints when a disc needs a key it does not have and cannot download. That
 needs a UHD whose keys are not in `keydb.cfg`; none of the owner's discs so far has shown it.

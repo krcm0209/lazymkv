@@ -129,18 +129,20 @@ The diagnosis runs (the exit code -1073741819 is 0xC0000005 in every crash):
   lines, one for every clip in the partial copy (`00000.m2ts` to `00063.m2ts`, 0 to 100 s); then
   `MSG:5010,0,0,"Failed to open disc","Failed to open disc"` and `TCOUNT:0` (113 lines). There is no `MSG:5011` and
   no `MSG:3307`, and `00800.mpls`, whose only clip was left out, is not mentioned. With no title of 120 s or more,
-  MakeMKV ended with `MSG:5010` here, after it had gone through the playlists and every clip without crashing. Its debug log ends "Application
-  exited".
+  MakeMKV ended with `MSG:5010` here, after it had gone through the playlists and every clip without crashing. Its
+  debug log ends "Application exited".
 - `t1` and `t1-nojava` are inconclusive: 26 of the 60 clips are absent, and the codes of their debug lines are
   exactly the numbers of those 26 clips (the disc's clips from 00000 to 00026, and 00061 and 00063) plus 52, 53, 54,
   120 and 140, which are playlist numbers. The missing files dominate these runs, and they crash before any
   `MSG:3025`.
 - Conclusion: `all-but-6` reproduces the share's crash on a local path (the same four `MSG:3025` lines, then the
   same silent end), and the only difference between `all-but-6` and `no55mpls` is the two copies of `00055.mpls`.
-  So MakeMKV 2.0.0 crashes while it processes playlist `00055.mpls` from a folder source. It is not the network path
-  (the crash happens on C:), not the flags (`plain`, `nodebug`), not the target folder (`bdmv`), and not the Java
-  files (`no55mpls` keeps all 9 JAR and 4 BDJO files and runs to the end). In the six crashes that print `MSG:3025`
-  lines, the last is `00054.mpls`, and in `no55mpls` the next playlist reported is `00120.mpls`, which fits.
+  So, on the partial copy, MakeMKV 2.0.0 crashes when `00055.mpls` is present and runs to the end without it; the
+  full copy crashes at the same point, so `00055.mpls` is the likely cause there too (not re-tested; see below). It is
+  not the network path (the crash happens on C:), not the flags (`plain`, `nodebug`) and not the Java files (`no55mpls`
+  keeps all 9 JAR and 4 BDJO files and runs to the end); pointing MakeMKV at `BDMV` changes nothing (it opens the copy
+  root either way). In the six crashes that print `MSG:3025` lines, the last is `00054.mpls`, and in `no55mpls` the
+  next playlist reported is `00120.mpls`, which fits.
 - On the disc, `00055.mpls` is title 1 of `scan.txt`: 0:05:40, 34 chapters, segment map 27 to 60, one video stream
   and no audio (the rehearsal rip of title 1, `rehearsal/mkvmerge.json`, has one HEVC video track, 340.3 s, 34
   chapters). The disc scan and that rip read it from the disc without trouble. `00055.mpls` has the same size on the
@@ -178,11 +180,11 @@ saving anything.
 ## Answer
 
 **No.** `backup --decrypt` to the network share worked on Disc A, but MakeMKV 2.0.0 crashed while scanning the
-copy, so `info file:` listed none of the disc scan's titles and nothing could be extracted.
+copy, so `info file:` listed none of the disc scan's titles and nothing was extracted (Step 6 was skipped).
 
-1. Disc A has Java menus: `files.json` lists 9 `BDMV/JAR/` entries (and two BDJO files), so the question's
-   condition, a UHD with Java menus, is met. `MSG:3344` appeared in neither scan; it shows only whether MakeMKV
-   used a Java runtime (EXP-12), not whether the disc has Java menus.
+1. Disc A has Java menus: `files.json` lists 9 `BDMV/JAR/` entries (and 4 BDJO files, 2 of them under
+   `BDMV/BACKUP/`), so the question's condition, a UHD with Java menus, is met. `MSG:3344` appeared in neither scan;
+   it shows only whether MakeMKV used a Java runtime (EXP-12), not whether the disc has Java menus.
 2. Of the three conditions for yes:
    - the copy completed: **held**. `MSG:5070`, no `5069`, no `5079`, no read or write errors, and every stream file
      arrived with the disc's size;
@@ -203,12 +205,14 @@ copy, so `info file:` listed none of the disc scan's titles and nothing could be
   labels, as the reference.
 - 9.2 and 9.4, this experiment's own finding: MakeMKV 2.0.0 can crash without any message (exit code -1073741819,
   0xC0000005; no `MSG:5010` or `5011`, no `TCOUNT`, empty standard error) when it opens a folder copy, within 12 s,
-  before any watchdog in 10.4 would act. The engine must treat a `makemkvcon` run that exits without `MSG:5011`
-  and a `TCOUNT` line as a failed scan, whatever the exit code; the exit code is still recorded with the log, since
-  here it was the only direct sign of the crash. Until such a crash is mapped it is `Unknown` (10.2), with the full
-  log attached. A note for 9.4's `5010` row: in `no55mpls`, `MSG:5010` ("Failed to open disc") ended a scan that
-  had gone through the playlists and clips and found no title of `--minlength` or more (with the main clip absent), so
-  `5010` may mean "no usable title" as well as "the source could not be opened".
+  before any watchdog in 10.4 would act. The engine must treat a `makemkvcon` run that exits without a `TCOUNT`
+  line as a failed scan, whatever the exit code. Every scan that listed titles so far (4 scans of 2 discs) also
+  printed `MSG:5011` just before `TCOUNT`; whether to require it is left until more discs confirm it. The exit code
+  is still recorded with the log, since here it was the only direct sign of the crash. Until such a crash is mapped
+  it is `Unknown` (10.2), with the full log attached. A note for 9.4's `5010` row: in `no55mpls`, `MSG:5010`
+  ("Failed to open disc") ended a scan that had gone through the playlists and clips and found no title of
+  `--minlength` or more (with the main clip absent), so `5010` may mean "no usable title" as well as "the source
+  could not be opened".
 - The crash follows one playlist of this disc (`00055.mpls`), so it may not hit other discs. Open question, not a
   plan: whether experiment 3 succeeds when repeated on a UHD with Java menus that has no such playlist.
 - 18: the risk "Whole-disc copy is unverified on this setup until experiment 3" now has an answer: the copy to the
