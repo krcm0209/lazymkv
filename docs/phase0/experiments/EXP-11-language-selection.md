@@ -173,7 +173,7 @@ after the check by eye: missing=0 extra=0 unmatched=0
 | audio language filter (other languages dropped) | pans-labyrinth-2006-uhd, 0, streams 1 and 2 (spa); stream 3 (eng) kept | yes | Streams 1 (DTS-HD MA, flags 1024) and 2 (DTS, flags 2304) are absent: 4,481,466,356 bytes in the all-tracks file. Stream 1 is neither a core nor flagged, so only the language filter can have dropped it. Stream 3 is present with the same bytes |
 | `nolang` | none: title 0 has no audio without a language | not exercised | `nolang=0` |
 | `subtitle*eng` | pans-labyrinth-2006-uhd, 0, streams 6 and 7 (spa); streams 4 and 5 (eng) kept | yes | Stream 6 is absent (14,610,116 bytes in the all-tracks file). Stream 4 is present with the same bytes. Stream 5 was selected and removed as empty (`MSG:4047` "#3"). Stream 7 is empty either way; one `MSG:4047` line says only one twin was selected (section 1) |
-| `core` | pans-labyrinth-2006-uhd, 0, stream 2 (spa DTS core, flags 2304) | yes | Stream 2 is absent. But it is Spanish, so the language filter drops it as well: this title does not show `-sel:core` acting alone. The Office disc's derived cores are English (its titles 0 to 3 have `core=1` or `2` and `audio-lang=0`; title 4 has `core=0`) |
+| `core` | pans-labyrinth-2006-uhd, 0, stream 2 (spa DTS core, flags 2304) | not exercised | Stream 2 is absent. But it is Spanish, so the language filter drops it as well: this title does not show `-sel:core` acting alone. The Office disc's derived cores are English (its titles 0 to 3, 5 and 6 have `core=1` or `2` and `audio-lang=0`; title 4 has `core=0`) |
 | `special` | none: title 0 has no flagged audio | not exercised | `special=0`; Blu-ray and UHD discs carry no flags 1, 2 or 4 (spec 9.5) |
 
 ### 4. Observations
@@ -229,29 +229,32 @@ not English alone. R4 and 8.6 already define the wanted languages as English plu
 experiment tested only the English half of that set.
 
 Also observed: writing 4.5 GB less did not shorten the rip; both rips took 2245 s. Two runs do not show what
-sets the pace (experiment 4 measures that), but a selection that writes less cannot be counted on to be faster.
+sets the pace (not measured separately; experiment 4's throughput figures bear on it), but a selection that writes
+less cannot be counted on to be faster.
 
 ## Answer
 
 **Not answered.** The one rip shows no difference after the check by eye: every predicted stream is in the file
 or was removed by MakeMKV as an empty forced-only twin (`MSG:4047`), nothing unpredicted is present, and the tracks
-are in scan order. But two parts of the selection were not exercised: **`nolang`** (no audio without a language
-on Disc A's title) and **`special`** (no flagged audio; Blu-ray and UHD never carry these flags). Both wait for
-Step 7's DVD, which the owner has not supplied yet. The parts that were exercised behaved as predicted:
+are in scan order. But three parts of the selection were not exercised: **`nolang`** (no audio without a language
+on Disc A's title), **`special`** (no flagged audio; Blu-ray and UHD never carry these flags) and **`core`** (the
+only derived core is Spanish, which the language filter drops anyway, so the title shows nothing about `-sel:core`
+on its own; the plan's Step 8 counts `core` as exercised only by a core in a kept language). `nolang` and `special`
+wait for Step 7's DVD, which the owner has not supplied yet; `core` for an English-only rip of an Office title,
+whose derived cores are English. The parts that were exercised behaved as predicted:
 - the audio language filter dropped the Spanish DTS-HD MA (stream 1) and its core (2) and kept the English AC-3 (3);
 - `subtitle*eng` dropped the Spanish PGS (6) and kept the English PGS (4) and its forced-only twin (5, then removed
   as empty);
-- `core`: the derived core (2) is absent, but it is Spanish, so this title does not separate `core` from the
-  language filter.
+- the derived core (2) is absent, consistent with `-sel:core`, but see above: the language filter explains it too.
 
 Video was kept, and the order is the scan order.
 
 ## Consequence for the spec
 
-- Section 16, item 1 stays a later feature, marked **not yet verified**: experiment 11 has not exercised `nolang`
-  or `special` (Disc A only; the DVD of Step 7 is pending). On one UHD title, the audio language filter,
-  `subtitle*eng` and `core` (only together with the language filter) behaved as predicted. Section 17, row 11
-  says the same.
+- Section 16, item 1 stays a later feature, marked **not yet verified**: experiment 11 has not exercised `nolang`,
+  `special` or `core` on its own (Disc A only; the DVD of Step 7 and an Office eng-only rip are pending). On one
+  UHD title, the audio language filter and `subtitle*eng` behaved as predicted. Section 17, row 11 says the same.
+
 The two points below come from observations 6 and 7, not from the Answer rule above (controller's ruling,
 2026-10-06): they are facts about verification and selection that this experiment established, and Task 17
 Step 2 applies them to the spec.
