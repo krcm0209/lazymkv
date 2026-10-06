@@ -1,0 +1,3 @@
+{"responses": [
+  {"args_contain": ["info", "disc:0"], "stdout": "scan.txt", "timing": "scan.txt.timing.jsonl"}
+]}

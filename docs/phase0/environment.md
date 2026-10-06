@@ -48,6 +48,8 @@ Notes on that output:
   change (the same symptom is reported in rust-lang/rust#160163: cargo blocked, rustc not); turning SAC off is in
   Windows Security > App & browser control > Smart App Control settings, and on recent builds (Insider 26220.7070;
   reported for 26200.8246) it can be turned on again without a clean install, which older documentation still denies.
+  The owner turned Smart App Control OFF on 2026-10-06 (about 14:50; the machine is build 26200.9457, 25H2):
+  `VerifiedAndReputablePolicyState` = 0, cargo runs, and the stand-in built in 8.7 s.
   Consequence for the product (D17): an unsigned lazymkv.exe would be blocked on such machines; the installer and the
   executables need code signing (phase 1 design, section 18 risks).
 
