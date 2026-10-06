@@ -73,7 +73,11 @@ def removed_streams(rip):
 
 def without_removed(rows, removed):
     """Split the predicted rows (the selected streams in scan order) into those still expected in
-    the file and those MakeMKV removed; `removed` holds positions in `rows` (see removed_streams)."""
+    the file and those MakeMKV removed; `removed` holds positions in `rows` (see removed_streams).
+
+    The mapping is exact only when MakeMKV selected exactly the predicted streams: if it kept a stream the
+    prediction drops (or dropped one it keeps), the output numbering shifts and the REMOVED line may name the
+    wrong stream. The TRACK COUNT and ORDER MATCH lines then show the disagreement."""
     return [r for i, r in enumerate(rows) if i not in removed], [r for i, r in enumerate(rows) if i in removed]
 
 
@@ -158,8 +162,8 @@ def main():
     for r in dropped:
         print(f"REMOVED          scan stream {r['stream']} ({r['type']} {r['lang_raw']} {r['codec']} f={r['flags']}): "
               "MakeMKV left it out of the file (MSG:4047), so it is not expected")
-    for n in sorted(i for i in removed if i >= len(want) + len(dropped)):
-        print(f"REMOVED          MSG:4047 names output track {n}, which the prediction does not have")
+    for idx in sorted(i for i in removed if i >= len(want) + len(dropped)):
+        print(f"REMOVED          MSG:4047 names output track {idx}, which the prediction does not have")
     print(f"TRACK COUNT      scan={len(want)} file={len(got)}")
     print(f"ORDER MATCH      {yes_no(verdicts['order'])} (type, language except on video, audio channels; position by position)")
     print(f"CHAPTERS         scan={n['scan_chapters']} file={n['file_chapters']}")

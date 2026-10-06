@@ -21,9 +21,11 @@ The answer decides whether the rip-time fast path (section 16, item 1) can be bu
   -sel:all,+sel:video,+sel:(audio*(eng|nolang)),+sel:(subtitle*eng),-sel:mvcvideo,-sel:core,-sel:special,=100:all
   ```
 
-  Step 2's `findstr` output was not copied into the repository. The controller's log records only that the check
-  passed: every `defaultSelection` attribute of the profile carries this string (four of them, by Task 7's
-  record). MakeMKV accepted the profile, so no `SELECTION_2` was needed (observation 4).
+  Step 2's `findstr` output was not copied into the repository at the time. Re-read on 2026-10-06 over ssh
+  (`type C:\lazymkv\phase0\profiles\eng-only.mmcp.xml`, read-only): the four `defaultSelection` attributes
+  (`copy`, `lpcm`, `wavex`, `convertToSRT`) all carry exactly the string above; the file's only other selection
+  string is MakeMKV's own `app_DefaultSelectionString` in a comment that the file says MakeMKV ignores. MakeMKV
+  accepted the profile, so no `SELECTION_2` was needed (observation 4).
 - The prediction is `compare_tracks.py --selection eng` applied to the scan: every video stream that is not 3D;
   audio whose attribute 3 is `eng`, empty, absent or `und`, except flags 256 and 1, 2, 4; every English subtitle
   stream, whatever its flags.
@@ -171,7 +173,7 @@ after the check by eye: missing=0 extra=0 unmatched=0
 | audio language filter (other languages dropped) | pans-labyrinth-2006-uhd, 0, streams 1 and 2 (spa); stream 3 (eng) kept | yes | Streams 1 (DTS-HD MA, flags 1024) and 2 (DTS, flags 2304) are absent: 4,481,466,356 bytes in the all-tracks file. Stream 1 is neither a core nor flagged, so only the language filter can have dropped it. Stream 3 is present with the same bytes |
 | `nolang` | none: title 0 has no audio without a language | not exercised | `nolang=0` |
 | `subtitle*eng` | pans-labyrinth-2006-uhd, 0, streams 6 and 7 (spa); streams 4 and 5 (eng) kept | yes | Stream 6 is absent (14,610,116 bytes in the all-tracks file). Stream 4 is present with the same bytes. Stream 5 was selected and removed as empty (`MSG:4047` "#3"). Stream 7 is empty either way; one `MSG:4047` line says only one twin was selected (section 1) |
-| `core` | pans-labyrinth-2006-uhd, 0, stream 2 (spa DTS core, flags 2304) | yes | Stream 2 is absent. But it is Spanish, so the language filter drops it as well: this title does not show `-sel:core` acting alone. The Office disc's derived cores are English (its titles have `core=1` or `2` and `audio-lang=0`) |
+| `core` | pans-labyrinth-2006-uhd, 0, stream 2 (spa DTS core, flags 2304) | yes | Stream 2 is absent. But it is Spanish, so the language filter drops it as well: this title does not show `-sel:core` acting alone. The Office disc's derived cores are English (its titles 0 to 3 have `core=1` or `2` and `audio-lang=0`; title 4 has `core=0`) |
 | `special` | none: title 0 has no flagged audio | not exercised | `special=0`; Blu-ray and UHD discs carry no flags 1, 2 or 4 (spec 9.5) |
 
 ### 4. Observations
@@ -226,8 +228,8 @@ Spanish soundtrack is gone. So a rip-time fast path needs the work's original la
 not English alone. R4 and 8.6 already define the wanted languages as English plus the original language, and this
 experiment tested only the English half of that set.
 
-Also observed: writing 4.5 GB less did not shorten the rip. 2245 s is exactly the all-tracks rip's time, so on
-this drive and share the disc read sets the pace, not the writing.
+Also observed: writing 4.5 GB less did not shorten the rip; both rips took 2245 s. Two runs do not show what
+sets the pace (experiment 4 measures that), but a selection that writes less cannot be counted on to be faster.
 
 ## Answer
 
@@ -250,6 +252,10 @@ Video was kept, and the order is the scan order.
   or `special` (Disc A only; the DVD of Step 7 is pending). On one UHD title, the audio language filter,
   `subtitle*eng` and `core` (only together with the language filter) behaved as predicted. Section 17, row 11
   says the same.
+The two points below come from observations 6 and 7, not from the Answer rule above (controller's ruling,
+2026-10-06): they are facts about verification and selection that this experiment established, and Task 17
+Step 2 applies them to the spec.
+
 - The fast path's selection string must carry the work's original language as well as English (R4, 8.6). On
   Disc A, English alone keeps only the commentary and makes it the default audio track (observation 7). This is
   no change to R4 or 8.6. Section 16, item 1's "wanted-language" means that set, never English alone.

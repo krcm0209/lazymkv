@@ -6982,7 +6982,7 @@ Then read each line with these rules. A "difference" means that MakeMKV did not 
 - `MISSING` English audio without flags 1, 2, 4, 256 or 512: the language filter dropped it. Difference, `audio*(eng|nolang)`.
 - `MISSING` audio with flag 512 (secondary audio): the selection drops it, as spec 8.6 does anyway. Observation.
 - `MISSING` English subtitles with flag 1, 2 or 4: `special` also drops flagged subtitles. Spec 8.7 drops DVD subtitles flagged 1 or 2 anyway. Observation; for flag 4, report it to the controller.
-- `MISSING` English subtitles of any other kind, forced-only (6144) included: `subtitle*eng` dropped them. Difference, `subtitle*eng`.
+- `MISSING` English subtitles of any other kind, forced-only (6144) included: `subtitle*eng` dropped them. Difference, `subtitle*eng`. Exception (Global Constraints, `MSG:4047`): a forced-only stream that the rip log says MakeMKV removed as empty, with the message's index mapped through the selected streams (compare_tracks' `REMOVED` line), was selected and is not a difference; `match` does not read the rip log, so such a stream shows as `MISSING` there and the all-tracks listing shows `scan ?`. Likewise, `match` pairs greedily by type, language and channels: a dropped commentary can appear as an `EXTRA` plus a `MISSING` pair; the check by eye (bytes, codec, name) settles it.
 - `MISSING` video: difference.
 - `UNMATCHED`: a file track out of scan order, or one the scan does not explain. An `UNMATCHED` video track is most likely 3D video that `-sel:mvcvideo` should have dropped. Difference, order (or `mvcvideo` for video).
 
@@ -7013,7 +7013,7 @@ It must state:
      | `special` | ... | ... | ... |
      ```
 
-     A part is "not exercised" when its `COVERAGE` count was 0 on every title ripped.
+     A part is "not exercised" when its `COVERAGE` count was 0 on every title ripped. `core` and `special` count as exercised only by a stream the language filter keeps (an English derived core; a flagged English track): `COVERAGE` counts them in every language, and a Spanish core that the language filter drops anyway shows nothing about `-sel:core`.
   4. Observations:
      - whether flagged subtitles (`sub-flagged`) were kept or dropped;
      - whether secondary audio (`audio-512`) was kept or dropped. Write "no such stream" where the count was 0. This is how MakeMKV's `special` treats flag 512; it is recorded, not judged;
@@ -7039,7 +7039,7 @@ Which disc is in the drive: does not matter (Disc A should be back in for Task 1
 python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
 ```
 
-Expected: the line `Titles whose audio is in the tuning dataset ...`, naming under `missing` `SLUG_A/eng-only` (or `eng-only-2`), and `SLUG_D/eng-only` when Step 7 ran. A rip that MakeMKV made with its default selection after rejecting the profile is still a rip: add it too. For each SLUG/LABEL named, run Task 11 Step 11 from `audio_dataset.py args` onwards, with its exit codes and its Expected. The eng-only rip of SLUG_A is the title Task 11 ripped as `all-tracks`. Its streams have the same packets (the `md5=` of its `stream` lines equals those of `corpus/owner/SLUG_A/all-tracks/audio-levels-20ms-*/manifest.txt`). It needs no new labels (the harness notes `takes its label from all-tracks stream <n> (same packets)`) and adds nothing to experiment 13's counts. A packet MD5 that differs from the all-tracks rip's for the same stream is a finding for EXP-11: note it.
+Expected: the line `Titles whose audio is in the tuning dataset ...`, naming under `missing` `SLUG_A/eng-only` (or `eng-only-2`), and `SLUG_D/eng-only` when Step 7 ran. A rip that MakeMKV made with its default selection after rejecting the profile is still a rip: add it too. For each SLUG/LABEL named, run Task 11 Step 11 from `audio_dataset.py args` onwards, with its exit codes and its Expected. The eng-only rip of SLUG_A is the title Task 11 ripped as `all-tracks`. Its streams have the same packets (the `md5=` of its `stream` lines equals those of `corpus/owner/SLUG_A/all-tracks/audio-levels-20ms-*/manifest.txt`). It needs no new labels: its one stream is the title's reference, so the harness lists the title as in the dataset without a label line (a label is asked for candidate streams only) and adds nothing to experiment 13's counts. A packet MD5 that differs from the all-tracks rip's for the same stream is a finding for EXP-11: note it.
 
 In Step 10 (Commit), `git status --short` also lists the new level folders' `streams.json`, `proxy-check.json` and `audio-proxy.json`, and `corpus/owner/audio-dataset.json`.
 

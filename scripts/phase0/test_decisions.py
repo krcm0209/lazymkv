@@ -1,6 +1,7 @@
 """The scripts that answer an experiment with yes or no must not say yes on empty or broken input."""
 import contextlib
 import io
+import json
 import pathlib
 import tempfile
 import unittest
@@ -192,6 +193,30 @@ class CompareTracks(unittest.TestCase):
         verdicts, _ = compare_tracks.checks(want, compare_tracks.file_rows(file), scan.titles[0], file)
         self.assertTrue(verdicts["count"])
         self.assertTrue(verdicts["order"])
+
+    def test_a_4047_index_beyond_the_selection_is_reported_not_fatal(self):
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            d = pathlib.Path(tmp)
+            (d / "scan.txt").write_text(TRACK_SCAN.format(lang="eng"), encoding="utf-8")
+            (d / "mkvmerge.json").write_text(json.dumps(ident([("video", "und", None), ("audio", "eng", 8), ("audio", "eng", 2)])), encoding="utf-8")
+            removed = "Forced subtitles track #9 turned out to be empty and was removed from output file"
+            (d / "rip.txt").write_text(
+                f'MSG:4047,16,3,"AV sync issue in stream 9 at 0:00:00 : {removed}",'
+                f'"AV sync issue in stream %1 at %2 : %3","9","0:00:00","{removed}"\n', encoding="utf-8")
+            out = io.StringIO()
+            argv = sys.argv
+            sys.argv = ["compare_tracks.py", str(d / "scan.txt"), "0", str(d / "mkvmerge.json")]
+            try:
+                with contextlib.redirect_stdout(out):
+                    try:
+                        compare_tracks.main()
+                    except SystemExit:
+                        pass
+            finally:
+                sys.argv = argv
+        self.assertIn("MSG:4047 names output track 9, which the prediction does not have", out.getvalue())
+        self.assertIn("CHAPTERS", out.getvalue())
 
     def test_chapter_count_and_duration_are_checked(self):
         verdicts = self.verdicts(
