@@ -218,3 +218,51 @@ a one-time native build and a licence audit of its payload. Two cheap checks on 
 and marker hit rate on the experiment 14 frames (the J4125 has no AVX2), and whether the Tesseract eng unicharset has
 U+266A at all. The CC-BY-SA-4.0 models are shipped unmodified, which needs attribution and the licence text (ShareAlike
 binds adaptations); the owner should confirm that reading before ocrs is adopted.
+
+## Trial (2026-10-06)
+
+Built to answer the first two settling checks above on the mini PC; results to be filled in by the controller.
+
+- `experiments/ocrs-trial/`: a standalone crate (its own workspace) with one binary, `ocrs-trial --detection <file>
+  --recognition <file> --frames <dir> --out <jsonl> [--limit N]`. It pins ocrs =0.13.1, rten =0.26.0 (the only 0.26
+  release, as ocrs requires), image =0.25.10 (png only), serde_json and sha1, loads both models from files with
+  `rten::Model::load_file` (nothing is downloaded), reads every `*.png` of the folder in name order and writes one JSON
+  line per frame (`frame`, `file`, `lines`, `ms` = decode + OCR) and a summary line (frames, ms per frame, model load
+  time, ocrs version, SHA-1 of both models). Its README carries the model licence and attribution.
+- Models: ocrs 0.13.1 documents `.onnx` files, not `.rten`: the CLI's defaults (`ocrs-cli/src/main.rs`) and the
+  library's `examples/download-models.sh` both fetch `https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.onnx`
+  (2499479 bytes, SHA-1 709176816006063da8155f549aa0e44735ed0e9c) and `.../text-recognition.onnx` (9713177 bytes, SHA-1
+  b16f361df884a9afaa067e4d6932567f6f652a81); both were re-uploaded on 2026-09-13, the day 0.13.1 was released. The
+  `.rten` files at the same place date from 2024-01-01 and are not used. The models are CC-BY-SA-4.0 and are never
+  committed; on the mini PC they live in `C:\lazymkv\phase0\models\`.
+- `scripts/phase0/ocrs-trial.ps1 -Slug -Label [-Stream 0] [-Folder subs-ocr] [-Limit N] [-Show 20] [-Force]`: copies one
+  stream's frames from the tuning dataset to C: (refused above 2 GB, always deleted), runs the exe under
+  `lazymkv-capture record`, keeps the text as `ocrs-s<n>.jsonl` beside Tesseract's in the tuning dataset, and writes
+  `ocrs-summary.json` (counts, ocr-subs.ps1's five marker counts, timing, model hashes; no text) to the recording.
+  `tuning-fetch.ps1 -Text` now also fetches `ocrs-s<n>.jsonl`.
+- `scripts/phase0/ocr_compare.py <sub-<n>.ocr.jsonl> <ocrs-s<n>.jsonl> [--rec <recording>/subs-ocr]`: pairs the frames,
+  folds both texts with subtitle_text.py's fold and corrections, and prints numbers only: frames with text in each,
+  exact matches, character error rate, subtitle_text's marker counts, readability and stopword language per engine,
+  the speed of each, and the 10 frames that differ most (lengths and CER).
+
+How to run it (Mac, controller):
+
+```
+ssh -o BatchMode=yes USER@makemkv-box "if not exist C:\lazymkv\phase0\models mkdir C:\lazymkv\phase0\models"
+scp -q -o BatchMode=yes MODELS/text-detection.onnx MODELS/text-recognition.onnx USER@makemkv-box:C:/lazymkv/phase0/models/
+time scripts/box.sh cargo build --release --manifest-path experiments/ocrs-trial/Cargo.toml
+scp -q -o BatchMode=yes USER@makemkv-box:C:/lazymkv/src/experiments/ocrs-trial/Cargo.lock experiments/ocrs-trial/
+ssh -o BatchMode=yes USER@makemkv-box "dir C:\lazymkv\target\release\ocrs-trial.exe"
+scripts/phase0/job.sh ocrs-trial.ps1 ocrs-SLUG-LABEL -Slug SLUG -Label LABEL -Stream N -Limit 50
+scripts/phase0/wait.sh ocrs-SLUG-LABEL
+scripts/phase0/job.sh ocrs-trial.ps1 ocrs-SLUG-LABEL -Slug SLUG -Label LABEL -Stream N -Force
+scripts/phase0/wait.sh ocrs-SLUG-LABEL
+scripts/phase0/pull-recording.sh SLUG
+scripts/phase0/job.sh tuning-fetch.ps1 fetch-SLUG-LABEL -Slug SLUG -Label LABEL -Text
+scripts/phase0/wait.sh fetch-SLUG-LABEL        # then the scp and the clean-up it prints
+python3 scripts/phase0/ocr_compare.py TEXT/sub-N.ocr.jsonl TEXT/ocrs-sN.jsonl --rec corpus/owner/SLUG/LABEL/subs-ocr
+```
+
+Results (to be filled in): build time and exe size on the J4125; whether it runs without SIGILL; ms per frame for ocrs
+and Tesseract; exact-match rate and CER; marker counts and stopword language per engine; what accented letters and
+music notes became.

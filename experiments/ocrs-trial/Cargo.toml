@@ -1,0 +1,24 @@
+[package]
+name = "ocrs-trial"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 0 trial of the pure-Rust ocrs OCR engine on subtitle frames (lazymkv decisions D17/D19)"
+
+# An empty workspace table: this crate is its own workspace, so the root workspace (an explicit member list that
+# does not name experiments/) neither builds it nor locks its dependencies.
+[workspace]
+
+[[bin]]
+name = "ocrs-trial"
+path = "src/main.rs"
+
+# Exact versions, checked on crates.io on 2026-10-06. ocrs 0.13.1 depends on rten ^0.26.0, and 0.26.0 is the only
+# 0.26 release; a model loader from another rten minor would be a second, incompatible rten. "onnx" loads the .onnx
+# models that ocrs 0.13.1 documents (examples/download-models.sh, the CLI's defaults); "rten" also allows .rten files.
+[dependencies]
+ocrs = { version = "=0.13.1", default-features = false, features = ["onnx", "rten"] }
+rten = { version = "=0.26.0", default-features = false }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+serde_json = "=1.0.151"
+sha1 = "=0.10.7"
