@@ -3,6 +3,8 @@
 # The copy goes to $Staging\<Slug>\backup\. The evidence goes to $Recordings\<Slug>\backup\
 # (C:\lazymkv\phase0\recordings\<Slug>\backup\):
 #   backup.txt with .timing.jsonl, .stderr and .exit.json      MakeMKV's backup run, recorded by lazymkv-capture
+#   backup.txt.makemkv-debug.txt, scan-file.txt.makemkv-debug.txt   MakeMKV's debug logs of the two runs (decision D16)
+#   system-events.json   Windows System and SMB client events during the copy (decision D16)
 #   copy-files.txt       one line per file of the copy: its size, a space, its path below the copy's root
 #   scan-file.txt with .timing.jsonl, .stderr and .exit.json   MakeMKV's scan of the copy, with Get-MkFlags
 #   backup-summary.json  timing, size, messages, the copy's layout and the verdict
@@ -59,10 +61,12 @@ try {
     $start = Get-Date
     $summary['started'] = $start.ToString('yyyy-MM-dd HH:mm:ss.fff')
     "copy: $Slug from disc:$index to $dest, started $($summary['started'])"
-    & $CAP record --out "$rec\backup.txt" -- $MK -r --messages=-stdout --progress=-same --cache=1024 backup --decrypt "disc:$index" $dest | Out-Null
+    & $CAP record --out "$rec\backup.txt" -- $MK -r --messages=-stdout --progress=-same --debug --cache=1024 backup --decrypt "disc:$index" $dest | Out-Null
     $summary['exit_code'] = $LASTEXITCODE
     $elapsed = ((Get-Date) - $start).TotalSeconds
     $summary['elapsed_s'] = [int]$elapsed
+    Save-MkDebugLog -Since $start -To "$rec\backup.txt.makemkv-debug.txt"
+    Save-SystemEvents -Since $start -To "$rec\system-events.json"
 
     # The copy's verdict from MakeMKV's messages (spec 6.3).
     $codes = @()
@@ -115,7 +119,9 @@ try {
 
     # The copy's titles, with the same flags as the disc-time scan (spec 9.2).
     $flags = Get-MkFlags
+    $scanStart = Get-Date
     & $CAP record --out "$rec\scan-file.txt" -- $MK @flags info "file:$root" | Out-Null
+    Save-MkDebugLog -Since $scanStart -To "$rec\scan-file.txt.makemkv-debug.txt"
     $exitJson = [string](Get-Content -LiteralPath "$rec\scan-file.txt.exit.json" -Raw -ErrorAction SilentlyContinue)
     $raw = [string](Get-Content -LiteralPath "$rec\scan-file.txt" -Raw -ErrorAction SilentlyContinue)
     $banner = [regex]::IsMatch($raw, '(?m)^MSG:1005,')

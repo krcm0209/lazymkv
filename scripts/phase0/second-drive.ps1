@@ -2,6 +2,7 @@
 # -Letter. Run it over plain ssh: it needs C: and the drive, never the share. It writes
 # $Recordings\<Slug>\drive2\ (C:\lazymkv\phase0\recordings\<Slug>\drive2\):
 #   drives.txt with .timing.jsonl, .stderr and .exit.json   MakeMKV's drive listing (info disc:9999)
+#   drives.txt.makemkv-debug.txt   MakeMKV's debug log of that call (decision D16)
 #   snapshot\meta.json, snapshot\files.json, snapshot\nav\  lazymkv-capture disc for <Letter>:\ (fingerprint, disc ID)
 # Both are made in $P0\tmp\drive2-<Slug> first and moved into the recording only when the disc in <Letter>: has
 # the recording's fingerprint, so a failed run leaves the recording unchanged. Assert-DiscIs is not used because
@@ -41,7 +42,9 @@ try {
     if (-not $ready) { throw "no readable disc in ${Letter}: after 120 s" }
 
     # MakeMKV's view of the drive: its index, its name (the model) and its state.
-    & $CAP record --out "$stage\drives.txt" -- $MK -r --cache=1 info disc:9999 | Out-Null
+    $listStart = Get-Date
+    & $CAP record --out "$stage\drives.txt" -- $MK -r --cache=1 --debug info disc:9999 | Out-Null
+    Save-MkDebugLog -Since $listStart -To "$stage\drives.txt.makemkv-debug.txt"
     $raw = [string](Get-Content -LiteralPath "$stage\drives.txt" -Raw -ErrorAction SilentlyContinue)
     $drv = [regex]::Match($raw, '(?m)^DRV:(\d+),(\d+),\d+,\d+,"([^"]*)","([^"]*)","' + [regex]::Escape("${Letter}:") + '"\s*$')
     if (-not $drv.Success) { throw "MakeMKV lists no drive at ${Letter}: (see $stage\drives.txt)" }

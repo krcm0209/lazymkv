@@ -5,6 +5,7 @@
 # $Recordings\<Slug>\backup\scan-file.txt. The file goes to $Staging\<Slug>\extract\; the evidence goes to
 # $Recordings\<Slug>\extract\ (C:\lazymkv\phase0\recordings\<Slug>\extract\):
 #   extract.txt with .timing.jsonl, .stderr and .exit.json     MakeMKV's run: mkv file:<copy root> <Title> <dir>
+#   extract.txt.makemkv-debug.txt   MakeMKV's debug log of that run; system-events.json   Windows events during it (D16)
 #   mkvmerge.json with .timing.jsonl, .stderr and .exit.json   mkvmerge -J of the extracted file
 #   extract-summary.json   timing, size, messages and the verdict
 # If either folder is not empty the run is refused, unless -Force is given, which deletes both first.
@@ -80,6 +81,8 @@ try {
     $summary['exit_code'] = $LASTEXITCODE
     $elapsed = ((Get-Date) - $start).TotalSeconds
     $summary['elapsed_s'] = [int]$elapsed
+    Save-MkDebugLog -Since $start -To "$rec\extract.txt.makemkv-debug.txt"
+    Save-SystemEvents -Since $start -To "$rec\system-events.json"
 
     $codes = @()
     $successLine = $null
