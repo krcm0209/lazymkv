@@ -4,7 +4,7 @@
 # $Staging\<Slug>\<Label>\. It reads the subtitle streams given with -Streams, or else every subtitle stream whose
 # language tag is in -Languages (default eng and und; a stream without a tag counts as und; "all" reads every one).
 # For each: ffmpeg draws the stream (-Render canvas: on a black canvas that ticks at -Fps; -Render changes: only when
-# the subtitle changes, not yet timed), keeps one frame per change (mpdecimate), inverts it (dark text on white, which
+# the subtitle changes), keeps one frame per change (mpdecimate), inverts it (dark text on white, which
 # Tesseract reads best) and writes PNG frames named by their time to a work folder on C:; tesseract then reads all of
 # a stream's frames in one call. The work folder of a stream is deleted once its frames are in the tuning dataset, so
 # at most one stream's frames are on C: at any time.
@@ -150,9 +150,14 @@ try {
             # subtitle changes.
             $graph = "[0:s:${n}]negate,format=gray,mpdecimate,showinfo[v]"
         }
+        # canvas: vfr drops nothing (mpdecimate already thinned the ticking canvas) and the file name carries the
+        # frame's tick. changes: two frames can share a timestamp (a subtitle replaced in the same instant), which
+        # vfr would drop and -frame_pts would overwrite; passthrough with plain numbering keeps every frame
+        # showinfo logged, and the time comes from showinfo by index.
+        $muxArgs = if ($Render -eq 'canvas') { @('-fps_mode', 'vfr', '-frame_pts', '1') } else { @('-fps_mode', 'passthrough') }
         $t0 = Get-Date
         & $CAP record --out "$out\ffmpeg-$n.txt" -- $FFMPEG -hide_banner -nostats -v info -y -canvas_size $size -i $evidence `
-            -filter_complex $graph -map '[v]' -fps_mode vfr -frame_pts 1 -f image2 "$sdir\f-%08d.png" | Out-Null
+            -filter_complex $graph -map '[v]' @muxArgs -f image2 "$sdir\f-%08d.png" | Out-Null
         $ffmpegS = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
         if ($LASTEXITCODE -ne 0) { throw "ffmpeg exited $LASTEXITCODE on stream s:${n}; see ffmpeg-$n.txt.stderr" }
         $frames = @(Get-ChildItem -LiteralPath $sdir -Filter 'f-*.png' -ErrorAction Stop | Sort-Object Name)
