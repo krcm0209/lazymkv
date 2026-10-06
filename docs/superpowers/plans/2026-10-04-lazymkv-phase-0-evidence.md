@@ -40,6 +40,7 @@
 - Commit commands take the form `git commit -m "<message>" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 - The saving message is `MSG:5014`, or `MSG:5015` when a profile is in use. Found on 2026-10-05, on the first real rip: with `--profile`, MakeMKV 2.0.0 prints `MSG:5015` ("Saving %1 titles into directory %2 using profile '%3' from file '%4'") and no `MSG:5014`. Every rip in this plan uses a profile. Wherever a task says `MSG:5014`, read "`MSG:5014` or `MSG:5015`"; the scripts accept both, and their labels (`5014=`, `saw_5014`, `stopped-at-5014`, `added-before-5014`) keep their names and are true for either code. A `codes=` list then ends in 5015. The profile named in the `MSG:5015` line is the proof that MakeMKV used the job profile.
 - Decision D16 (owner, 2026-10-05): every MakeMKV call runs with `--debug` (`Get-MkFlags` adds it) and its debug log, which MakeMKV 2.0.0 always writes to `%USERPROFILE%\MakeMKV_log.txt`, is kept beside the call's output as `<output>.makemkv-debug.txt` by `Save-MkDebugLog`. With `--debug` the robot output also carries `MSG:1004` and `MSG:1003` lines. Every rip also keeps `system.csv` (CPU load, free RAM and bytes written every 5 s) and `system-events.json` (Windows warnings and errors about storage, USB and the network during the rip). A script that calls MakeMKV without `Get-MkFlags` adds `--debug` and calls `Save-MkDebugLog` itself.
+- Tuning dataset (decision D16): every rip that ends `RESULT ok` is added to the audio tuning dataset after its probe and pull, while the rip is still in staging, and at the latest before its task's commit. `python3 scripts/phase0/audio_dataset.py args corpus/owner/<slug> <label>` prints one `scripts/phase0/job.sh audio-levels.ps1 ...` line and its `wait.sh` line per language with two or more audio streams, or one job for the reference alone. Run each pair, then `scripts/phase0/pull-recording.sh <slug>`, `python3 scripts/phase0/audio_labels.py auto corpus/owner/<slug>` and `python3 scripts/phase0/audio_dataset.py`. audio-levels.ps1 writes, besides its level folder, a compact copy of every audio stream (`audio-proxy.mka`: FLAC, 8 kHz, mono, 24 bit) and a copy of the level folder to `$TuningData\<slug>\<label>\` (`\\unas-pro\media\lazymkv-tuning`); it writes `audio-proxy.json` into the level folder last, so a level folder without it is from a run that did not finish. The harness's last list names every successful rip not yet in the dataset. A rip in staging is deleted only once that list no longer names it. Nothing under `$TuningData` is deleted without the owner's say. The one exception to writing large files only to the share (never to `C:`): a proxy may be copied to C:\lazymkv\phase0\tmp\tuning-fetch for the minutes an scp takes, at most 2 GB, deleted right after. `scripts/phase0/tuning-fetch.ps1 -Slug <slug> -Label <label>` (a job) makes that copy of one title's dataset folder, refuses more than 2 GB or a second copy while one is still there, and prints the size, the `scp` command and the clean-up command; the Mac runs the clean-up command immediately after the `scp`. It is needed only when a future measure needs the proxies on the Mac, never in this routine. The owner's label for each measured track is asked for without showing any verdict and is recorded only with `audio_labels.py set` or `unset` (never by editing the JSON); whether a label counts for experiment 13 is worked out by the harness, never stored. `audio_dataset.py` exits 1 when a track the owner labelled as programme audio gets a drop verdict, when a level folder is measured against the wrong reference, or when a reference is labelled as unwanted audio (stop and report); 2 when a labels file does not validate; 3 when something could not be checked (level files missing, a label with no measurement, a measured track gone).
 - MakeMKV removes a forced-only subtitle track that turns out to be empty and says so with `MSG:4047` ("Forced subtitles track #N turned out to be empty and was removed from output file", after `MSG:4007`). Found on the same rip. A ripped file can therefore hold fewer tracks than the scan lists; such a difference is explained, not a failure, when a `MSG:4047` line names the missing stream.
 
 ## Owner inputs needed during execution
@@ -4320,6 +4321,7 @@ Expected:
 - Create: `docs/phase0/experiments/EXP-01-profile-and-order.md`, `docs/phase0/experiments/EXP-04-rip-to-share.md`
 - Create (pulled from the mini PC): `corpus/owner/SLUG/rehearsal/`, `corpus/owner/SLUG/all-tracks/`, `corpus/owner/SLUG/share-drop/`, and when their steps run, `corpus/owner/SLUG/share-drop-2/`, `corpus/owner/SLUG/all-tracks-512/`, `corpus/owner/SLUG/all-tracks-256/`
 - Prerequisite, applied and committed by the controller before this task: `scripts/phase0/run-interactive.ps1` (`-NonInteractive`)
+- Create (pulled from the mini PC): `corpus/owner/SLUG/<label>/audio-levels-20ms-<M>[-<C>...]/` for every successful rip (its level files are ignored by git; `streams.json`, `proxy-check.json` and `audio-proxy.json` are committed); modify `corpus/owner/audio-dataset.json`; create or modify `corpus/owner/SLUG/audio-labels.json`.
 
 **Interfaces:**
 - Consumes:
@@ -4327,6 +4329,7 @@ Expected:
   - `lazymkv-capture record --out <file> -- <command...>`: writes `<file>` (the command's standard output), `<file>.timing.jsonl` (one `{"n":<line>,"t_ms":<ms since start>}` per line), `<file>.stderr` and, when the command has ended, `<file>.exit.json` (`exit_code`, `elapsed_ms`, `lines`). Its own exit code is the command's, or 2 when the tool itself fails.
   - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/pull-recording.sh <slug>` (Task 8: never deletes on the Mac), `scripts/phase0/setup-check.ps1` (Task 7), `scripts/phase0/summarize_scan.py <recording dir>`, `scripts/phase0/compare_tracks.py <scan> <title> <mkvmerge json> [--selection all|eng]` (exits 1 when any verdict is no), `scripts/phase0/robot.py` (`parse`).
   - Disc A's recording from Task 9: `C:\lazymkv\phase0\recordings\SLUG\` and `corpus/owner/SLUG/`, with `meta.json` and `scan.txt` (the online scan, made with `Get-MkFlags`' defaults: the all-tracks profile and `--cache=1024`).
+  - Prerequisite D16, applied by the controller before this task: `scripts/phase0/audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]` (a job), `scripts/phase0/audio_dataset.py [args corpus/owner/<slug> <label>]`, `scripts/phase0/audio_labels.py` (`auto`, `set`, `unset`, `title`, `kinds`, `check`), and `$TuningData` from env.ps1.
 - Produces:
   - `scripts/phase0/rip-title.ps1 -Slug <slug> -Title <n> -Label <name> [-Profile <path>] [-CacheMb <n>] [-Force]`. Run it as a job: `scripts/phase0/job.sh rip-title.ps1 <log> -Slug <slug> -Title <n> -Label <name> ...`. A `-Profile` path typed in the Mac shell must be in single quotes there (`-Profile 'C:\lazymkv\phase0\profiles\eng-only.mmcp.xml'`), or bash deletes its backslashes; job.sh receives it without quotes. `-Profile` defaults to `$AllTracksProfile`, `-CacheMb` to 1024.
     - It refuses before anything is created or deleted in the recording or on the share (only Assert-DiscIs's own `$P0\tmp\disc-check` is written), when:
@@ -5267,7 +5270,86 @@ Answer yes if free RAM stayed at 1 GB or more and no slow-write message appeared
 - whether makemkvcon exits after a drop, for spec 10.4's `exit_wait_min`;
 - the measured file-phase time replaces the estimate in spec section 18.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 11: Add this task's rips to the tuning dataset (decision D16)**
+
+In this step SLUG and LABEL stand for the slug and the label of the title being added, whichever disc it belongs to; they replace Task 11's placeholders of the same names here.
+
+Which disc is in the drive: Disc A stays in (not used). The jobs read only the share.
+
+List the rips still to add:
+
+```bash
+python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
+```
+
+Expected: one line `Titles whose audio is in the tuning dataset (audio-proxy.json): <a> of <b> ...; missing: ...`. Every SLUG/LABEL it names under `missing` is a rip of this task that ended `RESULT ok` (normally `rehearsal` and `all-tracks`, and any `share-drop`, `share-drop-2`, `all-tracks-512` or `all-tracks-256` that succeeded), or a title of an earlier task. Do the following for each SLUG/LABEL named, one title at a time.
+
+```bash
+python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL
+```
+
+Expected: `SLUG/LABEL: <n> audio streams (from <source>)`, one `stream <n>: <codec> ... lang=<code>` line per audio stream, then one or more pairs of lines `scripts/phase0/job.sh audio-levels.ps1 audio-levels-SLUG-LABEL[-M] -Slug SLUG -Label LABEL -Main M[ -Cand C,...]` and `scripts/phase0/wait.sh audio-levels-SLUG-LABEL[-M]`. `<source>` is `ffprobe-streams.json`, or for a rip Steps 8 and 9 did not probe, `<other label>/ffprobe-streams.json: a rip of the same title <t> with the same size, <b> bytes`. When neither exists, `args` exits 2 and prints instead the two lines `scripts/phase0/job.sh probe-title.ps1 probe-LABEL -Slug SLUG -Label LABEL -SkipRemux` and its `wait.sh` line: run them (with Step 6's exit-code handling), pull, and run `args` again. Run the printed audio-levels pairs in order, one job at a time.
+
+What wait.sh's exit codes mean for these jobs:
+- **0**: check the log against the Expected below.
+- **1**: read the `RESULT FAILED:` line.
+  - Assert-Slug, `is the main stream and cannot also be a candidate`, `a candidate stream is listed twice`, `the file has no stream` or `is ... not audio`: the job line was not copied as printed. Start it again as printed, with `-b` added to the log name in both commands.
+  - `already exists and is kept as evidence`: this title was measured before by a run that finished. Go on with the next pair; the harness below confirms that the title is no longer missing (if it still is, stop and report).
+  - `is from a run that did not finish (it has no audio-proxy.json ...), or from before D16: repeat with -Force`: an earlier run of this pair failed after making its folders. If that failure was not reported yet, pull the recording and read its `ffmpeg.txt` first. Then start the job again as printed with `-Force` added and `-b` in the log name. A finished proxy of the same file is kept (`proxy: kept ...`).
+  - `describes a proxy of ... but staging holds ...`: the dataset holds a proxy of another rip of this label. Stop and report; only the controller decides on `-Force` here, after comparing the two files.
+  - `cannot reach the staging share`, `cannot reach the tuning dataset`, `Access ... is denied` or `Cannot find path`: run `scripts/phase0/job.sh setup-check.ps1 setup-check-tuning-LABEL` and `scripts/phase0/wait.sh setup-check-tuning-LABEL`. Its staging and tuning lines must say `write, rename and delete OK`. wait.sh exits 0: read the log; 1 or 4: stop and report with the log; 3: run wait.sh again; 5: run it again once the mini PC can be reached. If one says `FAILED`, ask the owner to check the NAS and run the check again with `-b`. Then start the audio-levels job again with `-b`, with `-Force` only if the job now says `did not finish`.
+  - `expected one .mkv in ... found 0`: the rip is no longer in staging. Write "LABEL: not in the tuning dataset (rip deleted)" in this task's report and go on.
+  - `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `ffmpeg wrote no raw-`, `holds no level`, `proxy check failed` (including `may be clipped`), `the copy of ... in the dataset differs` or `the ffmpeg command line is`: pull the recording and read `corpus/owner/SLUG/LABEL/audio-levels-20ms-*/ffmpeg.txt` (`ffprobe.txt` after `ffprobe failed`) and `command.txt`; stop and report. `.partial` files on the share are removed by the script. A repeat after the fix adds `-Force`: these failures happen after the folders were made, and only for them is `-Force` right.
+  - Anything else: stop and report with the log.
+- **3**: still running. The job reads the whole file from the share once: a few minutes for an episode, and an hour or more for a UHD feature. Run wait.sh again, and start nothing else meanwhile. If three hours pass without a DONE line, end ffmpeg (not the job) with `ssh USER@makemkv-box "taskkill /im ffmpeg.exe /f"` and run wait.sh again: it exits 1 with `ffmpeg failed`. Stop and report.
+- **4**: the job ended without a DONE line: stop and report.
+- **5**: the mini PC cannot be reached. Run wait.sh again once it can.
+
+Expected (exit 0), in the log:
+- possibly `dataset: created \\unas-pro\media\lazymkv-tuning` and `dataset: removed ..., left by an interrupted run` first;
+- `levels: <file>.mkv main=M cand=<C or nothing> centre=<True|False> ffmpeg_exit=0 seconds=<s> folder=audio-levels-20ms-M[-C...]`. Note `seconds` with the title's running time and size: the J4125's cost of the pass;
+- one `stream <n>: ... frames=<n> md5=<32 hex characters>` line for M and for each candidate. A line ending `(layout guessed by ffmpeg: <name>)` is a stream whose layout ffprobe could not name (LPCM in Matroska reports `unknown`): note it for EXP-06;
+- `proxy: \\unas-pro\media\lazymkv-tuning\SLUG\LABEL\audio-proxy.mka tracks=<k> bytes=<b> (<n> mix, <n> fc, <n> side, ...)`: one `mix` for every audio stream of the file, in file order, one `fc` after each stream whose layout has a centre channel (5.1, 7.1), and one `side` after each two-channel stream. `bytes` is about 51 MB per hour of running time per track, and between 40 and 70 MB; outside that range, note it. A second job on the same LABEL prints `proxy: kept ... (made by an earlier run from this same file)` instead;
+- `dataset: \\unas-pro\media\lazymkv-tuning\SLUG\LABEL\audio-levels-20ms-...`, `RESULT ok`, `PHASE0-DONE status=ok exit=<n>`.
+
+When every pair of the title has ended `RESULT ok`:
+
+```bash
+scripts/phase0/pull-recording.sh SLUG
+python3 scripts/phase0/audio_labels.py auto corpus/owner/SLUG
+python3 scripts/phase0/audio_dataset.py; echo "exit=$?"
+```
+
+Expected:
+- `pulled corpus/owner/SLUG (...)`.
+- `auto` prints a line `labelled LABEL stream <n>: duplicate (md5), counts=False (a duplicate track never counts)` or `... derived-core (flag), counts=True` for each such track, or `nothing to label automatically`. A line `LABEL: derived cores not labelled: the file has <a> audio streams and the scan's title <t> has <b>` means the streams could not be matched by position. Label the cores by hand from Step 6's compare_tracks table (`audio_labels.py set ... derived-core --how flag --saw-verdict no`).
+- The harness prints its sections, then `RESULT ok` and `exit=0`. LABEL is no longer under `missing` in its last list. A note `... takes its label from <label> stream <n> (same packets)` is normal for a title ripped twice.
+- `exit=1` with `RESULT FAILED: ...`: read its `FAIL` lines and stop and report with them.
+  - `labelled <kind> (programme audio), verdict <commentary|duplicate>`: a track the owner labelled as programme audio got a drop verdict. On a counted track this is experiment 13's answer "no" in the making; otherwise it may be a wrong label.
+  - `wrong reference: measured against stream <M> ..., but the top-ranked <lang> stream is <X>`: that level folder was measured with another `-Main` than `args` prints. Its tracks are left out.
+  - `the reference is labelled <kind> (unwanted audio)`: a label is on the wrong stream, or the reference is not what its ranking says.
+- `exit=2`: a labels file (or `corpus/owner/audio-fitted.json`) does not validate, or the spec's row 13 can no longer be read. The message names the file and the problem. Repair it only with `audio_labels.py set` or `unset` (each repairs one entry and prints the problems left), and run again.
+- `exit=3` with `RESULT FAILED: not everything was checked: ...`: read `Folders that cannot be read`, `Labels without a measurement` and the `gone:` line.
+  - `its level files are not here`: pull the recording again (`pull-recording.sh SLUG`); if it is still missing, stop and report.
+  - A label without a measurement whose stream number is wrong: `python3 scripts/phase0/audio_labels.py unset corpus/owner/SLUG LABEL <stream> --note "<why>"`, then label the right stream.
+  - `gone: ...`: tracks of the last committed snapshot are no longer measured. Stop and report. The baseline snapshot is not replaced by such a run.
+
+The owner's labels: the harness's `To label` list names every measured track without a label, with its position in a player and its track name (and `they disagree` when two rips with the same packets were labelled differently). When the owner has time (this does not hold up the next step), ask what each track is, as Task 12 Step 18 describes, without showing any verdict. Then record each answer, and once per title its kind:
+
+```bash
+python3 scripts/phase0/audio_labels.py kinds
+python3 scripts/phase0/audio_labels.py set corpus/owner/SLUG LABEL STREAM KIND --how HOW --saw-verdict no [--sure no] --note "<the owner's words>"
+python3 scripts/phase0/audio_labels.py title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
+python3 scripts/phase0/audio_dataset.py; echo "exit=$?"
+```
+
+Placeholders in these two lines: STREAM is the ffprobe stream number from the harness's To-label line; KIND one of the kinds `python3 scripts/phase0/audio_labels.py kinds` lists; HOW one of listened, packaging, menu, flag, thediscdb or md5; TITLE_KIND one of feature, episode, extra or other; DIALOGUE one of yes, no or unknown.
+
+Add `--film-audible yes` or `no` for a commentary (is the film clearly audible under the voices?). Add `--sure no` when the owner is guessing ("probably"); the label is kept and does not count. Use `--saw-verdict yes` if the owner had seen a verdict for that track: the label is then kept but does not count for experiment 13. Expected: `labelled LABEL stream <n>: <kind> (<how>, <date>, saw verdict no, sure yes), counts=True`, or `counts=False (<why>)` for a duplicate, an `inferred` or unsure label, or a disc or track the thresholds were fitted on; `title LABEL: <kind>, dialogue_heavy=<...>`; and the harness as above. A label given again replaces the old one, which is kept in its history (`replaces 1 earlier label(s)`). The same title ripped again under another label (a cache repeat) takes its labels from identical packets and needs none.
+
+In this step's Commit (Step 12), `git status --short` also lists `corpus/owner/SLUG/audio-labels.json` (once labels exist), `corpus/owner/audio-dataset.json`, and in each new `audio-levels-20ms-*` folder `streams.json`, `proxy-check.json` and `audio-proxy.json`. No `*.txt` level file appears.
+
+- [ ] **Step 12: Commit**
 
 Which disc is in the drive: does not matter. Disc A stays in for Task 12.
 
@@ -5884,48 +5966,46 @@ Put the `## Coverage` section from Step 9 (the one made again in Step 11 when CL
 
 **Experiment 13 (added 2026-10-05).** The owner asked for a content-based way to tell commentary and audio description from the programme's own audio. Steps 13 to 21 measure it on every extra same-language audio track of the titles this task rips. The first two steps and the Office disc's two rips were done on 2026-10-05, when the design was made; their results are in `corpus/owner/the-office-2005-s3d3-bluray/`.
 
-These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by Step 21 below. In them, "the design" is `docs/phase0/experiments/EXP-13-design.md` (this file, committed there by the controller before Task 12 runs). Task 12's header gains:
+These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by Step 22 below. In them, "the design" is `docs/phase0/experiments/EXP-13-design.md` (this file, committed there by the controller before Task 12 runs). Task 12's header gains:
 
 - **Files:**
   - Prerequisite, committed by the controller before this task: `docs/phase0/experiments/EXP-13-design.md` (the design).
-  - Modify: `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py`, `scripts/phase0/test_audio_similarity.py` (contents in `docs/phase0/experiments/EXP-13-design.md`, section 6, "Changes to the measurement scripts").
+  - Already applied by the controller, not changed by this task: `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py` and `scripts/phase0/test_audio_similarity.py` (EXP-13 commit 731247d, then the D16 prerequisite, which also added `audio_dataset.py`, `audio_labels.py`, `proxy_levels.py`, `test_audio_dataset.py` and `tuning-fetch.ps1`). EXP-13-design.md section 6 holds the pre-D16 versions: never copy them over the scripts.
   - Create: `docs/phase0/experiments/EXP-13-commentary-by-audio.md`.
   - Create (pulled from the mini PC): `corpus/owner/<slug>/<label>/audio-levels-20ms-<M>-<C...>/`. Its level files are ignored by git; its `streams.json` is committed.
   - Create (on the Mac): `corpus/owner/<slug>/<label>/audio-content-20ms-<M>-<C...>.txt`.
   - Append to (on the Mac only): a `## Experiment 13 (Task 12)` section in `corpus/owner/<slug>/notes.md` for every disc measured.
-- **Produces:** `audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> -Cand <stream>[,<stream>...] [-Force]`, run as a job. Its log lines are `levels: <file> main=<M> cand=<C,...> centre=<True|False> ffmpeg_exit=<n> seconds=<s> folder=<folder>`, one `stream <n>: <codec> <channels> ch <layout> <language> frames=<n> md5=<hash>` line per stream, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1.
+  - Create or modify: `corpus/owner/<slug>/audio-labels.json` for every disc measured, and `corpus/owner/audio-dataset.json`.
+- **Produces:** `audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]`, run as a job. Its log lines are possibly `dataset: created ...` and `dataset: removed ...`, then `levels: <file> main=<M> cand=<C,... or nothing> centre=<True|False> ffmpeg_exit=<n> seconds=<s> folder=<folder>`, one `stream <n>: <codec> <channels> ch <layout> <language> frames=<n> md5=<hash>[ (layout guessed by ffmpeg: <name>)]` line per measured stream, `proxy: <path> tracks=<k> bytes=<b> (<stream> <mix|fc|side>, ...)` or `proxy: kept <path> ...`, `dataset: <path>`, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1. `audio_dataset.py` (the harness, `args`) and `audio_labels.py` as in the Global Constraints.
 
 Placeholders for Steps 15 to 18:
-- **TITLES** is the list of (SLUG, LABEL) pairs whose ripped file has two or more audio streams in one language:
-  - `the-office-2005-s3d3-bluray` with `e16-stereo` and with `rehearsal`;
-  - SLUG_A with `all-tracks` (Task 11);
-  - each NEW with `all-tracks` from Steps 6 to 8;
-  - each pair ripped in Step 19.
+- **TITLES** is fixed when Step 15 starts, and written at the top of this task's report: every (SLUG, LABEL) pair that `python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'` lists as missing at that moment, plus the pairs of the old list below that are not in it (already in the dataset, for example the Office titles after the D16 backfill; for them Step 16 says `already exists`, and Steps 17 and 18 still run), plus each pair ripped in Step 19 as it is ripped. A title with fewer than two audio streams in every language is measured with its reference alone (no `-Cand`), for the dataset only. The old list: `the-office-2005-s3d3-bluray` with `e16-stereo`, `rehearsal` and `t3-all-tracks`; SLUG_A with `all-tracks` (Task 11); each NEW with `all-tracks` from Steps 6 to 8.
 - **M** is the reference stream number and **C** the candidate list, both chosen in Step 15. **CS** is C with hyphens in place of commas.
 - **LOG** is `audio-levels-SLUG-LABEL`, with `-M` appended when one label is measured for two languages, and `-2`, `-3` and so on appended on a repeat.
 
-When `-Force` is right for `audio-levels.ps1`: only to repeat a measurement that failed after its folder was created. That means a `RESULT FAILED:` reason beginning `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `ffmpeg wrote no raw-` or `<series>.txt holds no level`, once the cause has been dealt with. A refusal before that (among them `ffmpeg -layouts printed no table of channel layouts`, `cannot reach the staging share` and `expected one .mkv`) wrote nothing and is repeated without `-Force`. Never over a folder whose run ended `RESULT ok`.
+When `-Force` is right for `audio-levels.ps1`: only to repeat a measurement that failed after its folders were created: a `RESULT FAILED:` reason beginning `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `ffmpeg wrote no raw-`, `<series>.txt holds no level`, `proxy check failed` or `the copy of ... in the dataset differs`, once the cause has been dealt with, and a refusal saying `is from a run that did not finish ...: repeat with -Force`. A refusal before that (among them `ffmpeg -layouts printed no table of channel layouts`, `cannot reach the staging share` and `expected one .mkv`) wrote nothing and is repeated without `-Force`. Never over a folder whose run ended `RESULT ok` (it says `already exists and is kept as evidence`), except in the D16 prerequisite's backfill.
 
 - [ ] **Step 13: Write and test the measurement scripts**
 
 Which disc is in the drive: does not matter (this runs on the Mac).
 
-Replace `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py` and `scripts/phase0/test_audio_similarity.py` with the contents given in `docs/phase0/experiments/EXP-13-design.md`, section 6, "Changes to the measurement scripts". Then:
+The scripts are already in place: the controller applied EXP-13-design.md section 6 (commit 731247d) and then the D16 prerequisite, which changed `audio-levels.ps1` and `audio_similarity.py` again. Do not replace any script, and never copy section 6 of the design over them: that would undo D16 (no proxy, `-Cand` mandatory, no `results()` for the harness). Only check:
 
 ```bash
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
 python3 -c "open('scripts/phase0/audio-levels.ps1', 'rb').read().decode('ascii'); print('audio-levels.ps1 is ASCII')"
 grep -c 'measure_overall=RMS_level' scripts/phase0/audio-levels.ps1
+grep -c 'def results' scripts/phase0/audio_similarity.py
 python3 scripts/phase0/audio_similarity.py corpus/owner/the-office-2005-s3d3-bluray/e16-stereo/audio-levels-1-3; echo "exit=$?"
 ```
 
 Expected:
-- the unit tests end `Ran <n> tests` and `OK`, with `<n>` 12 more than before this step (`test_audio_similarity.py` goes from 6 tests to 18);
+- the unit tests end `Ran 97 tests` (or more, if later tasks added tests) and `OK`;
 - `audio-levels.ps1 is ASCII`;
-- `1`;
+- `1`, then `1`;
 - one line ending `this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>`, and `exit=1`: the first measurement's folder is refused, with no number printed.
 
-A failing test, a `UnicodeDecodeError`, or any measure printed for the old folder is a defect in this step: fix it before going on.
+A failing test, a `0` from either grep, a `UnicodeDecodeError`, or any measure printed for the old folder means the scripts are not the D16 ones: stop and report.
 
 - [ ] **Step 14: Check the measurement script on the mini PC**
 
@@ -5971,7 +6051,7 @@ print(f"{slug}/{label}: title {rip['title']}, {len(audio)} audio streams in the 
 
 def lossless(s):
     c = str(s.get("codec_name", ""))
-    return c in ("truehd", "mlp", "flac") or c.startswith("pcm") or s.get("profile") == "DTS-HD MA"
+    return c in ("truehd", "mlp", "flac") or c.startswith("pcm") or "DTS-HD MA" in str(s.get("profile") or "")
 
 
 groups = {}
@@ -5998,6 +6078,8 @@ Expected:
 - One `language <xxx>: -Main M -Cand C` line per language with two or more streams. M is the top-ranked stream: most channels, then lossless, then the earlier stream, as in spec 8.6 step 3. Measure the English line and, when the TMDb original language is not English, that language's line. Keep derived cores (`derived`) and flagged streams in C: a core is a real lossy companion of the reference, and a flag is a free label.
 - For the Office disc the lines are `language eng: -Main 1 -Cand 2,3` (e16-stereo) and `language eng: -Main 1 -Cand 2,3,4` (rehearsal).
 
+The same choice, as ready job lines, is printed by `python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL` (for the Office titles: `-Main 1 -Cand 2,3` for e16-stereo and t3-all-tracks, `-Main 1 -Cand 2,3,4` for rehearsal). For a title with no `language` line above, it prints one job with `-Main M` alone; use that line in Step 16.
+
 If the two counts of audio streams differ, match the streams by codec, channels and language by hand, and say so in the report.
 
 - [ ] **Step 16: Measure each title**
@@ -6022,14 +6104,17 @@ What wait.sh's exit codes mean for this job:
   - `the file has no stream`, `is ... not audio`, `is the main stream and cannot also be a candidate` or `a candidate stream is listed twice`: M or C is wrong. Repeat Step 15 for this title, then start again with log `LOG-2`.
   - An error reading the share (`cannot reach the staging share`, `Cannot find path` or `Access ... is denied`): run `scripts/phase0/job.sh setup-check.ps1 setup-check-LOG` and `scripts/phase0/wait.sh setup-check-LOG`, and proceed as in Step 3.
   - `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `wrote no raw-` or `holds no level`: pull the recording (`scripts/phase0/pull-recording.sh SLUG`), read `corpus/owner/SLUG/LABEL/audio-levels-20ms-M-CS/ffprobe.txt` (after `ffprobe failed`) or `.../ffmpeg.txt` (otherwise; it is written only once ffmpeg has run), and stop and report. A repeat after the fix adds `-Force` (see "When -Force is right" above).
+  - `cannot reach the tuning dataset`, `describes a proxy of ... but staging holds ...`, `proxy check failed`, `the copy of ... in the dataset differs`, `the ffmpeg command line is` or `is from a run that did not finish`: each is handled as in Task 11 Step 11.
   - Any other reason (`ffmpeg not found`, `ffprobe not found`, `ffmpeg -layouts printed no table of channel layouts`, or any other error message from the script or from PowerShell): stop and report with the log, and do not repeat the job before the cause is known.
-- **3**: still running. A Blu-ray episode should take a few minutes; a feature film may take up to an hour (not yet measured). Run wait.sh again, and start nothing else meanwhile. If 90 minutes pass without a DONE line, end ffmpeg (not the job) with `ssh USER@makemkv-box "taskkill /im ffmpeg.exe /f"`, run wait.sh again (it then exits 1), and stop and report.
+- **3**: still running. A Blu-ray episode should take a few minutes; a feature film may take up to an hour (not yet measured). Run wait.sh again, and start nothing else meanwhile. If three hours pass without a DONE line, end ffmpeg (not the job) with `ssh USER@makemkv-box "taskkill /im ffmpeg.exe /f"`, run wait.sh again (it then exits 1), and stop and report.
 - **4**: the job ended without a DONE line: stop and report.
 - **5**: the mini PC cannot be reached. Run wait.sh again once it can.
 
 Expected (exit 0), in the log:
-- `levels: <name>.mkv main=M cand=C centre=<True or False> ffmpeg_exit=0 seconds=<n> folder=audio-levels-20ms-M-CS`. `centre` is True for 5.1 and 7.1 references and False for mono and 2.0 ones. It is also False when ffprobe cannot name the reference's layout (its `stream M:` line shows `unknown` or `<n> channels`): the mixdown is then the dialogue curve; note such a title for the report. A reference whose `stream M:` line shows a layout such as `5.1(side)` or `7.1` with `centre=False` is a defect: stop and report with the log. `seconds` is the cost on the J4125: write it down with the title's running time.
+- `levels: <name>.mkv main=M cand=C centre=<True or False> ffmpeg_exit=0 seconds=<n> folder=audio-levels-20ms-M-CS`. `centre` is True for 5.1 and 7.1 references and False for mono and 2.0 ones. When ffprobe cannot name the reference's layout (`unknown`, as LPCM in Matroska reports it, or `<n> channels`), the script takes ffmpeg's own guess for that channel count and its `stream M:` line ends `(layout guessed by ffmpeg: <name>)`: `centre` is then True for 4 to 8 channels (4.0, 5.0, 5.1, 6.1, 7.1) and False for 3 (2.1). Note such a title for the report. A reference whose `stream M:` line shows a layout such as `5.1(side)` or `7.1` with `centre=False` is a defect: stop and report with the log. `seconds` is the cost on the J4125: write it down with the title's running time.
 - One `stream <n>: ...` line for M and for each candidate, with `frames=<n>` (about 50 per second of running time) and `md5=<32 hex characters>`. Candidates whose frame count is more than 1% away from M's are judged on their overlap only; note them.
+- `proxy: \\unas-pro\media\lazymkv-tuning\SLUG\LABEL\audio-proxy.mka tracks=<k> bytes=<b> (<n> mix, <n> fc, <n> side, ...)`: one `mix` for every audio stream of the file, in file order, one `fc` after each stream whose layout has a centre channel (5.1, 7.1), and one `side` after each two-channel stream. `bytes` is about 51 MB per hour of running time per track, and between 40 and 70 MB; outside that range, note it. A second job on the same LABEL prints `proxy: kept ... (made by an earlier run from this same file)` instead.
+- `dataset: \\unas-pro\media\lazymkv-tuning\SLUG\LABEL\audio-levels-20ms-...`.
 - `RESULT ok`, then `PHASE0-DONE status=ok exit=<n>`.
 - For the Office disc: e16-stereo streams 1, 2 and 3 have three different MD5s. In rehearsal, stream 3's MD5 equals stream 1's and stream 4's equals stream 2's, as notes.md found with an MD5 of each stream's packets.
 
@@ -6045,6 +6130,7 @@ python3 scripts/phase0/audio_similarity.py corpus/owner/SLUG/LABEL/audio-levels-
 Expected:
 - `pulled corpus/owner/SLUG (...)`.
 - The analysis begins with the folder, the file name and `measured in <n> s`, then `main stream M: ...; dialogue reference: its centre channel` (or `its mono mixdown (no centre channel)`).
+- A folder measured with the reference alone prints `no candidate stream: nothing to judge (measured for the tuning dataset only)` after the main-stream line: it has no row for notes.md.
 - Then, for each candidate, either `verdict: duplicate of stream <n>` with its `row:` line, or:
   - the lag and overlap line;
   - the `DC ... AG ... tenths ... SMI ... LS ... ADL ... added` line;
@@ -6088,6 +6174,15 @@ Reference streams: <label> stream <M> (<codec> <channels> ch <language>), ...
 
    The middle column is the `row:` line's measures and verdict. A duplicate's middle column is `same packets as stream <n>: duplicate`.
 4. For the Office disc, e16-stereo stream 3's owner column is `commentary (listened, 2026-10-05)`. That is already recorded under "Owner's ground truth".
+5. Record every answer in the disc's labels file as well, never by editing it:
+
+   ```bash
+   python3 scripts/phase0/audio_labels.py auto corpus/owner/SLUG
+   python3 scripts/phase0/audio_labels.py set corpus/owner/SLUG LABEL STREAM KIND --how HOW --saw-verdict no [--sure no] [--film-audible yes|no] --note "<the owner's words>"
+   python3 scripts/phase0/audio_labels.py title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
+   ```
+
+   Expected: one `labelled ...` line per track, and `title LABEL: ...`. The kinds (`audio_labels.py kinds`) are those of item 1: `main`, `lossy-companion`, `derived-core`, `alternate-mix`, `isolated-score`, `music-effects`, `same-language-dub`, `foreign-dub`, `alternate-narration`, `commentary`, `partial-commentary`, `audio-description`, `other-speech`, `laugh-track-version`, `sing-along`, `unknown`, plus `duplicate`. An answer the owner is not sure of ("probably") gets `--sure no`. The Office disc's labels are already recorded, and its tracks never count.
 
 - [ ] **Step 19: Add discs until the experiment's kinds are covered**
 
@@ -6125,8 +6220,8 @@ Which disc is in the drive: the disc being added, which the owner inserts.
 
 Which disc is in the drive: does not matter.
 
-1. Build the coverage table and the track table from the notes.md sections, with no threshold changed. The coverage table and every total leave out each track of the Office disc (`the-office-2005-s3d3-bluray`), whose S03E16 commentary and S03E15 duplicate the thresholds were fitted on; the track table lists them, marked "fitting disc, not counted".
-   - **False verdict:** a track with the verdict `commentary` that the owner names as programme audio (main programme, lossy companion, derived core, alternate or original mix, isolated score, laugh-track version), or as an ask-kind the owner wants kept (the design's questions 2 to 6). This includes the tracks of the Office disc.
+1. Run `python3 scripts/phase0/audio_dataset.py; echo "exit=$?"` with no `--set`. Its experiment-13 section is the coverage table's source: the counts against row 13, `false verdicts`, `as it stands`, and `not counted`. Its kind-against-verdict table and the notes.md sections give the track table. No threshold is changed. `exit=1` with a `FAIL ... (programme audio), verdict commentary` line is a false verdict; `exit=3` means not every track was checked: deal with it as Task 11 Step 11 says before judging. The coverage table and every total leave out each track of the Office disc (`the-office-2005-s3d3-bluray`), whose S03E16 commentary and S03E15 duplicate the thresholds were fitted on; the track table lists them, marked "fitting disc, not counted".
+   - **False verdict:** a track with the verdict `commentary` that the owner labelled as programme audio (`main`, `lossy-companion`, `alternate-mix`, `laugh-track-version`, `derived-core`), or as a kind the owner has decided to keep in answer to the design's questions 3 to 6 (`audio_labels.py` then lists that kind as programme audio, so the harness gives it a `FAIL`). An isolated score or M&E track is not programme audio (D14: not wanted); one with the commentary verdict is a note, `dropped as a commentary`. This includes the tracks of the Office disc.
    - **Answer yes:** every kind in the row is covered without any track of the Office disc, there is no false verdict, and at least one commentary got the verdict on each of at least 3 different discs other than the Office disc.
    - **Answer no:** any false verdict, on any disc, whatever the coverage. Also no when coverage is met but fewer than 3 discs other than the Office disc had a commentary verdict.
    - **Not answered:** coverage is not met and there is no false verdict.
@@ -6138,6 +6233,8 @@ Which disc is in the drive: does not matter.
 3. Right after the header, put `## Coverage`:
 
 ```markdown
+
+   Placeholders in these two lines: STREAM is the ffprobe stream number from the harness's To-label line; KIND one of the kinds `python3 scripts/phase0/audio_labels.py kinds` lists; HOW one of listened, packaging, menu, flag, thediscdb or md5; TITLE_KIND one of feature, episode, extra or other; DIALOGUE one of yes, no or unknown.
 ## Coverage
 
 | Kind | Needed | Labelled tracks (discs), without the Office disc |
@@ -6174,7 +6271,17 @@ Which disc is in the drive: does not matter.
      - on no or not answered: the same spec text, except that the content row only flags for review (`commentary_detected`) and never drops; D12 changes accordingly;
      - in every case: the duplicate row, and the open questions still open.
 
-- [ ] **Step 21: Commit** (replaces the old Step 13)
+- [ ] **Step 21: Add the remaining rips of this task to the tuning dataset (decision D16)**
+
+Which disc is in the drive: does not matter. The jobs read only the share.
+
+```bash
+python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
+```
+
+Expected: the line `Titles whose audio is in the tuning dataset ...`. Every SLUG/LABEL under `missing` is a rip that has not been added yet: normally the experiment-6 rips of Steps 6 to 8 that were not in TITLES. For each, run Task 11 Step 11 from `audio_dataset.py args` onwards, with its exit codes and its Expected. Stop when the line ends `<b> of <b> ...` with no `missing`, apart from rips written down as deleted.
+
+- [ ] **Step 22: Commit** (replaces the old Step 13)
 
 Which disc is in the drive: does not matter. Disc A is needed again in Task 13, which starts by asking the owner to put it back.
 
@@ -6182,7 +6289,7 @@ Which disc is in the drive: does not matter. Disc A is needed again in Task 13, 
 find corpus/owner -iname '*unit_key*'
 grep -rIl 'eyJhbGciOi' corpus/owner
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
-git add scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py corpus/owner docs/phase0/experiments
+git add scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py scripts/phase0/audio_dataset.py scripts/phase0/audio_labels.py scripts/phase0/proxy_levels.py scripts/phase0/test_audio_dataset.py scripts/phase0/tuning-fetch.ps1 corpus/owner docs/phase0/experiments
 git status --short
 git commit -m "Run experiments 6 and 13: audio profiles, subtitle alignment, commentary by audio content" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -6193,6 +6300,7 @@ Expected:
 - `git status --short` lists:
   - the four scripts;
   - the new files under `corpus/owner/`. These are what the old Step 13 listed, plus each `audio-content-20ms-*.txt`, each `audio-levels-20ms-*/streams.json`, the new `tT-all-tracks/` recordings and the `notes.md` changes. No `audio-levels-*/*.txt` file appears: `.gitignore` keeps them out.
+  - the `audio-labels.json` of each disc labelled, `corpus/owner/audio-dataset.json`, and in each new level folder `streams.json`, `proxy-check.json` and `audio-proxy.json`.
   - both reports.
 - The commit succeeds.
 
@@ -6684,7 +6792,7 @@ If MakeMKV rejected the profile:
    grep -n -i -E '^MSG:1009|profile' corpus/owner/SLUG_A/eng-only/rip.txt | cut -c1-240
    ```
 
-2. Keep `corpus/owner/SLUG_A/eng-only` as it is: it is the evidence of the rejection, and it is committed in Step 9. Never use `-Force` on this label.
+2. Keep `corpus/owner/SLUG_A/eng-only` as it is: it is the evidence of the rejection, and it is committed in Step 10. Never use `-Force` on this label.
 3. Stop and report to the controller with those lines and Step 2's `findstr` output. The controller either chooses a corrected selection string, SELECTION_2, or decides that experiment 11 is "not run: profile rejected". In that case, go to Step 8; Steps 6 and 7 are skipped.
 4. With SELECTION_2, build the corrected profile once. Check first that it does not exist yet:
 
@@ -6923,7 +7031,19 @@ It must state:
   - On **no**: record which parts behaved differently (for example whether `core` removed derived cores, and whether `nolang` kept streams with no language). Mark the fast path as not buildable with this selection string: spec 17 row 11's fallback, every title is remuxed.
   - On **not answered** or **not run**: section 16 item 1 stays a later feature, marked "not yet verified", with the parts not exercised or the rejection message. Spec 17 row 11 says the same.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Add this task's rips to the tuning dataset (decision D16)**
+
+Which disc is in the drive: does not matter (Disc A should be back in for Task 14, as Step 7 says). The jobs read only the share.
+
+```bash
+python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
+```
+
+Expected: the line `Titles whose audio is in the tuning dataset ...`, naming under `missing` `SLUG_A/eng-only` (or `eng-only-2`), and `SLUG_D/eng-only` when Step 7 ran. A rip that MakeMKV made with its default selection after rejecting the profile is still a rip: add it too. For each SLUG/LABEL named, run Task 11 Step 11 from `audio_dataset.py args` onwards, with its exit codes and its Expected. The eng-only rip of SLUG_A is the title Task 11 ripped as `all-tracks`. Its streams have the same packets (the `md5=` of its `stream` lines equals those of `corpus/owner/SLUG_A/all-tracks/audio-levels-20ms-*/manifest.txt`). It needs no new labels (the harness notes `takes its label from all-tracks stream <n> (same packets)`) and adds nothing to experiment 13's counts. A packet MD5 that differs from the all-tracks rip's for the same stream is a finding for EXP-11: note it.
+
+In Step 10 (Commit), `git status --short` also lists the new level folders' `streams.json`, `proxy-check.json` and `audio-proxy.json`, and `corpus/owner/audio-dataset.json`.
+
+- [ ] **Step 10: Commit**
 
 Which disc is in the drive: does not matter. Disc A should be back in for Task 14 (Step 7e; when Step 7 was skipped, it never left the drive).
 
@@ -7016,7 +7136,7 @@ Placeholders:
 - SAME_ID: whether drive 2's disc ID equals drive 1's: `yes`, `no (drive 1 <id>, drive 2 <id>)` or `not compared` when either disc ID is missing (Step 11, from Step 9's comparison).
 - KEEP and KEEP_LETTER: the drive that stays attached after this task (`1` or `2`) and its letter, from Step 10.
 - SCRATCH: the session's scratch directory, as given in the agent's system prompt; never `/tmp` and never inside the repository.
-- Disc A: the UHD film of Task 9. It is in drive 1 (`D:`) from Step 4 until Step 8 ejects it, and in drive 2 in Step 9. In Step 10 the owner takes it out and keeps it at hand until the commit in Step 12; from then on the attached drive is empty. backup-disc.ps1 checks it with Assert-DiscIs before it copies, and second-drive.ps1 checks its fingerprint before it keeps anything.
+- Disc A: the UHD film of Task 9. It is in drive 1 (`D:`) from Step 4 until Step 8 ejects it, and in drive 2 in Step 9. In Step 10 the owner takes it out and keeps it at hand until the commit in Step 13; from then on the attached drive is empty. backup-disc.ps1 checks it with Assert-DiscIs before it copies, and second-drive.ps1 checks its fingerprint before it keeps anything.
 
 When `-Force` is right (decision D3):
 - `backup-disc.ps1 ... -Force`: only to replace a copy that failed or was interrupted, once its cause has been dealt with and the owner has agreed to another one to two hours of drive time. Such a copy has a `backup-summary.json` that is missing, or that says `"ok": false` with a `result` beginning `FAILED: the copy failed`. Check with `ssh USER@makemkv-box "type C:\lazymkv\phase0\recordings\SLUG_A\backup\backup-summary.json"`.
@@ -7848,7 +7968,7 @@ The `drive2` folder is part of Disc A's recording. `hit_rate.py` counts only top
 
 - [ ] **Step 10: Leave the right drive attached**
 
-Which disc is in the drive: none needed. Disc A is in drive 2 if the owner moved it there in Step 9 (in an open tray if Step 9's eject ran), otherwise in drive 1's open tray (Step 8). The owner takes it out now, before any drive is unplugged, and keeps it at hand until the commit in Step 12, in case a step has to be repeated. This step ends with the attached drive empty and its tray closed, which is how Task 15 starts.
+Which disc is in the drive: none needed. Disc A is in drive 2 if the owner moved it there in Step 9 (in an open tray if Step 9's eject ran), otherwise in drive 1's open tray (Step 8). The owner takes it out now, before any drive is unplugged, and keeps it at hand until the commit in Step 13, in case a step has to be repeated. This step ends with the attached drive empty and its tray closed, which is how Task 15 starts.
 
 Ask the owner: "Please take Disc A out of the drive it is in (if that tray is closed, press the drive's eject button first), keep it at hand until I say Task 14 is committed, and close that tray with no disc in it. Which drive should stay attached for the rest of phase 0 (Task 15 records about 20 discs)? If it is drive 1, please unplug drive 2 and plug drive 1 back in, and leave its tray closed with no disc in it." Write down KEEP (`1` or `2`). Then check which letter Windows gave it, from a job, as every later script sees it:
 
@@ -7937,14 +8057,34 @@ with:
 
 If drive 2 was not run, its line reads `- Drive 2: not tested in Task 14 (<reason>).`
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 12: Add the extracted title to the tuning dataset (decision D16)**
+
+Which disc is in the drive: none (Disc A is with the owner). The job reads only the share.
+
+Skip this step if Step 6 did not end `RESULT ok`. The extraction is a rip of title N made from the disc copy. Its recording has `mkvmerge.json` but no `ffprobe-streams.json`, so `args` reads the `ffprobe-streams.json` of a rip of the same title with the same size if there is one, and otherwise mkvmerge.json's track IDs, which for a Matroska file are ffprobe's stream numbers:
+
+```bash
+python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG_A extract
+```
+
+Expected: `SLUG_A/extract: <n> audio streams (from <source>)`, the stream lines, and the job lines. Run them, then the pull, `auto` and the harness, as in Task 11 Step 11, with its exit codes and its Expected. When `<source>` is `mkvmerge.json (track IDs: ...)`, check that the job's `stream <n>:` lines show the codec and channels that `args` listed for the same numbers; if they do not, stop and report (the harness would also report `wrong reference` for that folder). Then compare the packets with the direct rip:
+
+```bash
+grep -h '^\(main\|cand\)=' corpus/owner/SLUG_A/all-tracks/audio-levels-20ms-*/manifest.txt corpus/owner/SLUG_A/extract/audio-levels-20ms-*/manifest.txt | sed 's/ frames=.*md5=/ md5=/' | sort | uniq -c
+```
+
+Expected: every `main=`/`cand=` line appears twice (count `2`), once from each rip. The extracted title's audio is then bit-identical to the direct rip's, which is evidence for EXP-03. A line with count `1` names a stream whose packets differ: record it in EXP-03.
+
+In Step 13 (Commit), add `corpus/owner/audio-dataset.json` to the `git add` line, after `corpus/owner/SLUG_A`; `git status --short` then also lists the extract's level folder files (`streams.json`, `proxy-check.json`, `audio-proxy.json`), `corpus/owner/SLUG_A/audio-labels.json` when labels were added, and `corpus/owner/audio-dataset.json`.
+
+- [ ] **Step 13: Commit**
 
 Which disc is in the drive: none; Disc A is with the owner. Disc A's part in phase 0 ends here.
 
 ```bash
 find corpus/owner -iname '*unit_key*'
 grep -rIl 'eyJhbGciOi' corpus/owner
-git add scripts/phase0/backup-disc.ps1 scripts/phase0/extract-from-copy.ps1 scripts/phase0/second-drive.ps1 corpus/owner/SLUG_A docs/phase0
+git add scripts/phase0/backup-disc.ps1 scripts/phase0/extract-from-copy.ps1 scripts/phase0/second-drive.ps1 corpus/owner/SLUG_A docs/phase0 corpus/owner/audio-dataset.json
 git status --short
 git commit -m "Run experiments 3 and 7: whole-disc copy and eject" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -9087,7 +9227,7 @@ Expected:
 - Create: `scripts/phase0/list-leftovers.ps1` (Step 5), `docs/phase0/REPORT.md` (Step 3; Step 7 adds its last section)
 - Modify: `docs/superpowers/specs/2026-10-04-lazymkv-design.md` (Step 2)
 - On the mini PC only, not in the repository: `C:\lazymkv\phase0\tmp\makemkvcon64.exe` (a copy of the stand-in) and `C:\lazymkv\phase0\tmp\replayed.txt` (Step 1), and the job logs `final-list` and `final-list-2` (Steps 5 and 6).
-- Prerequisite, applied and committed by the controller before this task: the env.ps1 variables of decision D1. This task uses `$P0`, `$Recordings`, `$Staging` and `$TestLibrary` only.
+- Prerequisite, applied and committed by the controller before this task: the env.ps1 variables of decision D1. This task uses `$P0`, `$Recordings`, `$Staging`, `$TestLibrary` and `$TuningData` only.
 
 **Interfaces:**
 - Consumes:
@@ -9095,13 +9235,15 @@ Expected:
   - `docs/phase0/environment.md` (its `## Installed for phase 0`, `## Optical drives` and `## Fingerprint check (Task 8)` sections) and `corpus/owner/<slug>/notes.md` (written in Tasks 12 and 15).
   - Disc A's recording from Task 9: `corpus/owner/SLUG_A/scan.txt` and `scan.txt.timing.jsonl` (the online scan, made with `Get-MkFlags`), and on the mini PC the original `C:\lazymkv\phase0\recordings\SLUG_A\scan.txt`.
   - The stand-in: `cargo build --release -p fake-tools` writes `C:\lazymkv\target\release\fake-tool.exe`. It takes the tool's name from its own file name (`makemkvcon64.exe` reads `makemkvcon64.json` in the folder named by the environment variable `LAZYMKV_FAKE_DIR`), prints the file named by the first response whose `args_contain` strings all occur in its arguments, and, when `LAZYMKV_FAKE_SPEED` is above 0, waits that fraction of each line's recorded arrival time before printing it.
-  - From `env.ps1`: `$P0`, `$Recordings`, `$Staging`, `$TestLibrary`.
+  - From `env.ps1`: `$P0`, `$Recordings`, `$Staging`, `$TestLibrary`, `$TuningData`.
   - Scripts: `scripts/box.sh [command...]`, `scripts/phase0/job.sh <script.ps1> <log name>`, `scripts/phase0/wait.sh <log name>`, `scripts/phase0/summarize_scan.py <recording dir>`.
+  - `scripts/phase0/audio_dataset.py` (its last list: the titles not yet in the tuning dataset).
 - Produces:
   - `corpus/scenarios/disc-a-scan/`: a stand-in scenario made from a real scan: `makemkvcon64.json` (one response: arguments containing `info` and `disc:0` print `scan.txt` with the timing of `scan.txt.timing.jsonl`), `scan.txt` and `scan.txt.timing.jsonl`. Phase 1's tests point `LAZYMKV_FAKE_DIR` at this folder.
   - `scripts/phase0/list-leftovers.ps1` (no parameters; read-only). Run it as a job: `scripts/phase0/job.sh list-leftovers.ps1 <log name>`. It prints:
     - `staging: <path>`, then one line for each folder directly under the staging folder (its size in GB), one line for each item directly inside it (a folder with its size in GB, or a file with its size in bytes), and `staging holds <n> folder(s)`;
     - `test library: <path>` and one line for each file in it (`<full path>  <bytes> bytes`), or `test library: (not set in config.ps1)` or `test library: <path> (does not exist)`;
+    - `tuning dataset: <path>: <n> GB in <k> title folder(s)` (`$TuningData`; `(does not exist)` when missing);
     - one line each for `C:\lazymkv\phase0\tmp`, `C:\lazymkv\phase0\exp09`, `C:\lazymkv\phase0\recordings` and `C:\lazymkv\phase0\logs` (`<path>: <n> MB`, or `<path>: absent`);
     - `firewall rule lazymkv-exp05 (0 = gone): <n>`;
     - last `RESULT ok` or `RESULT FAILED: <reason>`. After a failure it throws, so wait.sh exits 1.
@@ -9563,6 +9705,13 @@ try {
         }
     }
 
+    if (Test-Path -LiteralPath $TuningData -PathType Container) {
+        $titles = @(Get-ChildItem -LiteralPath $TuningData -Directory -Force -ErrorAction Stop | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction Stop })
+        'tuning dataset: {0}: {1:N1} GB in {2} title folder(s)' -f $TuningData, ((Get-FolderBytes $TuningData) / 1GB), $titles.Count
+    } else {
+        "tuning dataset: $TuningData (does not exist)"
+    }
+
     foreach ($place in "$P0\tmp", "$P0\exp09", $Recordings, "$P0\logs") {
         if (Test-Path -LiteralPath $place) {
             '{0}: {1:N1} MB' -f $place, ((Get-FolderBytes $place) / 1MB)
@@ -9619,6 +9768,7 @@ staging: <STAGING>
 staging holds <n> folder(s)
 test library: <TEST_LIBRARY>
   <full path>  <bytes> bytes
+tuning dataset: <the value of $TuningData in config.ps1>: <n> GB in <k> title folder(s)
 C:\lazymkv\phase0\tmp: <n> MB
 C:\lazymkv\phase0\exp09: <n> MB
 C:\lazymkv\phase0\recordings: <n> MB
@@ -9633,6 +9783,7 @@ The last line may read `PHASE0-DONE status=ok exit=` with nothing after the `=`,
 - There is one `folder` line for each slug that a rip, copy or extraction used, with one indented line for each label folder (`rehearsal`, `all-tracks`, `share-drop`, `eng-only`, `backup`, `extract`, `share-drop-2`, `all-tracks-512` and so on) beneath it. Files inside a label folder, such as the ripped `.mkv` and `evidence.mks`, are counted in that folder's size and are not listed. A repeat with `-Force` reused its label folder on the share, so the `-failed-N` folders kept on the Mac have no line here. A folder that holds `exp02-tmp` means experiment 2's cleanup did not finish; note it.
 - The `test library` line may read `(not set in config.ps1)` or `(does not exist)`; then there are no file lines. Otherwise there are five file lines: the files of the last Task 16 run (Task 16 Steps 6 and 7 have the owner empty the folder before each later run, so earlier runs' files are gone; their logs and summaries on the mini PC still list them). There is also a line for each file the NAS keeps in the folder by itself: `.DS_Store`, `Thumbs.db` or `desktop.ini`, and each file inside a folder such as `@eaDir` or `#recycle` (the listing includes hidden files and lists files only, not folders). If the owner has emptied the folder since, or did not run Task 16 at all, there are no file lines.
 - A local folder that was never created reads `<path>: absent`.
+- The `C:\lazymkv\phase0\tmp` line also counts a `tuning-fetch` folder that a fetch left behind (`tuning-fetch.ps1`; the Mac should have deleted it right after its scp); name it if `dir /s /b` shows one.
 - If the `firewall` line is not `0`, the rule that blocks MakeMKV's network access is still there. Task 9 asked the owner to remove it. Ask the owner to remove it now, as Step 6 says.
 - The ssh line prints the file names under `C:\lazymkv\phase0\tmp` (at least `makemkvcon64.exe` and `replayed.txt` from Step 1) and a line `TaskName:   \lazymkv-phase0`: the job that just ran registered the task.
 
@@ -9641,6 +9792,8 @@ The last line may read `PHASE0-DONE status=ok exit=` with nothing after the `=`,
 Which disc is in the drive: does not matter.
 
 The staging folders `STAGING\<slug>\` (rips, the whole-disc copy, extractions, evidence files), the test library folder, the scheduled task `lazymkv-phase0` and `C:\lazymkv\phase0\tmp` are all created by this plan. The rips may be wanted as inputs for phase 2, and a whole-disc copy of a UHD can be tens of gigabytes. The decision is the owner's, and so is the deletion: the agent deletes nothing (the owner's rules reserve permanent deletion to the owner, and changing the firewall or other system settings too). No `Remove-Item`, `rmdir`, `del` or firewall command is run by the agent here.
+
+Before offering any staging folder for deletion, run `python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'`. A rip it names under `missing` is not offered: its audio is not in the tuning dataset yet (decision D16); add it first with Task 11 Step 11, or ask the owner to keep it. Never write a command for `$TuningData` or anything under it: the dataset is kept until the owner decides otherwise, separately from this clean-up.
 
 Show the owner the `final-list` log and ask, item by item, what to keep and what to delete. Group the questions by what the data is good for, and give the sizes from the log. For each item the owner agrees to delete, write out the exact command below, with the real names copied from the log, and ask the owner to run it in an administrator PowerShell at the mini PC's desktop and to say when it is done. One named folder per command. Before sending a command, check that its path appears, character for character, as a folder line in the log:
 
@@ -9651,7 +9804,7 @@ Remove-Item -LiteralPath 'TEST_LIBRARY' -Recurse -Force
 Remove-Item -LiteralPath 'C:\lazymkv\phase0\tmp' -Recurse -Force
 ```
 
-- Never write a command for STAGING itself, for an empty FOLDER, or for anything under `\\unas-pro\media\Movies` or `\\unas-pro\media\Shows`.
+- Never write a command for STAGING itself, for an empty FOLDER, for `$TuningData` or anything under it, or for anything under `\\unas-pro\media\Movies` or `\\unas-pro\media\Shows`.
 - The first command removes one label folder, the second a whole slug folder. The third removes the test library folder, which the owner made; if the owner wants to keep the empty folder, they empty it by hand in Explorer instead. Before it goes, ask the owner to remove that library from Plex and from Jellyfin and to empty the Plex trash.
 - The fourth removes the stand-in copy and the replayed scan from Step 1 and everything else the scripts left in `tmp`.
 - Leave `C:\lazymkv\phase0\recordings` and `logs` alone unless the owner asks: they are small, and the recordings are also in `corpus/owner`.

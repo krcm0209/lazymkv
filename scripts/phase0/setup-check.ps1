@@ -13,20 +13,24 @@
 "profiles   : all-tracks=$(Test-Path $AllTracksProfile) eng-only=$(Test-Path $EngProfile)"
 
 # Every step must stop on failure and is then checked, so "OK" is only printed when all three worked.
-$probe = "$Staging\lazymkv-write-test.txt"
-$renamed = "$Staging\lazymkv-write-test-renamed.txt"
-try {
-    New-Item -ItemType Directory -Force $Staging -ErrorAction Stop | Out-Null
-    Remove-Item $probe, $renamed -ErrorAction SilentlyContinue
-    Set-Content $probe 'ok' -ErrorAction Stop
-    Rename-Item $probe 'lazymkv-write-test-renamed.txt' -ErrorAction Stop
-    if ((Test-Path $probe) -or -not (Test-Path $renamed)) { throw 'the rename did not take effect' }
-    Remove-Item $renamed -ErrorAction Stop
-    if (Test-Path $renamed) { throw 'the delete did not take effect' }
-    "staging    : $Staging : write, rename and delete OK"
-} catch {
-    "staging    : $Staging : FAILED: $($_.Exception.Message)"
+function Test-ShareFolder([string]$Name, [string]$Folder) {
+    $probe = "$Folder\lazymkv-write-test.txt"
+    $renamed = "$Folder\lazymkv-write-test-renamed.txt"
+    try {
+        New-Item -ItemType Directory -Force $Folder -ErrorAction Stop | Out-Null
+        Remove-Item $probe, $renamed -ErrorAction SilentlyContinue
+        Set-Content $probe 'ok' -ErrorAction Stop
+        Rename-Item $probe 'lazymkv-write-test-renamed.txt' -ErrorAction Stop
+        if ((Test-Path $probe) -or -not (Test-Path $renamed)) { throw 'the rename did not take effect' }
+        Remove-Item $renamed -ErrorAction Stop
+        if (Test-Path $renamed) { throw 'the delete did not take effect' }
+        "$Name : $Folder : write, rename and delete OK"
+    } catch {
+        "$Name : $Folder : FAILED: $($_.Exception.Message)"
+    }
 }
+Test-ShareFolder 'staging   ' $Staging
+Test-ShareFolder 'tuning    ' $TuningData
 Add-Type -Namespace Win32 -Name Disk -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool GetDiskFreeSpaceEx(string path, out ulong freeToCaller, out ulong total, out ulong totalFree);'
 [uint64]$free = 0; [uint64]$total = 0; [uint64]$totalFree = 0
 if ([Win32.Disk]::GetDiskFreeSpaceEx("$Staging\", [ref]$free, [ref]$total, [ref]$totalFree)) {

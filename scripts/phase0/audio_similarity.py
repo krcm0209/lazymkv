@@ -21,6 +21,10 @@ Stereo width, codec and track position are not used; the main track's channel la
 centre channel is the dialogue curve. A folder that audio-levels.ps1 did not write in this form is refused, with a
 one-line message and a non-zero exit, before any number is printed: the first measurement's folders
 (audio-levels-<main>-<cand>, 100 ms frames, full band, no manifest) must be measured again with the new script.
+A folder with a main stream and no candidate (a title measured only for the tuning dataset) has nothing to judge.
+
+For other programs: results(folder, rule) gives the same measures and verdicts as data; RULE holds the decision
+thresholds and CONSTANTS names the module constants of the measures, so that audio_dataset.py can try other values.
 """
 import cmath
 import json
@@ -50,6 +54,15 @@ GAP_TRIM = 5            # ... and loses 100 ms at each end
 ADDED_DB = 10.0         # added: at least 10 dB above the level the main predicts
 SILENT_DB = -90.0       # the main is digitally silent at or below this level
 N_SMI = 64              # 1.28 s modulation windows
+LAG_MIN_R = 0.5         # a lag (global or per block) is used only when the envelopes correlate at least this much
+GAIN_PCT = 0.75         # the gain is this percentile of the candidate's level over the main's in matched windows
+TENTH_GAP_S = 10.0      # a tenth of the running time counts when it holds this many seconds of dialogue gaps
+TENTH_COMM_AG = 0.40    # a counting tenth has commentary-like added sound at this AG or more (tenths_comm)
+TENTH_AD_AG = 0.05      # ... and audio-description-like added sound at this AG or more (tenths_ad)
+# The measure constants above that a tuning run may change (audio_dataset.py --set NAME=VALUE); FRAME_MS, WIN, BLOCK
+# and N_SMI are fixed by the level files and the precomputed transform.
+CONSTANTS = ("MATCH_R", "MISMATCH_R", "X_ACTIVE_BELOW", "DLG_BELOW", "GAP_MIN", "GAP_TRIM", "ADDED_DB", "SILENT_DB",
+             "COARSE_LAG", "BLOCK_LAG", "WIN_LAG", "LAG_MIN_R", "GAIN_PCT", "TENTH_GAP_S", "TENTH_COMM_AG", "TENTH_AD_AG")
 
 # The thresholds of the decision rule. Every one is PROVISIONAL (docs/phase0/experiments/EXP-13-design.md, section 3).
 RULE = {
@@ -138,8 +151,8 @@ def refusal(folder):
     man = read_manifest(d)
     if man.get("frame_ms") != str(FRAME_MS):
         return f"{d}: manifest.txt gives frame_ms={man.get('frame_ms', '(none)')}, not {FRAME_MS}; {again}"
-    if not man["main"] or not man["cands"]:
-        return f"{d}: manifest.txt names no main stream or no candidate stream; {again}"
+    if not man["main"]:
+        return f"{d}: manifest.txt names no main stream; {again}"
     names = ["main-mix.txt"] + (["main-fc.txt"] if (d / "main-fc.txt").exists() else [])
     names += [f"cand-{c.get('cand')}.txt" for c in man["cands"]]
     for name in names:
@@ -212,13 +225,13 @@ def analyse(main, cand, dialogue=None, reverse=True):
     xk = [sum(xc[i:i + 5]) / 5 for i in range(0, len(xc) - 4, 5)]
     _, lag_k = max((corr_at(mk, xk, 0, len(mk), lag, 2), lag) for lag in range(-COARSE_LAG, COARSE_LAG + 1))
     r_glob, lag = max((corr_at(mc, xc, 0, n, l, 5), l) for l in range(5 * lag_k - 5, 5 * lag_k + 6))
-    if r_glob < 0.5:
+    if r_glob < LAG_MIN_R:
         lag = 0
     block_lag = {}
     for b in range((n + BLOCK - 1) // BLOCK):
         b0, b1 = b * BLOCK, min(n, (b + 1) * BLOCK)
         r, lb = max((corr_at(mc, xc, b0, b1, l, 4), l) for l in range(lag - BLOCK_LAG, lag + BLOCK_LAG + 1, 2))
-        block_lag[b] = lb if r >= 0.5 else lag
+        block_lag[b] = lb if r >= LAG_MIN_R else lag
 
     def lag_of(t):
         return block_lag[t // BLOCK]
@@ -252,7 +265,7 @@ def analyse(main, cand, dialogue=None, reverse=True):
     matched = [w for w in wins if rw[w] >= MATCH_R]
     mframes = [u for w in matched for u in range(w, w + WIN) if main[u] >= m95 - 30 and xa[u] > FLOOR]
     if len(matched) >= max(10, len(wins) // 20) and mframes:
-        gain = percentile([xa[u] - main[u] for u in mframes], 0.75)
+        gain = percentile([xa[u] - main[u] for u in mframes], GAIN_PCT)
     else:
         gain = x95 - m95
     added = [active[u] and xa[u] - gain - main[u] >= ADDED_DB and rw.get((u // WIN) * WIN, 1.0) < MISMATCH_R
@@ -265,7 +278,7 @@ def analyse(main, cand, dialogue=None, reverse=True):
     for k in range(10):
         a, b = lo + k * (hi - lo) // 10, lo + (k + 1) * (hi - lo) // 10
         g = sum(gap[a:b])
-        if g * FRAME_S >= 10:
+        if g * FRAME_S >= TENTH_GAP_S:
             tenths.append(sum(1 for u in range(a, b) if gap[u] and added[u]) / g)
     s = [smi(xa[t0:t0 + N_SMI]) for t0 in range(0, n - N_SMI, N_SMI // 2) if sum(added[t0:t0 + N_SMI]) >= N_SMI // 2]
     m = {
@@ -274,8 +287,8 @@ def analyse(main, cand, dialogue=None, reverse=True):
         "dc": dc, "gain_db": gain, "gap_s": n_gap * FRAME_S,
         "ag": n_ag / n_gap if n_gap else float("nan"), "ag_s": n_ag * FRAME_S,
         "adl": sum(1 for u in range(n) if dlg[u] and added[u]) / n_dlg if n_dlg else float("nan"),
-        "tenths": len(tenths), "tenths_comm": sum(1 for v in tenths if v >= 0.40),
-        "tenths_ad": sum(1 for v in tenths if v >= 0.05),
+        "tenths": len(tenths), "tenths_comm": sum(1 for v in tenths if v >= TENTH_COMM_AG),
+        "tenths_ad": sum(1 for v in tenths if v >= TENTH_AD_AG),
         "smi": statistics.median(s) if s else float("nan"), "smi_windows": len(s),
         "ls_db": x95 - percentile([xa[u] for u in frames], 0.50), "added_s": sum(added) * FRAME_S,
     }
@@ -349,11 +362,17 @@ def fmt(v, digits=2):
     return "n/a" if not ok(v) else f"{v:.{digits}f}"
 
 
-def report(folder):
+def results(folder, rule=RULE, analyse_fn=None):
+    """The measures and verdict of every candidate of a folder written by audio-levels.ps1, as data:
+    {"folder", "manifest", "main" (its manifest fields), "frames", "dialogue" ("fc" or "mix"), "candidates": [
+        {"stream", "info" (its manifest fields), "duplicate_of" (a stream number or None), "measures" (None for a
+         duplicate), "verdict", "not_judged" (the reason, or '')}]}.
+    Raises ValueError with the refusal's reason. analyse_fn(main, cand, dialogue) replaces analyse (a cache, say)."""
     d = pathlib.Path(folder)
     why = refusal(d)
     if why:
         raise ValueError(why)
+    analyse_fn = analyse_fn or analyse
     man = read_manifest(d)
     main = read_levels(d / "main-mix.txt")
     fc_path = d / "main-fc.txt"
@@ -361,31 +380,48 @@ def report(folder):
     if fc and max(fc) <= SILENT_DB:
         fc = []
     mainfo = man["main"] or {}
+    out = {"folder": str(d), "manifest": man, "main": mainfo, "frames": len(main), "dialogue": "fc" if fc else "mix",
+           "candidates": []}
+    seen = {mainfo["md5"]: mainfo.get("main", "?")} if mainfo.get("md5") else {}
+    for c in man["cands"]:
+        sid = c.get("cand")
+        r = {"stream": sid, "info": c, "duplicate_of": None, "measures": None, "verdict": "duplicate", "not_judged": ""}
+        if c.get("md5") in seen:
+            r["duplicate_of"] = seen[c["md5"]]
+        else:
+            if c.get("md5"):
+                seen[c["md5"]] = sid
+            m = analyse_fn(main, read_levels(d / f"cand-{sid}.txt"), fc or None)
+            r["measures"], r["verdict"] = m, verdict(m, rule)
+            r["not_judged"] = m["error"] if "error" in m else not_judged(m, rule)
+        out["candidates"].append(r)
+    return out
+
+
+def report(folder):
+    res = results(folder)
+    d = pathlib.Path(folder)
+    man, mainfo = res["manifest"], res["main"]
     lines = [f"{d} ({man.get('file', '?')}, measured in {man.get('seconds', '?')} s)",
              f"  main stream {mainfo.get('main', '?')}: {mainfo.get('codec', '?')} {mainfo.get('channels', '?')} ch "
              f"{mainfo.get('layout', '')} {mainfo.get('language', '')}; dialogue reference: "
-             f"{'its centre channel' if fc else 'its mono mixdown (no centre channel)'}; "
-             f"{len(main)} frames ({len(main) * FRAME_S / 60:.1f} min)"]
-    cands = man["cands"]
-    seen = {mainfo["md5"]: mainfo.get("main", "?")} if mainfo.get("md5") else {}
+             f"{'its centre channel' if res['dialogue'] == 'fc' else 'its mono mixdown (no centre channel)'}; "
+             f"{res['frames']} frames ({res['frames'] * FRAME_S / 60:.1f} min)"]
+    if not res["candidates"]:
+        lines.append("  no candidate stream: nothing to judge (measured for the tuning dataset only)")
     label = f"{d.resolve().parent.name}/{man.get('file', d.resolve().name)}"
-    for c in cands:
-        sid = c.get("cand")
-        path = d / f"cand-{sid}.txt"
+    for r in res["candidates"]:
+        c, sid = r["info"], r["stream"]
         head = f"  stream {sid}: {c.get('codec', '?')} {c.get('channels', '?')} ch {c.get('layout', '')} {c.get('language', '')}"
-        if c.get("md5") in seen:
-            lines += [head, f"    verdict: duplicate of stream {seen[c['md5']]} (" + MEANING["duplicate"] + ")",
-                      f"    row: | {label} | {sid} | same packets as stream {seen[c['md5']]} | duplicate |"]
+        if r["duplicate_of"] is not None:
+            lines += [head, f"    verdict: duplicate of stream {r['duplicate_of']} (" + MEANING["duplicate"] + ")",
+                      f"    row: | {label} | {sid} | same packets as stream {r['duplicate_of']} | duplicate |"]
             continue
-        if c.get("md5"):
-            seen[c["md5"]] = sid
-        m = analyse(main, read_levels(path), fc or None)
-        v = verdict(m)
+        m, v, why = r["measures"], r["verdict"], r["not_judged"]
         lines.append(head)
         if "error" in m:
             lines.append(f"    verdict: not-judged ({m['error']})")
             continue
-        why = not_judged(m)
         lines += [
             f"    lag {m['lag_ms']} ms (envelope r {fmt(m['r_global'])}), overlap {fmt(m['overlap'])}, "
             f"main silent {fmt(m['main_silent'])}",
