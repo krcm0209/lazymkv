@@ -1,6 +1,7 @@
 # Decision D16: copies one title's part of the tuning dataset ($TuningData\<Slug>\<Label>\: audio-proxy.mka,
-# audio-proxy.json and the audio-levels-20ms-* folders; with -Text instead only the OCR text of its subtitle tracks,
-# subs-ocr\sub-<n>.ocr.jsonl, written by ocr-subs.ps1, and ocrs-s<n>.jsonl, written by ocrs-trial.ps1) to C:\lazymkv\phase0\tmp\tuning-fetch\<Slug>\<Label>\, so that
+# audio-proxy.json and the audio-levels-20ms-* folders; with -Text instead only the OCR text of its subtitle tracks:
+# subs-ocr\sub-<n>.ocr.jsonl, written by ocr-subs.ps1, and ocrs-s<n>.jsonl and ocrs-s<n>-crop<pad>.jsonl, written by
+# ocrs-trial.ps1) to C:\lazymkv\phase0\tmp\tuning-fetch\<Slug>\<Label>\, so that
 # the Mac can fetch it with scp: the share is reachable only from a job. Needed only when a measure needs the proxies
 # on the Mac; the routine after a rip never runs it.
 # This is the one exception to "only small files on C:" (plan, Global Constraints): one title at a time, at most 2 GB,
@@ -40,7 +41,8 @@ try {
         $src = "$src\subs-ocr"
         $files = @(Get-ChildItem -LiteralPath $src -Filter '*.ocr.jsonl' -File -ErrorAction SilentlyContinue)
         if ($files.Count -eq 0) { throw "$src holds no OCR text (sub-<n>.ocr.jsonl; run ocr-subs.ps1 first)" }
-        # ocrs's text of the same frames (ocrs-trial.ps1), when there is any, for scripts/phase0/ocr_compare.py.
+        # ocrs's text of the same frames (ocrs-trial.ps1), when there is any, for scripts/phase0/ocr_compare.py; the
+        # pattern takes the full-frame ocrs-s<n>.jsonl and the cropped ocrs-s<n>-crop<pad>.jsonl alike.
         $files += @(Get-ChildItem -LiteralPath $src -Filter 'ocrs-s*.jsonl' -File -ErrorAction SilentlyContinue)
     } else {
         if (-not (Test-Path -LiteralPath "$src\audio-proxy.json")) { throw "$src holds no complete proxy (no audio-proxy.json)" }

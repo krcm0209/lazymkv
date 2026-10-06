@@ -12,15 +12,29 @@ This crate is its own Cargo workspace (the empty `[workspace]` table), so the ro
 ## Use
 
 ```
-ocrs-trial --detection <model file> --recognition <model file> --frames <dir> --out <jsonl> [--limit N]
+ocrs-trial --detection <model file> --recognition <model file> --frames <dir> --out <jsonl> [--limit N] [--crop <pad>]
 ```
 
 It loads the two models from the files given (no download and no network: the ocrs library never fetches models, only
 the ocrs CLI does), reads every `*.png` in `<dir>` in name order (the first N with `--limit`), and writes to `<out>`:
 
-- one line per frame: `{"frame": k, "file": "<name>", "lines": ["...", ...], "ms": <decode + OCR time>}`
+- one line per frame: `{"frame": k, "file": "<name>", "lines": ["...", ...], "ms", "decode_ms", "detect_ms",
+  "rec_ms"}`. `ms` is the OCR alone (`detect_ms`, ocrs's input preparation, word detection and line grouping, plus
+  `rec_ms`, line recognition); `decode_ms` is the PNG decode. (Before `--crop` existed, `ms` was decode + OCR.)
+- with `--crop <pad>` also `"crop": [x, y, w, h]` and `"crop_ms"`: the box of every pixel darker than 128 (the frames
+  are dark glyphs on white), grown by `<pad>` pixels on each side and clamped to the frame, is the only part read;
+  `crop_ms` is the box scan and the copy. A frame without a dark pixel is not read at all: `"crop": null`, no lines,
+  `ms` 0.
 - a last line: `{"summary": {"frames", "ms_total", "ms_per_frame", "load_ms", "ocrs", "models": {"detection",
-  "recognition"}}}`, where the model values are the SHA-1 of the model files.
+  "recognition"}, "crop_pad", "read_frames", "ms_per_read_frame", "decode_ms_per_frame", "crop_ms_per_frame",
+  "detect_ms_per_read_frame", "rec_ms_per_read_frame", "crop_boxes", "crop_mean_w", "crop_mean_h"}}`, where the model
+  values are the SHA-1 of the model files. `ms_per_frame` counts every frame (0 for one --crop skipped);
+  `ms_per_read_frame` only the frames that went through OCR. A mean with nothing to average is null.
+
+Note on speed: ocrs's detection model takes a fixed 800 x 600 (height x width) input. ocrs pads a smaller image to
+that size and resizes a larger one to it, so the detection model's own run costs the same for a crop as for a full
+frame; a crop saves the work done at the image's own size (input preparation, resizing, the text mask scaled back to
+the image and its connected components). `detect_ms` and `rec_ms` show where the time goes.
 
 Standard output carries progress and timing only, never recognised text. Exit status: 0 done, 1 failed, 2 bad
 arguments. The phase 0 job `scripts/phase0/ocrs-trial.ps1` runs it on one subtitle stream of the tuning dataset, and

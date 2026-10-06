@@ -1,19 +1,21 @@
-"""Tesseract's and ocrs's text of the same subtitle frames, side by side (the ocrs trial; decisions D17 and D19).
+"""Tesseract's and ocrs's text of the same subtitle frames, side by side (the ocrs trial; decisions D17, D19, D22).
 
   python3 scripts/phase0/ocr_compare.py TESS.ocr.jsonl OCRS.jsonl [--rec RECDIR] [--tag eng]
 
-TESS.ocr.jsonl is ocr-subs.ps1's sub-<n>.ocr.jsonl and OCRS.jsonl is ocrs-trial.ps1's ocrs-s<n>.jsonl for the same
-stream. Both live in the tuning dataset (decision D16); the Mac holds temporary copies and never commits them.
-RECDIR is the recording folder of that reading (corpus/owner/<slug>/<label>/subs-ocr): its sub-<n>.frames.json gives
-the line counts of older Tesseract records that hold only ' | '-joined text, its summary.json Tesseract's run time,
-its ocrs-summary.json ocrs's.
+TESS.ocr.jsonl is ocr-subs.ps1's sub-<n>.ocr.jsonl and OCRS.jsonl is ocrs-trial.ps1's ocrs-s<n>.jsonl, or a cropped
+reading's ocrs-s<n>-crop<pad>.jsonl, for the same stream. Both live in the tuning dataset (decision D16); the Mac holds
+temporary copies and never commits them. RECDIR is the recording folder of that reading
+(corpus/owner/<slug>/<label>/subs-ocr): its sub-<n>.frames.json gives the line counts of older Tesseract records that
+hold only ' | '-joined text, its summary.json Tesseract's run time, and its ocrs-summary.json ocrs's when the ocrs file
+has no summary line of its own.
 
 Frames are paired by file name (by frame number when a record has no file name). Both texts are folded to ASCII and,
 for an English tag, corrected the way subtitle_text.py reads them (its fold and correct), so ocrs's ASCII-only alphabet
 costs nothing on accents. Prints numbers only, never subtitle text: frames compared, frames with text in each engine,
 the exact-match rate after folding, the character error rate (Levenshtein distance over the longer text's length), the
 marker counts of subtitle_text.measure for each engine (CUE, LABEL, CHEV, NOTE, ODD, then M, SO, CS, readability,
-the stopword language), the speed of each engine, and the 10 frames that differ most (lengths and CER only).
+the stopword language), the speed of each engine, where ocrs's time went per frame read (detection, recognition) and,
+for a cropped reading, the mean crop box and crop time, and the 10 frames that differ most (lengths and CER only).
 
 Exit status 0 when frames were compared, 2 when an input cannot be read or no frame is in both files.
 Python 3.9 standard library. ASCII only.
@@ -30,6 +32,8 @@ import subtitle_text as st  # noqa: E402
 
 SHOW_WORST = 10
 CER_HIGH = 0.20
+# Per-frame fields of ocrs-trial's output that read_frames keeps (times in ms; crop is [x, y, w, h] or null).
+OCRS_FIELDS = ('ms', 'decode_ms', 'detect_ms', 'rec_ms', 'crop', 'crop_ms')
 
 
 def levenshtein(a, b):
@@ -71,9 +75,10 @@ def norm_text(lines, english=True):
 
 
 def read_frames(path, line_counts=None):
-    """(frames, summary) of a JSON-lines file: frames = [{'frame', 'file', 'lines'}] in file order; summary = the
-    {'summary': {...}} line of ocrs-trial, or None. A record with a 'lines' array is taken as it is; an older Tesseract
-    record with only joined 'text' is split with subtitle_text.split_joined and the frame's line count, if known."""
+    """(frames, summary) of a JSON-lines file: frames = [{'frame', 'file', 'lines'}, plus any of OCRS_FIELDS the
+    record has] in file order; summary = the {'summary': {...}} line of ocrs-trial, or None. A record with a 'lines'
+    array is taken as it is; an older Tesseract record with only joined 'text' is split with
+    subtitle_text.split_joined and the frame's line count, if known."""
     frames, summary = [], None
     for raw in pathlib.Path(path).read_text(encoding='utf-8-sig').splitlines():
         if not raw.strip():
@@ -87,7 +92,9 @@ def read_frames(path, line_counts=None):
         else:
             text = (r.get('text') or '').strip()
             lines = st.split_joined(text, (line_counts or {}).get(r.get('frame'))) if text else []
-        frames.append({'frame': r.get('frame'), 'file': r.get('file'), 'lines': lines})
+        frame = {'frame': r.get('frame'), 'file': r.get('file'), 'lines': lines}
+        frame.update({k: r[k] for k in OCRS_FIELDS if k in r})
+        frames.append(frame)
     return frames, summary
 
 
@@ -147,28 +154,65 @@ def marker_line(m):
 
 
 def stream_number(*paths):
-    """The stream number in sub-<n>.ocr.jsonl or ocrs-s<n>.jsonl, or None."""
+    """The stream number in sub-<n>.ocr.jsonl, ocrs-s<n>.jsonl or ocrs-s<n>-crop<pad>.jsonl, or None."""
     for p in paths:
-        m = re.match(r'(?:sub-|ocrs-s)(\d+)\.', pathlib.Path(p).name)
+        m = re.match(r'(?:sub-|ocrs-s)(\d+)(?:-crop\d+)?\.', pathlib.Path(p).name)
         if m:
             return int(m.group(1))
     return None
 
 
-def stream_entry(path, n):
-    """The entry of stream n in a summary file's 'streams' list (summary.json, ocrs-summary.json), or None."""
+def crop_number(path):
+    """The padding in ocrs-s<n>-crop<pad>.jsonl; 0 (the full frame) for any other name."""
+    m = re.match(r'ocrs-s\d+-crop(\d+)\.', pathlib.Path(path).name)
+    return int(m.group(1)) if m else 0
+
+
+def stream_entry(path, n, crop=None):
+    """The entry of stream n (and, when crop is given, of that crop; an entry without one is crop 0) in a summary
+    file's 'streams' list (summary.json, ocrs-summary.json), or None."""
     path = pathlib.Path(path)
     if n is None or not path.is_file():
         return None
     for s in st.read_json(path).get('streams', []):
-        if int(s.get('n', -1)) == n:
+        if int(s.get('n', -1)) == n and (crop is None or int(s.get('crop') or 0) == crop):
             return s
     return None
 
 
-def speed_line(rec, n, ocrs_summary):
+def num(x, fmt='%.1f'):
+    return 'n/a' if x is None else fmt % x
+
+
+def mean_of(xs):
+    xs = [float(x) for x in xs if x is not None]
+    return statistics.mean(xs) if xs else None
+
+
+def ocrs_frames_line(frames):
+    """Where ocrs's time went, from its per-frame records: the OCR time per frame read, split into detection and
+    recognition, and for a cropped reading the boxes and the crop time; None when the records carry no time."""
+    if not any('ms' in f for f in frames):
+        return None
+    cropped = any('crop' in f for f in frames)
+    read = [f for f in frames if 'ms' in f and (f.get('crop') or not cropped)]
+    what = 'OCR' if any('decode_ms' in f for f in frames) else 'decode + OCR (an output from before --crop)'
+    parts = ['%s %s ms mean over %d frames read' % (what, num(mean_of(f['ms'] for f in read)), len(read))]
+    if any('detect_ms' in f for f in read):
+        parts.append('detection %s ms, recognition %s ms' % (
+            num(mean_of(f.get('detect_ms') for f in read)), num(mean_of(f.get('rec_ms') for f in read))))
+    if cropped:
+        boxes = [f['crop'] for f in frames if f.get('crop')]
+        blank = sum(1 for f in frames if 'crop' in f and not f['crop'])
+        parts.append('crop: %d boxes, mean %s x %s px, %d frames without a dark pixel (not read), crop_ms mean %s' % (
+            len(boxes), num(mean_of(b[2] for b in boxes), '%.0f'), num(mean_of(b[3] for b in boxes), '%.0f'), blank,
+            num(mean_of(f.get('crop_ms') for f in frames), '%.2f')))
+    return 'ocrs per frame: ' + '; '.join(parts)
+
+
+def speed_line(rec, n, ocrs_summary, crop=0):
     """Each engine's time per frame: Tesseract from summary.json (one call for every frame of the stream), ocrs
-    from ocrs-summary.json or, without it, from the summary line of its output."""
+    from the summary line of its output or, without one, from its entry (stream and crop) in ocrs-summary.json."""
     parts = []
     t = stream_entry(pathlib.Path(rec) / 'summary.json', n) if rec else None
     if t and t.get('frames') and t.get('tesseract_s') is not None:
@@ -176,11 +220,14 @@ def speed_line(rec, n, ocrs_summary):
             1000.0 * float(t['tesseract_s']) / int(t['frames']), float(t['tesseract_s']), int(t['frames'])))
     else:
         parts.append('tesseract n/a (no --rec summary.json entry)')
-    o = stream_entry(pathlib.Path(rec) / 'ocrs-summary.json', n) if rec else None
-    o = o or ocrs_summary
+    o = ocrs_summary or (stream_entry(pathlib.Path(rec) / 'ocrs-summary.json', n, crop) if rec else None)
     if o and o.get('ms_per_frame') is not None:
-        parts.append('ocrs %.1f ms/frame over %d frames (+ %.1f ms model load)' % (
-            float(o['ms_per_frame']), int(o.get('frames', 0)), float(o.get('load_ms') or 0.0)))
+        read = ''
+        if o.get('ms_per_read_frame') is not None:
+            read = ', %.1f ms per frame read (%d read)' % (float(o['ms_per_read_frame']), int(o.get('read_frames', 0)))
+        parts.append('ocrs %.1f ms/frame over %d frames%s%s (+ %.1f ms model load)' % (
+            float(o['ms_per_frame']), int(o.get('frames', 0)), read,
+            ', crop pad %d' % int(o['crop_pad']) if o.get('crop_pad') else '', float(o.get('load_ms') or 0.0)))
     else:
         parts.append('ocrs n/a (no summary)')
     return 'speed: ' + '; '.join(parts)
@@ -226,7 +273,8 @@ def main(argv=None):
         tess, _ = read_frames(a.tesseract, counts)
         ocrs, ocrs_summary = read_frames(a.ocrs)
         c = compare(tess, ocrs, a.tag)
-        speed = speed_line(a.rec, n, ocrs_summary)
+        speed = speed_line(a.rec, n, ocrs_summary, crop_number(a.ocrs))
+        ocrs_line = ocrs_frames_line(ocrs)
     except (OSError, ValueError, KeyError, TypeError) as e:
         print('cannot read the input: %s' % e, file=sys.stderr)
         return 2
@@ -238,6 +286,8 @@ def main(argv=None):
         a.tesseract, len(tess), a.ocrs, len(ocrs), 'yes' if ocrs_summary else 'no'))
     report(c)
     print(speed)
+    if ocrs_line:
+        print(ocrs_line)
     return 0
 
 

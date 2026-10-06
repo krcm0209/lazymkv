@@ -61,7 +61,7 @@ class Reading(unittest.TestCase):
             write_jsonl(p, [{'frame': 0, 'file': 'f-1.png', 'lines': [' Zabo kelu ', ''], 'ms': 5.0},
                             {'summary': {'frames': 1, 'ms_per_frame': 5.0}}])
             got, summary = oc.read_frames(p)
-        self.assertEqual(got, [{'frame': 0, 'file': 'f-1.png', 'lines': ['Zabo kelu']}])
+        self.assertEqual(got, [{'frame': 0, 'file': 'f-1.png', 'lines': ['Zabo kelu'], 'ms': 5.0}])
         self.assertEqual(summary['frames'], 1)
 
     def test_joined_text_is_split_with_the_line_count(self):
@@ -76,7 +76,24 @@ class Reading(unittest.TestCase):
     def test_stream_number_from_either_name(self):
         self.assertEqual(oc.stream_number('a/sub-12.ocr.jsonl', 'b/ocrs-s3.jsonl'), 12)
         self.assertEqual(oc.stream_number('a/copy.jsonl', 'b/ocrs-s3.jsonl'), 3)
+        self.assertEqual(oc.stream_number('a/copy.jsonl', 'b/ocrs-s4-crop16.jsonl'), 4)
         self.assertIsNone(oc.stream_number('a/copy.jsonl', 'b/other.jsonl'))
+
+    def test_crop_number(self):
+        self.assertEqual(oc.crop_number('b/ocrs-s4-crop16.jsonl'), 16)
+        self.assertEqual(oc.crop_number('b/ocrs-s4.jsonl'), 0)
+
+    def test_stream_entry_by_crop(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / 'ocrs-summary.json'
+            # The first entry predates -Crop: it has no crop and counts as the full frame.
+            streams = [{'n': 0, 'ms_per_frame': 1.0}, {'n': 0, 'crop': 16, 'ms_per_frame': 2.0},
+                       {'n': 1, 'crop': 0, 'ms_per_frame': 3.0}]
+            p.write_text(json.dumps({'streams': streams}), encoding='utf-8')
+            self.assertEqual(oc.stream_entry(p, 0, 0)['ms_per_frame'], 1.0)
+            self.assertEqual(oc.stream_entry(p, 0, 16)['ms_per_frame'], 2.0)
+            self.assertEqual(oc.stream_entry(p, 0)['ms_per_frame'], 1.0)
+            self.assertIsNone(oc.stream_entry(p, 1, 16))
 
 
 class Pairing(unittest.TestCase):
@@ -148,6 +165,7 @@ class Main(unittest.TestCase):
             (rec / 'summary.json').write_text(json.dumps({'streams': streams}), encoding='utf-8')
             (rec / 'ocrs-summary.json').write_text(json.dumps({'streams': [
                 {'n': 2, 'frames': 3, 'ms_per_frame': 910.0, 'load_ms': 750.0}]}), encoding='utf-8')
+            # The ocrs file's own summary line is the run compared, so it wins over ocrs-summary.json.
             code, out, err = self.run_main(self.write_pair(d) + ['--rec', str(rec)])
         self.assertEqual(code, 0, err)
         self.assertIn('paired by file name: 3 frames; only in tesseract 0, only in ocrs 0', out)
@@ -155,7 +173,10 @@ class Main(unittest.TestCase):
         self.assertIn('exact match after folding: 1 of 2 frames with text in either (0.500)', out)
         self.assertEqual(out.count('CUE=1 '), 2)
         self.assertIn('speed: tesseract 500.0 ms/frame (summary.json: 1.5 s for 3 frames, one call); '
-                      'ocrs 910.0 ms/frame over 3 frames (+ 750.0 ms model load)', out)
+                      'ocrs 900.0 ms/frame over 3 frames (+ 800.0 ms model load)', out)
+        # An output from before --crop: its ms was decode + OCR, and it says so.
+        self.assertIn('ocrs per frame: decode + OCR (an output from before --crop) 900.0 ms mean over 3 frames read',
+                      out)
         for word in ('Vorpa', 'zindle', 'quax', 'ZORBLE'):
             self.assertNotIn(word, out + err)
 
@@ -165,6 +186,45 @@ class Main(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn('speed: tesseract n/a (no --rec summary.json entry); '
                       'ocrs 900.0 ms/frame over 3 frames (+ 800.0 ms model load)', out)
+
+    def write_cropped(self, d, summary=True):
+        tess = frames([['Vorpal zindle quax.'], ['[ZORBLE HUMS]'], []])
+        ocrs = [dict(f, ms=ms, decode_ms=20.0, detect_ms=det, rec_ms=ms - det, crop=box, crop_ms=cms)
+                for f, ms, det, box, cms in zip(frames([['Vorpal zindle quax.'], ['[ZORBLE HUMS]'], []]),
+                                                (300.0, 200.0, 0.0), (250.0, 150.0, 0.0),
+                                                ([500, 900, 900, 120], [600, 950, 700, 60], None), (4.0, 3.0, 2.0))]
+        if summary:
+            ocrs.append({'summary': {'frames': 3, 'ms_total': 500.0, 'ms_per_frame': 166.7, 'load_ms': 800.0,
+                                     'crop_pad': 16, 'read_frames': 2, 'ms_per_read_frame': 250.0}})
+        write_jsonl(d / 'sub-2.ocr.jsonl', tess)
+        write_jsonl(d / 'ocrs-s2-crop16.jsonl', ocrs)
+        return [str(d / 'sub-2.ocr.jsonl'), str(d / 'ocrs-s2-crop16.jsonl')]
+
+    def test_a_cropped_reading(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = self.run_main(self.write_cropped(pathlib.Path(d)))
+        self.assertEqual(code, 0, err)
+        self.assertIn('paired by file name: 3 frames; only in tesseract 0, only in ocrs 0', out)
+        self.assertIn('exact match after folding: 2 of 2 frames with text in either (1.000)', out)
+        self.assertIn('ocrs 166.7 ms/frame over 3 frames, 250.0 ms per frame read (2 read), crop pad 16 '
+                      '(+ 800.0 ms model load)', out)
+        self.assertIn('ocrs per frame: OCR 250.0 ms mean over 2 frames read; detection 200.0 ms, recognition 50.0 ms; '
+                      'crop: 2 boxes, mean 800 x 90 px, 1 frames without a dark pixel (not read), crop_ms mean 3.00',
+                      out)
+        for word in ('Vorpa', 'zindle', 'ZORBLE'):
+            self.assertNotIn(word, out + err)
+
+    def test_a_cropped_reading_without_a_summary_line_takes_its_own_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            rec = d / 'rec'
+            rec.mkdir()
+            (rec / 'ocrs-summary.json').write_text(json.dumps({'streams': [
+                {'n': 2, 'frames': 3, 'ms_per_frame': 910.0, 'load_ms': 750.0},
+                {'n': 2, 'crop': 16, 'frames': 3, 'ms_per_frame': 170.0, 'load_ms': 700.0}]}), encoding='utf-8')
+            code, out, err = self.run_main(self.write_cropped(d, summary=False) + ['--rec', str(rec)])
+        self.assertEqual(code, 0, err)
+        self.assertIn('ocrs 170.0 ms/frame over 3 frames (+ 700.0 ms model load)', out)
 
     def test_unreadable_or_disjoint_input_exits_2(self):
         with tempfile.TemporaryDirectory() as d:
