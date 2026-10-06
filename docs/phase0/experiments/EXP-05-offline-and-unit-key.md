@@ -21,7 +21,9 @@ be read from a mounted UHD in both drives?
   `tasklist` printed no MakeMKV row at any point).
 - Disc A was identified before MakeMKV saw it: `Get-InsertedDisc` (lazymkv-capture only), the `INDX0300` header,
   and TheDiscDB by fingerprint ("Pan's Labyrinth (2006), UHD, release 2019 4K"). Its name is in none of MakeMKV's
-  cached `MKB20_*.tgz` files, so MakeMKV had not opened it on this machine.
+  cached `MKB20_*.tgz` files. That is consistent with MakeMKV never having opened it here, but it is not proof: the
+  two scans of Disc A created no `MKB20_*` file either (see the listings below), so the cache does not record
+  every disc. The owner's word that the disc was new to this machine is the real basis.
 - Order of the MakeMKV runs and data-folder listings:
   1. listing 0 (before any contact);
   2. Disc A inserted; snapshot and lookups with `record-disc.ps1 -NoScan` (lazymkv-capture and curl, no MakeMKV);
@@ -53,7 +55,7 @@ The blocked network made MakeMKV wait for nothing: the offline scan was 2.6 s fa
 Titles: 2 offline, 2 online. `compare_scans.py scan-offline.txt scan.txt`: `titles: A=2 B=2 common=2`,
 `only in A: 0`, `only in B: 0`, `comment differs: 0`, exit 0. Title 0 is `00800.mpls` (1:59:10, 22 chapters,
 51.7 GB, HEVC Main10 2160p; Spanish DTS-HD MA 5.1 with its DTS core, English DD 2.0, English and Spanish PGS each
-with a forced-only twin); title 1 is `00055.mpls` (0:05:40, 34 segments, no audio). 36 titles under 120 s were
+with a forced-only twin); title 1 is `00055.mpls` (0:05:40, 34 segments, no audio). 31 titles under 120 s were
 skipped (`MSG:3025`), the same ones in both scans.
 
 `ONLY HERE` messages (1003 DEBUG lines excluded):
@@ -61,7 +63,7 @@ skipped (`MSG:3025`), the same ones in both scans.
   online drive listing too.
 - `scan-offline.txt`: none.
 - Online only: `scan.txt` has `3338 "Downloading latest HK to C:\Users\USER/.MakeMKV ..."` (disc position), with
-  no failure message after it. Neither offline run printed a `3338` line: offline, MakeMKV did not try to download.
+  no failure message after it. Neither offline run printed a `3338` line.
 
 The drive listing did not open Disc A: after its `DRV` lines it printed only `5010 Failed to open disc` (the
 answer to `disc:9999`), and listing 0 to listing 1 shows no difference. This matches PROBE_ANSWER.
@@ -73,18 +75,21 @@ other candidate folders are absent. Before MakeMKV first saw Disc A the folder h
 `_private_data.tar`, a firmware dump and seven `MKB20_*.tgz` files from UHDs opened earlier. The four diffs:
 listing 0 to 1 none; 1 to 2 none (the offline scan wrote and changed nothing); 2 to 3 none; 3 to 4 one change,
 `_private_data.tar` grew from 15055872 to 15074816 bytes at the online scan's time, matching the `3338` download.
-No file written offline was read online, so the online scan is a clean baseline. `keydb.cfg` was present
-throughout, which is what let the disc open offline.
+No file written offline was read online, so the online scan is a clean baseline. `keydb.cfg`, the cached
+`_private_data.tar` (dated 2026-09-10, the file the online HK download then rewrote) and LibreDrive were all
+present for the offline runs; which of them let the disc open offline is not isolated by this experiment.
 
 Neither scan printed `MSG:1009`.
 
-The debug logs add: both scans say `Network access is ENABLED` (MakeMKV's own setting, not the firewall's state),
-both show `Using LibreDrive mode` and `DISCID=C337194670AF8C954C320875D671653F7EF2C256`, and the online log has
-the `3338` HK download line that the offline log lacks. MakeMKV's `DISCID` equals our `disc_id`.
+The debug logs add: both scans say `Network access is ENABLED` (printed in the blocked run too, so it is not the
+firewall's state), both show `Using LibreDrive mode` and `DISCID=C337194670AF8C954C320875D671653F7EF2C256`, and
+apart from timestamps the two logs differ only in the online `3338` HK download line, which the robot output
+also carries. MakeMKV's `DISCID` equals our `disc_id`.
 
 Disc ID: `disc_id` is 40 hex characters (`C337194670AF8C954C320875D671653F7EF2C256`): `AACS/Unit_Key_RO.inf`
 (65536 bytes, and its `AACS/DUPLICATE` copy) was readable in drive 1. TheDiscDB answered 404 for this ID while
-knowing the disc by fingerprint, as with the first disc.
+knowing the disc by fingerprint, and its record's `global_disc_id` (`B5F0E23E...`) differs from ours: the same
+DIFFERENT outcome as the first disc (Task 8's check), now on a UHD.
 
 Only drive 1 (D:) was tested. The second-drive half of the question is not run here; Task 14 adds it.
 
@@ -93,8 +98,8 @@ Only drive 1 (D:) was tested. The second-drive half of the question is not run h
 Rule 3 applies: **no distinct message was seen; the disc opened offline.** There was no `ONLY HERE` message in
 either offline run, no offline `3338`, no `start`-position difference either, and both scans listed the same two
 titles. The only difference is on the online side: `3338 "Downloading latest HK ..."` and a larger
-`_private_data.tar`. On this machine, with its `keydb.cfg` and LibreDrive, a never-seen UHD opens offline exactly as
-online.
+`_private_data.tar`. On this machine a never-seen UHD opened offline and listed the same titles as online; the
+only difference was the online download.
 
 `AACS/Unit_Key_RO.inf` was readable in drive 1 (disc ID computed, and equal to MakeMKV's own `DISCID`).
 
@@ -109,5 +114,5 @@ needs a UHD whose keys are not in `keydb.cfg`; none of the owner's discs so far 
 - Section 10.4: the scan watchdog (`scan_timeout_min`) remains the only guard for an offline disc that would hang.
 - Section 8.1: the disc ID is MakeMKV's `DISCID` (confirmed by the debug log); TheDiscDB's `/api/discid/` missed it
   for the second disc in a row while `/api/dischash/` hit. The fingerprint is the primary key.
-- Decision D16 earns its keep here: the debug logs, not the robot output, show the one real difference between
-  offline and online (`DISCID`, `Network access`, the HK download).
+- The debug logs (decision D16) confirm the robot output rather than add to it here: their one difference is the
+  same `3338` line. They do add `DISCID`, which settled the disc-ID question of Task 8.

@@ -21,14 +21,18 @@ installed and MakeMKV's `app_Java` setting is unset.
 - `Java in use: no (MSG:3344 absent)` in the online scan; the offline scan has no `3344` either.
 - No title has a comment (attribute 49): the summary's comment column is empty for both titles (`00800.mpls`,
   `00055.mpls`). No `FPL_MainFeature` label anywhere.
-- The disc lists only two titles over 120 s and 36 short clips; its menus did not run under Java here.
+- The disc does carry BD-J content: `files.json` lists `BDMV/BDJO/00000.bdjo`, `BDMV/BDJO/00001.bdjo` and
+  `BDMV/JAR/00001.jar`. Yet the scan took 19 s (the plan expected ten minutes or more when Java analysis runs),
+  printed no `3344` and gave no labels, with Java 8 installed and MakeMKV's `app_Java` unset.
+- The disc lists two titles over 120 s and 31 short clips.
 
 ## Answer
 
-**Not answered by this disc.** Pan's Labyrinth (2019 4K) showed no Java menus to MakeMKV: no `3344` and no labels.
-Whether that is because the disc has no BD-J menus or because MakeMKV did not find a Java runtime (`app_Java`
-unset) cannot be told from this scan; `3344` is printed only when MakeMKV runs BD-J. The check is repeated on each
-later UHD until one answers it (Task 15 Step 6).
+**Not answered by this disc, and leaning no.** Pan's Labyrinth (2019 4K) has BD-J files, but MakeMKV printed no
+`3344` and no labels. Whether MakeMKV did not run the disc's Java (it did not find a runtime with `app_Java`
+unset, or chose not to) or ran it and found nothing to label cannot be told from this scan. The check is repeated
+on each later UHD until one answers it (Task 15 Step 6); if none does, the answer is no in this configuration,
+and setting `app_Java` to the installed Java 8 is the one change worth trying before that.
 
 ## Consequence for the spec
 
