@@ -298,3 +298,16 @@ that the S3 files the ocrs tools download carry no licence of their own (the Hug
 ## Decision (owner, 2026-10-06)
 
 ocrs is the engine (spec D22): identical rule measures to Tesseract on the trial, pure Rust, bundle-friendly, keeps `cargo install` seamless; the app OCRs only the glyph box to recover the speed; Tesseract is the fallback if that fails. The CC-BY-SA-4.0 attribution and licence text ship with the app; the owner reads the licence.
+
+### Crop trial (2026-10-06, same 600 frames, `--crop 16`)
+
+OCR only the glyph box (bounding box of the dark pixels, 16 px padding; mean box 611 x 143 px): markers identical
+again (CUE 10, LABEL 7, upper 10; 345 text frames; 619 lines against 603 full-frame). Time per READ frame 854 ms
+(full frame: about 930 ms including decode), of which detection 613 ms, recognition 240 ms, PNG decode 57 ms, box
+search 4 ms; blank frames are skipped, so the mean over all 600 frames falls to 491 ms. The crop therefore recovers
+little: ocrs 0.13.1's detection model takes a fixed 800 x 600 input (read from the ONNX file), so a crop is padded or
+resized to the same size and the detector costs the same. The recovery the app needs is to skip ocrs's detector for
+subtitles: the lines are found from the rows of dark pixels of the decoded bitmap and handed to `recognize_text`
+directly, which is the 240 ms part (about 7 minutes for a two-hour film's text frames on the J4125, without AVX2).
+Not built in phase 0; it is the first measurement of the phase 1 OCR work. Detection on a crop narrower than 600 px
+is padded rather than scaled, which is why the crop's line count differs slightly from the full frame's.
