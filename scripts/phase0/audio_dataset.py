@@ -2,7 +2,9 @@
 
     audio_dataset.py [corpus/owner] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE]
                      [--allow-unmeasured]
-    audio_dataset.py args corpus/owner/<slug> <label>       the audio-levels.ps1 jobs that add a ripped title
+    audio_dataset.py args corpus/owner/<slug> <label>       the audio-levels.ps1 jobs that add a ripped title: the
+                                                            title's programme reference against every other stream in a
+                                                            wanted language (EXP-13 addendum, section 9.1)
 
 The first form runs the current rule (audio_similarity.py, imported, never copied) over every
 corpus/owner/<slug>/<label>/audio-levels-20ms-* folder, joins each candidate track with the owner's label in
@@ -13,9 +15,15 @@ corpus/owner/<slug>/audio-labels.json (see audio_labels.py), and prints:
   3. experiment 13: the tracks that count, against the totals of spec section 17 row 13 (read from the spec), and
      the answer as it stands. Whether a label counts is worked out here (audio_labels.not_counted_because), never
      stored, and no track of a disc or track the thresholds were fitted on counts (row 13, audio-fitted.json);
-  4. disagreements: FAIL for a programme track with a drop verdict (commentary or duplicate), for a level folder
-     measured against another stream than the top-ranked one of its language, and for a reference the owner labelled
-     as unwanted audio; the unwanted tracks that were kept, by kind; notes;
+  4. disagreements: FAIL for a programme track with a drop verdict (commentary or duplicate) or with the commentary
+     pattern in another language than the reference (commentary-cross-language: kept, but the pattern fired on
+     programme audio, so it counts as a false verdict), for a level folder
+     measured against another stream than the title's programme reference (the stream spec 8.6 places first in the
+     work's original language, else in English; tmdb.json gives the original language), for a reference the owner
+     labelled as unwanted audio, and for a swapped reference: a labelled candidate against which, taken as the
+     reference, the programme would get the commentary verdict (the same two runs read the other way round); the
+     unwanted tracks that were kept, by kind; notes (among them every folder whose reference is not the first stream
+     of its language in the file: question 10's position veto would refuse to judge it);
   5. labels without a measurement, folders that cannot be read, and the titles not yet in the dataset: every
      successful rip (rip-summary.json or extract-summary.json saying ok) and every measured title without an
      audio-proxy.json in one of its level folders (audio-levels.ps1 writes that file there last, once the title is
@@ -42,10 +50,11 @@ DC_MAX=0.25 (only the verdicts change), or one of audio_similarity.CONSTANTS, su
 computed again). The value must be a finite number. The report is then that of the changed rule, and ends with its
 differences from the baseline.
 
-Exit status: 0; 1 when the rule reported drops a programme track or a folder is measured against the wrong
-reference; 2 for usage errors, a labels or fitted file that does not validate, or a spec row 13 that cannot be read;
-3 when something could not be checked (no level folder, a folder that cannot be read, a labelled track not measured,
-a track of the previous snapshot gone), unless --allow-unmeasured is given.
+Exit status: 0; 1 when the rule reported drops a programme track (or gives one commentary-cross-language), a folder
+is measured against the wrong reference, or a labelled candidate taken as the reference would give the programme the
+commentary verdict; 2 for usage errors, a labels or fitted file that does not validate, or a spec row 13 that cannot be
+read; 3 when something could not be checked (no level folder, a folder that cannot be read, a labelled track not
+measured, a track of the previous snapshot gone), unless --allow-unmeasured is given.
 """
 import argparse
 import array
@@ -62,9 +71,13 @@ import audio_labels as labels
 import audio_similarity as sim
 
 SNAPSHOT_FORMAT = "lazymkv audio dataset snapshot v2"
-VERDICTS = ("duplicate", "commentary", "reference-unclear", "ad-pattern", "note-commentary", "note-ad", "keep", "not-judged")
-SHORT = ("dup", "comm", "r-unc", "ad-p", "n-com", "n-ad", "keep", "n-j")
+VERDICTS = ("duplicate", "commentary", "commentary-cross-language", "reference-unclear", "ad-pattern", "note-commentary",
+            "note-ad", "keep", "not-judged")
+SHORT = ("dup", "comm", "c-x", "r-unc", "ad-p", "n-com", "n-ad", "keep", "n-j")
 DROP = ("duplicate", "commentary")  # the verdicts that drop a track: by MD5 (D13), by content once experiment 13 says yes
+# The commentary pattern confirmed: a drop verdict in the reference's language, keep-only in another (addendum 9.2). On a
+# programme track either one is a false verdict.
+PATTERN = ("commentary", "commentary-cross-language")
 CODE = hashlib.sha1(pathlib.Path(sim.__file__).read_bytes()).hexdigest()
 SPEC = labels.SPEC
 
@@ -143,12 +156,6 @@ class Measurer:
         return m
 
 
-def is_lossless(codec, profile):
-    """Lossless audio as spec 8.6 ranks it. ffprobe names DTS:X tracks 'DTS-HD MA + DTS:X' (and '... IMAX')."""
-    c = str(codec or "")
-    return c in ("truehd", "mlp", "flac") or c.startswith("pcm") or "DTS-HD MA" in str(profile or "")
-
-
 def ffprobe_audio(streams):
     """[(stream, channels, lossless, language, description)] for the audio streams of an ffprobe stream list."""
     out = []
@@ -162,9 +169,46 @@ def ffprobe_audio(streams):
     return out
 
 
-def rank(a):
-    """Task 12 Step 15's and spec 8.6's order: most channels, then lossless, then the earlier stream."""
-    return (-a[1], not a[2], a[0])
+is_lossless, rank, placed_first = sim.is_lossless, sim.rank, sim.placed_first  # spec 8.6 steps 3 and 4 (the rule's own)
+ISO639 = sim.ISO639  # TMDb's two-letter original_language -> three-letter stream codes
+
+
+def original_language(slug_dir):
+    """(codes, what): the three-letter codes of the work's original language from <slug_dir>/tmdb.json, and a phrase
+    saying how it was found. codes is () when the original language is English or unknown."""
+    try:
+        code = json.loads((pathlib.Path(slug_dir) / "tmdb.json").read_text(encoding="utf-8-sig")).get("original_language")
+    except (OSError, ValueError, AttributeError):
+        return (), "original language unknown (no readable tmdb.json)"
+    if not code:
+        return (), "original language unknown (tmdb.json gives none)"
+    if code == "en":
+        return (), "original language English (TMDb en)"
+    if code == sim.TMDB_NO_LANGUAGE:
+        return (), f"original language none (TMDb {code}: a work without speech; English is the reference language)"
+    if code not in ISO639:
+        return (), f"original language unknown (TMDb {code!r} is not in audio_similarity.ISO639)"
+    return ISO639[code], f"original language {'/'.join(ISO639[code])} (TMDb {code})"
+
+
+def programme_reference(audio, original=()):
+    """(stream, why): the title's programme reference (EXP-13 addendum, section 9.1), as an ffprobe_audio() tuple: the
+    stream spec 8.6 places first in the work's original language when the title has one in it, else in English, else
+    among all streams (no stream in a wanted language: measured for the dataset only)."""
+    for codes, why in ((tuple(original), "the original language"), (("eng",), "English")):
+        mine = [a for a in audio if a[3] in codes]
+        if mine:
+            return placed_first(mine), why
+    return placed_first(audio), "any language (no stream is in a wanted language)"
+
+
+NO_LANGUAGE = sim.NO_LANGUAGE
+
+
+def wanted(a, original=()):
+    """A stream measured as a candidate: in English or the original language (R4), or with no language code (the app
+    does not judge those; phase 0 measures them for the dataset)."""
+    return a[3] == "eng" or a[3] in original or a[3] in NO_LANGUAGE
 
 
 def find_folders(corpus):
@@ -190,29 +234,55 @@ def audio_positions(streams):
     return {s["index"]: (k + 1, len(audio), (s.get("tags") or {}).get("title", "")) for k, s in enumerate(audio)}
 
 
-def reference_problem(streams, main):
-    """None when there is no streams.json to check against; '' when `main` is the top-ranked audio stream of its
-    language; otherwise what is wrong."""
+def reference_problem(streams, main, original=()):
+    """None when there is no streams.json to check against; '' when `main` is the title's programme reference
+    (programme_reference), or the stream placed first in a language that is not wanted (a folder measured for the
+    dataset only); otherwise what is wrong. original: the three-letter codes of the work's original language."""
     if streams is None:
         return None
     audio = ffprobe_audio(streams)
     mine = [a for a in audio if a[0] == main]
     if not mine:
         return f"stream {main} is not an audio stream of the file (streams.json)"
-    top = sorted((a for a in audio if a[3] == mine[0][3]), key=rank)[0]
-    if top[0] != main:
-        return (f"measured against stream {main} ({mine[0][4]}), but the top-ranked {mine[0][3]} stream is {top[0]} "
-                f"({top[4]})")
-    return ""
+    ref, why = programme_reference(audio, original)
+    if ref[0] == main:
+        return ""
+    if not wanted(mine[0], original) and placed_first([a for a in audio if a[3] == mine[0][3]])[0] == main:
+        return ""
+    return (f"measured against stream {main} ({mine[0][4]}), but the top-ranked {ref[3]} stream is {ref[0]} ({ref[4]}), "
+            f"the title's programme reference (placed first in {why}; EXP-13 addendum, section 9.1)")
+
+
+def first_of_language(streams, main):
+    """The first audio stream of the file in the language of stream `main`, as (stream, description), when it is not
+    `main` itself and is lossless or has more than two channels (a lossy stereo first stream is what G1 and G2 pass
+    over on purpose); None otherwise, or without streams.json. Question 10's position veto would refuse to judge a
+    folder whose reference is not the first stream of its language."""
+    audio = ffprobe_audio(streams or [])
+    mine = [a for a in audio if a[0] == main]
+    if not mine:
+        return None
+    first = min((a for a in audio if a[3] == mine[0][3]), key=lambda a: a[0])
+    return None if first[0] == main or not (first[2] or first[1] > 2) else (first[0], first[4])
+
+
+def peer_row(peer, meas):
+    """A candidate's peer run (audio_similarity.results) as stored in the snapshot, or None."""
+    if not peer:
+        return None
+    return {"stream": int(peer["stream"]), "verdict": peer["verdict"], "measures": nan_to_none(peer["measures"]),
+            "key": meas.key_of.get(id(peer["measures"]))}
 
 
 def measure(found, rule, consts, cache):
     """Every reference and candidate of every folder under one rule: (tracks, unreadable, measurer). A track is one
     stream in one folder; the same stream in several folders of a title gives several tracks."""
     meas = Measurer(cache)
-    tracks, unreadable = [], []
+    tracks, unreadable, originals = [], [], {}
     with constants(consts):
         for slug, label, folder in found:
+            if slug not in originals:
+                originals[slug] = original_language(folder.parent.parent)[0]
             if not (folder / "manifest.txt").is_file() and (folder / "streams.json").is_file():
                 unreadable.append(f"{slug}/{label}/{folder.name}: its level files are not here (git keeps only "
                                   f"streams.json): pull the recording or copy the folder from the dataset share")
@@ -226,23 +296,27 @@ def measure(found, rule, consts, cache):
             pos = audio_positions(streams)
             mi = res["main"]
             main = int(mi["main"])
-            problem = reference_problem(streams, main)
+            problem = reference_problem(streams, main, originals[slug])
             base = {"slug": slug, "label": label, "folder": folder.name, "main": main, "ref_fc": mi.get("fc") == "yes",
                     "ref_problem": problem, "excluded": bool(problem), "secondary": False,
-                    "n_cands": len(res["candidates"])}
+                    "n_cands": len(res["candidates"]), "ref_first": first_of_language(streams, main)}
             order = [(main, mi.get("md5"))] + [(int(c["stream"]), c["info"].get("md5")) for c in res["candidates"]]
             ranks = {n: sum(1 for m, h in order[:k] if h and h == md5) for k, (n, md5) in enumerate(order)}
             tracks.append(dict(base, role="reference", stream=main, md5=mi.get("md5"), md5_rank=0, codec=mi.get("codec"),
                                channels=mi.get("channels"), language=mi.get("language"), position=pos.get(main),
-                               verdict=None, measures=None, key=None, not_judged="", duplicate_of=None))
+                               verdict=None, measures=None, key=None, not_judged="", duplicate_of=None,
+                               cross_language="", swapped_verdict=None, peer=None))
             for c in res["candidates"]:
                 n = int(c["stream"])
                 key = meas.key_of.get(id(c["measures"])) if c["measures"] is not None else None
+                back = sim.swapped(c["measures"]) if c["measures"] is not None else None
                 tracks.append(dict(base, role="candidate", stream=n, md5=c["info"].get("md5"), md5_rank=ranks[n],
                                    codec=c["info"].get("codec"), channels=c["info"].get("channels"),
                                    language=c["info"].get("language"), position=pos.get(n), verdict=c["verdict"],
                                    measures=nan_to_none(c["measures"]), key=key, not_judged=c["not_judged"],
-                                   duplicate_of=c["duplicate_of"]))
+                                   duplicate_of=c["duplicate_of"], cross_language=c.get("cross_language", ""),
+                                   swapped_verdict=sim.verdict(back, rule) if back is not None else None,
+                                   peer=peer_row(c.get("peer"), meas)))
     # The same stream in several valid folders of one title: each is judged; the table uses the folder with the most
     # candidates (it sees the most of the title's duplicates), the others are marked secondary.
     groups = {}
@@ -313,18 +387,26 @@ def join_labels(tracks, labelled, fitted):
                 t["outcome"] = f"reference labelled {k}"
         elif lab is None:
             t["outcome"] = "unlabelled"
-        elif group == "programme" and v in DROP:
+        elif group == "programme" and (v in DROP or v in PATTERN):
             t["outcome"] = "FAIL"
         elif group in ("unwanted", "duplicate") and v not in DROP:
             t["outcome"] = "kept"
         elif group == "unwanted" and v == "commentary" and k not in labels.COMMENTARY_KINDS:
             t["outcome"] = "dropped as a commentary"
-        elif group == "ask" and v in DROP:
-            t["outcome"] = "undecided kind, drop verdict"
-        elif group == "unknown" and v in DROP:
-            t["outcome"] = "unknown kind, drop verdict"
+        elif group in ("ask", "unknown") and (v in DROP or v in PATTERN):
+            t["outcome"] = ("undecided" if group == "ask" else "unknown") + " kind, " + \
+                ("drop verdict" if v in DROP else "commentary pattern")
         else:
             t["outcome"] = "agrees"
+    # A swapped reference: the same pair read the other way round. If this candidate were the reference, would the
+    # title's reference (programme audio unless the owner labelled it otherwise) get the commentary verdict? Only for
+    # labelled candidates: like every verdict, it is not shown before the owner has labelled the track.
+    ref_kind = {(t["slug"], t["label"], t["folder"]): t["kind"] for t in tracks if t["role"] == "reference"}
+    for t in tracks:
+        k = ref_kind.get((t["slug"], t["label"], t["folder"]))
+        programme_ref = k is None or labels.KINDS[k][0] == "programme"
+        t["swap_fail"] = (t["role"] == "candidate" and not t["excluded"] and t["kind"] is not None
+                          and t.get("swapped_verdict") == "commentary" and programme_ref)
     return tracks
 
 
@@ -351,8 +433,17 @@ def coverage(tracks, req, titles):
         "dialogue_heavy_titles": len({(t["slug"], t["label"]) for t in cnt if title(t).get("dialogue_heavy") is True}),
         "others": {k: sum(1 for t in cnt if t["kind"] == k) for k in ("isolated-score", "music-effects", "same-language-dub", "alternate-narration")},
         "verdict_discs": len({t["slug"] for t in comm if t["verdict"] == "commentary"}),
+        "dubs": sum(1 for t in cnt if t["kind"] == "dub"),
+        "dub_discs": len({t["slug"] for t in cnt if t["kind"] == "dub"}),
+        "dub_heavy": len({(t["slug"], t["label"]) for t in cnt if t["kind"] == "dub" and title(t).get("dialogue_heavy") is True}),
+        "dub_pattern": sum(1 for t in cnt if t["kind"] == "dub" and t["verdict"] in PATTERN),
+        "cross_comm": sum(1 for t in comm if t["cross_language"]),
+        "cross_comm_pattern": sum(1 for t in comm if t["verdict"] == "commentary-cross-language"),
+        "cross_prog": sum(1 for t in prog if t["cross_language"]),
+        "swapped": sum(1 for t in judged(tracks) if t["role"] == "candidate" and t["kind"] and t.get("swapped_verdict")),
+        "swap_fails": sum(1 for t in judged(tracks) if t.get("swap_fail")),
     }
-    false = sorted({(t["slug"], t["label"], t["stream"]) for t in tracks if t["outcome"] == "FAIL" and t["verdict"] == "commentary"})
+    false = sorted({(t["slug"], t["label"], t["stream"]) for t in tracks if t["outcome"] == "FAIL" and t["verdict"] in PATTERN})
     missing = [name for name, have, need in (
         ("commentaries", c["commentaries"], req["commentaries"]), ("discs with a commentary", c["commentary_discs"], req["commentary_discs"]),
         ("commentaries on feature films", c["commentary_features"], req["commentary_features"]),
@@ -368,7 +459,9 @@ def coverage(tracks, req, titles):
     elif c["verdict_discs"] < req["verdict_discs"]:
         answer = f"no: commentary verdicts on {c['verdict_discs']} discs, {req['verdict_discs']} needed"
     else:
-        answer = "yes, if the audio-description and 'every one the owner has' kinds are covered (checked by hand)"
+        answer = ("yes, if the audio-description and 'every one the owner has' kinds are covered (checked by hand); for "
+                  "candidates in the reference's language only: one in another language is never dropped by content "
+                  "(addendum 9.2)")
     return c, answer, false
 
 
@@ -498,6 +591,17 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
               f"  score, M&E, dub, narration  isolated-score {o['isolated-score']}, music-effects {o['music-effects']}, "
               f"same-language-dub {o['same-language-dub']}, alternate-narration {o['alternate-narration']} (every one the owner has; checked by hand)",
               f"  commentary verdicts   on {c['verdict_discs']} of {req['verdict_discs']} discs",
+              f"  cross-language        commentaries {c['cross_comm']} (commentary-cross-language {c['cross_comm_pattern']}), "
+              f"programme tracks {c['cross_prog']}, judged against a reference in another language; never dropped by content "
+              f"(addendum 9.2)",
+              f"  dubs                  {c['dubs']}" + (f" of {req['dubs']}" if req.get("dubs") is not None else "")
+              + f" from {c['dub_discs']}" + (f" of {req['dub_discs']}" if req.get("dub_discs") is not None else "")
+              + f" discs; on dialogue-heavy titles {c['dub_heavy']}" + (f" of {req['dub_heavy']}" if req.get("dub_heavy") is not None else "")
+              + f"; with the commentary pattern {c['dub_pattern']} (" + ("what row 13 asks before content may judge a "
+              "candidate in another language" if req.get("dubs") is not None else "row 13 sets no number for dubs yet")
+              + "; until then such a candidate is never dropped by content)",
+              f"  swapped references    {c['swapped']} labelled candidates read the other way round; the programme would get "
+              f"the commentary verdict against {c['swap_fails']} of them (addendum 9.3; no number in row 13)",
               f"  false verdicts        {len(false)} (a programme track with the commentary verdict, on any disc)",
               f"  as it stands: {answer}",
               "  not counted: " + (", ".join(f"{s} {n}" for s, n in sorted(not_counted.items())) or "none")]
@@ -508,11 +612,18 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
     lines += [f"  FAIL {where(t)}: labelled {t['kind']} (programme audio), verdict {t['verdict']}"
               + (f" (label of {t['inherited_from']})" if t["inherited_from"] else "") for t in fails]
     if fails:
-        failures.append(f"{len(fails)} programme track(s) got a drop verdict: " + "; ".join(where(t) for t in fails))
+        failures.append(f"{len(fails)} programme track(s) got a drop verdict or the commentary pattern: "
+                        + "; ".join(where(t) for t in fails))
     lines += [f"  FAIL {s}/{l}/{f}: wrong reference: {p}; its tracks are left out (measure the title again with the "
               f"reference that `audio_dataset.py args` prints, then delete this folder)" for s, l, f, p in wrong]
     if wrong:
         failures.append(f"{len(wrong)} folder(s) measured against the wrong reference: " + "; ".join(f"{s}/{l}/{f}" for s, l, f, _ in wrong))
+    swaps = [t for t in tracks if t.get("swap_fail")]
+    lines += [f"  FAIL {where(t)}: swapped reference: labelled {t['kind']}, verdict {t['verdict']}; "
+              f"with this track as the reference, the programme (stream {t['main']}) would get the commentary verdict "
+              f"(EXP-13 addendum, section 9.3)" for t in swaps]
+    if swaps:
+        failures.append(f"{len(swaps)} swapped reference(s) would drop the programme: " + "; ".join(where(t) for t in swaps))
     bad_refs = [t for t in tracks if t["outcome"] == "reference is unwanted audio"]
     lines += [f"  FAIL {where(t)}: the reference is labelled {t['kind']} (unwanted audio): its folder measures the "
               f"title against it" for t in bad_refs]
@@ -525,9 +636,14 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
             lines.append(f"  kept although unwanted, {kind}: " + "; ".join(f"{name(t)} ({t['verdict']}"
                                                                          + (f", not judged: {t['not_judged']}" if t["not_judged"] else "") + ")" for t in rows))
     for t in [t for t in tracks if not t["excluded"]]:
-        if t["outcome"] in ("dropped as a commentary", "undecided kind, drop verdict", "unknown kind, drop verdict") \
+        if t["outcome"] == "dropped as a commentary" or t["outcome"].startswith(("undecided kind, ", "unknown kind, ")) \
                 or t["outcome"].startswith("reference labelled"):
             lines.append(f"  note: {where(t)}: {t['outcome']} ({t['kind']}, verdict {t['verdict']})")
+    for t in good:
+        if t["role"] == "reference" and t.get("ref_first"):
+            lines.append(f"  note: {t['slug']}/{t['label']}/{t['folder']}: the reference, stream {t['stream']}, is not the "
+                         f"first {t['language']} stream of the file (stream {t['ref_first'][0]}, {t['ref_first'][1]}, comes "
+                         f"first): question 10's position veto would refuse to judge its candidates (EXP-13 addendum 9.3)")
     shown = set()
     for t in good:
         if t.get("also_in") and (t["slug"], t["label"], t["stream"], t["role"]) not in shown:
@@ -567,13 +683,16 @@ def load_snapshot(path):
 def write_snapshot(path, corpus, tracks, unreadable, rule, consts, overrides, req, fitted, meas):
     keep = ("slug", "label", "folder", "role", "stream", "main", "md5", "md5_rank", "codec", "channels", "language",
             "ref_fc", "ref_problem", "excluded", "secondary", "verdict", "not_judged", "duplicate_of", "measures", "key",
-            "kind", "inherited_from", "counts", "why_not_counted", "outcome")
+            "kind", "inherited_from", "counts", "why_not_counted", "outcome", "cross_language", "swapped_verdict",
+            "swap_fail", "peer", "ref_first")
     rows, hidden = [], {}
     for t in tracks:
         row = dict({k: t[k] for k in keep}, owner_label=t["label_entry"])
         if t["role"] == "candidate" and t["kind"] is None:
             hidden[track_key(t)] = row["verdict"]
-            row["verdict"] = None
+            row["verdict"] = row["swapped_verdict"] = None
+            if row["peer"]:
+                row["peer"] = dict(row["peer"], verdict=None)
         rows.append(row)
     data = {"format": SNAPSHOT_FORMAT, "created": datetime.datetime.now().isoformat(timespec="seconds"),
             "corpus": str(corpus), "code": {"audio_similarity_sha1": CODE}, "rule": rule, "constants": consts,
@@ -609,9 +728,12 @@ def same_rip(slug_dir, label):
 
 
 def levels_args(slug_dir, label):
-    """The audio-levels.ps1 job lines for a ripped title: per language with two or more audio streams, the
-    top-ranked stream (most channels, then lossless, then the earlier) against the others (Task 12 Step 15's
-    ranking); when no language has two, one job with the top-ranked English (else any) stream alone, for the dataset.
+    """The audio-levels.ps1 job lines for a ripped title (EXP-13 addendum, section 9.1): one job with the title's
+    programme reference (the stream spec 8.6 places first in the work's original language, from tmdb.json, else in
+    English) against every other stream in a wanted language (English, the original language) or with no language,
+    whatever their language: an English commentary on a Spanish film is judged against the Spanish main track. When no
+    other stream is wanted, the job has the reference alone, for the dataset. A language that is not wanted and has two
+    or more streams gets its own job, for the dataset only: its first-placed stream against the others.
     The streams come from the rip's own ffprobe-streams.json, else from that of a rip of the same title with the same
     size, else from its mkvmerge.json."""
     d = pathlib.Path(slug_dir) / label
@@ -640,17 +762,43 @@ def levels_args(slug_dir, label):
                          f"scripts/phase0/wait.sh probe-{label}")
     if not audio:
         raise ValueError(f"{d}: the file has no audio stream")
-    langs = {}
+    original, what = original_language(slug_dir)
+    ref, why = programme_reference(audio, original)
+    groups = [[ref] + sorted((a for a in audio if a[0] != ref[0] and (wanted(a, original) or a[3] == ref[3])),
+                             key=lambda a: a[0])]
+    others = {}
     for a in audio:
-        langs.setdefault(a[3], []).append(a)
-    groups = [sorted(v, key=rank) for v in langs.values() if len(v) >= 2]
-    if not groups:
-        eng = [a for a in audio if a[3] == "eng"]
-        groups = [sorted(eng or audio, key=rank)[:1]]
-    lines = [f"{slug}/{label}: {len(audio)} audio streams (from {source})"]
+        if not wanted(a, original):
+            others.setdefault(a[3], []).append(a)
+    for lang, streams in sorted(others.items()):
+        if len(streams) >= 2 and ref[0] not in [a[0] for a in streams]:
+            top = placed_first(streams)
+            groups.append([top] + sorted((a for a in streams if a[0] != top[0]), key=lambda a: a[0]))
+    lines = [f"{slug}/{label}: {len(audio)} audio streams (from {source}); {what}"]
     lines += [f"  stream {a[0]}: {a[4]} lang={a[3]}" for a in audio]
+    lines.append(f"  programme reference: stream {ref[0]} ({ref[4]}), placed first in {why} (spec 8.6 steps 3 and 4); "
+                 f"candidates: every other stream in {', '.join(['eng'] + list(original))} or with no language, "
+                 f"whatever its language")
+    if original and why != "the original language":
+        lines.append(f"  note: the file has no stream in the original language ({'/'.join(original)}): the reference may "
+                     f"not be the programme (an English-only rip of a foreign film can hold only a commentary)")
+    first = min((a for a in audio if a[3] == ref[3]), key=lambda a: a[0])
+    if first[0] != ref[0] and (first[2] or first[1] > 2):  # not a lossy stereo first stream that G1 or G2 passed over
+        lines.append(f"  note: the reference is not the first {ref[3]} stream of the file (stream {first[0]}, {first[4]}, "
+                     f"comes first): if stream {first[0]} is the programme and the reference an isolated score, an M&E "
+                     f"track or a commentary, the candidates are judged against the wrong track (EXP-13 addendum 9.3, "
+                     f"question 10); measure as printed and say so in the report")
+    louder = [a for a in audio if a[3] in NO_LANGUAGE and a[0] != ref[0] and (a[2] or a[1] > 2)]
+    if not ref[2] and ref[1] <= 2 and louder:
+        lines.append(f"  note: the reference is a lossy stream of {ref[1]} channel(s), and stream "
+                     f"{', '.join(str(a[0]) for a in louder)} with no language code is lossless or has more than 2 "
+                     f"channels: if it is the programme, the reference may be a commentary (EXP-13 addendum 9.6); "
+                     f"measure as printed and say so in the report")
+    for g in groups[1:]:
+        lines.append(f"  dataset only: {g[0][3]} is not a wanted language; stream {g[0][0]} against "
+                     f"{','.join(str(a[0]) for a in g[1:])}")
     for g in groups:
-        main, cands = g[0][0], sorted(a[0] for a in g[1:])
+        main, cands = g[0][0], [a[0] for a in g[1:]]
         log = f"audio-levels-{slug}-{label}" + (f"-{main}" if len(groups) > 1 else "")
         lines += [f"scripts/phase0/job.sh audio-levels.ps1 {log} -Slug {slug} -Label {label} -Main {main}"
                   + (f" -Cand {','.join(map(str, cands))}" if cands else ""),

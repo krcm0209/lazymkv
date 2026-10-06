@@ -1,4 +1,4 @@
-"""Experiment 13: is an extra audio track a commentary? Judged from its content against the main track.
+"""Experiment 13: is an extra audio track a commentary? Judged from its content against the title's main track.
 
     audio_similarity.py <audio-levels-20ms folder> ...     the measures and the verdict of every candidate
     audio_similarity.py --titles corpus/owner/<slug>       which titles of a recorded scan have two or more audio
@@ -7,7 +7,7 @@
 Reads a folder written by audio-levels.ps1 (audio-levels-20ms-<main>-<candidates>): manifest.txt, main-mix.txt,
 main-fc.txt (only when the main track has a centre channel) and cand-<stream>.txt, each holding one speech-band
 (300-3400 Hz) RMS level in dB per 20 ms frame. For every candidate it prints the measures and the verdict of the
-rule in docs/phase0/experiments/EXP-13-design.md (section 3):
+rule in docs/phase0/experiments/EXP-13-design.md (section 3, rows 3 to 5 as its addendum, section 9, replaces them):
 
   DC     dialogue carried: share of the main's 2 s dialogue windows in which the candidate's level follows the main's
   AG     added in the gaps: share of the main's dialogue-gap time in which the candidate carries speech-level sound
@@ -23,8 +23,26 @@ one-line message and a non-zero exit, before any number is printed: the first me
 (audio-levels-<main>-<cand>, 100 ms frames, full band, no manifest) must be measured again with the new script.
 A folder with a main stream and no candidate (a title measured only for the tuning dataset) has nothing to judge.
 
+The main stream of a folder is the title's programme reference (EXP-13 addendum, section 9): the top-ranked stream of
+the work's original language, else of English. A candidate in another language than the reference (an English
+commentary on a Spanish film, an English dub) is judged against it like any other candidate; its report line says
+"cross-language". Every candidate is also judged the other way round (the reverse run: the candidate as reference, the
+main stream as candidate). When the reverse run has the commentary pattern, the reference looks like a commentary over
+the candidate, so one of the two is not what its rank says: the verdict is reference-unclear (keep, review), whatever
+the forward run says.
+
+A cross-language candidate with the commentary pattern is never a plain "commentary" (addendum 9.2): level curves do
+not hear language, and a lip-synced dub with loose timing on a dialogue-dense title can show the pattern against the
+original. When its language has a stream that 8.6 places before it (the dub itself, for a 2.0 companion of the dub),
+it is judged against that stream too (the peer run, from the same folder): if the peer run has no commentary verdict,
+the candidate follows a programme track of its own language and gets only note-commentary. Otherwise its verdict is
+commentary-cross-language: keep and flag for review, never dropped by content.
+
 For other programs: results(folder, rule) gives the same measures and verdicts as data; RULE holds the decision
 thresholds and CONSTANTS names the module constants of the measures, so that audio_dataset.py can try other values.
+swapped(measures) gives the measures of the same pair with the roles exchanged (what the rule would say of the main
+stream if the candidate were the reference), from the same two runs. placed_first() is spec 8.6's ranking (step 3)
+with its guards G1 and G2 (step 4) as far as ffprobe's facts go; audio_dataset.py chooses the reference with it.
 """
 import cmath
 import json
@@ -68,11 +86,18 @@ CONSTANTS = ("MATCH_R", "MISMATCH_R", "X_ACTIVE_BELOW", "DLG_BELOW", "GAP_MIN", 
 RULE = {
     "overlap_min": 0.90, "main_silent_max": 0.10, "gap_s_min": 90.0,
     "dc_max": 0.30, "ag_min": 0.50, "tenths_min": 6, "tenths_share": 0.90, "smi_min": 0.50, "ls_max": 13.0,
-    "added_s_min": 60.0, "reverse_gap_s_min": 90.0, "reverse_ag_max": 0.30,
+    "added_s_min": 60.0,
     "ad_dc_min": 0.90, "ad_adl_max": 0.02, "ad_ag_min": 0.15, "ad_ag_s_min": 45.0, "ad_tenths_share": 0.60,
     "note_comm_dc_max": 0.50, "note_comm_ag_min": 0.30,
     "note_ad_dc_min": 0.80, "note_ad_ag_min": 0.10, "note_ad_ag_s_min": 30.0,
 }
+# The reverse run's measures kept with every candidate's measures, as "rev_<name>" (EXP-13 addendum, section 9.3).
+REVERSE_KEYS = ("overlap", "main_silent", "gap_s", "dc", "ag", "ag_s", "adl", "tenths", "tenths_comm", "tenths_ad", "smi",
+                "smi_windows", "ls_db", "added_s", "gain_db")
+# The reverse test of EXP-13-design.md section 2 item 13 (90 s of the candidate's gaps, reverse AG 0.30). It is replaced
+# by the reverse commentary pattern (addendum section 9.3) and used only for measures that carry no reverse block
+# (rev_gap_s and rev_ag alone, as the code before 2026-10-06 wrote them): it can only keep.
+EARLIER_REVERSE = {"gap_s_min": 90.0, "ag_min": 0.30}
 _TW = [[cmath.exp(-2j * math.pi * k * n / N_SMI) for n in range(N_SMI)] for k in range(33)]
 
 
@@ -294,7 +319,9 @@ def analyse(main, cand, dialogue=None, reverse=True):
     }
     if reverse:
         back = analyse(cand, main, None, reverse=False)
-        m["rev_gap_s"], m["rev_ag"] = back.get("gap_s", 0.0), back.get("ag", float("nan"))
+        m["rev_error"] = back.get("error", "")
+        for k in REVERSE_KEYS:
+            m["rev_" + k] = back.get(k, 0.0 if k == "gap_s" else float("nan"))
     return m
 
 
@@ -327,15 +354,59 @@ def not_judged(m, rule=RULE):
     return ""
 
 
+def reverse_measures(m):
+    """The reverse run (the candidate as reference, the main stream as candidate) as a measures dict; None when m
+    carries no reverse block (measures written before 2026-10-06 kept only rev_gap_s and rev_ag)."""
+    if "rev_tenths" not in m:
+        return None
+    if m.get("rev_error"):
+        return {"error": m["rev_error"]}
+    return {k: m["rev_" + k] for k in REVERSE_KEYS}
+
+
+def reverse_pattern(m, rule=RULE):
+    """True when the reverse run may be judged and has the commentary pattern: the reference looks like a commentary
+    over the candidate (EXP-13 addendum, section 9.3). The same thresholds as the forward pattern; no number of its own."""
+    r = reverse_measures(m)
+    return r is not None and "error" not in r and not not_judged(r, rule) and commentary_pattern(r, rule)
+
+
+def swapped(m):
+    """The measures of the same pair with the roles exchanged: the forward run becomes the reverse one and the other way
+    round. verdict(swapped(m)) is what the rule would say of the main stream if the candidate were the reference. It is
+    an approximation in two ways, neither measured: the forward run used the main stream's centre channel as its
+    dialogue curve, where a real swap would use its mixdown; and the reverse run used the candidate's mixdown as its
+    dialogue curve, where a candidate with a centre channel (a 5.1 isolated score or M&E track) taken as the reference
+    would use that channel, which carries little or no dialogue, so its gaps would be longer than those measured here.
+    None when m has no reverse block or an error."""
+    r = reverse_measures(m)
+    if r is None or "error" in m:
+        return None
+    if "error" in r:
+        return {"error": r["error"]}
+    out = dict(r)
+    out["rev_error"] = ""
+    for k in REVERSE_KEYS:
+        out["rev_" + k] = m.get(k, float("nan"))
+    return out
+
+
 def verdict(m, rule=RULE):
-    """One of: commentary, reference-unclear, ad-pattern, note-commentary, note-ad, keep; with not-judged reasons."""
-    why = not_judged(m, rule)
+    """One of: commentary, reference-unclear, ad-pattern, note-commentary, note-ad, keep; with not-judged reasons.
+    reference-unclear: the reverse run has the commentary pattern (the reference looks like a commentary over this
+    track), whatever the forward run says; for measures without a reverse block, the earlier reverse test applies."""
     if "error" in m:
         return "not-judged"
-    if not why and commentary_pattern(m, rule):
-        reverse = ok(m.get("rev_ag", float("nan"))) and m.get("rev_gap_s", 0.0) >= rule["reverse_gap_s_min"] \
-            and m["rev_ag"] >= rule["reverse_ag_max"]
-        return "reference-unclear" if reverse else "commentary"
+    why = not_judged(m, rule)
+    if reverse_measures(m) is not None:
+        if reverse_pattern(m, rule):
+            return "reference-unclear"
+        if not why and commentary_pattern(m, rule):
+            return "commentary"
+    elif not why and commentary_pattern(m, rule):
+        earlier = ok(m.get("rev_ag", float("nan"))) and m.get("rev_gap_s", 0.0) >= EARLIER_REVERSE["gap_s_min"] \
+            and m["rev_ag"] >= EARLIER_REVERSE["ag_min"]
+        return "reference-unclear" if earlier else "commentary"
     if not why and ad_pattern(m, rule):
         return "ad-pattern"
     if ok(m["dc"]) and ok(m["ag"]) and m["dc"] <= rule["note_comm_dc_max"] and m["ag"] >= rule["note_comm_ag_min"]:
@@ -349,7 +420,11 @@ def verdict(m, rule=RULE):
 MEANING = {
     "duplicate": "exact duplicate (same packets): keep the first copy, drop this one; no audio analysis needed",
     "commentary": "commentary pattern: kept and flagged for review until experiment 13 answers yes, then dropped",
-    "reference-unclear": "commentary pattern, but the main track also adds sound to the candidate: keep, review",
+    "commentary-cross-language": "commentary pattern on a track in another language than the reference: keep and flag "
+                                 "for review (commentary_detected); never dropped by content until real dubs in a "
+                                 "wanted language have been measured (EXP-13 addendum 9.2)",
+    "reference-unclear": "the main track looks like a commentary over this one (reverse run): one of the two is not what "
+                         "its rank says (a commentary or a stem ranked first, or a stem among the candidates): keep, review",
     "ad-pattern": "audio-description pattern: keep, note possible_audio_description (never dropped by content)",
     "note-commentary": "keep, note possible_commentary",
     "note-ad": "keep, note possible_audio_description",
@@ -362,12 +437,139 @@ def fmt(v, digits=2):
     return "n/a" if not ok(v) else f"{v:.{digits}f}"
 
 
+NO_LANGUAGE = ("", "-", "und", "zxx", "mul", "mis")  # codes that name no language (spec 8.6: "no language")
+
+
+# TMDb's two-letter original_language -> the three-letter codes a stream may carry (spec 8.6 "Languages"): every ISO
+# 639-1 code with its ISO 639-2 terminology and bibliographic forms, as ffmpeg 8.1.2's own table (libavformat
+# avlanguage.c) pairs them, the deprecated aliases that table keeps (in, iw, ji, jw, mo), and TMDb's own codes: cn
+# (Cantonese, which discs tag chi or zho), sh (Serbo-Croatian) and xx (no language, TMDB_NO_LANGUAGE). A few entries
+# are wider than ISO 639-2 alone (no, nb, nn, tl, cn, sh, mo): a disc may tag Norwegian nob or nno, Filipino fil. A
+# code missing here leaves the original language unknown: English is then the reference language, and args says so.
+ISO639 = {
+    "aa": ("aar",), "ab": ("abk",), "ae": ("ave",), "af": ("afr",), "ak": ("aka",), "am": ("amh",), "an": ("arg",),
+    "ar": ("ara",), "as": ("asm",), "av": ("ava",), "ay": ("aym",), "az": ("aze",), "ba": ("bak",), "be": ("bel",),
+    "bg": ("bul",), "bh": ("bih",), "bi": ("bis",), "bm": ("bam",), "bn": ("ben",), "bo": ("bod", "tib"),
+    "br": ("bre",), "bs": ("bos",), "ca": ("cat",), "ce": ("che",), "ch": ("cha",), "cn": ("zho", "chi", "yue"),
+    "co": ("cos",), "cr": ("cre",), "cs": ("ces", "cze"), "cu": ("chu",), "cv": ("chv",), "cy": ("cym", "wel"),
+    "da": ("dan",), "de": ("deu", "ger"), "dv": ("div",), "dz": ("dzo",), "ee": ("ewe",), "el": ("ell", "gre"),
+    "en": ("eng",), "eo": ("epo",), "es": ("spa",), "et": ("est",), "eu": ("eus", "baq"), "fa": ("fas", "per"),
+    "ff": ("ful",), "fi": ("fin",), "fj": ("fij",), "fo": ("fao",), "fr": ("fra", "fre"), "fy": ("fry",),
+    "ga": ("gle",), "gd": ("gla",), "gl": ("glg",), "gn": ("grn",), "gu": ("guj",), "gv": ("glv",), "ha": ("hau",),
+    "he": ("heb",), "hi": ("hin",), "ho": ("hmo",), "hr": ("hrv",), "ht": ("hat",), "hu": ("hun",),
+    "hy": ("hye", "arm"), "hz": ("her",), "ia": ("ina",), "id": ("ind",), "ie": ("ile",), "ig": ("ibo",),
+    "ii": ("iii",), "ik": ("ipk",), "in": ("ind",), "io": ("ido",), "is": ("isl", "ice"), "it": ("ita",),
+    "iu": ("iku",), "iw": ("heb",), "ja": ("jpn",), "ji": ("yid",), "jv": ("jav",), "jw": ("jav",),
+    "ka": ("kat", "geo"), "kg": ("kon",), "ki": ("kik",), "kj": ("kua",), "kk": ("kaz",), "kl": ("kal",),
+    "km": ("khm",), "kn": ("kan",), "ko": ("kor",), "kr": ("kau",), "ks": ("kas",), "ku": ("kur",), "kv": ("kom",),
+    "kw": ("cor",), "ky": ("kir",), "la": ("lat",), "lb": ("ltz",), "lg": ("lug",), "li": ("lim",), "ln": ("lin",),
+    "lo": ("lao",), "lt": ("lit",), "lu": ("lub",), "lv": ("lav",), "mg": ("mlg",), "mh": ("mah",),
+    "mi": ("mri", "mao"), "mk": ("mkd", "mac"), "ml": ("mal",), "mn": ("mon",), "mo": ("ron", "rum", "mol"),
+    "mr": ("mar",), "ms": ("msa", "may"), "mt": ("mlt",), "my": ("mya", "bur"), "na": ("nau",), "nb": ("nob", "nor"),
+    "nd": ("nde",), "ne": ("nep",), "ng": ("ndo",), "nl": ("nld", "dut"), "nn": ("nno", "nor"),
+    "no": ("nor", "nob", "nno"), "nr": ("nbl",), "nv": ("nav",), "ny": ("nya",), "oc": ("oci",), "oj": ("oji",),
+    "om": ("orm",), "or": ("ori",), "os": ("oss",), "pa": ("pan",), "pi": ("pli",), "pl": ("pol",), "ps": ("pus",),
+    "pt": ("por",), "qu": ("que",), "rm": ("roh",), "rn": ("run",), "ro": ("ron", "rum"), "ru": ("rus",),
+    "rw": ("kin",), "sa": ("san",), "sc": ("srd",), "sd": ("snd",), "se": ("sme",), "sg": ("sag",),
+    "sh": ("hbs", "srp", "hrv", "bos"), "si": ("sin",), "sk": ("slk", "slo"), "sl": ("slv",), "sm": ("smo",),
+    "sn": ("sna",), "so": ("som",), "sq": ("sqi", "alb"), "sr": ("srp",), "ss": ("ssw",), "st": ("sot",),
+    "su": ("sun",), "sv": ("swe",), "sw": ("swa",), "ta": ("tam",), "te": ("tel",), "tg": ("tgk",), "th": ("tha",),
+    "ti": ("tir",), "tk": ("tuk",), "tl": ("tgl", "fil"), "tn": ("tsn",), "to": ("ton",), "tr": ("tur",),
+    "ts": ("tso",), "tt": ("tat",), "tw": ("twi",), "ty": ("tah",), "ug": ("uig",), "uk": ("ukr",), "ur": ("urd",),
+    "uz": ("uzb",), "ve": ("ven",), "vi": ("vie",), "vo": ("vol",), "wa": ("wln",), "wo": ("wol",), "xh": ("xho",),
+    "yi": ("yid",), "yo": ("yor",), "za": ("zha",), "zh": ("zho", "chi"), "zu": ("zul",),
+}
+
+TMDB_NO_LANGUAGE = "xx"  # TMDb's original_language of a work without speech: English is then the reference language
+
+
+def is_lossless(codec, profile):
+    """Lossless audio as spec 8.6 ranks it. ffprobe names DTS:X tracks 'DTS-HD MA + DTS:X' (and '... IMAX'); the
+    manifest of a level folder writes the profile with '_' for spaces ('DTS-HD_MA')."""
+    c = str(codec or "")
+    return c in ("truehd", "mlp", "flac") or c.startswith("pcm") or "DTS-HD MA" in str(profile or "").replace("_", " ")
+
+
+def rank(a):
+    """Spec 8.6 step 3's order of streams given as (stream, channels, lossless, language, description): most
+    channels, then lossless, then the earlier stream."""
+    return (-a[1], not a[2], a[0])
+
+
+def placed_first(streams):
+    """The stream spec 8.6 places first among the given streams of one language: rank() (step 3), then its guards
+    (step 4) as far as ffprobe's facts go. G1: a lossy stream of two channels or fewer (the spec says 256 kb/s or less;
+    streams.json carries no bit rate) never comes before a lossless one. G2: a lossy stream of two channels or fewer
+    that is not the language's first stream and has more channels than that first stream gives way to it."""
+    ranked = sorted(streams, key=rank)
+    top = ranked[0]
+    if not top[2] and top[1] <= 2:
+        lossless = [a for a in ranked if a[2]]
+        if lossless:
+            return lossless[0]
+        first = min(streams, key=lambda a: a[0])
+        if first[0] != top[0] and first[1] < top[1]:
+            return first
+    return top
+
+
+def manifest_stream(info):
+    """A manifest line's stream as (stream, channels, lossless, language, description), the form placed_first() takes."""
+    n = info.get("cand") or info.get("main")
+    try:
+        channels = int(info.get("channels") or 0)
+    except ValueError:
+        channels = 0
+    return (int(n), channels, is_lossless(info.get("codec"), info.get("profile")), info.get("language") or "und",
+            f"{info.get('codec', '?')} {channels} ch")
+
+
+def cross_language(main_info, cand_info):
+    """'<candidate language> against <main language>' when both streams name a language and they differ, else ''."""
+    a, b = str(cand_info.get("language") or ""), str(main_info.get("language") or "")
+    if a in NO_LANGUAGE or b in NO_LANGUAGE or a == b:
+        return ""
+    return f"{a} against {b}"
+
+
+def reverse_line(m):
+    """The report's reverse line: the reverse run's measures and whether it has the commentary pattern."""
+    r = reverse_measures(m)
+    if r is None:
+        return f"    reverse: {m['rev_gap_s']:.0f} s of gaps, AG {fmt(m['rev_ag'])}"
+    if "error" in r:
+        return f"    reverse: not judged ({r['error']})"
+    why = not_judged(r)
+    return (f"    reverse: {r['gap_s']:.0f} s of gaps, DC {fmt(r['dc'])}, AG {fmt(r['ag'])}, tenths "
+            f"{r['tenths_comm']}/{r['tenths']}, SMI {fmt(r['smi'])}, LS {fmt(r['ls_db'], 1)} dB, added {r['added_s']:.0f} s: "
+            + ("commentary pattern (the main track looks like a commentary over this one)" if reverse_pattern(m)
+               else f"not judged ({why})" if why else "no commentary pattern"))
+
+
+def peer_line(peer):
+    """The report's peer line: the cross-language candidate against the first stream of its own language."""
+    m = peer["measures"]
+    if "error" in m:
+        return f"    peer: against stream {peer['stream']}: not judged ({m['error']})"
+    return (f"    peer: against stream {peer['stream']} (placed first in the candidate's language): DC {fmt(m['dc'])}, "
+            f"AG {fmt(m['ag'])}, tenths {m['tenths_comm']}/{m['tenths']}, SMI {fmt(m['smi'])}, LS {fmt(m['ls_db'], 1)} dB: "
+            + ("commentary pattern" if peer["verdict"] == "commentary" else f"{peer['verdict']}, so not confirmed"))
+
+
 def results(folder, rule=RULE, analyse_fn=None):
     """The measures and verdict of every candidate of a folder written by audio-levels.ps1, as data:
     {"folder", "manifest", "main" (its manifest fields), "frames", "dialogue" ("fc" or "mix"), "candidates": [
         {"stream", "info" (its manifest fields), "duplicate_of" (a stream number or None), "measures" (None for a
-         duplicate), "verdict", "not_judged" (the reason, or '')}]}.
-    Raises ValueError with the refusal's reason. analyse_fn(main, cand, dialogue) replaces analyse (a cache, say)."""
+         duplicate), "verdict", "not_judged" (the reason, or ''), "cross_language" ('<cand> against <main>' or ''),
+         "peer" (None, or {"stream", "measures", "verdict"}: the peer run of a cross-language candidate)}]}.
+    Raises ValueError with the refusal's reason. analyse_fn(main, cand, dialogue) replaces analyse (a cache, say).
+
+    A cross-language candidate whose verdict would be commentary (addendum 9.2) is judged once more, against the stream
+    8.6 places first among the folder's candidates of its own language (duplicates left out), with that stream's mixdown
+    as the dialogue curve: the peer run, from the levels already in the folder. Its verdict is then note-commentary
+    when the peer run has no commentary verdict (the candidate follows a programme track of its language: the 2.0
+    companion of a dub), else commentary-cross-language. It is never commentary: content does not drop a candidate in
+    another language than the reference."""
     d = pathlib.Path(folder)
     why = refusal(d)
     if why:
@@ -385,7 +587,8 @@ def results(folder, rule=RULE, analyse_fn=None):
     seen = {mainfo["md5"]: mainfo.get("main", "?")} if mainfo.get("md5") else {}
     for c in man["cands"]:
         sid = c.get("cand")
-        r = {"stream": sid, "info": c, "duplicate_of": None, "measures": None, "verdict": "duplicate", "not_judged": ""}
+        r = {"stream": sid, "info": c, "duplicate_of": None, "measures": None, "verdict": "duplicate", "not_judged": "",
+             "cross_language": cross_language(mainfo, c), "peer": None}
         if c.get("md5") in seen:
             r["duplicate_of"] = seen[c["md5"]]
         else:
@@ -395,6 +598,19 @@ def results(folder, rule=RULE, analyse_fn=None):
             r["measures"], r["verdict"] = m, verdict(m, rule)
             r["not_judged"] = m["error"] if "error" in m else not_judged(m, rule)
         out["candidates"].append(r)
+    for r in out["candidates"]:
+        if r["verdict"] != "commentary" or not r["cross_language"]:
+            continue
+        own = [manifest_stream(x["info"]) for x in out["candidates"]
+               if x["duplicate_of"] is None and x["info"].get("language") == r["info"].get("language")]
+        peer = placed_first(own)[0]
+        r["verdict"] = "commentary-cross-language"
+        if peer != int(r["stream"]):
+            m2 = analyse_fn(read_levels(d / f"cand-{peer}.txt"), read_levels(d / f"cand-{r['stream']}.txt"), None)
+            v2 = verdict(m2, rule)
+            r["peer"] = {"stream": str(peer), "measures": m2, "verdict": v2}
+            if v2 != "commentary":
+                r["verdict"] = "note-commentary"
     return out
 
 
@@ -412,7 +628,8 @@ def report(folder):
     label = f"{d.resolve().parent.name}/{man.get('file', d.resolve().name)}"
     for r in res["candidates"]:
         c, sid = r["info"], r["stream"]
-        head = f"  stream {sid}: {c.get('codec', '?')} {c.get('channels', '?')} ch {c.get('layout', '')} {c.get('language', '')}"
+        head = f"  stream {sid}: {c.get('codec', '?')} {c.get('channels', '?')} ch {c.get('layout', '')} {c.get('language', '')}" \
+            + (f" (cross-language: {r['cross_language']})" if r["cross_language"] else "")
         if r["duplicate_of"] is not None:
             lines += [head, f"    verdict: duplicate of stream {r['duplicate_of']} (" + MEANING["duplicate"] + ")",
                       f"    row: | {label} | {sid} | same packets as stream {r['duplicate_of']} | duplicate |"]
@@ -428,7 +645,8 @@ def report(folder):
             f"    DC {fmt(m['dc'])}  AG {fmt(m['ag'])} ({m['gap_s']:.0f} s of gaps, {m['ag_s']:.0f} s added)  "
             f"tenths {m['tenths_comm']}/{m['tenths']}  SMI {fmt(m['smi'])}  LS {fmt(m['ls_db'], 1)} dB  "
             f"ADL {fmt(m['adl'])}  added {m['added_s']:.0f} s",
-            f"    reverse: {m['rev_gap_s']:.0f} s of gaps, AG {fmt(m['rev_ag'])}",
+            reverse_line(m),
+        ] + ([peer_line(r["peer"])] if r["peer"] else []) + [
             f"    verdict: {v} ({MEANING[v]})" + (f"; not judged: {why}" if why else ""),
             f"    row: | {label} | {sid} | DC {fmt(m['dc'])}, AG {fmt(m['ag'])}, tenths "
             f"{m['tenths_comm']}/{m['tenths']}, SMI {fmt(m['smi'])}, LS {fmt(m['ls_db'], 1)} | {v} |",
@@ -466,8 +684,11 @@ def audio_by_title(scan):
 
 def titles_report(recording):
     """Every title of <recording>/scan.txt, longest first: its audio streams by language without derived streams, a
-    mark '<- <language> x<n>' when one language has two or more, the labels it was already ripped under (from each
-    <label>/rip-summary.json), and the titles it shares segments with (a play-all playlist)."""
+    mark '<- <language> x<n>' when one language has two or more, a mark '<- wanted x<n> (...)' when no wanted language
+    has two but the wanted languages (English, the original language from tmdb.json) and streams with no language
+    have two or more together (an English commentary on a Spanish film: EXP-13 addendum, section 9.1), the labels it
+    was already ripped under (from each <label>/rip-summary.json), and the titles it shares segments with (a play-all
+    playlist)."""
     d = pathlib.Path(recording)
     scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
     ripped = {}
@@ -482,12 +703,17 @@ def titles_report(recording):
     tmdb = d / "tmdb.json"
     original = json.loads(tmdb.read_text(encoding="utf-8-sig")).get("original_language") if tmdb.exists() else None
     info = audio_by_title(scan)
+    wanted = {"eng"} | set(ISO639.get(original, ()))
     lines = [f"{d.name}: {len(info)} titles, longest first; TMDb original language: {original or 'unknown'}",
              "  audio: scan stream numbers by language, leaving out streams MakeMKV derived from another (flag 2048)"]
     for title in sorted(info, key=lambda t: (-info[t][0], t)):
         seconds, segs, langs = info[title]
         audio = "; ".join(f"{lang} {','.join(map(str, s))}" for lang, s in sorted(langs.items())) or "none"
         notes = [f"<- {lang} x{len(s)}" for lang, s in sorted(langs.items()) if len(s) >= 2]
+        mine = {lang: s for lang, s in sorted(langs.items()) if lang in wanted or lang in NO_LANGUAGE}
+        if sum(len(s) for s in mine.values()) >= 2 and all(len(s) < 2 for s in mine.values()):
+            notes.append(f"<- wanted x{sum(len(s) for s in mine.values())} ("
+                         + ", ".join(f"{lang} {len(s)}" for lang, s in mine.items()) + ")")
         if title in ripped:
             notes.append("ripped as " + ", ".join(ripped[title]))
         shared = [str(u) for u in sorted(info) if u != title and set(segs) & set(info[u][1])]

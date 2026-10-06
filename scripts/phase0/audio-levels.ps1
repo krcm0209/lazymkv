@@ -12,8 +12,9 @@
 #   main-mix.txt   the main stream mixed down to mono: a header line "# lazymkv audio levels v2: frame_ms=20 ...",
 #                  then one level in dB per line, 0.1 dB steps, -100 = silence
 #   main-fc.txt    the main stream's centre channel (dialogue); only when its layout has one besides other channels
-#   cand-<n>.txt   candidate stream <n> mixed down to mono. Without -Cand (a title with one audio stream, or with one
-#                  per language) only the main stream's files are written: the proxy is still made, nothing is judged
+#   cand-<n>.txt   candidate stream <n> mixed down to mono. Without -Cand (a title with one audio stream, or with no
+#                  other stream in a wanted language) only the main stream's files are written: the proxy is still
+#                  made, nothing is judged. audio_dataset.py args chooses -Main and -Cand (EXP-13 addendum 9.1)
 #   streams.json   ffprobe's list of the file's streams, with all tags, dispositions, start times, and the duration
 #   ffprobe.txt    ffprobe's messages
 #   streamhash.txt ffmpeg's MD5 of the packets of every audio stream of the file, in file order
@@ -40,7 +41,8 @@
 #   audio-proxy.json  what was kept and from what: the source file, each track with its source stream's facts, packet
 #                     MD5 and peak, the encoding, the time. Written after the proxy: a proxy without it is incomplete.
 #   audio-levels-20ms-<Main>[-<Cand>...]\   a copy of the level folder above, with audio-proxy.json in it
-# The proxy is made once per rip: a later run on the same file (another language's main stream) keeps it.
+# The proxy is made once per rip: a later run on the same file (a dataset-only job for a language that is not
+# wanted) keeps it.
 # Files on their way to the share end in .partial and are renamed only once checked. A failed run removes the
 # .partial files it wrote, and every run removes those an interrupted run left. A finished proxy is never removed by
 # a failure: a later run keeps it when its manifest matches the file, and makes it again when the manifest is missing.

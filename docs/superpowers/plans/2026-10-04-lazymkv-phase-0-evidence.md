@@ -41,7 +41,7 @@
 - Commit commands take the form `git commit -m "<message>" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 - The saving message is `MSG:5014`, or `MSG:5015` when a profile is in use. Found on 2026-10-05, on the first real rip: with `--profile`, MakeMKV 2.0.0 prints `MSG:5015` ("Saving %1 titles into directory %2 using profile '%3' from file '%4'") and no `MSG:5014`. Every rip in this plan uses a profile. Wherever a task says `MSG:5014`, read "`MSG:5014` or `MSG:5015`"; the scripts accept both, and their labels (`5014=`, `saw_5014`, `stopped-at-5014`, `added-before-5014`) keep their names and are true for either code. A `codes=` list then ends in 5015. The profile named in the `MSG:5015` line is the proof that MakeMKV used the job profile.
 - Decision D16 (owner, 2026-10-05): every MakeMKV call runs with `--debug` (`Get-MkFlags` adds it) and its debug log, which MakeMKV 2.0.0 always writes to `%USERPROFILE%\MakeMKV_log.txt`, is kept beside the call's output as `<output>.makemkv-debug.txt` by `Save-MkDebugLog`. With `--debug` the robot output also carries `MSG:1004` and `MSG:1003` lines. Every rip also keeps `system.csv` (CPU load, free RAM and bytes written every 5 s) and `system-events.json` (Windows warnings and errors about storage, USB and the network during the rip). A script that calls MakeMKV without `Get-MkFlags` adds `--debug` and calls `Save-MkDebugLog` itself.
-- Tuning dataset (decision D16): every rip that ends `RESULT ok` is added to the audio tuning dataset after its probe and pull, while the rip is still in staging, and at the latest before its task's commit. `python3 scripts/phase0/audio_dataset.py args corpus/owner/<slug> <label>` prints one `scripts/phase0/job.sh audio-levels.ps1 ...` line and its `wait.sh` line per language with two or more audio streams, or one job for the reference alone. Run each pair, then `scripts/phase0/pull-recording.sh <slug>`, `python3 scripts/phase0/audio_labels.py auto corpus/owner/<slug>` and `python3 scripts/phase0/audio_dataset.py`. audio-levels.ps1 writes, besides its level folder, a compact copy of every audio stream (`audio-proxy.mka`: FLAC, 8 kHz, mono, 24 bit) and a copy of the level folder to `$TuningData\<slug>\<label>\` (`\\unas-pro\media\lazymkv-tuning`); it writes `audio-proxy.json` into the level folder last, so a level folder without it is from a run that did not finish. The harness's last list names every successful rip not yet in the dataset. A rip in staging is deleted only once that list no longer names it. Nothing under `$TuningData` is deleted without the owner's say. The one exception to writing large files only to the share (never to `C:`): a proxy may be copied to C:\lazymkv\phase0\tmp\tuning-fetch for the minutes an scp takes, at most 2 GB, deleted right after. `scripts/phase0/tuning-fetch.ps1 -Slug <slug> -Label <label>` (a job) makes that copy of one title's dataset folder, refuses more than 2 GB or a second copy while one is still there, and prints the size, the `scp` command and the clean-up command; the Mac runs the clean-up command immediately after the `scp`. It is needed only when a future measure needs the proxies on the Mac, never in this routine. The owner's label for each measured track is asked for without showing any verdict and is recorded only with `audio_labels.py set` or `unset` (never by editing the JSON); whether a label counts for experiment 13 is worked out by the harness, never stored. `audio_dataset.py` exits 1 when a track the owner labelled as programme audio gets a drop verdict, when a level folder is measured against the wrong reference, or when a reference is labelled as unwanted audio (stop and report); 2 when a labels file does not validate; 3 when something could not be checked (level files missing, a label with no measurement, a measured track gone).
+- Tuning dataset (decision D16): every rip that ends `RESULT ok` is added to the audio tuning dataset after its probe and pull, while the rip is still in staging, and at the latest before its task's commit. `python3 scripts/phase0/audio_dataset.py args corpus/owner/<slug> <label>` prints one job line and its `wait.sh` line for the title's programme reference against every other stream in a wanted language (or the reference alone), then one per language that is not wanted and has two or more streams (dataset only). Run each pair, then `scripts/phase0/pull-recording.sh <slug>`, `python3 scripts/phase0/audio_labels.py auto corpus/owner/<slug>` and `python3 scripts/phase0/audio_dataset.py`. audio-levels.ps1 writes, besides its level folder, a compact copy of every audio stream (`audio-proxy.mka`: FLAC, 8 kHz, mono, 24 bit) and a copy of the level folder to `$TuningData\<slug>\<label>\` (`\\unas-pro\media\lazymkv-tuning`); it writes `audio-proxy.json` into the level folder last, so a level folder without it is from a run that did not finish. The harness's last list names every successful rip not yet in the dataset. A rip in staging is deleted only once that list no longer names it. Nothing under `$TuningData` is deleted without the owner's say. The one exception to writing large files only to the share (never to `C:`): a proxy may be copied to C:\lazymkv\phase0\tmp\tuning-fetch for the minutes an scp takes, at most 2 GB, deleted right after. `scripts/phase0/tuning-fetch.ps1 -Slug <slug> -Label <label>` (a job) makes that copy of one title's dataset folder, refuses more than 2 GB or a second copy while one is still there, and prints the size, the `scp` command and the clean-up command; the Mac runs the clean-up command immediately after the `scp`. It is needed only when a future measure needs the proxies on the Mac, never in this routine. The owner's label for each measured track is asked for without showing any verdict and is recorded only with `audio_labels.py set` or `unset` (never by editing the JSON); whether a label counts for experiment 13 is worked out by the harness, never stored. `audio_dataset.py` exits 1 when a track the owner labelled as programme audio gets a drop verdict, when a level folder is measured against the wrong reference, or when a reference is labelled as unwanted audio, or when a labelled programme track gets `commentary-cross-language`, or when a labelled candidate, taken as the reference, would give the programme the commentary verdict (`swapped reference`) (stop and report); 2 when a labels file does not validate; 3 when something could not be checked (level files missing, a label with no measurement, a measured track gone).
 - MakeMKV removes a forced-only subtitle track that turns out to be empty and says so with `MSG:4047` ("Forced subtitles track #N turned out to be empty and was removed from output file", after `MSG:4007`). Found on the same rip. N counts the title's SELECTED streams in scan order (the output file's tracks before the removal), not the scan's stream numbers: on Disc A's eng-only rip "#3" was scan stream 5 (Task 13 Step 6, 2026-10-06); compare_tracks.py maps it accordingly. A ripped file can therefore hold fewer tracks than the scan lists; such a difference is explained, not a failure, when a `MSG:4047` line names the missing stream.
 
 ## Owner inputs needed during execution
@@ -5289,7 +5289,7 @@ Expected: one line `Titles whose audio is in the tuning dataset (audio-proxy.jso
 python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL
 ```
 
-Expected: `SLUG/LABEL: <n> audio streams (from <source>)`, one `stream <n>: <codec> ... lang=<code>` line per audio stream, then one or more pairs of lines `scripts/phase0/job.sh audio-levels.ps1 audio-levels-SLUG-LABEL[-M] -Slug SLUG -Label LABEL -Main M[ -Cand C,...]` and `scripts/phase0/wait.sh audio-levels-SLUG-LABEL[-M]`. `<source>` is `ffprobe-streams.json`, or for a rip Steps 8 and 9 did not probe, `<other label>/ffprobe-streams.json: a rip of the same title <t> with the same size, <b> bytes`. When neither exists, `args` exits 2 and prints instead the two lines `scripts/phase0/job.sh probe-title.ps1 probe-LABEL -Slug SLUG -Label LABEL -SkipRemux` and its `wait.sh` line: run them (with Step 6's exit-code handling), pull, and run `args` again. Run the printed audio-levels pairs in order, one job at a time.
+Expected: `SLUG/LABEL: <n> audio streams (from <source>); original language <...>`, one `stream <n>: <codec> ... lang=<code>` line per audio stream, a `programme reference: ...` line (and possibly `note: ...` and `dataset only: ...` lines), then one or more pairs of lines `scripts/phase0/job.sh audio-levels.ps1 audio-levels-SLUG-LABEL[-M] -Slug SLUG -Label LABEL -Main M[ -Cand C,...]` and `scripts/phase0/wait.sh audio-levels-SLUG-LABEL[-M]`. `<source>` is `ffprobe-streams.json`, or for a rip Steps 8 and 9 did not probe, `<other label>/ffprobe-streams.json: a rip of the same title <t> with the same size, <b> bytes`. When neither exists, `args` exits 2 and prints instead the two lines `scripts/phase0/job.sh probe-title.ps1 probe-LABEL -Slug SLUG -Label LABEL -SkipRemux` and its `wait.sh` line: run them (with Step 6's exit-code handling), pull, and run `args` again. Run the printed audio-levels pairs in order, one job at a time.
 
 What wait.sh's exit codes mean for these jobs:
 - **0**: check the log against the Expected below.
@@ -5326,9 +5326,11 @@ Expected:
 - `auto` prints a line `labelled LABEL stream <n>: duplicate (md5), counts=False (a duplicate track never counts)` or `... derived-core (flag), counts=True` for each such track, or `nothing to label automatically`. A line `LABEL: derived cores not labelled: the file has <a> audio streams and the scan's title <t> has <b>` means the streams could not be matched by position. Label the cores by hand from Step 6's compare_tracks table (`audio_labels.py set ... derived-core --how flag --saw-verdict no`).
 - The harness prints its sections, then `RESULT ok` and `exit=0`. LABEL is no longer under `missing` in its last list. A note `... takes its label from <label> stream <n> (same packets)` is normal for a title ripped twice.
 - `exit=1` with `RESULT FAILED: ...`: read its `FAIL` lines and stop and report with them.
-  - `labelled <kind> (programme audio), verdict <commentary|duplicate>`: a track the owner labelled as programme audio got a drop verdict. On a counted track this is experiment 13's answer "no" in the making; otherwise it may be a wrong label.
-  - `wrong reference: measured against stream <M> ..., but the top-ranked <lang> stream is <X>`: that level folder was measured with another `-Main` than `args` prints. Its tracks are left out.
+  - `labelled <kind> (programme audio), verdict <commentary|commentary-cross-language|duplicate>`: a track the owner labelled as programme audio got a drop verdict. On a counted track this is experiment 13's answer "no" in the making; otherwise it may be a wrong label.
+  - `wrong reference: measured against stream <M> ..., but the top-ranked <lang> stream is <X> (...), the title's programme reference (placed first in ...)`: that level folder was measured with another `-Main` than `args` prints. Its tracks are left out.
   - `the reference is labelled <kind> (unwanted audio)`: a label is on the wrong stream, or the reference is not what its ranking says.
+  - `swapped reference: labelled <kind> ...`: stop and report with the track's measures (EXP-13 addendum 9.3).
+  - `note: ... is not the first <lang> stream of the file`: not a failure; name it in the report.
 - `exit=2`: a labels file (or `corpus/owner/audio-fitted.json`) does not validate, or the spec's row 13 can no longer be read. The message names the file and the problem. Repair it only with `audio_labels.py set` or `unset` (each repairs one entry and prints the problems left), and run again.
 - `exit=3` with `RESULT FAILED: not everything was checked: ...`: read `Folders that cannot be read`, `Labels without a measurement` and the `gone:` line.
   - `its level files are not here`: pull the recording again (`pull-recording.sh SLUG`); if it is still missing, stop and report.
@@ -5975,7 +5977,7 @@ These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by
 
 - **Files:**
   - Prerequisite, committed by the controller before this task: `docs/phase0/experiments/EXP-13-design.md` (the design).
-  - Already applied by the controller, not changed by this task: `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py` and `scripts/phase0/test_audio_similarity.py` (EXP-13 commit 731247d, then the D16 prerequisite, which also added `audio_dataset.py`, `audio_labels.py`, `proxy_levels.py`, `test_audio_dataset.py` and `tuning-fetch.ps1`). EXP-13-design.md section 6 holds the pre-D16 versions: never copy them over the scripts.
+  - Already applied by the controller, not changed by this task: `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py` and `scripts/phase0/test_audio_similarity.py` (EXP-13 commit 731247d, then the D16 prerequisite, which also added `audio_dataset.py`, `audio_labels.py`, `proxy_levels.py`, `test_audio_dataset.py` and `tuning-fetch.ps1`; then the EXP-13 addendum's `final/` (EXP-13-design.md section 9: the five Python scripts and the comment-only `audio-levels.ps1`), applied in one commit that also recorded Pan's Labyrinth's commentary as fitted (Step 13)). EXP-13-design.md section 6 holds the pre-D16 versions: never copy them over the scripts.
   - Create: `docs/phase0/experiments/EXP-13-commentary-by-audio.md`.
   - Create (pulled from the mini PC): `corpus/owner/<slug>/<label>/audio-levels-20ms-<M>-<C...>/`. Its level files are ignored by git; its `streams.json` is committed.
   - Create (on the Mac): `corpus/owner/<slug>/<label>/audio-content-20ms-<M>-<C...>.txt`.
@@ -5984,9 +5986,9 @@ These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by
 - **Produces:** `audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]`, run as a job. Its log lines are possibly `dataset: created ...` and `dataset: removed ...`, then `levels: <file> main=<M> cand=<C,... or nothing> centre=<True|False> ffmpeg_exit=<n> seconds=<s> folder=<folder>`, one `stream <n>: <codec> <channels> ch <layout> <language> frames=<n> md5=<hash>[ (layout guessed by ffmpeg: <name>)]` line per measured stream, `proxy: <path> tracks=<k> bytes=<b> (<stream> <mix|fc|side>, ...)` or `proxy: kept <path> ...`, `dataset: <path>`, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1. `audio_dataset.py` (the harness, `args`) and `audio_labels.py` as in the Global Constraints.
 
 Placeholders for Steps 15 to 18:
-- **TITLES** is fixed when Step 15 starts, and written at the top of this task's report: every (SLUG, LABEL) pair that `python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'` lists as missing at that moment, plus the pairs of the old list below that are not in it (already in the dataset, for example the Office titles after the D16 backfill; for them Step 16 says `already exists`, and Steps 17 and 18 still run), plus each pair ripped in Step 19 as it is ripped. A title with fewer than two audio streams in every language is measured with its reference alone (no `-Cand`), for the dataset only. The old list: `the-office-2005-s3d3-bluray` with `e16-stereo`, `rehearsal` and `t3-all-tracks`; SLUG_A with `all-tracks` (Task 11); each NEW with `all-tracks` from Steps 6 to 8.
+- **TITLES** is fixed when Step 15 starts, and written at the top of this task's report: every (SLUG, LABEL) pair that `python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'` lists as missing at that moment, plus the pairs of the old list below that are not in it (already in the dataset, for example the Office titles after the D16 backfill; for them Step 16 says `already exists`, and Steps 17 and 18 still run), plus each pair ripped in Step 19 as it is ripped. A title with no other audio stream in a wanted language (English, the original language) or with no language code is measured with its reference alone (no `-Cand`), for the dataset only; `audio_dataset.py args` prints the job. The old list: `the-office-2005-s3d3-bluray` with `e16-stereo`, `rehearsal` and `t3-all-tracks`; SLUG_A with `all-tracks` (Task 11); each NEW with `all-tracks` from Steps 6 to 8.
 - **M** is the reference stream number and **C** the candidate list, both chosen in Step 15. **CS** is C with hyphens in place of commas.
-- **LOG** is `audio-levels-SLUG-LABEL`, with `-M` appended when one label is measured for two languages, and `-2`, `-3` and so on appended on a repeat.
+- **LOG** is `audio-levels-SLUG-LABEL`, with `-M` appended when `audio_dataset.py args` prints more than one job for the label (it then does so itself: the programme reference's job and a dataset-only job per language that is not wanted), and `-2`, `-3` and so on appended on a repeat.
 
 When `-Force` is right for `audio-levels.ps1`: only to repeat a measurement that failed after its folders were created: a `RESULT FAILED:` reason beginning `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `ffmpeg wrote no raw-`, `<series>.txt holds no level`, `proxy check failed` or `the copy of ... in the dataset differs`, once the cause has been dealt with, and a refusal saying `is from a run that did not finish ...: repeat with -Force`. A refusal before that (among them `ffmpeg -layouts printed no table of channel layouts`, `cannot reach the staging share` and `expected one .mkv`) wrote nothing and is repeated without `-Force`. Never over a folder whose run ended `RESULT ok` (it says `already exists and is kept as evidence`), except in the D16 prerequisite's backfill.
 
@@ -6002,15 +6004,18 @@ python3 -c "open('scripts/phase0/audio-levels.ps1', 'rb').read().decode('ascii')
 grep -c 'measure_overall=RMS_level' scripts/phase0/audio-levels.ps1
 grep -c 'def results' scripts/phase0/audio_similarity.py
 python3 scripts/phase0/audio_similarity.py corpus/owner/the-office-2005-s3d3-bluray/e16-stereo/audio-levels-1-3; echo "exit=$?"
+grep -c 'def placed_first' scripts/phase0/audio_similarity.py
+python3 scripts/phase0/audio_labels.py check corpus/owner
 ```
 
 Expected:
 - the unit tests end `Ran 97 tests` (or more, if later tasks added tests) and `OK`;
 - `audio-levels.ps1 is ASCII`;
 - `1`, then `1`;
-- one line ending `this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>`, and `exit=1`: the first measurement's folder is refused, with no number printed.
+- one line ending `this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>`, and `exit=1`: the first measurement's folder is refused, with no number printed;
+- `1`; and `ok ...` for each labels file and `ok corpus/owner/audio-fitted.json (1 entries)`.
 
-A failing test, a `0` from either grep, a `UnicodeDecodeError`, or any measure printed for the old folder means the scripts are not the D16 ones: stop and report.
+A failing test, a `0` from any grep, a `UnicodeDecodeError`, or any measure printed for the old folder means the scripts are not the D16 ones: stop and report.
 
 - [ ] **Step 14: Check the measurement script on the mini PC**
 
@@ -6038,6 +6043,7 @@ Which disc is in the drive: does not matter (this runs on the Mac).
 For each (SLUG, LABEL) in TITLES (the Office pairs and SLUG_A first; the recordings must have been pulled with `ffprobe-streams.json` in them):
 
 ```bash
+python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL
 python3 - SLUG LABEL <<'EOF'
 import json, pathlib, sys
 sys.path.insert(0, "scripts/phase0")
@@ -6048,42 +6054,30 @@ rip = json.loads((d / label / "rip-summary.json").read_text(encoding="utf-8-sig"
 probe = json.loads((d / label / "ffprobe-streams.json").read_text(encoding="utf-8-sig"))
 scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
 flags = [int(a.get(22, "0") or 0) for (t, s), a in sorted(scan.streams.items()) if t == rip["title"] and a.get(1) == "Audio"]
-tmdb = d / "tmdb.json"
-orig = json.loads(tmdb.read_text(encoding="utf-8-sig")).get("original_language") if tmdb.exists() else None
 audio = [s for s in probe["streams"] if s.get("codec_type") == "audio"]
-print(f"{slug}/{label}: title {rip['title']}, {len(audio)} audio streams in the file, {len(flags)} in the scan; TMDb original language: {orig}")
-
-
-def lossless(s):
-    c = str(s.get("codec_name", ""))
-    return c in ("truehd", "mlp", "flac") or c.startswith("pcm") or "DTS-HD MA" in str(s.get("profile") or "")
-
-
-groups = {}
+print(f"{slug}/{label}: title {rip['title']}, {len(audio)} audio streams in the file, {len(flags)} in the scan")
 for k, s in enumerate(audio):
     tags = s.get("tags", {})
-    lang = tags.get("language", "und")
     f = flags[k] if k < len(flags) else None
     marks = [m for bit, m in ((1, "director-comments"), (2, "alt-director-comments"), (4, "visually-impaired"),
                               (512, "secondary"), (2048, "derived")) if f is not None and f & bit]
     print(f"  stream {s['index']}: {s.get('codec_name')} profile={s.get('profile')} {s.get('channels')} ch "
-          f"{s.get('channel_layout')} lang={lang} title={tags.get('title')!r} scan_flags={f} {' '.join(marks)}")
-    groups.setdefault(lang, []).append(s)
-for lang, streams in groups.items():
-    if len(streams) < 2:
-        continue
-    ranked = sorted(streams, key=lambda s: (-int(s.get("channels") or 0), not lossless(s), s["index"]))
-    main, cands = ranked[0]["index"], sorted(s["index"] for s in ranked[1:])
-    print(f"  language {lang}: -Main {main} -Cand {','.join(map(str, cands))}  (folder audio-levels-20ms-{main}-{'-'.join(map(str, cands))})")
+          f"{s.get('channel_layout')} lang={tags.get('language', 'und')} title={tags.get('title')!r} scan_flags={f} {' '.join(marks)}")
 EOF
 ```
 
 Expected:
-- One line per audio stream: ffprobe's stream number, codec, profile, channels, layout, language, track name, the scan's flags for that stream (k-th audio stream of the file against the k-th of the scan), and the names of the flags that are set.
-- One `language <xxx>: -Main M -Cand C` line per language with two or more streams. M is the top-ranked stream: most channels, then lossless, then the earlier stream, as in spec 8.6 step 3. Measure the English line and, when the TMDb original language is not English, that language's line. Keep derived cores (`derived`) and flagged streams in C: a core is a real lossy companion of the reference, and a flag is a free label.
-- For the Office disc the lines are `language eng: -Main 1 -Cand 2,3` (e16-stereo) and `language eng: -Main 1 -Cand 2,3,4` (rehearsal).
-
-The same choice, as ready job lines, is printed by `python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL` (for the Office titles: `-Main 1 -Cand 2,3` for e16-stereo and t3-all-tracks, `-Main 1 -Cand 2,3,4` for rehearsal). For a title with no `language` line above, it prints one job with `-Main M` alone; use that line in Step 16.
+- From `args`:
+  - a first line `SLUG/LABEL: <n> audio streams (from <source>); original language <codes> (TMDb <xx>)`, or `original language English (TMDb en)`, or `original language none (TMDb xx: ...)`, or `original language unknown (<why>)`;
+  - one `stream <n>: ... lang=<code>` line per audio stream;
+  - the line `  programme reference: stream M (<codec ...>), placed first in <the original language | English | any language (no stream is in a wanted language)> (spec 8.6 steps 3 and 4); candidates: every other stream in <eng[, xxx]> or with no language, whatever its language`;
+  - possibly one or more `  note: ...` lines: `the file has no stream in the original language` (an English-only rip of a foreign film; Disc A's `eng-only` holds only the commentary: measure it alone as printed), `the reference is not the first <lang> stream of the file` (a score, an M&E track or a commentary may be ranked above the programme; or two languages under one tag), or `the reference is a lossy stream of 2 channel(s), and stream <k> with no language code is lossless or has more than 2 channels`. Measure as printed, and name every note in the report with the title;
+  - possibly `  dataset only: <lang> is not a wanted language; stream <k> against <...>` lines;
+  - the job and `wait.sh` lines: first the programme reference's job (`-Main M -Cand C`, or `-Main M` alone when no other stream is wanted), then one dataset-only job per such line.
+- M is the stream that spec 8.6 places first in the work's original language (most channels, then lossless, then the earlier stream; a lossy stream of two channels or fewer comes neither before a lossless one nor before the language's first stream when that has fewer channels), else in English. C is every other stream in English, in the original language or with no language. An English commentary or an English dub on a foreign film is a candidate against the original-language main track (EXP-13 addendum 9.1); content never drops it (row 4b). Keep derived cores (`derived`) and flagged streams in C: a core is a real lossy companion of the reference, and a flag is a free label.
+- From the listing: one line per audio stream with ffprobe's stream number, codec, profile, channels, layout, language, track name, the scan's flags for that stream (k-th audio stream of the file against the k-th of the scan), and the names of the flags that are set.
+- For the Office disc (original language English): `-Main 1 -Cand 2,3` (e16-stereo and t3-all-tracks) and `-Main 1 -Cand 2,3,4` (rehearsal), no note. For Disc A (Pan's Labyrinth, original language Spanish): `-Main 1 -Cand 2,3` for `all-tracks`, no note; `-Main 1` with the no-original-language note for `eng-only`. Their folders `audio-levels-20ms-1-2-3` and `audio-levels-20ms-1` already exist: Step 16 then says `already exists`, and Step 17 analyses them again.
+- If `args` says `original language unknown (TMDb '<xx>' is not in audio_similarity.ISO639)`, stop and report: the table needs that code before the title is measured. If it says `no readable tmdb.json`, the title was not identified on TMDb; English is the reference language. Note the title for the report and go on.
 
 If the two counts of audio streams differ, match the streams by codec, channels and language by hand, and say so in the report.
 
@@ -6091,7 +6085,7 @@ If the two counts of audio streams differ, match the streams by codec, channels 
 
 Which disc is in the drive: does not matter. The job reads only the ripped file on the share.
 
-For each (SLUG, LABEL) and each language line of Step 15:
+For each (SLUG, LABEL) and each job line that `args` printed in Step 15 (the programme reference's first):
 
 ```bash
 scripts/phase0/job.sh audio-levels.ps1 LOG -Slug SLUG -Label LABEL -Main M -Cand C
@@ -6136,11 +6130,13 @@ Expected:
 - `pulled corpus/owner/SLUG (...)`.
 - The analysis begins with the folder, the file name and `measured in <n> s`, then `main stream M: ...; dialogue reference: its centre channel` (or `its mono mixdown (no centre channel)`).
 - A folder measured with the reference alone prints `no candidate stream: nothing to judge (measured for the tuning dataset only)` after the main-stream line: it has no row for notes.md.
-- Then, for each candidate, either `verdict: duplicate of stream <n>` with its `row:` line, or:
+- for each candidate, either `verdict: duplicate of stream <n>` with its `row:` line, or:
+  - its head line, ending `(cross-language: <candidate language> against <main language>)` when the two languages differ;
   - the lag and overlap line;
   - the `DC ... AG ... tenths ... SMI ... LS ... ADL ... added` line;
-  - the `reverse:` line;
-  - `verdict: <commentary | reference-unclear | ad-pattern | note-commentary | note-ad | keep>` with its meaning, and `not judged: <reason>` when row 3 of the rule applies (or only `verdict: not-judged (too short)` for a track under 20 s);
+  - the `reverse:` line: `reverse: <s> s of gaps, DC <x>, AG <x>, tenths <a>/<b>, SMI <x>, LS <x> dB, added <s> s: <no commentary pattern | commentary pattern (the main track looks like a commentary over this one) | not judged (<reason>)>`, or `reverse: not judged (too short)`;
+  - for a cross-language candidate with the commentary pattern whose language has another stream, a `peer: against stream <k> (placed first in the candidate's language): DC <x>, AG <x>, tenths <a>/<b>, SMI <x>, LS <x> dB: <commentary pattern | <verdict>, so not confirmed>` line;
+  - `verdict: <commentary | commentary-cross-language | reference-unclear | ad-pattern | note-commentary | note-ad | keep>` with its meaning, and `not judged: <reason>` when row 3 of the rule applies (`reference-unclear` may come with it: the reverse run has the commentary pattern although the forward run cannot be judged), or only `verdict: not-judged (too short)` for a track under 20 s;
   - a `row: | ... |` line for notes.md.
 - Each candidate takes a few seconds for an episode, and under a minute for a feature.
 - For the Office disc, the first check of the whole chain:
@@ -6149,6 +6145,12 @@ Expected:
   - In rehearsal, stream 3 must be `duplicate of stream 1`, stream 4 `duplicate of stream 2`, and stream 2 `keep`.
 
   Any other result means the measurement chain on the mini PC differs from the one in the design: stop and report with both outputs. Do not change a threshold.
+- For Disc A, `all-tracks/audio-levels-20ms-1-2-3`, the second check of the reference and reverse rules (EXP-13 addendum 9.4, table A):
+  - stream 3 (the English commentary) must come out `commentary-cross-language`, marked `(cross-language: eng against spa)`, with DC 0.08, AG 0.54, tenths 9/10, SMI 0.51, LS 10.8 dB, `reverse: 470 s of gaps, DC 0.06, AG 0.31, tenths 1/10, SMI 0.39, LS 17.1 dB, added 796 s: no commentary pattern`, and no `peer:` line (it is the only English stream);
+  - stream 2 must come out `keep` with DC 1.00.
+
+  Its earlier output said `reference-unclear`: replace `audio-content-20ms-1-2-3.txt` with the new output (`tee`), and say so in the report.
+- For Disc A, `eng-only/audio-levels-20ms-1`: `no candidate stream: nothing to judge (measured for the tuning dataset only)`.
 - If audio_similarity.py prints instead one line ending `measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>` (on standard error; it exits 1 and prints no number), the folder was not written completely by the new script: check the path, delete the empty `audio-content-20ms-M-CS.txt` that `tee` created, and go back to Step 16 for this title.
 
 - [ ] **Step 18: Ask the owner what each measured track is, and record it**
@@ -6157,7 +6159,7 @@ Which disc is in the drive: does not matter.
 
 1. For every candidate that is not a duplicate, ask the owner what it is. Give the stream as ffprobe's number and as a player shows it: with one video stream (stream 0), ffprobe's audio stream `<s>` is the player's audio track `<s>` counting from 1; with two video streams (a Dolby Vision enhancement layer), it is track `<s> - 1`. Do not show the verdict first. The owner plays the file from the staging share in a player that lists the audio tracks, at the start, the middle and near the end, and answers with one of:
    - main programme, lossy companion, derived core, alternate or original mix;
-   - isolated score, M&E, same-language dub, foreign dub, alternate narration;
+   - isolated score, M&E, same-language dub, dub (the programme in another language, tagged with that language), foreign dub, alternate narration;
    - commentary, partial commentary, audio description, trivia or other speech;
    - laugh-track version, sing-along, unknown;
 
@@ -6168,8 +6170,9 @@ Which disc is in the drive: does not matter.
 ```markdown
 ## Experiment 13 (Task 12)
 
-Extra audio tracks measured against the top-ranked track of their language (`scripts/phase0/audio_similarity.py`;
-full output in `<label>/audio-content-20ms-<M>-<C>.txt`). The owner named each track before seeing the measures.
+Extra audio tracks measured against the title's programme reference (the track spec 8.6 places first in the original
+language, else English; EXP-13 addendum 9.1) (`scripts/phase0/audio_similarity.py`; full output in
+`<label>/audio-content-20ms-<M>-<C>.txt`). The owner named each track before seeing the measures.
 Reference streams: <label> stream <M> (<codec> <channels> ch <language>), ...
 
 | File | Track | What the measures say | What the owner says it is |
@@ -6187,7 +6190,7 @@ Reference streams: <label> stream <M> (<codec> <channels> ch <language>), ...
    python3 scripts/phase0/audio_labels.py title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
    ```
 
-   Expected: one `labelled ...` line per track, and `title LABEL: ...`. The kinds (`audio_labels.py kinds`) are those of item 1: `main`, `lossy-companion`, `derived-core`, `alternate-mix`, `isolated-score`, `music-effects`, `same-language-dub`, `foreign-dub`, `alternate-narration`, `commentary`, `partial-commentary`, `audio-description`, `other-speech`, `laugh-track-version`, `sing-along`, `unknown`, plus `duplicate`. An answer the owner is not sure of ("probably") gets `--sure no`. The Office disc's labels are already recorded, and its tracks never count.
+   Expected: one `labelled ...` line per track, and `title LABEL: ...`. The kinds (`audio_labels.py kinds`) are those of item 1: `main`, `lossy-companion`, `derived-core`, `alternate-mix`, `isolated-score`, `music-effects`, `same-language-dub`, `dub`, `foreign-dub`, `alternate-narration`, `commentary`, `partial-commentary`, `audio-description`, `other-speech`, `laugh-track-version`, `sing-along`, `unknown`, plus `duplicate`. An answer the owner is not sure of ("probably") gets `--sure no`. The Office disc's labels are already recorded, and its tracks never count.
 
 - [ ] **Step 19: Add discs until the experiment's kinds are covered**
 
@@ -6199,8 +6202,9 @@ Which disc is in the drive: the disc being added, which the owner inserts.
    - programme tracks other than references, and how many of them are separately encoded lossy companions or alternate mixes;
    - a title whose reference has no centre channel;
    - a dialogue-heavy or speech-only title;
-   - isolated scores, M&E tracks, second dubs or narrations.
-2. Ask the owner, once per missing kind, for a disc that has it (the design's question 12). Also ask for the Office disc again (the design's question 13): its title 3 should carry a second commentary, and titles 2, 5 and 6 duplicates. Its tracks are measured and reported like any other, and a programme track of it with the commentary verdict still makes the answer no, but they count towards no total (point 1).
+   - isolated scores, M&E tracks, second dubs or narrations;
+   - dubs in a wanted language (row 13's proposed floor: 3 from 2 discs, 1 on a dialogue-heavy title; they gate only row 4b).
+2. Ask the owner, once per missing kind, for a disc that has it (the design's question 12). Also ask for a foreign-language film with an English dub (and, if any, an English 2.0 companion of the dub), the one kind no stand-in can replace (EXP-13 addendum 9.2), and a mono or 2.0 film with an isolated score (9.3). Also ask for the Office disc again (the design's question 13): its title 3 should carry a second commentary, and titles 2, 5 and 6 duplicates. Its tracks are measured and reported like any other, and a programme track of it with the commentary verdict still makes the answer no, but they count towards no total (point 1).
 3. For each disc the owner provides:
    - Run Step 6 (fingerprint, record if new, pull, `summarize_scan.py`). For a disc already recorded (the Office disc), skip the recording.
    - List the disc's titles with their audio streams by language, derived streams (scan flag 2048, MakeMKV's cores) left out:
@@ -6209,9 +6213,9 @@ Which disc is in the drive: the disc being added, which the owner inserts.
      python3 scripts/phase0/audio_similarity.py --titles corpus/owner/NEW
      ```
 
-     Expected: a first line `NEW: <n> titles, longest first; TMDb original language: <code or unknown>`, a line `audio: scan stream numbers by language, ...`, then one line per title: its number, running time, segments and `audio <language> <stream numbers>; ...`, and at the end `<- <language> x<n>` when one language has two or more streams, `ripped as <label>` for a title ripped before, and `shares segments with title <t>` for overlapping playlists.
+     Expected: a first line `NEW: <n> titles, longest first; TMDb original language: <code or unknown>`, a line `audio: scan stream numbers by language, ...`, then one line per title: its number, running time, segments and `audio <language> <stream numbers>; ...`, and at the end `<- <language> x<n>` when one language has two or more streams, `<- wanted x<n> (<lang> <k>, ...)` when no wanted language has two streams but the wanted languages and no-language streams have two or more together, `ripped as <label>` for a title ripped before, and `shares segments with title <t>` for overlapping playlists.
    - Choose at most 4 titles of the disc, going down the list (longest first) and taking a title only when all of these hold:
-     - its `<-` mark names `eng`, or the original language of the first line (TMDb gives two letters; the scan uses the three-letter code, for example `fr` is `fra` or `fre`);
+     - its `<-` mark names `eng` or the original language of the first line (TMDb gives two letters; the scan uses the three-letter code, for example `fr` is `fra` or `fre`), or is `<- wanted x<n> (...)` (one stream in each wanted language, such as an English commentary on a foreign film);
      - it is a feature or an episode, not an extra (when unsure, ask the owner);
      - it has no `ripped as` (other than a failed rip), and it shares no segment with a title already taken (a play-all playlist).
 
@@ -6226,10 +6230,11 @@ Which disc is in the drive: the disc being added, which the owner inserts.
 Which disc is in the drive: does not matter.
 
 1. Run `python3 scripts/phase0/audio_dataset.py; echo "exit=$?"` with no `--set`. Its experiment-13 section is the coverage table's source: the counts against row 13, `false verdicts`, `as it stands`, and `not counted`. Its kind-against-verdict table and the notes.md sections give the track table. No threshold is changed. `exit=1` with a `FAIL ... (programme audio), verdict commentary` line is a false verdict; `exit=3` means not every track was checked: deal with it as Task 11 Step 11 says before judging. The coverage table and every total leave out each track of the Office disc (`the-office-2005-s3d3-bluray`), whose S03E16 commentary and S03E15 duplicate the thresholds were fitted on; the track table lists them, marked "fitting disc, not counted".
-   - **False verdict:** a track with the verdict `commentary` that the owner labelled as programme audio (`main`, `lossy-companion`, `alternate-mix`, `laugh-track-version`, `derived-core`), or as a kind the owner has decided to keep in answer to the design's questions 3 to 6 (`audio_labels.py` then lists that kind as programme audio, so the harness gives it a `FAIL`). An isolated score or M&E track is not programme audio (D14: not wanted); one with the commentary verdict is a note, `dropped as a commentary`. This includes the tracks of the Office disc.
-   - **Answer yes:** every kind in the row is covered without any track of the Office disc, there is no false verdict, and at least one commentary got the verdict on each of at least 3 different discs other than the Office disc.
+   - **False verdict:** a track with the verdict `commentary` or `commentary-cross-language` that the owner labelled as programme audio (`main`, `lossy-companion`, `alternate-mix`, `laugh-track-version`, `derived-core`, `dub`), or as a kind the owner has decided to keep in answer to the design's questions 3 to 6 (`audio_labels.py` then lists that kind as programme audio, so the harness gives it a `FAIL`). An isolated score or M&E track is not programme audio (D14: not wanted); one with the commentary verdict is a note, `dropped as a commentary`. This includes the tracks of the Office disc.
+   - **Answer yes:** every kind in the row is covered without any track of the Office disc, there is no false verdict, and at least one commentary got the verdict on each of at least 3 different discs other than the Office disc. The yes covers candidates in the reference's language only: `commentary-cross-language` is never dropped, and it does not count towards the 3 discs with a commentary verdict (the harness counts `commentary` only).
    - **Answer no:** any false verdict, on any disc, whatever the coverage. Also no when coverage is met but fewer than 3 discs other than the Office disc had a commentary verdict.
    - **Not answered:** coverage is not met and there is no false verdict.
+   - **Swapped reference:** `exit=1` with `FAIL ... swapped reference` means that, were that labelled track ranked first, the programme would get the commentary verdict. Report it with both runs' measures. Until the owner decides question 4 of the design's section 9.9, treat it as blocking a yes.
 2. Create `docs/phase0/experiments/EXP-13-commentary-by-audio.md` from `docs/phase0/experiments/TEMPLATE.md`. Header:
    - the date;
    - every disc measured, with slug, format and the titles;
@@ -6261,7 +6266,8 @@ Which disc is in the drive: does not matter.
      - the `seconds=` of each run, with the title's running time and file size: the J4125's cost per minute of running time for an episode and for a feature;
      - the `audio_similarity.py` command.
    - **What was observed:**
-     - one table row per measured track: file, track, DC, AG, tenths, SMI, LS, ADL, reverse, verdict, the owner's label, and whether the two agree;
+     - one table row per measured track: file, track, DC, AG, tenths, SMI, LS, ADL, reverse, cross-language, peer, swapped (the harness snapshot's `cross_language`, `peer` and `swapped_verdict`), verdict, the owner's label, and whether the two agree;
+     - the harness's `cross-language`, `dubs` and `swapped references` lines, and every first-of-language note;
      - every duplicate found by MD5;
      - every track the rule did not judge, with the reason;
      - for each owner label, how many tracks got each verdict;
@@ -6274,7 +6280,8 @@ Which disc is in the drive: does not matter.
    - **Consequence for the spec:**
      - on yes: add row 13 to section 17; in 8.6 step 1, add the duplicate row and the content row behind `drop_commentary_by_audio`; in 8.8, add the review reasons `commentary_detected` and `audio_reference_unclear`; in section 14, add the setting; in 6.4 step 10, the whole-title decode with its measured cost; change D12 and R6 to say that content may confirm a commentary;
      - on no or not answered: the same spec text, except that the content row only flags for review (`commentary_detected`) and never drops; D12 changes accordingly;
-     - in every case: the duplicate row, and the open questions still open.
+     - in every case: the duplicate row, and the open questions still open;
+     - in every case also: D15's and row 13's wording (EXP-13 addendum 9.5), 8.8's meanings of `audio_reference_unclear` and `commentary_detected`, and the new rule row 4b.
 
 - [ ] **Step 21: Add the remaining rips of this task to the tuning dataset (decision D16)**
 

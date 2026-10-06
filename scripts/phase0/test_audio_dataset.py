@@ -32,6 +32,8 @@ def spec(**numbers):
 
 
 SPEC = spec()
+DUB_SPEC = SPEC.replace("each with an extra track.", "each with an extra track; at least 3 dubs in a wanted language from "
+                        "at least 2 discs, at least 1 of them on a dialogue-heavy title.")
 
 
 def speech(rnd, frames, loud, quiet):
@@ -74,21 +76,23 @@ def level_file(path, values):
                     + "\n".join(f"{v:.1f}" for v in values) + "\n", encoding="utf-8")
 
 
-def folder(label_dir, main_md5, cands, fc=True, channels=6, main=1, streams=None):
+def folder(label_dir, main_md5, cands, fc=True, channels=6, main=1, streams=None, langs=None):
     """A level folder as audio-levels.ps1 writes it. cands: [(stream, levels, md5)]. streams: the file's audio
     streams for streams.json, [(index, channels, codec, profile, language)]; by default every stream up to the highest
-    measured one, English, the main with `channels` and the others 2."""
+    measured one, English, the main with `channels` and the others 2. langs: {stream: language} for the manifest
+    (English when not given)."""
+    lang = lambda n: (langs or {}).get(n, "eng")
     d = label_dir / ("audio-levels-20ms-" + "-".join(str(n) for n in [main] + [n for n, _, _ in cands]))
     d.mkdir(parents=True)
     level_file(d / "main-mix.txt", MIX)
     if fc:
         level_file(d / "main-fc.txt", CENTRE)
     lines = ["# lazymkv audio-levels v2 (experiment 13)", "file=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400",
-             f"main={main} codec=dts profile=- channels={channels} layout={'5.1(side)' if fc else 'stereo'} language=eng "
+             f"main={main} codec=dts profile=- channels={channels} layout={'5.1(side)' if fc else 'stereo'} language={lang(main)} "
              f"fc={'yes' if fc else 'no'} frames={len(MIX)} md5={main_md5}"]
     for n, values, md5 in cands:
         level_file(d / f"cand-{n}.txt", values)
-        lines.append(f"cand={n} codec=ac3 profile=- channels=2 layout=stereo language=eng frames={len(values)} md5={md5}")
+        lines.append(f"cand={n} codec=ac3 profile=- channels=2 layout=stereo language={lang(n)} frames={len(values)} md5={md5}")
     (d / "manifest.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if streams is None:
         top = max([main] + [n for n, _, _ in cands])
@@ -141,6 +145,10 @@ class Spec(unittest.TestCase):
         self.assertEqual(req["fitting_slug"], "fit-disc")
         decoy = SPEC.replace("**no** programme track", "**no** programme track (`decoy-disc`)")
         self.assertEqual(labels.exp13_requirements(decoy)["fitting_slug"], "fit-disc")
+
+    def test_row_13_may_set_the_dubs_a_cross_language_verdict_needs(self):
+        self.assertEqual([labels.exp13_requirements(SPEC)[k] for k in ("dubs", "dub_discs", "dub_heavy")], [None] * 3)
+        self.assertEqual([labels.exp13_requirements(DUB_SPEC)[k] for k in ("dubs", "dub_discs", "dub_heavy")], [3, 2, 1])
 
     def test_a_reworded_row_is_refused_by_name(self):
         with self.assertRaises(ValueError) as stop:
@@ -349,7 +357,7 @@ class Dataset(unittest.TestCase):
 
     def test_kind_against_verdict(self):
         rows = {line.split()[0]: line.split() for line in section(self.out, "Kind against verdict").splitlines()[2:]}
-        self.assertEqual(rows["commentary"][2:], ["0", "3", "0", "0", "0", "0", "0", "0", "3"])  # fit-disc, disc-b twice
+        self.assertEqual(rows["commentary"][2:], ["0", "3", "0", "0", "0", "0", "0", "0", "0", "3"])  # fit-disc, disc-b twice
         self.assertEqual(rows["lossy-companion"][-2:], ["0", "1"])
         self.assertIn("verdicts hidden until labelled", " ".join(rows["(unlabelled)"]))
         self.assertEqual(rows["(unlabelled)"][1:9], ["-"] * 8)
@@ -619,6 +627,120 @@ class Joins(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL disc-w/t0 stream 1: the reference is labelled commentary (unwanted audio)", out)
 
+    def test_a_commentary_in_another_language_is_judged_against_the_original_language(self):
+        streams = [(1, 6, "dts", "DTS-HD MA", "spa"), (2, 6, "dts", "DTS", "spa"), (3, 2, "ac3", None, "eng")]
+        folder(self.c / "disc-s" / "t0", "s1", [(2, COPY, "s2"), (3, COMMENT, "s3")], streams=streams,
+               langs={1: "spa", 2: "spa"})
+        (self.c / "disc-s" / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+        write_labels(self.c / "disc-s", [entry("t0", 2, "derived-core", how="flag"), entry("t0", 3, "commentary")],
+                     {"t0": title("feature")})
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("(0 measured against the wrong reference)", out)
+        self.assertIn("cross-language        commentaries 1 (commentary-cross-language 1), programme tracks 0", out)
+        rows = {line.split()[0]: line.split() for line in section(out, "Kind against verdict").splitlines()[2:]}
+        self.assertEqual(rows["commentary"][2:5], ["0", "0", "1"])  # the pattern, in another language: keep-only
+        self.assertIn("commentary verdicts   on 0 of 3 discs", out)  # only a verdict that may drop shows the recall
+        self.assertIn("kept although unwanted, commentary: disc-s/t0 stream 3 (commentary-cross-language)", out)
+        self.assertIn("swapped references    2 labelled candidates read the other way round; the programme would get "
+                      "the commentary verdict against 0 of them", out)
+
+    def test_a_folder_against_the_english_track_of_a_spanish_film_is_the_wrong_reference(self):
+        streams = [(1, 6, "dts", "DTS-HD MA", "spa"), (2, 2, "ac3", None, "eng"), (3, 2, "ac3", None, "eng")]
+        folder(self.c / "disc-s" / "t0", "s2", [(3, COMMENT, "s3")], main=2, streams=streams)
+        (self.c / "disc-s" / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 1, out)
+        self.assertIn("wrong reference: measured against stream 2 (ac3 2 ch t2), but the top-ranked spa stream is 1 "
+                      "(dts DTS-HD MA 6 ch t1), the title's programme reference (placed first in the original language", out)
+
+    def test_a_dub_is_programme_audio(self):
+        folder(self.c / "disc-u" / "t0", "u1", [(2, COMMENT, "u2")], langs={1: "spa"},
+               streams=[(1, 6, "dts", "DTS-HD MA", "spa"), (2, 2, "ac3", None, "eng")])
+        (self.c / "disc-u" / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+        write_labels(self.c / "disc-u", [entry("t0", 2, "dub")])
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL disc-u/t0 stream 2: labelled dub (programme audio), verdict commentary-cross-language", out)
+        self.assertIn("cross-language        commentaries 0 (commentary-cross-language 0), programme tracks 1", out)
+        self.assertIn("dubs                  1 from 1 discs; on dialogue-heavy titles 0; with the commentary pattern 1 "
+                      "(row 13 sets no number for dubs yet", out)
+        self.assertIn("false verdicts        1", out)  # kept, but the pattern fired on programme audio
+        (self.c.parent / "dub-spec.md").write_text(DUB_SPEC, encoding="utf-8")
+        code, out = run([self.c, "--spec", self.c.parent / "dub-spec.md"])
+        self.assertIn("dubs                  1 of 3 from 1 of 2 discs; on dialogue-heavy titles 0 of 1; with the commentary "
+                      "pattern 1 (what row 13 asks before content may judge a candidate in another language", out)
+
+    def test_a_swapped_reference_that_would_drop_the_programme_fails(self):
+        rnd = random.Random(5)  # a stem: music cues of 12 s at -30 dB in every 30 s, room tone between them
+        stem = [(-30.0 if (t // FPS) % 30 < 12 else -62.0) + rnd.uniform(-1, 1) for t in range(len(MIX))]
+        folder(self.c / "disc-m" / "t0", "m1", [(2, stem, "m2")])
+        write_labels(self.c / "disc-m", [entry("t0", 2, "music-effects")])
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL disc-m/t0 stream 2: swapped reference: labelled music-effects, verdict reference-unclear; with "
+                      "this track as the reference, the programme (stream 1) would get the commentary verdict", out)
+        self.assertIn("RESULT FAILED: 1 swapped reference(s) would drop the programme", out)
+        write_labels(self.c / "disc-m", [])  # unlabelled: neither the verdict nor the swapped one is shown
+        code, out = run([self.c, "--spec", self.spec, "--snapshot", self.c / "t.json"])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("swapped reference:", out)
+
+    def test_the_companion_of_a_dub_is_judged_against_the_dub_too(self):
+        companion = [-100.0] * 3 + [v - 6 for v in COMMENT[:-3]]  # the dub stand-in has the pattern (addendum 9.2)
+        streams = [(1, 6, "dts", "DTS-HD MA", "spa"), (2, 2, "ac3", None, "eng"), (3, 2, "ac3", None, "eng")]
+        folder(self.c / "disc-x" / "t0", "x1", [(2, COMMENT, "x2"), (3, companion, "x3")], streams=streams, langs={1: "spa"})
+        (self.c / "disc-x" / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+        write_labels(self.c / "disc-x", [entry("t0", 2, "dub"), entry("t0", 3, "lossy-companion")])
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL disc-x/t0 stream 2: labelled dub (programme audio), verdict commentary-cross-language", out)
+        self.assertNotIn("FAIL disc-x/t0 stream 3", out)
+        rows = {t["stream"]: t for t in json.loads((self.c / "audio-dataset.json").read_text(encoding="utf-8"))["tracks"]}
+        self.assertEqual((rows[3]["verdict"], rows[3]["peer"]["stream"], rows[3]["peer"]["verdict"]), ("note-commentary", 2, "keep"))
+        self.assertIsNone(rows[2]["peer"])
+
+    def test_the_snapshot_hides_every_verdict_of_an_unlabelled_track(self):
+        companion = [-100.0] * 3 + [v - 6 for v in COMMENT[:-3]]
+        streams = [(1, 6, "dts", "DTS-HD MA", "spa"), (2, 2, "ac3", None, "eng"), (3, 2, "ac3", None, "eng")]
+        folder(self.c / "disc-x" / "t0", "x1", [(2, COMMENT, "x2"), (3, companion, "x3")], streams=streams, langs={1: "spa"})
+        (self.c / "disc-x" / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        snap = json.loads((self.c / "audio-dataset.json").read_text(encoding="utf-8"))
+        cands = [t for t in snap["tracks"] if t["role"] == "candidate"]
+        self.assertEqual([(t["verdict"], t["swapped_verdict"]) for t in cands], [(None, None)] * 2)
+        self.assertEqual((cands[1]["peer"]["stream"], cands[1]["peer"]["verdict"]), (2, None))
+        self.assertEqual(sorted(snap["unlabelled_verdicts"].values()), ["commentary-cross-language", "note-commentary"])
+
+    def test_a_folder_for_a_language_that_is_not_wanted_is_dataset_only(self):
+        streams = [(1, 8, "truehd", None, "eng"), (2, 6, "ac3", None, "fra"), (3, 2, "ac3", None, "fra")]
+        folder(self.c / "disc-f" / "t0", "f1", [], streams=streams, channels=8)
+        folder(self.c / "disc-f" / "t0", "f2", [(3, COPY, "f3")], main=2, streams=streams, langs={2: "fra", 3: "fra"})
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("(0 measured against the wrong reference)", out)
+
+    def test_a_reference_labelled_unwanted_is_its_own_failure_not_a_swapped_one(self):
+        d = folder(self.c / "disc-v" / "t0", "v1", [(2, MIX, "v2")], fc=False)
+        level_file(d / "main-mix.txt", COMMENT)  # a commentary ranked first: the programme is the candidate
+        write_labels(self.c / "disc-v", [entry("t0", 1, "commentary"), entry("t0", 2, "lossy-companion")])
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL disc-v/t0 stream 1: the reference is labelled commentary (unwanted audio)", out)
+        self.assertNotIn("swapped reference:", out)
+        rows = {t["stream"]: t for t in json.loads((self.c / "audio-dataset.json").read_text(encoding="utf-8"))["tracks"]
+                if t["role"] == "candidate"}
+        self.assertEqual((rows[2]["verdict"], rows[2]["swapped_verdict"]), ("reference-unclear", "commentary"))
+
+    def test_a_reference_that_is_not_the_first_stream_of_its_language_is_noted(self):
+        streams = [(1, 6, "dts", "DTS", "eng"), (2, 6, "dts", "DTS-HD MA", "eng"), (3, 2, "ac3", None, "eng")]
+        folder(self.c / "disc-q" / "t0", "q2", [(1, COPY, "q1"), (3, COMMENT, "q3")], main=2, streams=streams)
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("note: disc-q/t0/audio-levels-20ms-2-1-3: the reference, stream 2, is not the first eng stream of the "
+                      "file (stream 1, dts DTS 6 ch t1, comes first): question 10's position veto would refuse", out)
+
 
 def build_count_corpus(c):
     """Every counting rule of experiment 13 decides one of the numbers this corpus prints."""
@@ -727,6 +849,69 @@ class Routine(unittest.TestCase):
             self.assertTrue(self.jobs(slug, "dtsx")[0].endswith("-Main 2 -Cand 1"))
             self.assertEqual([j.split()[2] + j.split(" -Main ")[1] for j in self.jobs(slug, "two-languages")],
                              ["audio-levels-some-film-two-languages-11 -Cand 2", "audio-levels-some-film-two-languages-33 -Cand 4"])
+
+    def test_args_take_the_programme_reference_from_the_original_language(self):
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            slug = pathlib.Path(tmp) / "some-film"
+            for label, streams in (
+                    ("commentary", [("dts", "DTS-HD MA", 6, "spa"), ("dts", "DTS", 6, "spa"), ("ac3", None, 2, "eng")]),
+                    ("dub-first", [("dts", "DTS-HD MA", 6, "spa"), ("truehd", None, 8, "eng"), ("ac3", None, 2, "eng"),
+                                   ("ac3", None, 6, "fra"), ("ac3", None, 2, "fra")]),
+                    ("no-spanish", [("truehd", None, 8, "eng"), ("ac3", None, 2, "eng"), ("ac3", None, 2, "und")])):
+                probe_file(slug / label / "ffprobe-streams.json", streams)
+            (slug / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+            lines = ds.levels_args(slug, "commentary")
+            self.assertIn("original language spa (TMDb es)", lines[0])
+            self.assertIn("programme reference: stream 1 (dts DTS-HD MA 6 ch), placed first in the original language", lines[4])
+            self.assertEqual(self.jobs(slug, "commentary"), ["scripts/phase0/job.sh audio-levels.ps1 audio-levels-some-film-"
+                                                             "commentary -Slug some-film -Label commentary -Main 1 -Cand 2,3"])
+            self.assertEqual([j.split(" -Main ")[1] for j in self.jobs(slug, "dub-first")], ["1 -Cand 2,3", "4 -Cand 5"])
+            self.assertIn("  dataset only: fra is not a wanted language; stream 4 against 5", ds.levels_args(slug, "dub-first"))
+            self.assertTrue(self.jobs(slug, "no-spanish")[0].endswith("-Main 1 -Cand 2,3"))
+            self.assertIn("placed first in English", "\n".join(ds.levels_args(slug, "no-spanish")))
+            self.assertIn("note: the file has no stream in the original language (spa)", "\n".join(ds.levels_args(slug, "no-spanish")))
+            self.assertNotIn("note:", "\n".join(ds.levels_args(slug, "commentary")))
+            (slug / "tmdb.json").write_text('{"original_language": "xx"}', encoding="utf-8")
+            self.assertIn("original language none (TMDb xx: a work without speech", ds.levels_args(slug, "commentary")[0])
+            self.assertTrue(self.jobs(slug, "commentary")[0].endswith("-Main 3"))  # English then: the stereo track alone
+            (slug / "tmdb.json").write_text('{"original_language": "qq"}', encoding="utf-8")
+            self.assertIn("original language unknown (TMDb 'qq'", ds.levels_args(slug, "commentary")[0])
+
+    def test_args_keep_a_lossy_stereo_track_from_becoming_the_reference(self):
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            slug = pathlib.Path(tmp) / "old-film"
+            for label, streams in (
+                    ("mono-lossless", [("pcm_s24le", None, 1, "eng"), ("ac3", None, 2, "eng")]),   # spec 8.6 G1
+                    ("mono-lossy", [("ac3", None, 1, "eng"), ("ac3", None, 2, "eng")]),            # G2
+                    ("stereo-later", [("ac3", None, 2, "eng"), ("ac3", None, 1, "eng"), ("ac3", None, 2, "eng")])):
+                probe_file(slug / label / "ffprobe-streams.json", streams)
+            self.assertTrue(self.jobs(slug, "mono-lossless")[0].endswith("-Main 1 -Cand 2"))
+            self.assertTrue(self.jobs(slug, "mono-lossy")[0].endswith("-Main 1 -Cand 2"))
+            self.assertTrue(self.jobs(slug, "stereo-later")[0].endswith("-Main 1 -Cand 2,3"))
+
+    def test_args_g1_alone_and_the_notes_on_a_reference_that_may_not_be_the_programme(self):
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            slug = pathlib.Path(tmp) / "old-film"
+            for label, streams in (
+                    ("g1-alone", [("ac3", None, 2, "eng"), ("pcm_s24le", None, 1, "eng")]),  # G2 would keep stream 1
+                    ("score-first", [("pcm_s24le", None, 1, "eng"), ("dts", "DTS-HD MA", 2, "eng"), ("ac3", None, 2, "eng")]),
+                    ("und-main", [("dts", "DTS-HD MA", 6, "und"), ("ac3", None, 2, "eng")]),
+                    ("malayalam", [("dts", "DTS-HD MA", 6, "mal"), ("ac3", None, 2, "eng")])):
+                probe_file(slug / label / "ffprobe-streams.json", streams)
+            self.assertTrue(self.jobs(slug, "g1-alone")[0].endswith("-Main 2 -Cand 1"))
+            self.assertNotIn("note:", "\n".join(ds.levels_args(slug, "g1-alone")))  # G1 passed over a lossy stereo track
+            score = "\n".join(ds.levels_args(slug, "score-first"))
+            self.assertTrue(self.jobs(slug, "score-first")[0].endswith("-Main 2 -Cand 1,3"))
+            self.assertIn("note: the reference is not the first eng stream of the file (stream 1, pcm_s24le 1 ch, comes first)", score)
+            und = "\n".join(ds.levels_args(slug, "und-main"))
+            self.assertTrue(self.jobs(slug, "und-main")[0].endswith("-Main 2 -Cand 1"))
+            self.assertIn("note: the reference is a lossy stream of 2 channel(s), and stream 1 with no language code is "
+                          "lossless or has more than 2 channels", und)
+            (slug / "tmdb.json").write_text('{"original_language": "en"}', encoding="utf-8")
+            self.assertIn("original language English (TMDb en)", ds.levels_args(slug, "und-main")[0])
+            (slug / "tmdb.json").write_text('{"original_language": "ml"}', encoding="utf-8")
+            self.assertIn("original language mal (TMDb ml)", ds.levels_args(slug, "malayalam")[0])
+            self.assertTrue(self.jobs(slug, "malayalam")[0].endswith("-Main 1 -Cand 2"))
 
     def test_args_without_a_probe_take_a_rip_of_the_same_title_and_size_or_say_how_to_probe(self):
         with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:

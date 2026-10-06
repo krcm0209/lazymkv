@@ -66,6 +66,8 @@ KINDS = {
     "lossy-companion": ("programme", "keep", "a separately encoded copy of the programme mix (AC-3/AAC/DTS companion, 2.0 downmix)"),
     "alternate-mix": ("programme", "keep", "another mix or master of the programme (original or broadcast mix, remaster, night mix)"),
     "laugh-track-version": ("programme", "keep", "the programme with or without its laugh track"),
+    "dub": ("programme", "keep", "the programme in another language, tagged with it (an English dub of a Spanish film); kept (R3, R4); "
+                                "content never drops a candidate in another language than the reference (EXP-13 addendum 9.2)"),
     "derived-core": ("programme", "keep", "a stream MakeMKV derived from another (scan flag 2048); the app drops it by that flag, never by content"),
     "duplicate": ("duplicate", "drop", "an exact copy of another track of the title (same packet MD5); one copy is kept (D13)"),
     "commentary": ("unwanted", "drop", "an audio commentary (R6, D12)"),
@@ -75,7 +77,7 @@ KINDS = {
     "music-effects": ("unwanted", "drop", "music and effects without dialogue (D14)"),
     "same-language-dub": ("ask", "ask", "a second dub or alternate dialogue in the same language (EXP-13 question 3)"),
     "alternate-narration": ("ask", "ask", "a second narrator (EXP-13 question 3)"),
-    "foreign-dub": ("ask", "ask", "a dub in another language tagged with a wanted one (EXP-13 question 4)"),
+    "foreign-dub": ("ask", "ask", "a dub in another language than its tag says, tagged with a wanted one (EXP-13 question 4)"),
     "other-speech": ("ask", "ask", "trivia, interview or picture-in-picture speech (EXP-13 question 5)"),
     "sing-along": ("ask", "ask", "a sing-along or karaoke track (EXP-13 question 6)"),
     "unknown": ("unknown", "unknown", "the owner does not know"),
@@ -125,6 +127,12 @@ def exp13_requirements(spec_text):
     if not m:
         raise ValueError("spec section 17 row 13 no longer names the disc the thresholds were fitted on")
     out["fitting_slug"] = m.group(1)
+    # Optional (EXP-13 addendum 9.5): the dubs a yes needs before content may judge a candidate in another language
+    # than the reference. None while row 13 does not have the phrase: such a candidate then stays keep-only.
+    m = re.search(rf"at least {num} dubs in a wanted language from at least {num} discs, at least {num} of them on a "
+                  rf"dialogue-heavy title", row)
+    for k, v in zip(("dubs", "dub_discs", "dub_heavy"), m.groups() if m else (None, None, None)):
+        out[k] = None if v is None else int(v) if v.isdigit() else WORDS[v]
     return out
 
 
