@@ -43,6 +43,11 @@ Notes on that output:
   blocked this file", os error 4551; Code Integrity events 3077/3118 name `rustup.exe` loading the toolchain's cargo).
   `rustc --version` still runs, and the already-built `lazymkv-capture.exe` runs in jobs and over ssh. Builds on the
   mini PC are impossible until the owner decides what to do about the policy (nothing here changes a security setting).
+  Microsoft's documentation (read 2026-10-06): Smart App Control has no per-app exception; the Rust toolchain is not
+  Authenticode-signed, so cargo runs only on a per-file cloud reputation verdict that Windows re-queries and that can
+  change (the same symptom is reported in rust-lang/rust#160163: cargo blocked, rustc not); turning SAC off is in
+  Windows Security > App & browser control > Smart App Control settings, and on recent builds (Insider 26220.7070;
+  reported for 26200.8246) it can be turned on again without a clean install, which older documentation still denies.
   Consequence for the product (D17): an unsigned lazymkv.exe would be blocked on such machines; the installer and the
   executables need code signing (phase 1 design, section 18 risks).
 
