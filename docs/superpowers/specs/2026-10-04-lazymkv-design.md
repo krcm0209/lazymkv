@@ -44,6 +44,7 @@ Decisions (D) made during design:
 - D14. (Owner, 2026-10-05.) Isolated-score and music-and-effects tracks are not wanted. They are dropped when confirmed, on the same footing as commentary and audio description (R6); an unconfirmed track is kept.
 - D15. (Owner, 2026-10-05.) Stereo width is not a requirement for calling a track unwanted, and a rule based on a track's position on the disc is too brittle to decide it. Whether a track is a commentary, an audio description or a score is judged from flags, database entries and, once experiment 13 has answered yes, the track's content compared with the main track of its language (docs/phase0/experiments/EXP-13-design.md). Until then a track with the commentary pattern is kept; whether it also sends the job to review, against D12's "no review", is still to be decided by the owner.
 - D16. (Owner, 2026-10-05.) Until the content rules are trusted, every rip is run with as much debug logging as the tools offer, and keeps the information needed to tune the rules as more discs go through: the tools' full output, the measures and evidence behind every decision, and enough of each audio track to compute new measures later without the disc. The owner's label for a track, once given, is kept with it.
+- D17. (Owner, 2026-10-06.) Installing lazymkv must be dead simple for other users: they are not expected to install any sidecar program by hand. Every redistributable tool the app needs (mkvmerge, ffprobe/ffmpeg, an OCR engine or its models) ships with the app or is fetched by it, with the tools' licences and version pins; the app never asks the user to find and install them. MakeMKV cannot be redistributed, so it is the one program the app may find missing: the app detects it, says exactly what to install and checks the version (4.4); whether its official installer can be run unattended from the app is a later question. This reverses the "never bundled" rule that 4.4 and 19 carried before this date; those sections are to be rewritten in the phase 1 design, and phase 0 choices of OCR engine are made with D17 in view (prefer an engine that can ship with a Rust program on Windows and later Linux/macOS).
 
 ## 3. Target environment
 
@@ -100,7 +101,7 @@ Each has a Windows implementation in the first version:
 
 ### 4.4 External programs
 
-Located at runtime, never bundled. Lookup order: the path in settings, then the default install folder or registry entry, then `PATH`.
+Lookup order: the path in settings, then the folder the app ships them in (D17), then the default install folder or registry entry, then `PATH`. Before D17 (2026-10-06) this section read "located at runtime, never bundled"; under D17 only MakeMKV is found rather than shipped, and the table below is to be revised in the phase 1 design (which tools ship, their licences, and how the OCR engine of experiment 14 is delivered).
 
 | Program | Use | Minimum version |
 |---|---|---|
@@ -694,6 +695,7 @@ Later features, in rough order of value:
 ## 19. Setup prerequisites
 
 - On the target machine: upgrade MakeMKV to 2.0.0; install MKVToolNix, FFmpeg and a Java runtime.
+  (These are the phase 0 prerequisites on the owner's machine. For other users D17 applies: the released app ships or fetches everything except MakeMKV, and the setup steps a user performs by hand are installing MakeMKV and running lazymkv's own installer.)
 - A TMDb API key created by the owner.
 - Staging and library paths, with share credentials entered on the target machine.
 - A Home Assistant webhook, and optionally a generic webhook URL.

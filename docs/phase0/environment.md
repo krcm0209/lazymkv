@@ -47,6 +47,7 @@ Notes on that output:
 | MKVToolNix | `MoritzBunkus.MKVToolNix` | 100.0.0 |
 | FFmpeg | `Gyan.FFmpeg` | 9.0.2 |
 | MediaInfo (command line) | `MediaArea.MediaInfo` | 26.05 |
+| Tesseract OCR (approved 2026-10-06, for experiment 14: reading bitmap subtitles) | `UB-Mannheim.TesseractOCR` | 5.4.0.20240606 (leptonica 1.84.1; languages `eng`, `osd`; `C:\Program Files\Tesseract-OCR\tesseract.exe`) |
 
 ## Optical drives
 
