@@ -1,0 +1,441 @@
+# Experiment 14: English subtitle tracks by their text (design)
+
+- Date: 2026-10-06
+- Status: design for the owner and the controller. Committed copy, installed with what it describes: `scripts/phase0/subtitle_text.py` and `scripts/phase0/test_subtitle_text.py` (section 6), the changes to `scripts/phase0/ocr-subs.ps1` (section 6 (a)), Task 12 Steps 22 to 32 of the plan (section 7) and row 14 of spec section 17 (section 5). The rest of the spec is not changed by this file. The scratch folders it names were temporary and are not kept.
+- Built from three independent proposals (the "text", "requirements" and "pipeline" lenses), the adversarial attack on each, a re-computation, by the synthesis, of every number quoted below with the final `subtitle_text.py`: 101 titles with 156 tracks (the two real titles, two in which a real track carries another language tag, and 97 constructed from the three real tracks), and a mechanical check whose fixes are applied here (no-language and partial tracks are no longer dropped unread; the example lines leave the recording; `-Languages` is a list). The 101 titles and the threshold sweep were run again with the corrected script (scratch `exp14-work/rerun/`) and gave the same results. Scratch: `/private/tmp/claude-502/-Users-USER-code-lazymkv/d9f40c13-92fa-4abc-ab12-bdb22c67ac55/scratchpad/exp14-work/synth/` (`repo/` the two Python files, `cases.py` the constructed titles, `cases.log` and `cases-out.json` their results, `sweep.py` and `sweep.log` the threshold sensitivity, `rejected.log` the numbers of the rejected measures). No file there holds subtitle text beyond what the scripts read.
+
+**The owner's question: can code tell regular, SDH, forced and commentary subtitle tracks apart from their content, with OCR of the text? Partly, and only with a review path for what text cannot see.** On the evidence so far:
+- SDH against regular is decided by *sound-only events*: events whose every letter sits inside a bracketed sound description or a capital speaker label. The real Office S03E16 SDH track has 9 of them (and 17 events with any SDH marker, 4.9%); the real Pan's Labyrinth English translation has 0 (0 markers in 887 events). A regular track has none on every real and constructed track except one with stand-alone bracketed sign or letter notes (SO 8, CS 0 in the stand-in), which the count of cues that name a sound (CS) separates; an SDH track has them unless its cues are inline only or carry no brackets.
+- Whether two English tracks carry the same words is decided by the share of one track's word pairs found anywhere in the other (bigram containment, CB, time-free). Timing alone cannot do it: the real English and Spanish tracks of Pan's Labyrinth align at 0.995/0.999 on start times, while CB is 0.002 both ways.
+- A forced track is a one-way subset: its word pairs are all in the dialogue track (CB 1.00) while the dialogue track's are mostly not in it. This holds whatever 8.7's "full" (10% of the events) says.
+- A commentary is dropped only when both its words and its timing differ from the dialogue, it has no sound-only event, and the title's original language is English.
+- Text cannot see: an SDH track whose brackets the OCR systematically reads as letters, a UK-style SDH (sounds in bare capitals, speakers told apart by colour) printed all in capitals, and an SDH track with no marker at all. Each is listed in section 3; the first two cost nothing worse than today, where no lone track is ever flagged SDH.
+
+**The design in one paragraph.** ocr-subs.ps1 reads every English (and no-language) bitmap subtitle stream with Tesseract and puts the text in the tuning dataset (D16). subtitle_text.py pairs each displayed event (packet over 64 bytes) with its OCR lines, folds the text to ASCII, repairs Tesseract's I-as-`|`, and measures each track: readability, language by stopwords, SDH markers (cues, labels, `>>`), sound-only events, cues that name a sound, and three review triggers (damaged brackets, capital sound lines without brackets, note stand-ins). For each pair of English tracks it measures CB both ways and 8.7's alignment. The rule of section 3 then replaces 8.7's "the one with more events is SDH" with the text class, groups tracks by words before timing, demotes one-way subsets to forced candidates (full or not), confirms forced and commentary tracks by their words, and sends everything it cannot place to review with `subtitle_ambiguous`; nothing ambiguous is dropped, and a no-language or partial track whose text cannot be read is kept for review, not dropped. Until experiment 14 answers yes, the text may only add reviews to what 8.7 decides.
+
+## 1. What the owner wants
+
+From R5, R6, D15 and the owner's statements of 2026-10-06: keep the English subtitle tracks that transcribe the dialogue (regular and SDH when both exist) and the forced English track when there is one; never keep commentary subtitles; drop everything else; tell regular from SDH by content, by code; nothing ambiguous is dropped; the costly errors are dropping a dialogue track and labelling an SDH track regular. "Rule today" is what the rule of section 3 does with the stand-in named, as measured in section 4.
+
+| Track kind | Wanted | Rule today (stand-in) |
+|---|---|---|
+| Regular English transcription of an English programme | keep, "English" | regular (C1, the Office SDH with its markers removed: 0 markers); beside the SDH: regular (R1+C1, R1+C1r, condensed and split twins) |
+| English translation of a foreign-language film | keep, "English" | regular (R2, Pan's English, real: 0 markers in 887 events) |
+| SDH, US style: (CAPITAL SOUND) cues, NAME: labels | keep, "English (SDH)", hearing-impaired flag | sdh (R1, real: M 17, SO 9, CS 10) |
+| SDH, Netflix style: [lower-case cues], [Name] ids | keep, SDH | sdh (C7: same 17 events) |
+| SDH in capitals, or a DVD VobSub styled like closed captions | keep, SDH | sdh (C9: labels ignored in an all-capital track, cues still count) |
+| SDH, UK/BBC style: sounds as bare capital lines, speakers by colour | keep, SDH | review (C8: 10 capital sound lines, no bracket); in all capitals: **regular** (missed) |
+| SDH with few cues (a quiet drama) | keep, SDH | review with 1 to 4 cue events, sdh from 5 (sparse sweep); with no cue at all: regular (missed, as today) |
+| DVD closed-caption stream (MakeMKV's text conversion) | keep as SDH when the group has no SDH | set aside by 8.7 as today; its text can be read without OCR (not measured) |
+| Forced English track (separately authored, or a forced-only stream with events) | keep one, "English (Forced)" | forced, also when it has more than 10% of the events (35 to 266 events in the stand-ins); review when it holds 48% or more of the dialogue's words |
+| Second regular track of the same words (US/UK spelling, condensed) | ask the owner | review (C1+C1r) |
+| Two SDH tracks | ask the owner | review |
+| Commentary subtitles (full track) | drop | drop when words and timing both differ and the original language is English; review otherwise (no real one exists) |
+| Partial commentary, trivia or pop-up track (few events) | drop | review, not forced (trivia stand-ins: CB 0.004 to 0.014) |
+| English "dubtitles" (transcript of the English dub) beside a translation | ask the owner | the translation is kept for review on a foreign-language title, never dropped (dub-group stand-in) |
+| Lyrics or sing-along track | ask the owner | review when 30% of its events carry a note stand-in (ENGINE-DEPENDENT); without readable notes it looks forced (not constructed) |
+| Track tagged English whose text is another language | ask the owner | keep for review (R3 tagged eng: es 0.326, en 0.000) |
+| Track with no language tag whose text is English | keep, as English | treated as an English track (not constructed; unit test) |
+| Track with no language tag whose text cannot be read, or is too short or unclear to show its language | keep | kept for review, never dropped (not constructed; unit test) |
+| Other-language tracks | drop | dropped by tag as today (R3) |
+| Exact duplicate (same packets) | keep one | not handled by text; two copies give "two SDH tracks", review. A packet MD5, as D13 does for audio, is the right test (not built here) |
+| Track the OCR cannot read | keep | 8.7's timing rule decides, and the job goes to review (`subtitle_text_unreadable`); a track 8.7 would drop (outside the dialogue group, or not full with 150 events or more) is kept |
+| Not-full track with 150 events or more (8.7: `partial_subtitle_dropped`) | keep as forced when it is the forced track; drop otherwise | a forced candidate when its words are a one-way subset of a full track; kept for review when unreadable; dropped otherwise (not constructed; unit test) |
+
+Questions for the owner:
+
+1. Two regular English tracks of the same words (US and UK spelling, a condensed and a verbatim one): keep both, or only one? This design keeps both and asks.
+2. Two SDH tracks of one title: keep both?
+3. On a foreign-language film, an English transcript of the English dub ("dubtitles") beside the translation of the original: keep both? Text alone cannot tell which matches the audio that will play.
+4. A sing-along or lyrics-only subtitle track: keep (as what), or drop?
+5. A track tagged English whose text is clearly another language: once experiment 14 answers yes, drop it with a note, or always hold the job for review?
+6. Trivia and pop-up text tracks: drop like commentary? (R5 says everything else is dropped; this design keeps them for review because it cannot confirm them.)
+7. A UK-style SDH track that text cannot place goes to review. Is a review on such titles acceptable, and may the bitmaps (with their colours) be kept in the tuning dataset so that a colour measure can be added later (section 6)?
+8. The SDH flag on a title with a single English subtitle track needs the subtitle extraction (one more full read of the staged file) and OCR for every such title, which 6.4 step 10 skips today. Is that cost acceptable once it is measured (experiment 14 part b)?
+9. Until experiment 14 answers yes, this design lets the text only add reviews to what 8.7 decides (never change a label silently, never drop). Agreed?
+10. Ground truth: please confirm from the packaging or menu that Office S03E16's English track is SDH and that Pan's Labyrinth's English track is a plain translation (not SDH). Neither was asked before the measures were seen.
+11. Which discs can you lend experiment 14: a title with both a regular and an SDH English track (at least 3, one a feature film), a film with a forced English track (foreign-language scenes), a disc with commentary subtitles, a DVD with English subtitles, a UK (BBC-style) disc with SDH, and any disc with trivia, lyrics or two English translations?
+
+**Relation to spec 8.7 and experiment 6.** 8.7 groups full English tracks by start-time alignment and calls the one with more events SDH. That count was exercised on nothing: on the five tracks measured so far 100% of events fall during dialogue, so timing separated nothing, and the stand-ins below show the count rule failing whenever a regular track is split differently (R1+C1 split: 543 regular events against 345 SDH events) or two tracks carry different words on the same slots (R2 with R3 tagged eng: the translation called SDH). Experiment 6 measures the timing thresholds (`subs_same_min`, `subs_diff_max`, `sub_clear_max_bytes`) and gathers the owner's label for each English subtitle stream of its discs (Task 12 Step 5); experiment 14 reuses those labels and those rips, adds OCR, and keeps 8.7's timing bands as they are, both as a guard (the in-between band still raises `subtitle_ambiguous`) and as the fallback when the text cannot be read. If experiment 6 finds no clean timing separation, its fallback (two or more full English tracks raise `subtitle_ambiguous`) stays in force until experiment 14 answers; the text verdicts are still recorded.
+
+## 2. Measures
+
+### Inputs
+
+For each subtitle stream `s<n>` of a title, from the recording and the tuning dataset:
+- `subs/sub-<n>.packets.json` (probe-title.ps1): `pts_time`, `duration_time`, `size` of every packet. A packet larger than `sub_clear_max_bytes` (64) is a displayed event; smaller ones clear the screen. Measured: the clear packets are 30 bytes on all three real tracks, the smallest event 2,029 bytes.
+- `sub-<n>.ocr.jsonl` (ocr-subs.ps1, in the tuning dataset only): one record per rendered frame. The proof of concept wrote `{"frame","file","t","text"}` with the lines joined by ` | `; the final script adds `lines` (an array) and `pts` (section 6).
+- `subs-ocr/sub-<n>.frames.json`: the line count of every frame (no text).
+
+### Measures that decide or support
+
+1. **Event pairing (input).** The k-th frame with text is the k-th event when the counts are equal; otherwise each frame is matched to the event starting within 0.30 s of `pts` (or of `t` plus the file's first packet time, for the proof of concept's records, whose `t` counts from the start of evidence.mks on a 0.25 s grid). Measured: text frames equal events on all three tracks (345/345, 887/887, 884/884); `pts - t` is constant within one 0.25 s step (Office 3.837-4.087 s, Pan's 60.853-61.103 s, both ending at the file's first packet time, which for Pan's is the English track's first packet even on the Spanish track).
+
+2. **Lines.** The final records carry a `lines` array, used as it is. For the proof of concept's joined text, the frame's line count L from frames.json says how many bare `|` tokens are line breaks (L - 1); the others are a capital I read as `|`, chosen by a score: +3 at the very start, +1 after another `|`, +2 before a lower-case word or an apostrophe, -1 before a capital, a dash or a bracket; ties go to the earlier token. Without L every ` | ` is a break. No measure below changed between the two readings on the real tracks (the markers sit at line starts or inside brackets).
+
+3. **ASCII fold (engine-independent).** In this order: map typographic quotes and apostrophes (U+2018, U+2019, U+201A, U+2032, U+00B4, U+0060, U+02BC to `'`; U+201C, U+201D, U+201E, U+00AB, U+00BB, U+2033 to `"`), dashes (U+2010-U+2015, U+2212 to `-`), U+2026 to `...`, U+00A0 to a space; map the music notes U+2669, U+266A, U+266B, U+266C, U+266D, U+266F and the pilcrow U+00B6 to `#`, the note stand-in; drop U+00BF and U+00A1 (inverted ? and !); map sharp s to `ss`, the ae and oe ligatures to `ae`/`oe`, o-slash to `o`, l-stroke to `l`; then NFKD, drop combining marks, drop any remaining non-ASCII character. Built with `chr()` in the script. Measured: no character above U+007F is left in any track, and the English tracks' measures are the same raw and folded.
+
+4. **Corrections (English-tagged streams only, after folding).** In order: a `|` that is not preceded by a letter or digit and is followed by a space, `'`, `.`, `,`, `?`, `!` or the end becomes `I` (`|`, `|!`, `|'m`); a `|` before a lower-case letter at a word start becomes `I` (`|t's`); a `|` between lower-case letters becomes `l`; `l`, `1` or `|` between two capitals becomes `I` (WHlSTLlNG); `0` between two capitals becomes `O`; a lone `l` or `1` before `'m`, `'ll`, `'d`, `'ve` becomes `I`; `lam`, `1am`, `|am` become `I am`; any `|` left becomes `l`. Applied by tag, not by the language verdict, so that a short forced track (too short for a language verdict) is corrected too. Measured: Office 70 `|` to I and 3 `I am`; Pan's English 81, 1 and 1. A line such as `| almost died.` (Office) is the typical case.
+
+5. **READ, readability (decides whether the text may judge).** `letter_events` = share of events with 2 or more letters; `wordlike` = share of whitespace tokens, note stand-ins (`#`, `*`, `|`) left out, that fully match `["'(\[-]*(?:[A-Za-z]+(?:[-'][A-Za-z]+)*|\d+(?:[.,:]\d+)*)["'.,!?:;)\]-]*`. Readable when letter_events >= 0.90, wordlike >= 0.85 and at least 20 dialogue words. Measured: letters 1.000 on all three; wordlike Office 0.998, Pan's English 0.989, Pan's Spanish read with the English model 0.970. With half of the Office's lines garbled at 50% the track is unreadable (constructed). Lines with note stand-ins at both ends on 50% of the events stay readable (constructed), which closes the attack where lyrics made an SDH track unreadable.
+
+6. **LANG, language (decides: tag check).** Words: `[a-z]+(?:'[a-z]+)?` on the lower-cased dialogue text (cues, labels and note stand-ins removed). Shares of four stopword lists on ASCII-folded words (en, es, fr, de; 60, 47, 36 and 35 words once shared words are removed, in `STOP` of the script); a word in two lists counts for neither, and `me he has a no son come sin con pan` are taken out of English. With 50 words or more: `en` when the English share >= 0.20; another language when English <= 0.08, that language >= 0.12 and >= 3 times English; otherwise `unknown`. Under 50 words: `short` (the tag stands). Measured: Office en 0.431 (es 0.001); Pan's English en 0.399 (others 0.000); Pan's Spanish read with the English model es 0.326, en 0.000. French and German lists are untested.
+
+7. **Markers (decide, with 8 and 9).** On the folded, corrected lines of one event:
+   - CUE: `[\[(]\s*([A-Za-z0-9][A-Za-z0-9 ',.!?&:;/\-]{0,78}[A-Za-z0-9.!?'])\s*[\])]` on the event's lines joined by spaces (a cue may cross the line break), with at least 2 letters inside, counted only when at least half of the event's own tokens are word-like. Either bracket may close the other (an OCR slip). `{` `}` are not brackets: the English model reads the Spanish inverted ? as `{`. The strict inner alphabet keeps OCR junk from making a cue.
+   - LABEL: `^\s*(?:-\s*)?([A-Z][A-Z0-9'.\-]*(?:\s+[A-Z0-9'.\-]+){0,2})\s*:\s+\S` per line, case-sensitive, at least 2 letters in the name, and text after the colon (so a capital line that merely ends in a colon is not a label). Not counted in an all-capital track (caps_style below).
+   - CHEV: `^\s*>>` (closed-caption speaker change).
+   - M = events with a CUE, a CHEV, or a LABEL (outside caps_style); `rate` = M / events.
+   Measured: Office CUE 10, LABEL 7, M 17, rate 0.0493 (for example `(WOMAN SCREAMS)` and `DWIGHT: Bat! Bat!`); Pan's English and Spanish 0.
+
+8. **SO, sound-only events (decides).** An event with a CUE whose remainder, after removing every cue span, the label prefix and the note stand-ins, has fewer than 2 letters. These are the events only an SDH track has. Measured: Office 9; every real regular track and every constructed one except the sign-notes stand-in (SO 8, CS 0), 0; regular tracks with inline asides `(FBI)` 0.
+
+9. **CS, cues that name a sound (decides).** Events with a CUE whose words start with one of the sound stems in `SOUND_STEMS` (laugh, sigh, scream, music, door, phone, knock, ring, ...: 105 English prefixes). Used only inside cues and on capital lines, never on dialogue words (rejected measures below). Measured: Office 10 of its 10 cue events. It keeps bracketed notes that describe no sound (`[SIGN]`, `[LETTER]`, which a translation track may carry) from making SDH: 8 stand-alone and 8 inline such notes gave M 16, SO 8, CS 0.
+
+10. **caps_style and CAPS_CUE (support: review trigger).** A capital line has 4 or more letters and no lower case after removing its label and cues; caps_style when 50% or more of the lines are capital lines (closed captions, capital fonts); it switches LABEL off. CAPS_CUE = events with a capital line naming a sound (stem), outside caps_style. It never makes SDH; more than 2 such events keep a track from being called regular (review). Measured: 0 capital lines on all three real tracks. The UK stand-in C8 has 10; Pan's English with 10% of lines shouted in capitals has 5, with 3 inserted caption cards 3 (both reviewed, never SDH).
+
+11. **ODD, damaged brackets (support: review trigger).** On the folded text before the corrections: events whose `(`+`[` count differs from their `)`+`]` count, or with a line wrapped in `|...|` or `{...}`. More than 2 keep a track from being called regular. Measured: Office 0, Pan's English 0, Pan's Spanish 1. It catches the Netflix stand-in with every bracket read as `|` or `{` `}` (10 events), and OCR junk with bracket characters (12 to 48 events at 10-20% garbled lines). It cannot catch brackets read as letters (`l`, `I`, `C...J`): those stay missed (section 3).
+
+12. **NOTE, lyrics stand-in (support; ENGINE-DEPENDENT).** A line beginning or ending with `#` or `*` after folding (strict; Subtitle Edit's replacement set). NOTE_LOOSE, a lone `J`, `JJ`, `Jf`, `Ji`, `Jl`, `P`, `D`, `d`, `f`, `$` or `%` at a line edge, is reported only: it comes from unverified Tesseract 4 reports. Used once: a forced candidate with note lines on 30% of its events goes to review as possible lyrics. Never an SDH marker (a regular track of a musical carries notes too). Measured: 0 strict and 0 loose on all 2,116 real events, so there is no false hit here and no hit rate can be measured: no real track has lyrics.
+
+13. **CB, content bigram containment (decides: grouping, subset, commentary, forced).** Bigrams: consecutive pairs of dialogue words of 2 or more letters inside one event, leaving out pairs whose two words are both English stopwords. CB(A,B) = share of A's distinct bigrams found anywhere in B; not computed under 20 bigrams. Time-free, so a re-timed or other-cut copy still matches. Same words: both directions >= 0.50; other words: both <= 0.20; else partial. Subset: CB(small, big) >= 0.60, CB(big, small) < 0.50 and the small track has at most 70% of the big one's events. Measured: Office 1,225 bigrams, Pan's English 2,518, Pan's Spanish 2,911. Pan's English/Spanish 0.002/0.002 (aligned 0.995/0.999). Office/Pan's English 0.084/0.041; Pan's first half/second half 0.096/0.099 (the closest unrelated pair); the Office text on Pan's timing 0.041/0.084 with alignment up to 1.00 (C6). Same words: R1/C1 1.000/1.000; re-authored twins 0.81-0.84/0.88-0.89; a twin with 30% of its words dropped and half its events merged 0.518/0.707; the twin 10 s late 1.000/1.000.
+
+14. **aligned (8.7, unchanged) and other-language support (support).** `aligned(A,B)` is 8.7's share of A's events starting within 300 ms of an event of B. Timing band: same >= 0.70, diff <= 0.30, between otherwise. New, only when every English group has one track: the group whose track aligns >= 0.70 with a full subtitle track of another language is the dialogue group, when exactly one does. Measured: Pan's English/Spanish 0.995/0.999. Constructed: an SDH beside a commentary with a third-language track on the SDH's timing picks the SDH (8.7 today: review).
+
+15. **UC (reported).** A's all-capital events that overlap no event of B. Only names the reason of a review between two regular-looking tracks (possible UK-style SDH); never sets a flag. Three inserted title cards in capitals gave UC 2/0 (constructed).
+
+### Tried and rejected
+
+- **"More events = SDH" (8.7).** Within one title the counts differ by little and in either direction: SDH 345 against its stripped twin 336, 285, 281 or 249 events, but against a split twin 345 against 543 (the count then names the regular track SDH). On R2 with R3 tagged English it calls the translation SDH (887 against 884). Replaced by the text class; kept only when the text is unreadable.
+- **Style and density measures.** Events per minute: Office SDH 16.36, its stripped twin 15.93, Pan's English 7.97; characters per event 32.9, 33.2, 26.6; two-line share 0.603, 0.616, 0.260; dash share 0.000, 0.000, 0.028. Each separates the sitcom from the film and none separates SDH from regular within the episode: genre, not SDH.
+- **Sound words outside brackets.** Per 1,000 dialogue words: Office 4.17, Pan's English 5.91, higher on the translation. Prefix stems hit ordinary words. Stems are used only inside cues and on capital lines.
+- **Capital lines as an SDH marker** (the proof of concept's `upper`, the text lens's UK path). Shouting, caption cards and title cards make them: Pan's English with 10% of lines shouted gave 5, with 45% 8 to 13; three caption cards whose words start with a stem gave 3. Kept only as a review trigger (CAPS_CUE).
+- **Mixed-case labels** (`Name: ...`). Ordinary dialogue such as "Look: ..." matches. Not counted.
+- **UC as an SDH decider** (requirements lens). Title cards and sign translations in capitals with no counterpart in the other track make it fire. Reported only.
+- **A time-windowed text similarity** (text lens, words within +-2 s; pipeline lens, +-1 s). It fails on a re-timed copy: the Office twin shifted 2 or 3 s gives 1.000 both ways, 5 s 0.381/0.378, 10 s 0.018/0.032, which would let 8.7 drop a dialogue track as commentary. CB is 1.000 at every shift.
+- **S = max of the two similarity directions** (text and pipeline lenses). A forced track inside the dialogue's words then counts as "same", is paired with the SDH and named "English". The two directions are kept apart (subset test).
+- **Other-language support before "largest group"** (requirements lens). It let a single translation track outrank a two-track dub group, which was then dropped. Used only between single-track groups.
+- **Film-making vocabulary and "we" rate** as commentary evidence. Office 1.39 and 12.98 per 1,000 words, Pan's English 0.22 and 13.12; no real commentary subtitle exists to set a threshold. Not used.
+- **Glyph-shape note detector** (pipeline lens: connected components of the bitmap, 92 of 96 rendered notes, 0 of 2,065 other glyphs). Fitted on CoreText renders, not on PGS or VobSub glyphs, and on its own tuning set; not adopted. It can be tried later on the bitmaps the tuning dataset now keeps (section 6).
+- **Sampling events for speed.** The marker count falls one for one with lost events (sparse sweep); a share of a sample would also move M across its small thresholds. Whole tracks only; when the time is too long, the answer is "not read" (8.7 decides, review), never a sampled verdict.
+
+### OCR preparation and corrections
+
+**What runs today (scripts/phase0/ocr-subs.ps1, measured on the J4125).** ffmpeg draws the stream on a black 1920x1080 canvas at 4 fps (`sub2video`, `overlay`), `mpdecimate` keeps one frame per change, then `negate` and `format=gray`, PNG. One `tesseract <list> stdout -l eng --psm 6` call per stream (Tesseract 5.4.0, UB-Mannheim build). Office (21 min): ffmpeg 117.9 s, tesseract 57.2 s, 600 frames of which 345 carry text. Pan's (1:58): ffmpeg 609 s and 621.2 s, tesseract 149 s and 154 s, 1,732 and 1,726 frames. The canvas render is 70-80% of the time; about half the frames are the blank frames between events.
+
+**Settings kept.** English model for every stream (it is also the stand-in for an ASCII-only engine on other languages), psm 6, the 4 fps canvas as the measured default. Changes are in section 6: the lines as an array, the event time, a second render mode to be timed, and the bitmaps kept in the tuning dataset.
+
+**Corrections.** Measure 4. Every standalone capital I followed by a space was read as `|` on both English tracks (70 and 81 corrections); I inside contractions (`I'm`, `I'll`) and `I?` were mostly read correctly. `I am` became `lam` 3 times on the Office. No bracket damage was seen on the real tracks: the Office's 10 cue pairs were all read as parentheses. In Spanish read with the English model, the inverted ? became `{`, `&`, `~`, a pound sign or an e-acute, the inverted ! became `i` or `j`, n-tilde became `fi`; hence `{` `}` are not brackets and `&` `~` are not note stand-ins.
+
+**Music note stand-in.** Neither engine outputs U+266A: Tesseract's stock English model has no note (research, unverified), and ocrs's alphabet is ASCII only (verified). The fold turns any note an engine does return into `#`, so `#` and `*` at a line edge are the strict stand-in (Subtitle Edit's practice). The loose tokens are reported, not used. The rule uses notes for one thing only (a forced candidate that looks like lyrics goes to review), so a wrong stand-in costs at most a review or a missed review, never a flag.
+
+**What depends on the engine.**
+- Nothing in the decision needs an accent or the note glyph: CUE, LABEL, CHEV, SO, CS, CAPS_CUE, ODD, READ and CB use ASCII letters, digits, `()[]:'-`, `>` and space, all in ocrs's alphabet.
+- The I corrections are Tesseract's (`|` for I); an engine that reads I as `l` or `1` is covered by the `l`/`1` rules; harmless when nothing matches.
+- The language check runs on folded text by design. Spanish read with the English model (which keeps only e-acute among the accents and turns n-tilde into `fi`) still reads es 0.326 against en 0.000. What ocrs makes of accented letters (dropped, or replaced by other letters) is unmeasured; French and German are untested with either engine.
+- The note stand-ins (strict and loose) and the bracket misreads (ODD) depend on what each engine makes of those glyphs, which nobody has measured.
+- Colour (UK speaker colours) is lost by the grey, negated preparation with either engine; the bitmaps kept by the final ocr-subs.ps1 keep it for later.
+
+## 3. Decision rule
+
+**Scope.** Every subtitle stream of the title. Streams tagged with another language than English are dropped by tag as today; their text is only measured when the tuning dataset has it. A no-language stream is read: it is treated as English when its text is readable English (T1c), dropped when its text is readable and another language, and kept for review when its text is unreadable or too short or unclear to tell (`no language tag and the text does not show its language`). 8.7's "Set aside first" is unchanged (derived forced-only streams, DVD director's-comments flags, the closed-caption stream).
+
+**Before and after a yes.** Until experiment 14 answers yes (section 5, part a), the app decides as 8.7 does today; where it has the text (titles where step 10 runs), every place where the rule below would decide differently raises `subtitle_ambiguous` with the note `subtitle_text_disagrees` and the rule's verdict, and the text never drops a track, never sets or removes a flag. After a yes, the rule below decides. The single-track SDH flag needs part b as well (section 5).
+
+**Order.** Steps T0 to T7 run in order. "Keep" means the track goes into the file; every review reason is `subtitle_ambiguous`, held for the owner with the note given.
+
+| # | Evidence | Outcome | Note (with `subtitle_ambiguous` where marked) |
+|---|---|---|---|
+| T0 | Text not readable: letter_events < 0.90, wordlike < 0.85, or fewer than 20 words | 8.7 as today for this track; anything 8.7 would drop is kept (outside the dialogue group, not full with 150 events or more, no language tag) | review, `subtitle_text_unreadable` (a no-language track: T1c's note) |
+| T1a | Tagged English, readable, LANG another language | keep, no role | review, `tagged eng, text reads <lang>` |
+| T1b | Tagged English, readable, LANG `unknown` (50 words or more) | placed by T2-T7 | review, `language of the text unclear` |
+| T1c | No language tag, readable, LANG `en` | treated as English from here | none |
+| T1c | No language tag, unreadable, or LANG `short` or `unknown` | keep, no role | review, `no language tag and the text does not show its language` |
+| T1c | No language tag, readable, LANG another language | drop (as a stream of that language) | none |
+| T2 | A full track (8.7: >= 10% of the largest English track's events), or a not-full track with 150 events or more, whose bigrams are a one-way subset of a larger full English track (CB in >= 0.60, CB back < 0.50, <= 70% of its events) | forced candidate (T7), whatever "full" says | none |
+| T3 | Two full English tracks, both readable: same words (CB >= 0.50 both ways) | same group, whatever the timing | none |
+| T3 | Other words (CB <= 0.20 both ways) and timing diff (aligned <= 0.30 both ways) | different groups | none |
+| T3 | Other words with timing same or between; partial words (anything else) | both kept; the track outside the dialogue group is not dropped | review, `text and timing disagree with the dialogue group` |
+| T3 | Either unreadable, or fewer than 20 bigrams in either (content not computed) | 8.7's timing bands as today (between: review) | as T0 when unreadable; none otherwise |
+| T4 | Dialogue group: 8.7's order (forced-only parent, TheDiscDB, largest group of 2 or more); then, when every group has one track, the one whose track aligns >= 0.70 with a full track of another language, when exactly one does; else none | no dialogue group: every full track kept | review, `no dialogue group` |
+| T5 | One track in the dialogue group, class **sdh**: M >= 5, rate >= 0.010, SO >= 3 and CS >= 2 | **SDH**: hearing-impaired flag, "English (SDH)" | none |
+| T5 | Class **regular**: M = 0, ODD <= 2, CAPS_CUE <= 2 | **regular**, "English" | none |
+| T5 | Class **unclear**: anything between (1-4 marker events; markers without sound-only events; bracket notes naming no sound; damaged brackets; capital sound lines) | regular for now, kept | review, the reason (`some SDH markers ...`, `damaged brackets`, `capital sound lines without brackets (UK-style SDH?)`) |
+| T5 | Two tracks: one sdh, one regular | **SDH** and **regular** by text (replaces the count) | `subtitle_count_disagrees` when the SDH has fewer events (note only) |
+| T5 | Two tracks: both regular, both sdh, or either unclear | both kept; suggested roles shown when one is sdh | review (`two regular tracks`, `two SDH tracks`, the unclear reason; `capital-only events in one track only` when UC >= 3 against <= 1) |
+| T5 | Two tracks, either unreadable | 8.7's count rule | review, `subtitle_text_unreadable` |
+| T5 | More than two tracks | as 8.7 | review |
+| T5 | A TheDiscDB description that agrees with the text | confirms | none |
+| T5 | A TheDiscDB description that contradicts an sdh or regular class | keep both readings | review |
+| T6 | Full track outside the dialogue group, readable, and all of: other words and timing diff against every dialogue track; alone in its group; SO = 0; class not sdh; LANG en or unknown; original language (TMDb) English | **drop** (confirmed commentary or trivia) | note `commentary or trivia: other words and other timing` |
+| T6 | Any other full track outside the dialogue group (original language not English or unknown, sound-only cues, a group of 2 or more, an SDH track, unreadable) | keep | review, the reason |
+| T7 | Forced candidates (8.7's order: flagged first, then not full with < 150 events, then T2's): LANG another language | keep, not forced | review |
+| T7 | Note lines on >= 30% of its events (ENGINE-DEPENDENT: needs the note stand-in) | keep, not forced | review, `looks like lyrics` |
+| T7 | CB(candidate, dialogue track) <= 0.20 | keep, not forced | review, `shares no words with the dialogue track` (partial commentary, trivia, or a signs-only forced track) |
+| T7 | 0.20 < CB < 0.60 | keep, not forced | review |
+| T7 | Unreadable | **forced**, the first one only (8.7's choice) | review, `subtitle_text_unreadable` |
+| T7 | CB >= 0.60, or too short to compare (< 20 bigrams), or no dialogue track | **forced**, "English (Forced)", the first one only | a second confirmed candidate: review |
+| T7 | Not full, >= 150 events, readable, not a subset | drop, `partial_subtitle_dropped` (8.7) | none |
+| T7 | Not full, >= 150 events, unreadable | keep, no role | review, `subtitle_text_unreadable` |
+
+"Dialogue track" in T6 and T7 is the regular track of the dialogue group, else its SDH track. Confidence: 8.7's table unchanged; the text never raises a confidence, and every review sets 0.60.
+
+**What this changes in spec 8.7** (to be made only after experiment 14 reports):
+- **Opening sentence**, "Every subtitle stream that no rule below keeps is dropped, including all streams in other languages." Augmented: a stream tagged English or with no language that the text rule cannot place is kept with review reason `subtitle_ambiguous` and the note named in T0, T1a, T1c, T3, T4, T6 or T7; streams in other languages are still dropped by tag.
+- **Events**, "A track is **full** when it has at least 10% as many events as the largest English track." Augmented: a full track whose words are a one-way subset of a larger full track is a forced candidate (T2).
+- **Alignment**, "Two full tracks are in the same group when ... In between: review reason `subtitle_ambiguous`." Augmented: when both tracks are readable, the words decide first (T3); timing alone stays for unreadable tracks; the in-between band still reviews.
+- **Dialogue group**, "... else the largest group if it has two or more tracks." Augmented by T4's other-language step for single-track groups.
+- **Regular and SDH**, "If two, the one with more events is SDH: hearing-impaired flag, named "English (SDH)"; the other is "English". A TheDiscDB description saying SDH overrides the count." **Replaced** by T5: the text class decides, for one track as well as two; a contradicting description raises review; the count survives only for unreadable tracks.
+- **Commentary or trivia**, "A full track outside the dialogue group is dropped (R6)." Augmented by T6: dropped only when words and timing both differ, with the conditions listed; otherwise kept for review.
+- **Forced**, "... a separately authored track that is not full and has fewer than 150 events." Augmented by T7's text checks and T2's subset candidates.
+- **Other tracks**, "... not full and have 150 events or more are dropped ..." Unchanged except that a subset of a full track is a forced candidate first (T2) and an unreadable one is kept for review (T0, T7).
+- **6.4 step 10**, "Skipped when the title has exactly one English subtitle stream." Replaced, after part b of experiment 14, by: skipped when the title has no English or no-language bitmap subtitle stream; the step also reads each such stream by OCR.
+- **8.8**: no new review reason; the notes above travel with `subtitle_ambiguous`.
+- **Section 14**: the thresholds of `RULE` in subtitle_text.py become settings, run through `lazymkvctl retune` like the audio ones.
+
+### Thresholds (every one PROVISIONAL)
+
+Each sits between values from one real SDH track (Office S03E16), one real translation track and one real Spanish track, and constructions made from them. None was set on held-out data.
+
+| Threshold | Value | Measured on each side | Data needed to fix it |
+|---|---|---|---|
+| SDH class | M >= 5, rate >= 0.010, SO >= 3, CS >= 2 | real SDH M 17, SO 9, CS 10; sparse SDH sdh from 5 kept cues (M 5, SO 4); real regular tracks M 0; regular with 12 asides M 12, SO 0; sign notes M 16, SO 8, CS 0 | real same-title SDH/regular pairs, sparse film SDH, regular tracks with stray brackets |
+| Regular class | M = 0, ODD <= 2, CAPS_CUE <= 2 | real regular 0, 0, 0; M = 1 (one kept cue) reviewed; ODD 10-48 on damaged or garbled text | real regular tracks with notes, asides, signs in capitals |
+| Readability | letter_events >= 0.90, wordlike >= 0.85, 20 words | real 1.000 and 0.970-0.998; 50% of lines garbled at 50%: unreadable | real bad OCR: small DVD glyphs, stylised fonts |
+| Language | 50 words; en >= 0.20; other >= 0.12, en <= 0.08, 3x | en 0.399-0.431; Spanish es 0.326, en 0.000 | French and German tracks, an ocrs run, short forced tracks |
+| CB | same >= 0.50 both ways; other <= 0.20 both ways; subset in >= 0.60, back < 0.50, <= 70% of events | same 0.52-1.00; other 0.002-0.099; subsets 1.00 in, 0.10-0.34 back | real independently authored SDH/regular pairs, real forced tracks, real commentary, two real translations of one film |
+| Timing | 8.7's 0.70 / 0.30 / 300 ms | unchanged (experiment 6) | experiment 6 |
+| Lyrics (ENGINE-DEPENDENT) | note lines on 30% of a forced candidate | no real lyrics | lyric frames read by both engines |
+| caps_style | 50% capital lines | real 0.000; capital restyles 1.000 | real CC-styled DVD tracks |
+
+**Sensitivity.** `sweep.py` re-ran all 101 titles with each threshold moved one step either way (SDH M 4/6, SO 2/4, CS 1/3, rate 0.005/0.015, the regular ceiling 2, CB same 0.4/0.6, other 0.15/0.25, subset in 0.5/0.7, back 0.4/0.6, events 0.6/0.8, ODD 1/4, CAPS_CUE 1/4, English share 0.15/0.25, word-like 0.80/0.90). No change added a wrong verdict except the regular ceiling: allowing M <= 2 for "regular" labels SDH tracks with 1 or 2 kept cues regular. Hence M = 0: a single marker event already sends a lone track to review.
+
+### How the rule treats the hard cases the attacks raised
+
+- **Inline asides in a regular track** (`(FBI)`, a spoken aside, a translator's note). They make markers but never a sound-only event: M 2 to 12, SO 0, so the track is unclear and reviewed, never SDH. Beside a real SDH: review, with the SDH suggested.
+- **Bracketed sign or letter notes** in a translation (`[SIGN]`, `[LETTER]`). Stand-alone ones are sound-only, but they name no sound: CS 0, review.
+- **Caption cards, shouting, title cards in capitals.** Never markers; at most CAPS_CUE, which reviews.
+- **OCR junk with bracket characters.** The strict cue alphabet and the per-event word-like check stop it from making cues (garbled Pan's English: M 0 to 2); ODD sends the track to review.
+- **Brackets misread systematically.** As `|` or `{}`: ODD, review. As letters (`l...l`, `I...I`, `C...J`) in a Netflix-style SDH: no marker is left, and the track is labelled regular. In the US style the labels survive (M 7, SO 0): review. This is one of the five wrong verdicts in section 4; how often an engine does it is unknown (the Office's 10 pairs were all read right).
+- **UK-style SDH.** Capital sound lines: review. Printed all in capitals: caps_style switches CAPS_CUE off and the track is labelled regular (wrong; also today). Remedy: a colour measure on the kept bitmaps (open question).
+- **Sparse SDH.** 1 to 4 cue events: review; 5 or more: SDH; none: regular (wrong, as today).
+- **A forced track with more than 10% of the events** (35, 46, 80 events beside 345; 150, 250 and 266 beside 887). 8.7 calls it full and names it "English" or even SDH; the subset test makes it a forced candidate, confirmed by CB 1.00. With 48% or 65% of the dialogue's words, CB back is 0.52-0.68 (same words): both tracks reviewed as "two regular tracks", not silently labelled.
+- **Trivia, partial commentary or a sparse unrelated track** with few events. 8.7 flags it forced; here CB 0.004-0.014 into the dialogue: kept unflagged, review.
+- **Commentary with speaker labels.** Labels are not sound-only events, so they do not block the drop (stand-in with 20% labels: dropped).
+- **Commentary quoting the dialogue.** CB back rises (0.35 at 20% quoted, 0.59 at 40%): partial, review rather than drop.
+- **Other words on the dialogue's slots or in the in-between timing band.** Review, never a drop (C6, between-timing runs).
+- **A translation beside an English-dub pair on a foreign-language film.** The dub pair is the largest group; the translation is outside it with other words and other timing, but the original language is not English: kept, review. 8.7 today drops it.
+- **A re-timed or other-cut copy.** CB is time-free: the twin 10 s late stays in the dialogue group (8.7 today: review).
+- **Lyrics in an SDH track.** Note stand-ins are not counted as tokens, so lyric lines on half the events leave the track readable and SDH.
+- **SDH beside a commentary and nothing else.** No dialogue group by size; review as today, unless a full track of another language follows one of them (then the SDH is the dialogue track and the commentary is dropped by T6).
+- **Exact duplicates.** Two identical tracks are "two SDH tracks" (or two regular): review. A packet MD5 test as in D13 should come first (not part of this experiment).
+
+### Where it runs and what it costs
+
+- **Measures.** All 101 titles in 2.8 s of CPU on the Mac in Python; the real Office title in 0.06 s, Pan's in 0.09 s. Negligible in Rust.
+- **OCR.** The cost is the reading. Proof of concept on the J4125: 175 s for a 21-minute episode track, 758 s and 775 s for each 2-hour film track (8.3 and 6.4 s per minute of running time). A film with an SDH, a regular and a commentary track would take about 38 minutes. Tesseract alone is about 0.17 s per frame with text plus the blank frames between events: 57-154 s per track. If ffmpeg's canvas render can be replaced by rendering only the changes (section 6, `-Render changes`, to be timed), a film track should take 2.5-3 minutes (estimate). The app would decode PGS and VobSub itself and read one cropped bitmap per event (not built).
+- **Where.** In the app, at 6.4 step 10, after the subtitle extraction. Before part b of experiment 14 answers yes, only where step 10 runs today (two or more English subtitle streams).
+- If the reading is too slow or fails, the answer is "not read" (8.7 decides, review), never a verdict on sampled events.
+
+## 4. Evidence so far
+
+**What exists.** Three real tracks from two titles, read on the J4125 with the proof of concept (Tesseract 5.4.0, English model, psm 6):
+- R1: Office S03E16 (`the-office-2005-s3d3-bluray`, `e16-stereo`), the title's only subtitle track, English PGS: SDH by its content; not confirmed by the owner (question 10).
+- R2: Pan's Labyrinth (`pans-labyrinth-2006-uhd`, `all-tracks`), English PGS: a translation of the Spanish dialogue; the owner expected a plain track, not confirmed from the packaging.
+- R3: the same film's Spanish PGS, read with the English model (accents unreliable), which stands in for an ASCII-only engine on another language.
+
+There is no real forced track with events (both discs' forced-only streams were removed as empty, MSG:4047), no commentary subtitle, no second English track, no lyrics, no DVD, no UK-style or closed-caption track.
+
+| Track | Events | Words | Readable (letters, word-like) | Language shares | CUE | LABEL | M (rate) | SO | CS | ODD | NOTE | Corrections | Class |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| R1 Office SDH | 345 | 2,157 | 1.000, 0.998 | en 0.431, es 0.001 | 10 | 7 | 17 (0.0493) | 9 | 10 | 0 | 0 | 70 pipe-to-I, 3 I am | sdh |
+| R2 Pan's English | 887 | 4,572 | 1.000, 0.989 | en 0.399 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 81 pipe-to-I, 1 I'm, 1 I am | regular |
+| R3 Pan's Spanish | 884 | 4,759 | 1.000, 0.970 | es 0.326, en 0.000 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | none (not English) | regular (rule: drop by tag spa; text reads es) |
+
+Pairs: R2/R3 aligned 0.995/0.999, CB 0.002/0.002 (other words on the same slots). R1 with R2: CB 0.084/0.041.
+
+**How the constructed titles were made, and how far they stand in.** All are built in `cases.py` from the three real tracks:
+- C1, the regular twin: R1 with every cue span and label removed and the events left empty dropped (336 events). It is built by removing exactly what the markers measure, so "C1 has no marker" and "R1/C1 CB 1.00" are true by construction; it only shows that nothing else in the rule mistakes one for the other. C1r (three seeds) merges 30% of neighbouring events, drops 10% of the words and jitters starts by +-0.15 s; the "condensed" twin merges 50% and drops 30%; the "split" twin cuts every two-line event in two. Real independently authored pairs differ in wording and segmentation in ways these do not model.
+- Restyles of R1: Netflix (lower-case [cues], [Name] ids), UK (cues as bare capital lines, labels removed as colour would be), CC (all capitals, `>>` for a new speaker), and the twin and Pan's English in capitals. Real house styles vary more.
+- Sparse SDH: R1 with labels removed and only k of its 10 cue events kept.
+- Attack stand-ins, after the three attacks: inline asides (a word of the line in parentheses), `(FBI)`, bracketed sign notes, caption cards whose first letters form a sound stem, shouted lines, lines garbled at 35% with bracket characters in the alphabet, systematic bracket misreads, forced tracks cut from C1 or R2 (consecutive events), sparse unrelated English as trivia, lyrics as `#` at both ends of every line of an event, a "commentary" of Pan's English lines in the Office's dialogue gaps (75 events of 2 s), the same with 20% capital labels or quoting 20-40% of the dialogue, other words on the Office's slots (C6) and in the in-between timing band, and a foreign-language title with a translation, a dub SDH and a dub regular (Pan's timing jittered by +-1.5 s carrying the Office text).
+- What none of them is: real commentary speech (no transcript of any commentary exists here; the stand-ins only have other words and other timing), a real forced track, real lyrics or note glyphs, real UK or closed-caption styling, real low-resolution OCR. Every SDH stand-in comes from one sitcom episode's 10 cues and 7 labels.
+
+**Summary of 101 titles (156 tracks).** "Right" is the wanted role with no review (or a review where review is wanted); "review" keeps the track and holds the job; "wrong" is a silent wrong role.
+
+| | Tracks | right | review | wrong |
+|---|---|---|---|---|
+| The rule of section 3 | 156 | 89 | 62 | **5** |
+| Spec 8.7 as written (count and timing) | 156 | 89 | 12 | **55** |
+
+The 5 wrong verdicts of the rule are all SDH tracks labelled regular when the text holds no marker: sparse k=0, the Netflix restyle with brackets read as `l`, `I` or `C...J`, and the UK restyle printed in capitals. 8.7 gets every one of these wrong too, and 50 more: every lone SDH (it never flags one), the forced tracks with more than 10% of the events, the translation beside a mis-tagged track, the split twin, the trivia tracks it flags forced, and the translation beside a dub pair, which it drops. The comparison is lopsided by construction (many runs are single SDH tracks) and shows the logic, not its accuracy: the thresholds came from the same three tracks.
+
+### All 101 titles
+
+`M, SO, CS` are measures 7-9; `class` is T5's; `rule` the outcome (review marked); `[8.7 today]` what 8.7 does; CB and aligned are given for every pair of English tracks.
+
+| Run | Made from (stands in for) | Tracks: M, SO, CS, class -> rule [8.7 today] | Pairs: CB both ways; aligned both ways | Wanted | Rule |
+|---|---|---|---|---|---|
+| R1 office-sdh | real | s0 eng: 17, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| R2+R3 pans | real | s0 eng: 0, 0, 0, regular -> regular [regular]; s1 spa: 0, 0, 0, regular -> drop [drop] | - | regular, drop | right |
+| R3-as-eng alone | Spanish track tagged eng | s0 eng: 0, 0, 0, regular -> keep (review) [regular] | - | review | right |
+| R2+R3-as-eng | Spanish track tagged eng | s0 eng: 0, 0, 0, regular -> regular [sdh]; s1 eng: 0, 0, 0, regular -> keep (review) [regular] | s0-s1 0.00/0.00; 0.99/1.00 | regular, review | right |
+| C1 regular-twin alone | R1 minus cues and labels | s1 eng: 0, 0, 0, regular -> regular [regular] | - | regular | right |
+| R1+C1 | R1 + stripped twin | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular] | s0-s1 1.00/1.00; 0.97/1.00 | sdh, regular | right |
+| R1+C1r seed1 | twin re-authored: 30% merged, 10% words dropped, +-0.15 s | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular] | s0-s1 0.81/0.88; 0.83/1.00 | sdh, regular | right |
+| R1+C1r seed2 | twin re-authored: 30% merged, 10% words dropped, +-0.15 s | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular] | s0-s1 0.84/0.89; 0.83/1.00 | sdh, regular | right |
+| R1+C1r seed3 | twin re-authored: 30% merged, 10% words dropped, +-0.15 s | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular] | s0-s1 0.84/0.88; 0.81/1.00 | sdh, regular | right |
+| R1+C1 condensed30 | twin: 50% merged, 30% words dropped | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular] | s0-s1 0.52/0.71; 0.72/1.00 | sdh, regular | right |
+| R1+C1 split | twin split into more events | s0 eng: 17, 9, 10, sdh -> sdh [regular]; s1 eng: 0, 0, 0, regular -> regular [sdh] | s0-s1 0.86/1.00; 0.97/0.62 | sdh, regular | right |
+| R1+C1 +10s | twin 10 s late | s0 eng: 17, 9, 10, sdh -> sdh [keep (review)]; s1 eng: 0, 0, 0, regular -> regular [keep (review)] | s0-s1 1.00/1.00; 0.17/0.17 | sdh, regular | right |
+| C1+C1r two-regular | two regular tracks | s0 eng: 0, 0, 0, regular -> regular (review) [sdh]; s1 eng: 0, 0, 0, regular -> regular (review) [regular] | s0-s1 0.83/0.89; 0.83/1.00 | review, review | right |
+| R1+R1j two-sdh | two SDH tracks | s0 eng: 17, 9, 10, sdh -> sdh (review) [sdh]; s1 eng: 17, 9, 10, sdh -> sdh (review) [regular] | s0-s1 1.00/1.00; 1.00/1.00 | review, review | right |
+| C7 netflix alone | [lower-case cues], [Name] ids | s0 eng: 17, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| C8 uk alone | cues as bare capitals, no labels | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | sdh | review |
+| C8 uk + C1 | UK SDH beside regular | s0 eng: 0, 0, 0, unclear -> keep (review) [sdh]; s1 eng: 0, 0, 0, regular -> keep (review) [regular] | s0-s1 0.99/1.00; 0.97/1.00 | sdh, regular | review |
+| C9 cc-look alone | all capitals, >> speaker marks | s0 eng: 17, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| C11 regular-caps alone | regular twin in capitals | s0 eng: 0, 0, 0, regular -> regular [regular] | - | regular | right |
+| R2 caps alone | Pans English in capitals | s0 eng: 0, 0, 0, regular -> regular [regular] | - | regular | right |
+| sparse k=0 alone | R1, labels gone, k of 10 cues kept | s0 eng: 0, 0, 0, regular -> regular [regular] | - | sdh | **WRONG** |
+| sparse k=1 alone | R1, labels gone, k of 10 cues kept | s0 eng: 1, 1, 1, unclear -> regular (review) [regular] | - | sdh | review |
+| sparse k=2 alone | R1, labels gone, k of 10 cues kept | s0 eng: 2, 1, 2, unclear -> regular (review) [regular] | - | sdh | review |
+| sparse k=3 alone | R1, labels gone, k of 10 cues kept | s0 eng: 3, 2, 3, unclear -> regular (review) [regular] | - | sdh | review |
+| sparse k=4 alone | R1, labels gone, k of 10 cues kept | s0 eng: 4, 3, 4, unclear -> regular (review) [regular] | - | sdh | review |
+| sparse k=5 alone | R1, labels gone, k of 10 cues kept | s0 eng: 5, 4, 5, sdh -> sdh [regular] | - | sdh | right |
+| sparse k=6 alone | R1, labels gone, k of 10 cues kept | s0 eng: 6, 5, 6, sdh -> sdh [regular] | - | sdh | right |
+| sparse k=8 alone | R1, labels gone, k of 10 cues kept | s0 eng: 8, 7, 8, sdh -> sdh [regular] | - | sdh | right |
+| sparse k=10 alone | R1, labels gone, k of 10 cues kept | s0 eng: 10, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| sparse k=1 + C1 | sparse SDH beside C1 | s0 eng: 1, 1, 1, unclear -> keep (review) [sdh]; s1 eng: 0, 0, 0, regular -> keep (review) [regular] | s0-s1 1.00/1.00; 1.00/1.00 | sdh, regular | review |
+| sparse k=3 + C1 | sparse SDH beside C1 | s0 eng: 3, 2, 3, unclear -> keep (review) [sdh]; s1 eng: 0, 0, 0, regular -> keep (review) [regular] | s0-s1 1.00/1.00; 0.99/1.00 | sdh, regular | review |
+| sparse k=5 + C1 | sparse SDH beside C1 | s0 eng: 5, 4, 5, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular] | s0-s1 1.00/1.00; 0.99/1.00 | sdh, regular | right |
+| asides k=2 C1 alone | regular with k inline (word) asides | s0 eng: 2, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| asides k=3 C1 alone | regular with k inline (word) asides | s0 eng: 3, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| asides k=5 C1 alone | regular with k inline (word) asides | s0 eng: 5, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| asides k=9 C1 alone | regular with k inline (word) asides | s0 eng: 9, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| asides k=12 C1 alone | regular with k inline (word) asides | s0 eng: 12, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| asides k=5 C1 + R1 | asides beside the SDH | s0 eng: 17, 9, 10, sdh -> sdh (review) [sdh]; s1 eng: 5, 0, 0, unclear -> regular (review) [regular] | s0-s1 1.00/1.00; 0.97/1.00 | sdh, regular | review |
+| asides k=12 C1 + R1 | asides beside the SDH | s0 eng: 17, 9, 10, sdh -> sdh (review) [sdh]; s1 eng: 12, 0, 0, unclear -> regular (review) [regular] | s0-s1 1.00/1.00; 0.97/1.00 | sdh, regular | review |
+| asides k=9 R2 alone | translation with asides | s0 eng: 9, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| asides k=12 R2 alone | translation with asides | s0 eng: 12, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| swap uk-sdh + fbi-regular | UK SDH beside a regular with 5 (FBI) | s0 eng: 0, 0, 0, unclear -> keep (review) [sdh]; s1 eng: 5, 0, 0, unclear -> keep (review) [regular] | s0-s1 0.99/1.00; 0.97/1.00 | sdh, regular | review |
+| sign-notes 8+8 R2 | 8 stand-alone and 8 inline bracketed sign notes | s0 eng: 16, 8, 0, unclear -> regular (review) [regular] | - | regular | review |
+| caption-cards k=3 R2 | stand-alone capital caption cards that start with a sound stem | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| caption-cards k=10 R2 | stand-alone capital caption cards that start with a sound stem | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| shout 10% R2 s1 | share of lines shouted in capitals | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| shout 10% R2 s2 | share of lines shouted in capitals | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| shout 10% R2 s3 | share of lines shouted in capitals | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| shout 45% R2 s1 | share of lines shouted in capitals | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| shout 45% R2 s2 | share of lines shouted in capitals | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| shout 45% R2 s3 | share of lines shouted in capitals | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 10% R2 s1 | lines garbled at 35% with bracket characters in the alphabet | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 10% C1 s1 | same on the regular twin | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 10% R2 s2 | lines garbled at 35% with bracket characters in the alphabet | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 10% C1 s2 | same on the regular twin | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 10% R2 s3 | lines garbled at 35% with bracket characters in the alphabet | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 10% C1 s3 | same on the regular twin | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 20% R2 s1 | lines garbled at 35% with bracket characters in the alphabet | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 20% C1 s1 | same on the regular twin | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 20% R2 s2 | lines garbled at 35% with bracket characters in the alphabet | s0 eng: 2, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 20% C1 s2 | same on the regular twin | s0 eng: 1, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 20% R2 s3 | lines garbled at 35% with bracket characters in the alphabet | s0 eng: 2, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 20% C1 s3 | same on the regular twin | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | regular | review |
+| garble 50% R1 | half the lines garbled at 50% | s0 eng: 12, 4, 4, unreadable -> regular (review) [regular] | - | sdh | review |
+| netflix brackets |..| | every bracket of the Netflix restyle misread the same way | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | sdh | review |
+| netflix brackets l..l | every bracket of the Netflix restyle misread the same way | s0 eng: 0, 0, 0, regular -> regular [regular] | - | sdh | **WRONG** |
+| netflix brackets I..I | every bracket of the Netflix restyle misread the same way | s0 eng: 0, 0, 0, regular -> regular [regular] | - | sdh | **WRONG** |
+| netflix brackets {..} | every bracket of the Netflix restyle misread the same way | s0 eng: 0, 0, 0, unclear -> regular (review) [regular] | - | sdh | review |
+| netflix brackets C..J | every bracket of the Netflix restyle misread the same way | s0 eng: 0, 0, 0, regular -> regular [regular] | - | sdh | **WRONG** |
+| netflix brackets (..] | every bracket of the Netflix restyle misread the same way | s0 eng: 17, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| office parens |..| | every parenthesis of R1 misread the same way | s0 eng: 7, 0, 0, unclear -> regular (review) [regular] | - | sdh | review |
+| office parens l..l | every parenthesis of R1 misread the same way | s0 eng: 7, 0, 0, unclear -> regular (review) [regular] | - | sdh | review |
+| office parens C..J | every parenthesis of R1 misread the same way | s0 eng: 7, 0, 0, unclear -> regular (review) [regular] | - | sdh | review |
+| forced 35 of C1 + R1 | C1 events 100..100+k as a track | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> forced [regular] | s0-s1 0.10/1.00; 0.10/1.00 | sdh, forced | right |
+| forced 46 of C1 + R1 | C1 events 100..100+k as a track | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> forced [regular] | s0-s1 0.13/1.00; 0.13/1.00 | sdh, forced | right |
+| forced 80 of C1 + R1 | C1 events 100..100+k as a track | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> forced [regular] | s0-s1 0.26/1.00; 0.23/1.00 | sdh, forced | right |
+| forced 150 of R2 | Pans English events 300..300+k as a track | s0 eng: 0, 0, 0, regular -> regular [sdh]; s1 eng: 0, 0, 0, regular -> forced [regular]; s2 spa: 0, 0, 0, regular -> drop [drop] | s0-s1 0.20/1.00; 0.17/1.00 | regular, forced, drop | right |
+| forced 250 of R2 | Pans English events 300..300+k as a track | s0 eng: 0, 0, 0, regular -> regular [sdh]; s1 eng: 0, 0, 0, regular -> forced [regular]; s2 spa: 0, 0, 0, regular -> drop [drop] | s0-s1 0.32/1.00; 0.28/1.00 | regular, forced, drop | right |
+| forced 30% of R2 | a forced track with a large share of the dialogue | s0 eng: 0, 0, 0, regular -> regular [sdh]; s1 eng: 0, 0, 0, regular -> forced [regular] | s0-s1 0.34/1.00; 0.30/1.00 | regular, forced | right |
+| forced 48% of R2 | a forced track with a large share of the dialogue | s0 eng: 0, 0, 0, regular -> regular (review) [sdh]; s1 eng: 0, 0, 0, regular -> regular (review) [regular] | s0-s1 0.52/1.00; 0.48/1.00 | regular, forced | review |
+| forced 65% of R2 | a forced track with a large share of the dialogue | s0 eng: 0, 0, 0, regular -> regular (review) [sdh]; s1 eng: 0, 0, 0, regular -> regular (review) [regular] | s0-s1 0.68/1.00; 0.65/1.00 | regular, forced | review |
+| flagged forced + R1 | forced flag set, 30 C1 events | s0 eng: 17, 9, 10, sdh -> sdh [regular]; s1 eng: 0, 0, 0, regular -> forced [forced] | s0-s1 0.10/1.00; 0.09/1.00 | sdh, forced | right |
+| trivia 30 + R2 | unrelated English, sparse | s0 eng: 0, 0, 0, regular -> regular [regular]; s1 eng: 0, 0, 0, regular -> keep (review) [forced] | s0-s1 0.00/0.09; 0.00/0.00 | regular, review | right |
+| trivia 60 + R2 | unrelated English, sparse | s0 eng: 0, 0, 0, regular -> regular [regular]; s1 eng: 0, 0, 0, regular -> keep (review) [forced] | s0-s1 0.01/0.10; 0.00/0.00 | regular, review | right |
+| trivia 85 + R2 | unrelated English, sparse | s0 eng: 0, 0, 0, regular -> regular [regular]; s1 eng: 0, 0, 0, regular -> keep (review) [forced] | s0-s1 0.01/0.10; 0.00/0.00 | regular, review | right |
+| lyrics 10% R1 | share of events with a note stand-in at both ends of each line | s0 eng: 16, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| lyrics 30% R1 | share of events with a note stand-in at both ends of each line | s0 eng: 14, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| lyrics 50% R1 | share of events with a note stand-in at both ends of each line | s0 eng: 12, 9, 10, sdh -> sdh [regular] | - | sdh | right |
+| commentary gaps + R1 + C1 | Pans English lines in the Office gaps | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular]; s2 eng: 0, 0, 0, regular -> drop [drop] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.01/0.07; 0.00/0.00; s1-s2 0.01/0.07; 0.00/0.00 | sdh, regular, drop | right |
+| commentary gaps + R1 | same, R1 alone beside it | s0 eng: 17, 9, 10, sdh -> keep (review) [keep (review)]; s1 eng: 0, 0, 0, regular -> keep (review) [keep (review)] | s0-s1 0.01/0.07; 0.00/0.00 | sdh, drop | review |
+| commentary labelled | 20% NAME: labels | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular]; s2 eng: 14, 0, 0, unclear -> drop [drop] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.01/0.07; 0.00/0.00; s1-s2 0.01/0.07; 0.00/0.00 | sdh, regular, drop | right |
+| commentary orig-unknown | same, original language unknown | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular]; s2 eng: 0, 0, 0, regular -> keep (review) [drop] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.01/0.07; 0.00/0.00; s1-s2 0.01/0.07; 0.00/0.00 | sdh, regular, drop | review |
+| commentary quoting 20% | commentary quoting dialogue lines | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular]; s2 eng: 0, 0, 0, regular -> keep (review) [drop] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.07/0.35; 0.00/0.00; s1-s2 0.07/0.35; 0.00/0.00 | sdh, regular, drop | review |
+| commentary quoting 40% | commentary quoting dialogue lines | s0 eng: 17, 9, 10, sdh -> sdh [sdh]; s1 eng: 0, 0, 0, regular -> regular [regular]; s2 eng: 0, 0, 0, regular -> keep (review) [drop] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.11/0.59; 0.00/0.00; s1-s2 0.11/0.59; 0.00/0.00 | sdh, regular, drop | review |
+| C6 other words same slots | Pans English lines on the Office times | s0 eng: 17, 9, 10, sdh -> keep (review) [sdh]; s1 eng: 0, 0, 0, regular -> keep (review) [regular] | s0-s1 0.04/0.05; 1.00/1.00 | sdh, review | review |
+| between-timing j=0.45 | other words, Office times jittered | s0 eng: 17, 9, 10, sdh -> sdh [sdh (review)]; s1 eng: 0, 0, 0, regular -> regular [regular (review)]; s2 eng: 0, 0, 0, regular -> keep (review) [drop (review)] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.04/0.05; 0.66/0.66; s1-s2 0.04/0.05; 0.66/0.65 | sdh, regular, review | right |
+| between-timing j=0.60 | other words, Office times jittered | s0 eng: 17, 9, 10, sdh -> sdh [sdh (review)]; s1 eng: 0, 0, 0, regular -> regular [regular (review)]; s2 eng: 0, 0, 0, regular -> keep (review) [drop (review)] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.04/0.05; 0.51/0.51; s1-s2 0.04/0.05; 0.51/0.49 | sdh, regular, review | right |
+| between-timing j=0.80 | other words, Office times jittered | s0 eng: 17, 9, 10, sdh -> sdh [sdh (review)]; s1 eng: 0, 0, 0, regular -> regular [regular (review)]; s2 eng: 0, 0, 0, regular -> keep (review) [drop (review)] | s0-s1 1.00/1.00; 0.97/1.00; s0-s2 0.04/0.05; 0.39/0.39; s1-s2 0.04/0.05; 0.39/0.38 | sdh, regular, review | right |
+| dub group vs translation | translation + dub SDH + dub regular (other words, own timing) | s0 eng: 0, 0, 0, regular -> keep (review) [drop]; s1 eng: 44, 23, 26, sdh -> sdh [sdh]; s2 eng: 0, 0, 0, regular -> regular [regular]; s3 spa: 0, 0, 0, regular -> drop [drop] | s0-s1 0.04/0.08; 0.22/0.22; s0-s2 0.04/0.08; 0.22/0.23; s1-s2 1.00/1.00; 0.97/1.00 | regular, sdh, regular, drop | review |
+| C8 uk in capitals alone | UK restyle printed in capitals | s0 eng: 0, 0, 0, regular -> regular [regular] | - | sdh | **WRONG** |
+| sdh + commentary + other-lang | SDH and a commentary, plus a subtitle track of another language on the dialogue timing | s0 eng: 17, 9, 10, sdh -> sdh [keep (review)]; s1 eng: 0, 0, 0, regular -> drop [keep (review)]; s3 fre: 0, 0, 0, regular -> drop [drop] | s0-s1 0.01/0.07; 0.00/0.00 | sdh, drop, drop | right |
+
+## 5. Experiment 14
+
+Row for the table in spec section 17:
+
+| # | Question | If the answer is no |
+|---|---|---|
+| 14 | (a) Read by OCR (`ocr-subs.ps1`, Tesseract, English model) and judged by the text rule of 8.7 (EXP-14-design.md section 3, every threshold as set there), and compared with the owner's label for every English and no-language subtitle track of the titles read, does the rule give **no costly verdict**, that is: no track the owner names as dialogue (regular, SDH, translation, dub transcript, closed captions) dropped; no track the owner names SDH labelled regular without review, and none the owner names regular labelled SDH without review; no track flagged forced without review that the owner does not name forced, and no forced track labelled regular or SDH without review; no commentary, trivia or lyrics track kept as regular, SDH or forced, each without review; and does it place at least half of the labelled tracks without review? Before (a) may be yes, the labelled tracks must include, from discs other than the two fitting discs: at least 3 titles from at least 2 discs (at least 1 feature film and 1 TV episode) that each have both a regular and an SDH English track; at least 6 SDH and 6 regular English tracks in all; at least 1 real forced English track with events (separately authored, or a MakeMKV forced-only stream that was not empty); at least 1 commentary subtitle track; at least 1 DVD with English VobSub subtitles (and its closed-caption stream if it has one); at least 1 UK-style SDH track (speakers by colour, sounds without brackets) if the owner has a UK disc; and every trivia, lyrics, dub-transcript or second-translation track the owner has. A track counts only when the owner names it from the packaging, the menu, the player or TheDiscDB before seeing the verdict. Every threshold was fitted on `the-office-2005-s3d3-bluray` (S03E16) and `pans-labyrinth-2006-uhd`, so none of their tracks counts towards any total above; they are still read and reported, and a costly verdict on them still makes the answer no. (b) On the J4125, does reading one English track take at most 150 s per hour of running time (ffmpeg plus tesseract, as `summary.json` gives them) for every track read with the chosen render mode? | (a) no, or not answered: the text only adds reviews. 8.7 decides as today; where the text verdict differs, `subtitle_ambiguous` with the note `subtitle_text_disagrees`; the text never drops a track and never sets or removes a flag. If the owner's discs cannot supply the tracks listed, the answer is "not answered": the report gives the count per kind against the list and names the missing kinds, and the same fallback applies. A single costly verdict makes the answer no, whatever else was measured. (b) no: the text runs only where 6.4 step 10 runs today (two or more English subtitle streams), and a title with one English track keeps it as "English" without the flag, as today. |
+
+What a yes does and does not show. Zero costly verdicts in about 20 labelled tracks bounds the costly-error rate only below about 15% per track (95%, rule of three). The thresholds are not re-tuned on the experiment's own tracks: a change made after seeing them needs a fresh set of discs to be judged on. The two fitting discs stay listed as fitted in the report.
+
+## 6. Changes to the measurement scripts
+
+Two new files and two changed ones. The three scripts are in the repository, installed with this design: `scripts/phase0/subtitle_text.py`, `scripts/phase0/test_subtitle_text.py` and `scripts/phase0/ocr-subs.ps1`. `.gitignore` is changed by plan Step 22.
+
+**(a) `scripts/phase0/ocr-subs.ps1`** (PowerShell 5.1, ASCII only). Its conventions stay: `Assert-Slug` on every name that becomes a path, no global `ErrorActionPreference`, `-ErrorAction Stop` per cmdlet, `$LASTEXITCODE` checked after every native call, `RESULT ok` or `RESULT FAILED: <reason>` and a throw, an existing output folder refused without `-Force`, the text written only to the tuning dataset. The parameters are now `Slug`, `Label`, `Streams`, `Languages`, `Fps`, `Canvas`, `Lang`, `Psm`, `Render`, `Folder`, `Show`, `Examples`, `Force`. Changes:
+1. **Lines as an array.** Each record of `sub-<n>.ocr.jsonl` gains `"lines": [ ... ]` (the page's non-empty lines, trimmed, never joined) beside the existing `text` (kept for older readers). This removes the ` | ` ambiguity with Tesseract's `|` for I.
+2. **Event time.** Each record gains `"pts"`: the frame time `t` plus `format.start_time` of evidence.mks from `streams.json`, rounded to the millisecond (0 when ffprobe gives no start time; the measured offset of `t`: 4.087 s on the Office, 61.103 s on Pan's). frames.json gains `pts` too. The stream's log line ends with `pts_offset=<s>`, and summary.json gives `pts_offset` per stream.
+3. **Which streams.** New parameter `-Languages`, declared `[string[]]$Languages = @('eng','und')`: a list of language tags, or the single value `all` (every subtitle stream). Each element is checked against `^[a-z]{2,3}$` (or equals `all`) before anything is read. job.sh passes `-Languages eng,und` to PowerShell through `-Command`, where the comma builds an array, so a plain `[string]` parameter would receive `eng und` and fail the check. An element that still holds commas (as `powershell -File` passes `eng,und`) is split first, and `all` together with another tag is refused. It chooses the streams by the tag in streams.json when `-Streams` is not given; a stream without a tag counts as `und`. When no stream matches, the script throws `no subtitle stream with a language in <list>`. The routine reads English and no-language streams; experiment 14 adds the original language's tag on one title per disc for the language check.
+4. **Render mode (to be timed).** New parameter `-Render canvas|changes`, default `canvas` (the measured path), checked beside `-Fps` before anything is read (`throw "-Render must be canvas or changes"`). `changes` drops the black `color` source and the overlay: `[0:s:<n>]negate,format=gray,mpdecimate,showinfo[v]` with the same `-canvas_size`, so that ffmpeg emits a frame only when the subtitle changes. It is untested (the Mac's ffmpeg cannot encode a bitmap subtitle stream to try it on): plan Step 25 compares it with `canvas` on one title, and nothing else depends on it. Only the canvas ticks at `-Fps`, so only there may a frame's time still come from its file name when showinfo's lines do not match the frames (a warning, as before); with `changes` that mismatch fails the run (`ffmpeg gave <k> frame times (showinfo) for <m> frames of stream s:<n> ...`). The log's `ocr:` line and summary.json record `render`.
+5. **Output folder name.** New parameter `-Folder` (default `subs-ocr`, checked with `Assert-Slug`), so that a second reading of a title (for example `subs-ocr-changes`) goes beside the first without `-Force`. It is used for both the recording and the tuning dataset; the work folder on C: keeps its name. (The script's loop variable `$folder` is renamed `$dir`: PowerShell variable names ignore case, and it would have overwritten `-Folder`.)
+6. **Bitmaps kept (D16).** After the last stream, `evidence.mks` (the subtitle-only file, a few MB per track) is copied to `$TuningData\<Slug>\<Label>\<Folder>\evidence.mks`; the copy's size is compared with the original's (a difference fails the run), and the log prints `evidence: copied <bytes> bytes`. It keeps the bitmaps with their palettes, so that colour (UK speakers), glyph shapes (the note) and another OCR engine (ocrs) can be tried later without the disc. Nothing of it goes to the recording.
+7. **Summary and examples.** `summary.json` gains `render`, `languages`, `folder` and per stream `pts_offset`. summary.json in the recording keeps the marker counts only and no `examples` key; the examples (at most 12 lines of at most 60 characters per marker) are written to `$TuningData\<Slug>\<Label>\<Folder>\examples.json` instead. The recording then holds no subtitle text at all (D16): the proof of concept's summary.json, already committed in the corpus for the Office, holds 27 example entries (15 distinct lines), which plan Steps 22 and 23 remove on the Mac and on the mini PC (Pan's holds none). The frames with text stay `text_frames`; the event count they are compared with (packets over 64 bytes) is read on the Mac from `subs/sub-<n>.packets.json` (plan Step 25).
+8. **One stream's frames on C: at a time.** After a stream's frames and text have been copied to the tuning dataset, and the copy holds as many frames as the work folder, that stream's work folder is deleted (`Remove-Item -LiteralPath $sdir -Recurse -Force -ErrorAction Stop`), so that at most one stream's frames are on C: at any time (about 1,700 frames per film stream; `-Languages all` on a disc with many subtitle streams would otherwise pile them up). A failed run still leaves its work folder, which holds tesseract's messages; the next run deletes it.
+
+Everything else (the 4 fps canvas, `mpdecimate`, `negate`, `format=gray`, one `tesseract <list> stdout -l eng --psm 6` call per stream, the frames and tesseract's raw output in the tuning dataset, nothing bulky left on C:) stays. `tuning-fetch.ps1 -Text` needs no change for the default folder: it copies only `sub-<n>.ocr.jsonl`, not examples.json.
+
+**`.gitignore`** gains `*.ocr.jsonl` and `corpus/owner/**/*.mks` (plan Step 22), so that subtitle text or bitmaps can never be committed by mistake.
+
+**(b) `scripts/phase0/subtitle_text.py`** (Python 3.9 standard library, ASCII only, `chr()` for every non-ASCII character): the measures of section 2 and the rule of section 3, with every threshold in `RULE`. It reads `--rec corpus/owner/<slug>/<label>` (index.json, the packets and frames.json) and `--text <folder>` (the fetched `sub-<n>.ocr.jsonl`, a temporary copy outside the repository), takes the original language from `--orig-lang` or the disc's `tmdb.json`, and prints numbers only: one line per stream, one per pair, the verdict table beside what 8.7 does today, and one `row:` line per stream for notes.md. Exit 0 when analysed, 2 when the input cannot be read. On this Mac it reproduces section 4's real-track rows exactly (the lines plan Step 24 expects). Three places of `decide()` follow the check of this design: a no-language stream that is unreadable, or whose language is `short` or `unknown`, is kept for review (T1c); a not-full track with 150 events or more is a forced candidate when its words are a one-way subset of a full track, kept for review when unreadable, and dropped otherwise (T2, T7); an unreadable forced candidate is reviewed also when there is no dialogue track (T0). None of them changes a verdict of the 101 titles of section 4, nor a line of the threshold sweep.
+
+**`scripts/phase0/test_subtitle_text.py`**: 26 tests, all on constructed text (made-up words; no line of any real subtitle track), including: folding and corrections; the line split with and without line counts; SDH, regular, asides, sign notes, capital sound lines, capital tracks, damaged brackets, note stand-ins, unreadable text and the language check; the rule for one and two tracks, the split regular, the re-timed twin, two regular tracks, a forced subset with many events, an unrelated short track, the commentary drop and its two refusals, a mis-tagged track, a no-language track (read, not dropped), a partial track (forced when a subset, kept when unreadable) and an unreadable flagged forced track (reviewed); reading both file formats from disk, pairing by time when the counts differ, the input error, and that no word of the input appears in the output. They run in under a second and pass on this Mac: with the 103 existing tests of `scripts/phase0`, `PYTHONDONTWRITEBYTECODE=1 python3 -W error -m unittest discover -s scripts/phase0 -p 'test_*.py'` ends `Ran 129 tests` and `OK`.
+
+## 7. Plan steps for Task 12
+
+The steps are in the plan, `docs/superpowers/plans/2026-10-04-lazymkv-phase-0-evidence.md`, Task 12: the paragraph "Experiment 14 (added 2026-10-06)" (the files, the interface of ocr-subs.ps1, the placeholders TITLES14, TEXTDIR, LOG and LANGS, and when `-Force` is right), then Steps 22 to 31 after experiment 13's Step 21, and the commit as Step 32 (it replaces experiment 13's commit step). In short:
+- **Step 22** (Mac): check the installed scripts (the unit tests, ASCII, no backslash-u escape, the input error), add the two `.gitignore` lines, and remove the `examples` key from the proof of concept's two summary.json files in the corpus.
+- **Step 23** (mini PC): copy those two cleaned files over the mini PC's recordings, so that a later `pull-recording.sh` cannot bring the lines back; check ocr-subs.ps1's parameter list and three refusals (`Bad_Slug`, `-Render sideways`, and `-Languages eng,Fr` started through `-Command` as job.sh does, which shows that the list arrives as two tags).
+- **Step 24**: fetch the two fitting titles' text, run subtitle_text.py, and compare with section 4's real-track rows; then delete the copy.
+- **Step 25**: read one title with both render modes, and time them.
+- **Step 26**: read every other title of TITLES14.
+- **Step 27**: fetch, analyse and delete the copy, title by title.
+- **Step 28**: the owner's label of each stream, asked without the verdict, in notes.md.
+- **Step 29**: more discs until the kinds of row 14 are covered.
+- **Step 30**: judge (costly verdict, placed tracks, coverage; part b's timing) and write `docs/phase0/experiments/EXP-14-subtitles-by-text.md`.
+- **Step 31**: read the task's remaining rips for the tuning dataset; from then on this reading is part of the routine after every rip (D16).
+- **Step 32**: commit, after checks that no unit key, token, subtitle text, example line, bitmap or frame is in the corpus and no text copy is left on the Mac.
+
+## 8. Open questions
+
+Only more discs, the engine decision or the owner can answer these.
+
+1. **Does the SDH class hold beyond one sitcom episode?** Every SDH threshold sits between one real SDH track (10 cues, 7 labels in 345 events) and two real tracks with no marker. Sparse film SDH, Netflix-style and UK-style discs, and real regular tracks with stray brackets or labels will move the floor (M 5, SO 3, CS 2) and the regular ceiling (M 0). Experiment 14 needs at least 6 SDH and 6 regular labelled tracks, 3 titles with both, before a yes.
+2. **How do real separately authored SDH and regular tracks compare in words?** CB "same" (0.50) rests on twins made from one track. A real regular track may be condensed far more; a pair below 0.50 goes to review, not to a silent error, but too many reviews make the rule useless.
+3. **What does a real commentary subtitle track look like?** No transcript of any commentary exists here. The drop needs other words and other timing; a commentary that quotes the film, or one that follows the dialogue closely, is reviewed instead. The SDH-plus-commentary title without another track goes to review as today.
+4. **What does each engine make of brackets and notes?** Systematic bracket misreads as letters are the one known way to miss an SDH silently; the real Office read all its parentheses right. Lyric frames, read by Tesseract and by ocrs, are needed to keep or replace the note stand-in. This is also an input to D17.
+5. **UK-style SDH.** Without colour, a UK track printed in capitals is labelled regular. The bitmaps kept by the final ocr-subs.ps1 allow a palette or fill-colour count per event later, without the disc. The owner's UK discs, if any, decide whether this matters.
+6. **Language check under ocrs.** The fold makes the check engine-independent on paper, and Spanish read with the English model still separates (es 0.326, en 0.000). Real French and German tracks, and a real ocrs run, are untested; ocrs may replace accented letters by other letters rather than drop the accent.
+7. **Cost.** The proof of concept reads a film track in about 13 minutes on the J4125. The `changes` render mode is untested; the app's own PGS/VobSub decoder (one cropped bitmap per event) is not built. Until part (b) is answered, a title with a single English track keeps today's behaviour (no OCR, no flag).
+8. **Forced tracks.** No real forced track with events has been read. The subset test (CB 1.00 in, 0.10-0.34 back on the stand-ins) is true by construction for subsets cut from the dialogue; a real forced track translating signs that the dialogue track lacks will score low and go to review. A sing-along track whose songs the SDH transcribes looks forced unless its notes are read.
+9. **Dub transcripts beside a translation.** Two English translations of one film were never measured; where their CB falls (and so whether they are grouped, reviewed or separated) is unknown. Any such track is kept for review on a foreign-language title.
+10. **The owner's policies** (section 1, questions 1 to 9), in particular whether the text may only add reviews until experiment 14 answers yes, and whether the single-track SDH flag is worth one more full read per title.

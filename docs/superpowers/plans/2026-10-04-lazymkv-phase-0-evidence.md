@@ -35,6 +35,7 @@
 - Evidence is never silently replaced: a script refuses to overwrite an existing scan, log or summary unless started with `-Force`, and the task says when `-Force` is right. `scripts/phase0/pull-recording.sh` never deletes anything on the Mac.
 - A script that drives a rip, copy, extraction or remux decides itself whether it worked, prints `RESULT ok` or `RESULT FAILED: <reason>`, and throws on failure, so `wait.sh` exits 1.
 - A job script never sets `$ErrorActionPreference = 'Stop'` globally (inside a job that turns any line a native tool writes to stderr into a failure). It uses `-ErrorAction Stop` on individual cmdlets and checks `$LASTEXITCODE`.
+- A job script parameter that takes a list is declared `[string[]]` (or `[int[]]` for numbers): `job.sh` hands the arguments to `run-interactive.ps1` as one `ArgLine`, which is evaluated inside `-Command`, where `eng,und` is an array literal, so a `[string]` parameter would receive `eng und`.
 - Evidence files written by PowerShell are UTF-8 (`-Encoding UTF8`); Python reads them with `encoding="utf-8-sig"`.
 - More than a trivial command on the mini PC is run as a `.ps1` file copied with `scp` and started with `powershell -NoProfile -ExecutionPolicy Bypass -File`; `C:\lazymkv\phase0\config.ps1` is changed by writing the whole file on the Mac and copying it over.
 - Commit commands take the form `git commit -m "<message>" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
@@ -5376,6 +5377,10 @@ Expected:
 - Create (pulled from the mini PC): `corpus/owner/SLUG_A/all-tracks/ffprobe-audio-deep.json` with its `.timing.jsonl`, `.stderr` and `.exit.json`; and, for each disc added in Steps 6 to 8, `corpus/owner/NEW/` (the recording, when it is new) and `corpus/owner/NEW/all-tracks/`.
 - Create or append to (on the Mac only; a pull never removes it): `corpus/owner/SLUG/notes.md` for every disc measured, with the owner's answers.
 - Prerequisite, applied and committed by the controller before this task: `scripts/phase0/subtitle_alignment.py` (`--subs-dir`) and `scripts/phase0/test_analysis.py`.
+- Experiment 14 (Steps 22 to 32; the full list is in the "Experiment 14 (added 2026-10-06)" paragraph before Step 22):
+  - Prerequisite, committed by the controller: `docs/phase0/experiments/EXP-14-design.md`, `scripts/phase0/subtitle_text.py`, `scripts/phase0/test_subtitle_text.py` and the changes to `scripts/phase0/ocr-subs.ps1`.
+  - Modify: `.gitignore` (two lines) and the proof of concept's `corpus/owner/<slug>/<label>/subs-ocr/summary.json` files (their example lines removed).
+  - Create: `docs/phase0/experiments/EXP-14-subtitles-by-text.md`; `corpus/owner/<slug>/<label>/subs-ocr/` (pulled, no text) and `corpus/owner/<slug>/<label>/subtitle-text.txt` (numbers only) for every title read.
 
 **Interfaces:**
 - Consumes:
@@ -5966,7 +5971,7 @@ Put the `## Coverage` section from Step 9 (the one made again in Step 11 when CL
 
 **Experiment 13 (added 2026-10-05).** The owner asked for a content-based way to tell commentary and audio description from the programme's own audio. Steps 13 to 21 measure it on every extra same-language audio track of the titles this task rips. The first two steps and the Office disc's two rips were done on 2026-10-05, when the design was made; their results are in `corpus/owner/the-office-2005-s3d3-bluray/`.
 
-These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by Step 22 below. In them, "the design" is `docs/phase0/experiments/EXP-13-design.md` (this file, committed there by the controller before Task 12 runs). Task 12's header gains:
+These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by Step 32 below (experiment 14's Steps 22 to 31 come before it). In them, "the design" is `docs/phase0/experiments/EXP-13-design.md` (this file, committed there by the controller before Task 12 runs). Task 12's header gains:
 
 - **Files:**
   - Prerequisite, committed by the controller before this task: `docs/phase0/experiments/EXP-13-design.md` (the design).
@@ -6281,27 +6286,271 @@ python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
 
 Expected: the line `Titles whose audio is in the tuning dataset ...`. Every SLUG/LABEL under `missing` is a rip that has not been added yet: normally the experiment-6 rips of Steps 6 to 8 that were not in TITLES. For each, run Task 11 Step 11 from `audio_dataset.py args` onwards, with its exit codes and its Expected. Stop when the line ends `<b> of <b> ...` with no `missing`, apart from rips written down as deleted.
 
-- [ ] **Step 22: Commit** (replaces the old Step 13)
+**Experiment 14 (added 2026-10-06).** The owner asked whether code can tell regular, SDH, forced and commentary subtitle tracks apart by their content, with OCR of the text (decision D15). Steps 22 to 31 measure it on every English and no-language subtitle stream of the titles this task rips. The proof of concept read the Office's S03E16 track and Pan's Labyrinth's two tracks on 2026-10-06; their text is in the tuning dataset, and the thresholds were fitted on them.
+
+These steps go after Step 21 of Task 12. Experiment 13's commit step (the old Step 22, which replaced the old Step 13) is replaced by Step 32 below. In them, "the design" is `docs/phase0/experiments/EXP-14-design.md` (committed by the controller, with the scripts it describes, before these steps run). Task 12's header gains:
+
+- **Files:**
+  - Prerequisite, committed by the controller with the design: `docs/phase0/experiments/EXP-14-design.md`, `scripts/phase0/subtitle_text.py`, `scripts/phase0/test_subtitle_text.py` and the changes to `scripts/phase0/ocr-subs.ps1` (the design, section 6). This task does not change them.
+  - Modify: `.gitignore` (two lines, Step 22); the proof of concept's `corpus/owner/<slug>/<label>/subs-ocr/summary.json` files (their `examples` removed, Step 22); and, once Step 31 is done, the Global Constraints' D16 tuning-dataset item (the routine sentence of Step 31, added by the controller).
+  - Create: `docs/phase0/experiments/EXP-14-subtitles-by-text.md`.
+  - Create (pulled from the mini PC): `corpus/owner/<slug>/<label>/subs-ocr/` (streams.json, ffmpeg logs, `sub-<n>.frames.json`, summary.json; no text), and `subs-ocr-changes/` for the title of Step 25.
+  - Create (on the Mac): `corpus/owner/<slug>/<label>/subtitle-text.txt` (numbers only).
+  - Append to (on the Mac only): a `## Experiment 14 (Task 12)` section in `corpus/owner/<slug>/notes.md` for every disc read.
+- **Produces:** `ocr-subs.ps1 -Slug <slug> -Label <label> [-Streams <n>[,<n>...]] [-Languages eng,und|all] [-Render canvas|changes] [-Folder <name>] [-Force]`, run as a job. It writes `$Recordings\<slug>\<label>\<Folder>\` (no subtitle text) and `$TuningData\<slug>\<label>\<Folder>\` (the text, `examples.json`, the frames and a copy of evidence.mks). Its log lines are `ocr: <evidence> tesseract=<path> lang=eng psm=6 fps=4 render=<mode>`, up to 30 lines `  s:<n> t=<t> | <text>` per stream (the log stays on the mini PC and is not committed), possibly `warning: s:<n> showinfo lines=<k> frames=<m>; times come from the file names`, one `stream s:<n> lang=<l> codec=<c> canvas=<WxH> frames=<n> text_frames=<n> lines=<n> bracket=<n> note=<n> hash=<n> speaker=<n> upper=<n> ffmpeg_s=<s> tesseract_s=<s> pts_offset=<s>` line per stream, `evidence: copied <bytes> bytes`, `written: <recording folder> and <dataset folder>`, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1.
+
+Placeholders for Steps 24 to 29:
+- **TITLES14** is fixed when Step 25 starts and written at the top of the report: every (SLUG, LABEL) of this task whose `subs/index.json` lists an English or no-language stream: SLUG_A (`pans-labyrinth-2006-uhd`) with `all-tracks`, each NEW with `all-tracks` from Steps 6 to 8, and `the-office-2005-s3d3-bluray` with `e16-stereo`; plus each pair ripped in Step 29 as it is ripped. The Office and Pan's titles are the fitting titles: read, reported, never counted.
+- **TEXTDIR** is `$HOME/lazymkv-text/SLUG-LABEL` on the Mac, outside the repository; it is deleted at the end of Steps 24 and 27.
+- **LOG** is `ocr-SLUG-LABEL`, with `-2`, `-3` appended on a repeat.
+- **LANGS** is `eng,und`, plus, on the first title of each disc whose TMDb original language is not English, that language's tag as `subs/index.json` spells it (for example `eng,und,spa`), so that the language check meets one real other-language track per disc.
+
+When `-Force` is right for `ocr-subs.ps1`: only to repeat a reading that failed after its folders were created (a `RESULT FAILED:` reason beginning `ffmpeg exited`, `ffmpeg wrote no frame`, `ffmpeg gave`, `tesseract exited`, `tesseract returned` or `the copy of`), once the cause has been dealt with. Never over a folder whose run ended `RESULT ok` (it says `already exists and is kept as evidence`); a second reading of such a title uses `-Folder` with a new name instead.
+
+- [ ] **Step 22: Check the scripts, take the example lines out of the corpus, add the .gitignore lines**
+
+Which disc is in the drive: does not matter (this runs on the Mac).
+
+The scripts are already in place: the controller installed `scripts/phase0/subtitle_text.py`, `scripts/phase0/test_subtitle_text.py` and the changes to `scripts/phase0/ocr-subs.ps1` with the design. Do not replace them. Add these lines at the end of `.gitignore`:
+
+```
+# Subtitle text and bitmaps stay in the tuning dataset (decision D16).
+*.ocr.jsonl
+corpus/owner/**/*.mks
+```
+
+The proof of concept wrote up to 12 example lines per marker into each summary.json of the recording; the Office's (committed) holds subtitle lines, which break D16. The new ocr-subs.ps1 writes them to the tuning dataset only. Remove the `examples` key from the two existing files, then check:
+
+```bash
+python3 - corpus/owner/*/*/subs-ocr/summary.json <<'EOF'
+import json, sys
+for p in sys.argv[1:]:
+    d = json.load(open(p, encoding='utf-8-sig'))
+    for s in d['streams']:
+        s.pop('examples', None)
+    open(p, 'w', encoding='utf-8').write(json.dumps(d, indent=2) + '\n')
+    print(p, 'has no examples now')
+EOF
+grep -l '"examples"' corpus/owner/*/*/subs-ocr/summary.json
+grep -cxF -e '*.ocr.jsonl' -e 'corpus/owner/**/*.mks' .gitignore
+PYTHONDONTWRITEBYTECODE=1 python3 -W error -m unittest discover -s scripts/phase0 -p 'test_*.py'
+for f in scripts/phase0/ocr-subs.ps1 scripts/phase0/subtitle_text.py scripts/phase0/test_subtitle_text.py; do python3 -c "import sys; open(sys.argv[1], 'rb').read().decode('ascii'); print(sys.argv[1], 'is ASCII')" "$f"; done
+python3 -c "import sys; print(sum(open(f, encoding='ascii').read().count(chr(92) + 'u') for f in sys.argv[1:]))" scripts/phase0/subtitle_text.py scripts/phase0/test_subtitle_text.py
+grep -c "'lines'\|Languages\|Render\|evidence.mks" scripts/phase0/ocr-subs.ps1
+python3 scripts/phase0/subtitle_text.py --rec corpus/owner/the-office-2005-s3d3-bluray/e16-stereo --text /nonexistent; echo "exit=$?"
+```
+
+Expected:
+- one line `<path> has no examples now` per summary.json (two on 2026-10-06: the Office's `e16-stereo` and Pan's `all-tracks`);
+- nothing from the `grep -l`;
+- `2` for `.gitignore`;
+- the unit tests end `Ran <n> tests` and `OK`, with `<n>` 129 on 2026-10-06 (103 before experiment 14, and its 26), or more if later tasks added tests;
+- three lines `... is ASCII`;
+- `0`: no backslash-u escape in either Python file;
+- a count of at least 4 for ocr-subs.ps1;
+- `no sub-<n>.ocr.jsonl in /nonexistent for the streams of ...` and `exit=2`.
+
+A failing test, a `UnicodeDecodeError`, a backslash-u escape or a `0` from the ocr-subs.ps1 count means the scripts are not the ones installed with the design: stop and report.
+
+- [ ] **Step 23: Check the changed reading script on the mini PC, and clean its copies of the summaries**
+
+Which disc is in the drive: does not matter. Nothing here reads the drive or the share. Run it only when no phase 0 job is running (`box.sh` replaces `C:\lazymkv\src`).
+
+`pull-recording.sh` replaces files of the same name, so the mini PC's copies of the two summary.json files must lose their example lines too, or the next pull of either disc brings them back.
+
+```bash
+scp -q -o BatchMode=yes corpus/owner/the-office-2005-s3d3-bluray/e16-stereo/subs-ocr/summary.json USER@makemkv-box:C:/lazymkv/phase0/recordings/the-office-2005-s3d3-bluray/e16-stereo/subs-ocr/summary.json
+scp -q -o BatchMode=yes corpus/owner/pans-labyrinth-2006-uhd/all-tracks/subs-ocr/summary.json USER@makemkv-box:C:/lazymkv/phase0/recordings/pans-labyrinth-2006-uhd/all-tracks/subs-ocr/summary.json
+ssh USER@makemkv-box "findstr /m examples C:\lazymkv\phase0\recordings\the-office-2005-s3d3-bluray\e16-stereo\subs-ocr\summary.json C:\lazymkv\phase0\recordings\pans-labyrinth-2006-uhd\all-tracks\subs-ocr\summary.json"; echo "exit=$?"
+scripts/box.sh
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Command C:\lazymkv\src\scripts\phase0\ocr-subs.ps1).Parameters.Keys\""
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\lazymkv\src\scripts\phase0\ocr-subs.ps1 -Slug Bad_Slug -Label x"; echo "exit=$?"
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -File C:\lazymkv\src\scripts\phase0\ocr-subs.ps1 -Slug the-office-2005-s3d3-bluray -Label e16-stereo -Render sideways"; echo "exit=$?"
+ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& C:\lazymkv\src\scripts\phase0\ocr-subs.ps1 -Slug the-office-2005-s3d3-bluray -Label e16-stereo -Languages eng,Fr\""; echo "exit=$?"
+```
+
+Expected:
+- The two `scp` commands print nothing; `findstr` prints nothing, then `exit=1` (no file names the word). Any file name printed: the copy failed; repeat it before going on.
+- `box.sh` exits 0.
+- The parameter list begins `Slug`, `Label`, `Streams`, `Languages`, `Fps`, `Canvas`, `Lang`, `Psm`, `Render`, `Folder`, `Show`, `Examples`, `Force`, then PowerShell's common parameters. A parse error is a defect in the installed script: stop and report.
+- The `Bad_Slug` run prints `RESULT FAILED:` with Assert-Slug's rejection, then `exit=1`.
+- The `-Render sideways` run prints `RESULT FAILED: -Render must be canvas or changes`, then `exit=1`, within seconds and before the share is touched.
+- The `-Languages eng,Fr` run, started through `-Command` as job.sh starts a job, prints `RESULT FAILED: -Languages takes lower-case language tags such as eng,und, or all; 'Fr' is neither`, then `exit=1`, before the share is touched: the list arrived as two tags (a `[string]` parameter would have named `'eng Fr'`).
+
+- [ ] **Step 24: Analyse the two fitting titles (first check of the chain)**
+
+Which disc is in the drive: does not matter.
+
+Their text was read by the proof of concept on 2026-10-06 and is in the tuning dataset. For (SLUG, LABEL) = (`the-office-2005-s3d3-bluray`, `e16-stereo`) and (`pans-labyrinth-2006-uhd`, `all-tracks`):
+
+```bash
+scripts/phase0/job.sh tuning-fetch.ps1 fetch-text-SLUG-LABEL -Slug SLUG -Label LABEL -Text
+scripts/phase0/wait.sh fetch-text-SLUG-LABEL
+```
+
+Expected (wait.sh exit 0): `fetched: ...\subs-ocr -> C:\lazymkv\phase0\tmp\tuning-fetch\SLUG\LABEL\subs-ocr (<bytes> bytes)` (about 48 KB for the Office, 260 KB for Pan's), the `scp` line and the clean-up line, `RESULT ok`. Exit 1: read the `RESULT FAILED:` line; `holds no OCR text` means the title was not read (stop and report); `already exists: an earlier fetch was not deleted` means run the clean-up command it prints, then start again with `-2`; anything else: stop and report. Exit 3: run wait.sh again. Exit 4 or 5: as in the Global Constraints.
+
+Then, on the Mac, with the scp line the log printed (DEST = TEXTDIR):
+
+```bash
+mkdir -p "$HOME/lazymkv-text"
+scp -q -r -o BatchMode=yes USER@makemkv-box:C:/lazymkv/phase0/tmp/tuning-fetch/SLUG/LABEL/subs-ocr "$HOME/lazymkv-text/SLUG-LABEL"
+ssh USER@makemkv-box "rmdir /s /q C:\lazymkv\phase0\tmp\tuning-fetch"
+python3 scripts/phase0/subtitle_text.py --rec corpus/owner/SLUG/LABEL --text "$HOME/lazymkv-text/SLUG-LABEL" --orig-lang ORIG | tee corpus/owner/SLUG/LABEL/subtitle-text.txt
+rm -rf "$HOME/lazymkv-text/SLUG-LABEL"
+```
+
+ORIG is `en` for the Office and `es` for Pan's. Expected:
+- For the Office: `stream s0 eng: events=345 lines=590 words=2157 letters=1.000 wordlike=0.998 readable=yes lang=en ... CUE=10 LABEL=7 CHEV=0 M=17 rate=0.0493 SO=9 CS=10 ... ODD=0 class=sdh  [text by order, 345 frames with text, 0 unmatched]`, `corrections: i_am=3 pipe_I=70`, and the table row `| s0 | eng | 345 | sdh | sdh | - | - | regular |`.
+- For Pan's: `stream s0 eng: events=887 ... M=0 ... class=regular`, `stream s1 spa: events=884 ... lang=es (en=0.000 es=0.326 ...)`, `pair s0 s1: aligned=0.995/0.999 timing=same CB=0.002/0.002 content=different ...`, and rows `| s0 | eng | 887 | regular | regular | - | - | regular |` and `| s1 | spa | 884 | regular | drop | - | not English (tag spa) | drop |`.
+
+Any other number means the chain differs from the design's: stop and report with both outputs. Do not change a threshold. `subtitle-text.txt` holds numbers only (the script never prints subtitle text).
+
+- [ ] **Step 25: Time the render modes on one title**
+
+Which disc is in the drive: does not matter. The job reads only the share.
+
+Take the first (SLUG, LABEL) of TITLES14 other than the two fitting titles whose `evidence.mks` is still in staging (`ls` on the share is not possible from the Mac: the job itself fails with `no ...evidence.mks; run probe-title.ps1 first` when it is gone; then try the next title). For that title, read its English streams twice:
+
+```bash
+scripts/phase0/job.sh ocr-subs.ps1 ocr-SLUG-LABEL -Slug SLUG -Label LABEL -Languages LANGS
+scripts/phase0/wait.sh ocr-SLUG-LABEL
+scripts/phase0/job.sh ocr-subs.ps1 ocr-SLUG-LABEL-changes -Slug SLUG -Label LABEL -Languages LANGS -Render changes -Folder subs-ocr-changes
+scripts/phase0/wait.sh ocr-SLUG-LABEL-changes
+scripts/phase0/pull-recording.sh SLUG
+```
+
+The first run is also that title's reading for Step 26. What wait.sh's exit codes mean for these jobs:
+- **0**: check the log against the Expected below.
+- **1**: read the `RESULT FAILED:` line.
+  - Assert-Slug's rejection, or `-Languages takes lower-case language tags ...`: SLUG, LABEL or LANGS is mistyped; check with `ls corpus/owner/SLUG` and `subs/index.json`, and start again with `LOG-2`.
+  - `already exists and is kept as evidence`: this title was read before; its folder is the evidence. For the second run, choose another `-Folder` name.
+  - `no ...evidence.mks; run probe-title.ps1 first`: the rip is no longer in staging. Write "not read: rip deleted" for this title and take the next one.
+  - `has no subtitle stream`, `no subtitle stream s:<n>`: the title has no English or no-language stream; drop it from TITLES14. `no subtitle stream with a language in <list>`: the title has no English or no-language stream; drop it from TITLES14.
+  - `ffmpeg exited`, `ffmpeg wrote no frame`, `ffmpeg gave` (only with `changes`: showinfo's frame times do not match the frames), `tesseract exited`, `tesseract returned`: pull the recording and read `<folder>/ffmpeg-<n>.txt.stderr` (`subs-ocr` or `subs-ocr-changes`); for the `changes` run this is a finding (the mode does not work on this ffmpeg): note it for the report and go on with `canvas` only. For the `canvas` run, stop and report; a repeat after the fix adds `-Force`.
+  - `tesseract.exe not found`, `ffmpeg/ffprobe not found` or any other message: stop and report; do not repeat before the cause is known.
+- **3**: still running. An episode takes about 3 minutes per English stream, a film about 13 (canvas). Run wait.sh again and start nothing else meanwhile. If 90 minutes pass without a DONE line, end ffmpeg and tesseract (`ssh USER@makemkv-box "taskkill /im ffmpeg.exe /f & taskkill /im tesseract.exe /f"`), run wait.sh again (it then exits 1), and stop and report.
+- **4**: the job ended without a DONE line: stop and report.
+- **5**: the mini PC cannot be reached; run wait.sh again once it can.
+
+Expected (exit 0), in each log: the `ocr:` line with `render=canvas` (then `render=changes`), one `stream s:<n> ...` line per English or no-language stream with `ffmpeg_s`, `tesseract_s` and `pts_offset`, `evidence: copied <bytes> bytes`, `RESULT ok`, `PHASE0-DONE status=ok exit=<n>`. Then compare, per stream, from the pulled `subs-ocr/summary.json` and `subs-ocr-changes/summary.json`: `text_frames` must equal the stream's event count (packets over 64 bytes in `subs/sub-<n>.packets.json`) in both, and the marker counts must be equal. Write down for the report, per stream: the running time, `ffmpeg_s` and `tesseract_s` of both modes, and the seconds per hour of running time. If `changes` gives a different `text_frames`, it is not used: note why.
+
+- [ ] **Step 26: Read every title of TITLES14**
+
+Which disc is in the drive: does not matter. The jobs read only the share.
+
+For each (SLUG, LABEL) of TITLES14 not read yet (not the two fitting titles, not the Step 25 title), with the render mode chosen in Step 25 (add `-Render changes` only if it matched `canvas` there):
+
+```bash
+scripts/phase0/job.sh ocr-subs.ps1 ocr-SLUG-LABEL -Slug SLUG -Label LABEL -Languages LANGS
+scripts/phase0/wait.sh ocr-SLUG-LABEL
+scripts/phase0/pull-recording.sh SLUG
+```
+
+Exit codes and Expected as in Step 25 (one `stream` line per stream whose tag is in LANGS).
+
+- [ ] **Step 27: Fetch the text, analyse each title, delete the copy**
+
+Which disc is in the drive: does not matter.
+
+For each (SLUG, LABEL) read in Steps 25 and 26: Step 24's commands, with ORIG the TMDb original language from `corpus/owner/SLUG/tmdb.json` (leave `--orig-lang` out to let the script read it). Expected: one `stream` line per stream read, with `[text by order, ...]` (or `[text by time, <n> frames with text, <k> unmatched]`: write down k, which must be 0 or the report names the events), the `pair` lines, the verdict table and one `row:` line per stream. `rm -rf "$HOME/lazymkv-text/SLUG-LABEL"` ends the step for each title: no subtitle text stays on the Mac, and none enters the repository (`git status --short | grep -c ocr.jsonl` prints 0).
+
+- [ ] **Step 28: Ask the owner what each English subtitle stream is, and record it**
+
+Which disc is in the drive: does not matter.
+
+1. For each stream of Step 27, use the owner's answer from Step 5 when there is one (it was given before any verdict). Otherwise ask, without showing the verdict, what each English or no-language stream is: regular, SDH (US style, UK style or closed-caption style), translation, dub transcript, forced, commentary, trivia, lyrics or sing-along, another language, or unknown, and how the owner knows (packaging, menu, track name, player, TheDiscDB). `s<n>` is the n-th subtitle track of the file counting from 0; a player usually counts from 1.
+2. Append to `corpus/owner/SLUG/notes.md` (never replacing what is in it), one section per disc, with one row per stream:
+
+```markdown
+## Experiment 14 (Task 12)
+
+English and no-language subtitle streams read by OCR (`scripts/phase0/ocr-subs.ps1`) and judged by
+`scripts/phase0/subtitle_text.py` (full output in `<label>/subtitle-text.txt`; the text itself is only in the tuning
+dataset). The owner named each stream before seeing the measures.
+
+| File | Track | What the measures say | What the owner says it is |
+|---|---|---|---|
+| <label>/evidence.mks | s<n>: <codec> <language>, <events> events | M <x>, SO <x>, CS <x>, lang <x>, <class>: <rule's role>[ (review: <note>)] | <kind> (<how the owner knows>, <date>) |
+```
+
+   The first three columns are the `row:` line of `subtitle-text.txt`. For the Office the owner's column is what question 10 of the design gets back (until then `SDH by content, not asked`); for Pan's English, `translation, regular (owner's expectation, not checked)` until confirmed.
+
+- [ ] **Step 29: Add discs until the experiment's kinds are covered**
+
+Which disc is in the drive: the disc being added, which the owner inserts.
+
+1. Count the labelled tracks so far against the list of row 14 (the design, section 5), leaving out every track of the two fitting discs: titles with both a regular and an SDH English track (and their discs, films and episodes), SDH and regular tracks, forced tracks with events, commentary subtitle tracks, DVDs with English VobSub, UK-style SDH tracks, trivia, lyrics, dub-transcript and second-translation tracks.
+2. Ask the owner, once per missing kind, for a disc that has it (the design's question 11).
+3. For each disc the owner provides: run Steps 6 to 8 (fingerprint, record if new, choose the title, rip with `all-tracks`, probe), Step 5's listing and its question, then Steps 26 to 28 for the new (SLUG, LABEL) while the rip is in staging. On a DVD, note the closed-caption stream (the `-text` stream of Step 5's listing) and its conversion text.
+4. Stop when every kind is covered, or when the owner has no disc left of a missing kind; write each such kind down as "not available: <kind>".
+
+- [ ] **Step 30: Judge the experiment and write the report**
+
+Which disc is in the drive: does not matter.
+
+1. Build the coverage table and the track table from the notes.md sections, with no threshold changed. The coverage table and every total leave out each track of the two fitting discs; the track table lists them, marked "fitting disc, not counted".
+   - **Costly verdict:** a track with no review (no `subtitle_ambiguous`) and any of: rule role `drop` and the owner names it dialogue (regular, SDH, translation, dub transcript, closed captions); role `regular` and the owner says SDH; role `sdh` and the owner says regular or translation; role `forced` and the owner names anything but forced; role `regular` or `sdh` and the owner says forced, commentary, trivia or lyrics. Any of these, on any disc, makes part (a) no.
+   - **Placed:** a labelled track with no review.
+   - **(a) yes:** every kind covered without the fitting discs, no costly verdict, and at least half of the labelled tracks placed. **No:** any costly verdict, or coverage met with fewer than half placed. **Not answered:** coverage not met and no costly verdict.
+   - **(b) yes** when every track read with the chosen render mode took at most 150 s of `ffmpeg_s + tesseract_s` per hour of running time; otherwise no.
+2. Create `docs/phase0/experiments/EXP-14-subtitles-by-text.md` from `docs/phase0/experiments/TEMPLATE.md`. Header: the date; every disc read, with slug, format and titles; the Tesseract and ffmpeg versions; `section 17, row 14 (added by this experiment)`. Right after it, `## Coverage`:
+
+```markdown
+## Coverage
+
+| Kind | Needed | Labelled tracks (discs), without the fitting discs |
+|---|---|---|
+| Titles with both a regular and an SDH English track | 3 from 2 discs; 1 film, 1 episode | <n> (<discs>); films <n>; episodes <n> |
+| SDH and regular English tracks | 6 and 6 | <n> and <n> |
+| Forced English track with events | 1 | <n> |
+| Commentary subtitle track | 1 | <n> |
+| DVD with English VobSub (and its closed captions) | 1 | <n> |
+| UK-style SDH | 1 if the owner has a UK disc | <n> or "owner has none" |
+| Trivia, lyrics, dub transcript, second translation | every one the owner has | <n> |
+
+- not available: <kind>, for each kind the owner could not supply.
+- not counted: every track of the-office-2005-s3d3-bluray and pans-labyrinth-2006-uhd (the thresholds were fitted on them).
+```
+
+3. Under the template's headings, the report states:
+   - **What was run:** per title, the label, the streams read, the `ocr-subs.ps1` command, log name and render mode; the timings of Step 25 and of every reading, per hour of running time; the `subtitle_text.py` commands.
+   - **What was observed:** one row per track: file, track, events, M, SO, CS, ODD, CAPS_CUE, lang, class, rule role and review note, 8.7's role, the owner's label, and whether rule and owner agree; per owner label, how many tracks got each role; every pair's CB and alignment; the corrections counted; every frame left unmatched; what the note stand-in and the loose tokens found on any track with songs (and whether those were lyrics); the language shares of every other-language stream read. Quote at most five short lines of subtitle text in the whole report.
+   - **Answer:** (a) and (b) by the rules above; every costly verdict with its measures; every review and its reason; the SDH tracks found and missed, with the kind of each miss (no marker, inline cues only, brackets misread, UK style).
+   - **Consequence for the spec:** on (a) yes: 8.7 as section 3 of the design says (the sentences it lists), the thresholds of `RULE` as settings in section 14, and 6.4 step 10 as (b) decides; on (a) no or not answered: 8.7 gains only the review path (`subtitle_text_disagrees`); in every case, the open questions still open and the OCR engine facts for D17 (what the English model did with accents, notes and brackets).
+
+- [ ] **Step 31: Read the remaining rips of this task (decision D16)**
+
+Which disc is in the drive: does not matter.
+
+Every rip of this task that ended `RESULT ok` and has an English or no-language subtitle stream, and was not read in Steps 25 to 29, is read now with `ocr-subs.ps1` (Step 26's commands and exit codes) while its `evidence.mks` is in staging; then `scripts/phase0/pull-recording.sh SLUG`. Nothing is analysed or fetched for them; their text goes to the tuning dataset only. A rip already deleted from staging is written down as "not read: rip deleted".
+
+From now on this is part of the routine after every rip (Global Constraints, D16): after the rip's probe and pull, and before the audio tuning-dataset jobs, `scripts/phase0/job.sh ocr-subs.ps1 ocr-<slug>-<label> -Slug <slug> -Label <label>` and its `wait.sh`, for every rip whose `subs/index.json` lists an English or no-language stream; then `scripts/phase0/pull-recording.sh <slug>`. The text, the example lines (`examples.json`), the frames and evidence.mks go to `$TuningData\<slug>\<label>\subs-ocr\`; the recording gets only frames.json, summary.json (counts, no text), streams.json and the ffmpeg logs. A rip is not deleted from staging before this reading ended `RESULT ok` or was written down as failed with its reason.
+
+- [ ] **Step 32: Commit** (replaces the old Step 13, and experiment 13's commit step, the old Step 22)
 
 Which disc is in the drive: does not matter. Disc A is needed again in Task 13, which starts by asking the owner to put it back.
 
 ```bash
 find corpus/owner -iname '*unit_key*'
 grep -rIl 'eyJhbGciOi' corpus/owner
+find corpus/owner -name '*.ocr.jsonl' -o -name 'evidence.mks' -o -name 'f-*.png'
+grep -l '"examples"' corpus/owner/*/*/subs-ocr*/summary.json
+ls -d "$HOME"/lazymkv-text/* 2>/dev/null
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
-git add scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py scripts/phase0/audio_dataset.py scripts/phase0/audio_labels.py scripts/phase0/proxy_levels.py scripts/phase0/test_audio_dataset.py scripts/phase0/tuning-fetch.ps1 corpus/owner docs/phase0/experiments
+git add .gitignore scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py scripts/phase0/audio_dataset.py scripts/phase0/audio_labels.py scripts/phase0/proxy_levels.py scripts/phase0/test_audio_dataset.py scripts/phase0/tuning-fetch.ps1 scripts/phase0/ocr-subs.ps1 scripts/phase0/subtitle_text.py scripts/phase0/test_subtitle_text.py corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Run experiments 6 and 13: audio profiles, subtitle alignment, commentary by audio content" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiments 6, 13 and 14: audio profiles, subtitle alignment, commentary by audio, subtitles by text" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 Expected:
-- `find` and `grep` print nothing: no AACS unit-key file and no JSON Web Token in any recording. If either prints a path, stop and do not commit.
+- The two `find` commands, both `grep` commands and the `ls` print nothing: no AACS unit-key file, no JSON Web Token, no subtitle text, bitmap, frame or example line in any recording, and no text copy left on the Mac. If any prints a path, stop and do not commit (delete a leftover Mac copy first; for a summary.json with examples, repeat Step 22's removal and Step 23's copy for that file).
 - The unit tests end `OK`.
 - `git status --short` lists:
-  - the four scripts;
-  - the new files under `corpus/owner/`. These are what the old Step 13 listed, plus each `audio-content-20ms-*.txt`, each `audio-levels-20ms-*/streams.json`, the new `tT-all-tracks/` recordings and the `notes.md` changes. No `audio-levels-*/*.txt` file appears: `.gitignore` keeps them out.
+  - the changed scripts and `.gitignore`;
+  - the new files under `corpus/owner/`. These are what the old Step 13 listed, plus each `audio-content-20ms-*.txt`, each `audio-levels-20ms-*/streams.json`, the new `tT-all-tracks/` recordings, each `subs-ocr*/` folder (without text), each `subtitle-text.txt`, the two summary.json files without examples, and the `notes.md` changes. No `audio-levels-*/*.txt` file appears: `.gitignore` keeps them out.
   - the `audio-labels.json` of each disc labelled, `corpus/owner/audio-dataset.json`, and in each new level folder `streams.json`, `proxy-check.json` and `audio-proxy.json`.
-  - both reports.
+  - the three reports.
 - The commit succeeds.
 
 ---
