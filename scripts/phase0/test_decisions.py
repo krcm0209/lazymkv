@@ -183,6 +183,12 @@ class CompareTracks(unittest.TestCase):
         file = ident([("video", "und", None), ("audio", "eng", 8)])
         want, dropped = compare_tracks.without_removed(compare_tracks.expected_rows(scan, 0, "all"), {2})
         self.assertEqual([r["stream"] for r in dropped], [2])
+        # MSG:4047 counts the selected streams, not the scan's: with the first stream deselected,
+        # output track 1 is scan stream 2.
+        rows = compare_tracks.expected_rows(scan, 0, "all")[1:]
+        want2, dropped2 = compare_tracks.without_removed(rows, {1})
+        self.assertEqual([r["stream"] for r in dropped2], [2])
+        self.assertEqual([r["stream"] for r in want2], [r["stream"] for r in rows if r["stream"] != 2])
         verdicts, _ = compare_tracks.checks(want, compare_tracks.file_rows(file), scan.titles[0], file)
         self.assertTrue(verdicts["count"])
         self.assertTrue(verdicts["order"])

@@ -55,11 +55,14 @@ RIP_LOG_NAMES = ("rip.txt", "extract.txt")
 
 
 def removed_streams(rip):
-    """Stream numbers MakeMKV left out of the output, from the rip log's MSG:4047 lines.
+    """Output track indices MakeMKV left out of the file, from the rip log's MSG:4047 lines.
 
     MakeMKV drops a forced-only subtitle track that turns out to be empty and says so:
     "AV sync issue in stream N at T : Forced subtitles track #N turned out to be empty and
-    was removed from output file". Other MSG:4047 lines are not removals.
+    was removed from output file". N counts the SELECTED streams of the title in scan order
+    (the output file's tracks before the removal), not the scan's stream numbers: with a
+    profile that drops streams, the two differ (Disc A, eng-only: "#3" was scan stream 5).
+    Other MSG:4047 lines are not removals.
     """
     return {
         int(params[0])
@@ -69,8 +72,9 @@ def removed_streams(rip):
 
 
 def without_removed(rows, removed):
-    """Split the predicted rows into those still expected in the file and those MakeMKV removed."""
-    return [r for r in rows if r["stream"] not in removed], [r for r in rows if r["stream"] in removed]
+    """Split the predicted rows (the selected streams in scan order) into those still expected in
+    the file and those MakeMKV removed; `removed` holds positions in `rows` (see removed_streams)."""
+    return [r for i, r in enumerate(rows) if i not in removed], [r for i, r in enumerate(rows) if i in removed]
 
 
 def file_rows(ident):
@@ -154,8 +158,8 @@ def main():
     for r in dropped:
         print(f"REMOVED          scan stream {r['stream']} ({r['type']} {r['lang_raw']} {r['codec']} f={r['flags']}): "
               "MakeMKV left it out of the file (MSG:4047), so it is not expected")
-    for n in sorted(removed - {r["stream"] for r in dropped}):
-        print(f"REMOVED          MSG:4047 names stream {n}, which the prediction does not include")
+    for n in sorted(i for i in removed if i >= len(want) + len(dropped)):
+        print(f"REMOVED          MSG:4047 names output track {n}, which the prediction does not have")
     print(f"TRACK COUNT      scan={len(want)} file={len(got)}")
     print(f"ORDER MATCH      {yes_no(verdicts['order'])} (type, language except on video, audio channels; position by position)")
     print(f"CHAPTERS         scan={n['scan_chapters']} file={n['file_chapters']}")
