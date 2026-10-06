@@ -2,3 +2,7 @@
 .DS_Store
 # Raw audio level files and their side files (up to 0.5 MB each); audio-levels.ps1 recreates them from the rip.
 corpus/owner/*/*/audio-levels-*/*.txt
+
+# Subtitle text and bitmaps stay in the tuning dataset (decision D16).
+*.ocr.jsonl
+corpus/owner/**/*.mks
