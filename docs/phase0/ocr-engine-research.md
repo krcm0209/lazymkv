@@ -266,3 +266,31 @@ python3 scripts/phase0/ocr_compare.py TEXT/sub-N.ocr.jsonl TEXT/ocrs-sN.jsonl --
 Results (to be filled in): build time and exe size on the J4125; whether it runs without SIGILL; ms per frame for ocrs
 and Tesseract; exact-match rate and CER; marker counts and stopword language per engine; what accented letters and
 music notes became.
+
+### Trial results (2026-10-06, Office S03E16 English PGS, 600 frames)
+
+Same frames for both engines (the canvas render of `ocr-subs.ps1`, 1920x1080, inverted); Tesseract 5.4.0 `eng` psm 6
+against ocrs 0.13.1 with the `.onnx` models (SHA-1 7091768... and b16f361...), run on the mini PC by
+`scripts/phase0/ocrs-trial.ps1`, compared with `scripts/phase0/ocr_compare.py` (numbers only; the text stays in the
+tuning dataset: `lazymkv-tuning\the-office-2005-s3d3-bluray\e16-stereo\subs-ocr\ocrs-s0.jsonl`).
+
+| Measure | Tesseract | ocrs |
+|---|---|---|
+| frames with text | 345 | 345 (the same 345) |
+| exact match after ASCII folding | - | 213 of 345 (0.617) |
+| character error rate (Levenshtein / longer text), mean / median | - | 0.019 / 0.000; above 0.20 on 2 frames |
+| same line count | - | 313 of 345 (0.907) |
+| CUE / LABEL / CHEV / NOTE / ODD | 10 / 7 / 0 / 0 / 0 | 10 / 7 / 0 / 0 / 1 |
+| M / SO / CS, class | 17 / 9 / 10, sdh | 17 / 9 / 10, sdh |
+| language (stopwords) | en 0.413 | en 0.409 |
+| time per frame on the J4125 | about 95 ms (57 s for 600) | 933 ms (560 s for 600; model load 19 ms) |
+
+Reading: every measure the experiment 14 rule decides on comes out identical. The engines differ in the kind of
+error: Tesseract reads a standalone "I" as "|" (corrected by `subtitle_text.py`), ocrs drops it ("amost died",
+" am being honored", "l'a be stupid") and reads a few other glyphs wrongly ("uo" for "up"); neither error touches
+brackets, capitals, colons or the stopwords. ocrs is about ten times slower on a full 1080p frame: a two-hour film's
+1,700 frames would take about 26 minutes per track against 2.5 with Tesseract. The frame is almost entirely white;
+the app, which decodes the PGS bitmap itself, would hand ocrs only the glyph box (typically under 1500 x 200), which
+removes most of that cost (not measured here; the frames the trial used are kept in the tuning dataset for that
+measurement). Open for the owner: the CC-BY-SA-4.0 reading for shipping the unmodified models with attribution, and
+that the S3 files the ocrs tools download carry no licence of their own (the Hugging Face card does).
