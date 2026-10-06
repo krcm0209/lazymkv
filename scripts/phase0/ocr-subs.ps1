@@ -3,6 +3,8 @@
 # commentary subtitle tracks apart by their text. Input: the subtitle-only evidence.mks that probe-title.ps1 left in
 # $Staging\<Slug>\<Label>\. It reads the subtitle streams given with -Streams, or else every subtitle stream whose
 # language tag is in -Languages (default eng and und; a stream without a tag counts as und; "all" reads every one).
+# Of those, only bitmap streams (PGS, VobSub, DVB) are read: a text stream, such as the DVD closed captions that
+# MakeMKV converts to SubRip and spec 8.7 sets aside, is printed as "skipped" and listed in summary.json.
 # For each: ffmpeg draws the stream (-Render canvas: on a black canvas that ticks at -Fps; -Render changes: only when
 # the subtitle changes), keeps one frame per change (mpdecimate), inverts it (dark text on white, which
 # Tesseract reads best) and writes PNG frames named by their time to a work folder on C:; tesseract then reads all of
@@ -14,9 +16,9 @@
 #   ffmpeg-<n>.txt       ffmpeg's messages for stream s:<n> (.stderr holds the showinfo line of every kept frame)
 #   sub-<n>.frames.json  one record per kept frame: frame number, file, time in seconds (t, from the start of the
 #                        file; pts, the stream's own time), characters, lines and the marker counts of its text
-#   summary.json         render mode, languages, and per stream: frames, frames with text, text lines, marker counts
-#                        (bracketed lines, music notes, lines beginning with #, speaker labels, upper-case lines), the
-#                        time offset and run times. Written last.
+#   summary.json         render mode, languages, the skipped text streams, and per stream: frames, frames with text,
+#                        text lines, marker counts (bracketed lines, music notes, lines beginning with #, speaker
+#                        labels, upper-case lines), the time offset and run times. Written last.
 # In $TuningData\<Slug>\<Label>\<Folder>\ (the tuning dataset, decision D16; the full text stays there):
 #   s<n>\f-<pts>.png     the frames, so that OCR can be re-run with other settings without the rip
 #   s<n>\list.txt        the frame list given to tesseract
@@ -129,11 +131,30 @@ try {
         $wanted = @(0..($subs.Count - 1) | Where-Object { $Languages -ccontains 'all' -or $Languages -ccontains (Get-SubLanguage $subs[$_]) })
         if ($wanted.Count -eq 0) { throw "no subtitle stream with a language in $($Languages -join ',')" }
     }
+    # Spec 8.7 sets the DVD closed-caption stream aside (MakeMKV converts it to text), and sub2video draws bitmap
+    # subtitles only: a chosen stream of any other codec is skipped and recorded, never rendered.
+    $bitmapCodecs = @('hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle')
+    $read = @()
+    $skipped = @()
+    foreach ($n in $wanted) {
+        $codec = [string]$subs[$n].codec_name
+        if ($bitmapCodecs -ccontains $codec) {
+            $read += $n
+        } else {
+            "skipped s:${n} (${codec}): not a bitmap subtitle track"
+            $skipped += [ordered]@{ n = $n; language = $subs[$n].tags.language; codec = $codec; reason = 'not a bitmap subtitle track' }
+        }
+    }
+    if ($read.Count -eq 0) {
+        $names = @($skipped | ForEach-Object { 's:' + $_.n + ' ' + $_.codec }) -join ', '
+        throw "no bitmap subtitle stream to read: the chosen streams are text streams ($names)"
+    }
+    $wanted = $read
 
     $summary = [ordered]@{
         slug = $Slug; label = $Label; folder = $Folder; evidence = $evidence; duration_s = [math]::Round($duration, 3)
         render = $Render; languages = @($Languages); fps = $Fps; lang = $Lang; psm = $Psm; tesseract = $TESSERACT
-        run = (Get-Date).ToString('s'); streams = @()
+        run = (Get-Date).ToString('s'); skipped = @($skipped); streams = @()
     }
     $exampleStreams = @()
     foreach ($n in $wanted) {
@@ -146,7 +167,7 @@ try {
             # canvas that ticks at -Fps; mpdecimate keeps only the frames that differ from the one before.
             $graph = "color=c=black:s=${size}:r=${Fps}:d=${duration}[bg];[bg][0:s:${n}]overlay=format=auto[ov];[ov]mpdecimate,negate,format=gray,showinfo[v]"
         } else {
-            # Not yet timed (plan Task 12 Step 25): no canvas and no overlay, so that ffmpeg emits a frame only when the
+            # Timed in plan Task 12 Step 25: no canvas and no overlay, so that ffmpeg emits a frame only when the
             # subtitle changes.
             $graph = "[0:s:${n}]negate,format=gray,mpdecimate,showinfo[v]"
         }

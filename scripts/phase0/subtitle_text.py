@@ -7,13 +7,16 @@ Reads, for one ripped title:
   TEXT/sub-<n>.ocr.jsonl           the OCR text of stream s:<n>, one record per frame (ocr-subs.ps1). The text
                                    lives in the tuning dataset on the share (decision D16); the Mac holds a
                                    temporary copy (tuning-fetch.ps1 -Text) and never commits it.
-and prints numbers only (no subtitle text): one line per stream, one line per pair of English streams, the
-verdict of the section 3 rule for every stream next to what spec 8.7 does today, and one row per stream for the
-disc's notes.md. Every threshold is in RULE and is PROVISIONAL.
+and prints numbers only (no subtitle text): one line per stream, one line per pair of streams read, the
+verdict of the section 3 rule for every stream next to what spec 8.7 does today (counts and start times only) and
+what the app does before experiment 14 answers yes, and one row per stream for the disc's notes.md. A text stream
+without OCR text (the DVD closed captions) is set aside, as 8.7 does; another language's stream without OCR text is
+used for timing only. Every threshold is in RULE and is PROVISIONAL.
 
   python3 scripts/phase0/subtitle_text.py --rec corpus/owner/SLUG/LABEL --text TEXTDIR [--orig-lang en]
 
-Exit status 0 when the title was analysed, 2 when the input cannot be read.
+Exit status 0 when the title was analysed, 2 when the input cannot be read, including an English or no-language
+bitmap stream without OCR text.
 Python 3.9 standard library. ASCII only: non-ASCII characters are built with chr().
 """
 import argparse
@@ -152,6 +155,7 @@ RE_CHEV = re.compile(r"^\s*>>")
 RE_NOTE = re.compile(r"^\s*[#*]|[#*]\s*$")
 # Lyrics (loose, ENGINE-DEPENDENT, reported only): a lone token reported as a Tesseract misread of a note.
 RE_NOTE_LOOSE = re.compile(r"^\s*(?:J|JJ|Jf|Ji|Jl|P|D|d|f|\$|%)\s+\S|\S\s+(?:J|JJ|Jf|Ji|Jl|P|D|d|f|\$|%)\s*$")
+NOTE_LOOSE_TOKENS = ('J', 'JJ', 'Jf', 'Ji', 'Jl', 'P', 'D', 'd', 'f', '$', '%')
 # Damaged brackets, on the folded text before corrections: a line wrapped in '|' or '{' '}' (a misread bracket
 # pair), counted per event together with unbalanced () and [].
 RE_WRAP = re.compile(r"^\s*-?\s*[|{]\s*[A-Za-z][^|{}()\[\]]*[A-Za-z.!?]\s*[|}]\s*$")
@@ -280,6 +284,10 @@ def event_features(lines_raw, english, counts):
     lines = [l.strip() for l in lines if l.strip()]
     joined = ' '.join(lines)
     toks = joined.split()
+    # A note-only event (a music cue read as note stand-ins, or as one stray letter; ENGINE-DEPENDENT) is left out
+    # of the readability share of events with letters.
+    f['note_only'] = bool(toks) and (all(is_note_token(t) for t in toks)
+                                     or (len(toks) == 1 and toks[0] in NOTE_LOOSE_TOKENS))
     real = [t for t in toks if not is_note_token(t)]
     f['tokens'] = len(real)
     f['wordlike'] = sum(1 for t in real if wordlike(t))
@@ -359,7 +367,9 @@ def measure(track):
     toks = sum(f['tokens'] for f in fs)
     words = [w for f in fs for w in f['words']]
     m = {'events': n, 'text_events': sum(1 for f in fs if f['letters'] > 0), 'lines': nlines, 'words': len(words)}
-    m['letter_events'] = round(sum(1 for f in fs if f['letters'] >= 2) / n, 3) if n else 0.0
+    scored = [f for f in fs if not f['note_only']]
+    m['note_only'] = n - len(scored)
+    m['letter_events'] = round(sum(1 for f in scored if f['letters'] >= 2) / len(scored), 3) if scored else 0.0
     m['wordlike'] = round(sum(f['wordlike'] for f in fs) / toks, 3) if toks else 0.0
     m['readable'] = (m['letter_events'] >= RULE['READ_LETTER_EVENTS'] and m['wordlike'] >= RULE['READ_WORDLIKE']
                      and len(words) >= RULE['READ_MIN_WORDS'])
@@ -459,7 +469,10 @@ def pair(a, b):
 
 
 def subset_of(a, b, p):
-    """True when a's words are a one-way subset of b's: forced (or partial) content, whatever 8.7's 'full' says."""
+    """True when a's words are a one-way subset of b's: forced (or partial) content, whatever 8.7's 'full' says.
+    Never for an unreadable track: 8.7 decides those (T0)."""
+    if not (a['m']['readable'] and b['m']['readable']):
+        return False
     x, y = p['cb']
     if x is None or y is None:
         return False
@@ -469,8 +482,11 @@ def subset_of(a, b, p):
 
 # ------------------------------------------------------------------ the rule (section 3 of the design)
 def decide(tracks, orig_lang=None):
-    """Role of every stream: tracks = [{'n', 'tag', 'forced', 'events', 'm', ...}], each measured first.
-    Returns {n: {'role', 'review', 'note'}}. role: sdh, regular, forced, drop, keep (kept with no role)."""
+    """Role of every stream: tracks = [{'n', 'tag', 'forced', 'events', 'm', ...}], each English or no-language
+    stream measured first (another language's stream may be unread, 'text': False; it then serves T4's timing only;
+    a closed-caption text stream is 'set_aside').
+    Returns {n: {'role', 'review', 'note'}}. role: sdh, regular, forced, drop, keep (kept with no role) or
+    set aside. A track with a review is never dropped (ambiguous = keep)."""
     out = {}
 
     def put(t, role, review=None, note=None):
@@ -478,6 +494,12 @@ def decide(tracks, orig_lang=None):
 
     eng = []
     for t in tracks:
+        if t.get('set_aside'):
+            put(t, 'set aside', None, 'closed captions, a text stream (8.7: set aside first)')
+            continue
+        if t['tag'] not in ('eng', 'en', 'und', '', None):
+            put(t, 'drop', None, 'not English (tag %s)' % t['tag'])
+            continue
         m = t['m']
         if t['tag'] in ('eng', 'en'):
             if m['readable'] and m['lang'] not in ('en', 'unknown', 'short'):
@@ -501,14 +523,17 @@ def decide(tracks, orig_lang=None):
             pairs[(a['n'], b['n'])] = p
             pairs[(b['n'], a['n'])] = dict(p, aligned=p['aligned'][::-1], cb=p['cb'][::-1], uc=p['uc'][::-1])
     largest = max(len(t['events']) for t in eng)
-    full, cands, partial = [], [], []
+    # rank: T7's order of the forced candidates (8.7's flagged ones, then 8.7's not full with < 150 events, then T2's).
+    full, cands, partial, rank = [], [], [], {}
     for t in eng:
         if t.get('forced'):
             cands.append(t)
+            rank[t['n']] = 0
         elif len(t['events']) >= RULE['FULL_SHARE'] * largest:
             full.append(t)
         elif len(t['events']) < RULE['FORCED_MAX_EVENTS']:
             cands.append(t)
+            rank[t['n']] = 1
         else:
             partial.append(t)
     # A full track whose words are a one-way subset of a larger full track is a forced candidate.
@@ -516,13 +541,18 @@ def decide(tracks, orig_lang=None):
         if any(u is not t and subset_of(t, u, pairs[(t['n'], u['n'])]) for u in full):
             full.remove(t)
             cands.append(t)
+            rank[t['n']] = 2
     # A not-full track with 150 events or more (8.7: partial_subtitle_dropped) is a forced candidate first when its
-    # words are a one-way subset of a full track; when its text cannot be read it is kept for review (T0, T7).
+    # words are a one-way subset of a full track; when its text cannot be read, or its language is unclear, it is
+    # kept for review (T0, T1b, T7).
     for t in partial:
         if any(subset_of(t, u, pairs[(t['n'], u['n'])]) for u in full):
             cands.append(t)
+            rank[t['n']] = 2
         elif not t['m']['readable']:
             put(t, 'keep', 'subtitle_ambiguous', 'subtitle_text_unreadable (8.7 would drop it as partial)')
+        elif t['n'] in unclear_lang:
+            put(t, 'keep', 'subtitle_ambiguous', 'language of the text unclear (8.7 would drop it as partial)')
         else:
             put(t, 'drop', None, 'partial_subtitle_dropped')
     # Groups: same words join (whatever the timing); timing joins when the text cannot be read.
@@ -555,7 +585,8 @@ def decide(tracks, orig_lang=None):
         elif len(big[0]) == 1:
             # Only single-track groups: the one whose track follows a full subtitle track of another language
             # (that track's timing is the dialogue's), when exactly one does. Timing, not SDH markers, decides.
-            others = [t for t in tracks if t not in eng and t['tag'] not in ('und', '', None)
+            # Another language's stream counts here whether its text was read or not (only its packets are used).
+            others = [t for t in tracks if t not in eng and t['tag'] not in ('und', '', None) and not t.get('set_aside')
                       and len(t['events']) >= RULE['FULL_SHARE'] * largest]
             hits = [g for g in groups if any(max(aligned(by_n[k], o), aligned(o, by_n[k])) >= RULE['SAME_MIN']
                                              for k in g for o in others)]
@@ -579,29 +610,30 @@ def decide(tracks, orig_lang=None):
             elif not m['readable']:
                 put(t, 'keep', 'subtitle_ambiguous', 'subtitle_text_unreadable (8.7 would drop it by timing)')
             elif (other_words and other_time and m['SO'] == 0 and m['class'] != 'sdh' and len(group[t['n']]) == 1
-                  and m['lang'] in ('en', 'unknown') and orig_lang == 'en'):
+                  and m['lang'] == 'en' and orig_lang == 'en'):
                 put(t, 'drop', None, 'commentary or trivia: other words and other timing')
             else:
                 why = 'outside the dialogue group'
                 if orig_lang != 'en':
                     why = 'original language %s' % (orig_lang or 'unknown')
+                if t['n'] in unclear_lang:
+                    why = 'language of the text unclear; ' + why
                 put(t, 'keep', 'subtitle_ambiguous', why)
-    # Forced candidates, in 8.7's order (flagged first), each confirmed by its words.
+    # Forced candidates in T7's order, each confirmed by its words. A candidate whose text reads another language
+    # never gets here: T1a keeps it for review.
     ref = None
     if dialogue:
         regs = [by_n[k] for k in sorted(dialogue) if out.get(k, {}).get('role') == 'regular']
         sdhs = [by_n[k] for k in sorted(dialogue) if out.get(k, {}).get('role') == 'sdh']
         ref = (regs or sdhs or [by_n[k] for k in sorted(dialogue)])[0]
     kept = False
-    for t in sorted(cands, key=lambda t: (not t.get('forced'), t['n'])):
+    for t in sorted(cands, key=lambda t: (rank[t['n']], t['n'])):
         m = t['m']
         x = None
         if ref is not None:
             x = contained(t, ref) if m['readable'] and ref['m']['readable'] else None
         lyrics = m['events'] and m['NOTE'] / m['events'] >= RULE['NOTE_LINES']
-        if m['readable'] and m['lang'] not in ('en', 'short', 'unknown'):
-            put(t, 'keep', 'subtitle_ambiguous', 'forced candidate reads %s' % m['lang'])
-        elif lyrics:
+        if lyrics:
             put(t, 'keep', 'subtitle_ambiguous', 'forced candidate looks like lyrics (%d note lines)' % m['NOTE'])
         elif x is not None and x <= RULE['CB_DIFF']:
             put(t, 'keep', 'subtitle_ambiguous', 'forced candidate shares no words with the dialogue track')
@@ -612,14 +644,24 @@ def decide(tracks, orig_lang=None):
         elif not m['readable']:
             put(t, 'forced', 'subtitle_ambiguous', 'subtitle_text_unreadable')
             kept = True
+        elif ref is not None and not ref['m']['readable']:
+            put(t, 'forced', 'subtitle_ambiguous', 'dialogue track unreadable')
+            kept = True
         else:
             note = ('words found in the dialogue track' if x is not None else
                     'no dialogue track to compare with' if ref is None else 'too short to compare')
             put(t, 'forced', None, note)
             kept = True
     for k in unclear_lang:
-        if k in out and not out[k]['review']:
+        if k in out and out[k]['role'] == 'drop':
+            out[k] = {'role': 'keep', 'review': 'subtitle_ambiguous',
+                      'note': 'language of the text unclear (the rule would drop it: %s)' % out[k]['note']}
+        elif k in out and not out[k]['review']:
             out[k] = dict(out[k], review='subtitle_ambiguous', note='language of the text unclear')
+    # Ambiguous = keep: a track held for review is never dropped, whatever step reviewed it.
+    for k, v in out.items():
+        if v['role'] == 'drop' and v['review']:
+            out[k] = dict(v, role='keep')
     return out
 
 
@@ -675,11 +717,14 @@ def roles(members, pairs, put):
 
 
 def spec87(tracks):
-    """What spec 8.7 does today, from event counts and start times alone (for comparison)."""
+    """What spec 8.7 does today, from event counts and start times alone (for comparison): no TheDiscDB and no
+    forced-only parent. A role with ' (review)' raised subtitle_ambiguous."""
     out = {}
-    eng = [t for t in tracks if t['tag'] in ('eng', 'en')]
+    eng = [t for t in tracks if t['tag'] in ('eng', 'en') and not t.get('set_aside')]
     for t in tracks:
-        if t not in eng:
+        if t.get('set_aside'):
+            out[t['n']] = 'set aside'
+        elif t not in eng:
             out[t['n']] = 'drop'
     if not eng:
         return out
@@ -752,15 +797,41 @@ def fmt(x):
     return 'n/a' if x is None else '%.3f' % x
 
 
+def before_yes(v, today):
+    """The outcome until experiment 14 answers yes: 8.7's role (today), and subtitle_ambiguous with the note
+    subtitle_text_disagrees when the rule differs: another role, or a review that 8.7 does not raise."""
+    role = today.replace(' (review)', '')
+    review = today.endswith(' (review)')
+    differs = v['role'] != role or (bool(v['review']) and not review)
+    if differs:
+        return '%s (review: subtitle_text_disagrees)' % role
+    return today
+
+
+def has_text(t):
+    return 'pairing' in t
+
+
 def analyse(tracks, orig_lang=None, label='', out=print):
     for t in tracks:
+        if t.get('set_aside'):
+            out('stream s%d %s: set aside (closed captions: %s is a text stream; 8.7 sets it aside), %d events' % (
+                t['n'], t['tag'], t.get('codec') or '?', len(t['events'])))
+            continue
+        if not has_text(t):
+            out('stream s%d %s: not read (no OCR text), %d events, used for timing only' % (
+                t['n'], t['tag'], len(t['events'])))
+            continue
         measure(t)
-        out(track_line(t) + ('  [%s]' % t['pairing'] if t.get('pairing') else ''))
+        out(track_line(t) + '  [%s]' % t['pairing'])
         c = {k: v for k, v in sorted(t['m']['corrections'].items()) if v}
         if c:
             out('  corrections: ' + ' '.join('%s=%d' % kv for kv in c.items()))
-    for i, a in enumerate(tracks):
-        for b in tracks[i + 1:]:
+        if t['m']['note_only']:
+            out('  note-only events: %d (left out of letters)' % t['m']['note_only'])
+    read = [t for t in tracks if has_text(t)]
+    for i, a in enumerate(read):
+        for b in read[i + 1:]:
             p = pair(a, b)
             out('pair s%d s%d: aligned=%.3f/%.3f timing=%s CB=%s/%s content=%s UC=%d/%d subset=%s' % (
                 a['n'], b['n'], p['aligned'][0], p['aligned'][1], p['timing'], fmt(p['cb'][0]), fmt(p['cb'][1]),
@@ -770,36 +841,60 @@ def analyse(tracks, orig_lang=None, label='', out=print):
     verdict = decide(tracks, orig_lang)
     today = spec87(tracks)
     out('original language: %s' % (orig_lang or 'unknown'))
-    out('| Stream | Tag | Events | Class | Rule | Review | Note | 8.7 today |')
-    out('|---|---|---|---|---|---|---|---|')
+    out('| Stream | Tag | Events | Class | Rule | Review | Note | 8.7 today | Before yes |')
+    out('|---|---|---|---|---|---|---|---|---|')
     for t in tracks:
         v = verdict.get(t['n'], {'role': '?', 'review': None, 'note': None})
-        out('| s%d | %s | %d | %s | %s | %s | %s | %s |' % (
-            t['n'], t['tag'], t['m']['events'], t['m']['class'], v['role'], v['review'] or '-', v['note'] or '-',
-            today.get(t['n'], '?')))
+        cls = t['m']['class'] if has_text(t) else 'set aside' if t.get('set_aside') else 'not read'
+        out('| s%d | %s | %d | %s | %s | %s | %s | %s | %s |' % (
+            t['n'], t['tag'], len(t['events']), cls, v['role'], v['review'] or '-', v['note'] or '-',
+            today.get(t['n'], '?'), before_yes(v, today.get(t['n'], '?'))))
     for t in tracks:
-        m, v = t['m'], verdict.get(t['n'], {})
-        out('row: | %s/evidence.mks | s%d: %s %s, %d events | M %d, SO %d, CS %d, lang %s, %s: %s%s | |' % (
-            label, t['n'], t.get('codec') or '?', t['tag'], m['events'], m['M'], m['SO'], m['CS'], m['lang'],
-            m['class'], v.get('role'), ' (review: %s)' % v['note'] if v.get('review') else ''))
+        v = verdict.get(t['n'], {})
+        if has_text(t):
+            m = t['m']
+            what = 'M %d, SO %d, CS %d, lang %s, %s' % (m['M'], m['SO'], m['CS'], m['lang'], m['class'])
+        else:
+            what = 'set aside (closed captions)' if t.get('set_aside') else 'not read (timing only)'
+        out('row: | %s/evidence.mks | s%d: %s %s, %d events | %s: %s%s | |' % (
+            label, t['n'], t.get('codec') or '?', t['tag'], len(t['events']), what, v.get('role'),
+            ' (review: %s)' % v['note'] if v.get('review') else ''))
     return verdict
 
 
+# Words in mkvmerge's codec names of text subtitles (as subtitle_alignment.py): "SubRip/SRT", "SubStationAlpha",
+# "WebVTT", "HDMV TextST". The DVD closed-caption stream is one: MakeMKV converts it to SubRip.
+TEXT_CODECS = ('SubRip', 'SRT', 'SubStation', 'WebVTT', 'Text')
+
+
+def is_text_codec(codec):
+    return any(word in (codec or '') for word in TEXT_CODECS)
+
+
 def load_title(rec, text, clear_max_bytes):
+    """Every stream of index.json with its displayed events (a text stream: every packet, spec 8.7). A stream with
+    OCR text gets its lines; a text stream without OCR text is set aside (closed captions, 8.7); any other stream
+    without OCR text is marked unread ('text': False)."""
     rec, text = pathlib.Path(rec), pathlib.Path(text)
     index = read_json(rec / 'subs' / 'index.json')
     tracks = []
     for entry in index:
         n = int(entry['n'])
+        codec = entry.get('codec')
+        txt = is_text_codec(codec)
+        events = packet_events(read_json(rec / 'subs' / ('sub-%d.packets.json' % n)), 0 if txt else clear_max_bytes)
+        t = {'n': n, 'tag': entry.get('language') or 'und', 'codec': codec, 'forced': bool(entry.get('forced')),
+             'events': events}
         jsonl = text / ('sub-%d.ocr.jsonl' % n)
-        if not jsonl.exists():
-            continue
-        events = packet_events(read_json(rec / 'subs' / ('sub-%d.packets.json' % n)), clear_max_bytes)
-        recs = ocr_records(jsonl, rec / 'subs-ocr' / ('sub-%d.frames.json' % n))
-        method, left = pair_text(events, recs)
-        tracks.append({'n': n, 'tag': entry.get('language') or 'und', 'codec': entry.get('codec'),
-                       'forced': bool(entry.get('forced')), 'events': events,
-                       'pairing': 'text by %s, %d frames with text, %d unmatched' % (method, len(recs), left)})
+        if jsonl.exists():
+            recs = ocr_records(jsonl, rec / 'subs-ocr' / ('sub-%d.frames.json' % n))
+            method, left = pair_text(events, recs)
+            t['pairing'] = 'text by %s, %d frames with text, %d unmatched' % (method, len(recs), left)
+        elif txt:
+            t['set_aside'] = True
+        else:
+            t['text'] = False
+        tracks.append(t)
     return tracks
 
 
@@ -817,14 +912,27 @@ def main(argv=None):
     except (OSError, ValueError, KeyError) as e:
         print('cannot read the input: %s' % e, file=sys.stderr)
         return 2
-    if not tracks:
+    if not any(has_text(t) for t in tracks):
         print('no sub-<n>.ocr.jsonl in %s for the streams of %s/subs/index.json' % (a.text, rec), file=sys.stderr)
+        return 2
+    # An English or no-language bitmap stream without text would leave the rule judging fewer tracks than the title
+    # has: an input error, never a silent skip.
+    missing = [t for t in tracks if t.get('text') is False and t['tag'] in ('eng', 'en', 'und')]
+    for t in missing:
+        print('stream s%d %s: no OCR text (no sub-%d.ocr.jsonl in %s); read it with ocr-subs.ps1' % (
+            t['n'], t['tag'], t['n'], a.text), file=sys.stderr)
+    if missing:
         return 2
     orig = a.orig_lang
     tmdb = rec.parent / 'tmdb.json'
     if orig is None and tmdb.exists():
         orig = read_json(tmdb).get('original_language')
-    print('%s: %d subtitle streams with OCR text; rule thresholds are provisional' % (rec, len(tracks)))
+    unread = sum(1 for t in tracks if t.get('text') is False)
+    aside = sum(1 for t in tracks if t.get('set_aside'))
+    extra = ''.join([', %d not read (another language)' % unread if unread else '',
+                     ', %d set aside (closed captions)' % aside if aside else ''])
+    print('%s: %d subtitle streams with OCR text%s; rule thresholds are provisional' % (
+        rec, sum(1 for t in tracks if has_text(t)), extra))
     analyse(tracks, orig, rec.name)
     return 0
 
