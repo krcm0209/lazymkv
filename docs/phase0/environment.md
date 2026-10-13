@@ -65,12 +65,15 @@ Notes on that output:
 
 ## Optical drives
 
-As MakeMKV lists them in its `DRV` line:
+As MakeMKV lists them in its `DRV` line, up to the firmware revision (the serial number that follows it is left out):
 
-- Drive 1 (`D:` in Tasks 7 to 14): `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`
-- Drive 2 (`D:` when attached in Task 14): `BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL`
+- Drive 1 (`D:` in Tasks 7 to 14): `BD-RE HL-DT-ST BD-RE BU40N 1.03`
+- Drive 2 (`D:` when attached in Task 14): `BD-RE PIONEER BD-RW  BDR-XS07U 1.01`
 - Attached after Task 14: drive 2, at `D:` (`$Drive` in `C:\lazymkv\phase0\config.ps1`,
   confirmed by the setup check `setup-check-after-drives`).
+
+Per-unit serial numbers are not kept in public documents; the full `DRV` lines stay in the recordings, in the
+private evidence repository (`corpus/owner/`).
 
 ## Paths
 

@@ -8280,7 +8280,7 @@ Which disc is in the drive: none; Disc A is with the owner. The drive is not use
 Create `docs/phase0/experiments/EXP-07-eject.md` from `docs/phase0/experiments/TEMPLATE.md`, with `Disc(s): SLUG_A, UHD, in drive 1 (D:) and drive 2 (LETTER2:)`, the MakeMKV version and `Spec reference: section 17, row 7`.
 - Under "What was run": `lazymkv-capture eject --drive <letter>` over ssh, once per drive, each after a check that no MakeMKV program was running.
 - Under "What was observed", for each drive:
-  - its name as MakeMKV lists it (drive 1: `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`, from `docs/phase0/environment.md`; drive 2: DRIVE2_NAME) and its letter;
+  - its name as MakeMKV lists it (drive 1: `BD-RE HL-DT-ST BD-RE BU40N 1.03`, from `docs/phase0/environment.md`; drive 2: DRIVE2_NAME) and its letter;
   - EJECT1 or EJECT2, as printed, including any step that reported `error N`;
   - TRAY1 or TRAY2.
   - Name any drive that was not run, with the reason.
@@ -8305,7 +8305,7 @@ Fingerprint equal to drive 1's: yes. Disc ID in drive 2: DISCID2_STATE. Equal to
 In `docs/phase0/environment.md`, under `## Optical drives`, replace these lines:
 
 ```markdown
-- Drive 1 (attached, `D:`): `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`
+- Drive 1 (attached, `D:`): `BD-RE HL-DT-ST BD-RE BU40N 1.03`
 - Drive 2: not attached when this was recorded. Its `DRV` line is added in Task 14, when the
   owner swaps drives.
 ```
@@ -8313,7 +8313,7 @@ In `docs/phase0/environment.md`, under `## Optical drives`, replace these lines:
 with:
 
 ```markdown
-- Drive 1 (`D:` in Tasks 7 to 14): `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`
+- Drive 1 (`D:` in Tasks 7 to 14): `BD-RE HL-DT-ST BD-RE BU40N 1.03`
 - Drive 2 (`LETTER2:` when attached in Task 14): `DRIVE2_NAME`
 - Attached after Task 14: drive KEEP, at `KEEP_LETTER:` (`$Drive` in `C:\lazymkv\phase0\config.ps1`,
   confirmed by the setup check `setup-check-after-drives` or `setup-check-after-config`).
@@ -9717,7 +9717,7 @@ EOF
 The changes, by section. These are the minimum. After them come the consequences that the reports themselves name and that are not listed here.
 
 Facts about the environment:
-- **Section 3.** The MakeMKV sentence (`MakeMKV 1.18.3 ... it is upgraded to 2.0.0 before recordings are captured (section 19)`) becomes the installed version: `MakeMKV 2.0.0` at the same path, upgraded from 1.18.3 on 2026-10-04. The drive sentence (`One is an HL-DT-ST BU40N reporting firmware 1.03`) becomes both drives as MakeMKV lists them, from `docs/phase0/environment.md` `## Optical drives`: drive 1 `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL`, and drive 2 as Task 14 recorded it. If drive 2 was not tested, say that.
+- **Section 3.** The MakeMKV sentence (`MakeMKV 1.18.3 ... it is upgraded to 2.0.0 before recordings are captured (section 19)`) becomes the installed version: `MakeMKV 2.0.0` at the same path, upgraded from 1.18.3 on 2026-10-04. The drive sentence (`One is an HL-DT-ST BU40N reporting firmware 1.03`) becomes both drives as MakeMKV lists them, from `docs/phase0/environment.md` `## Optical drives`: drive 1 `BD-RE HL-DT-ST BD-RE BU40N 1.03`, and drive 2 as Task 14 recorded it. If drive 2 was not tested, say that.
 - **Section 4.4.** Add a fourth column, `Installed (phase 0)`, to the table, with a cell in every row: MakeMKV 2.0.0; mkvmerge v100.0 (MKVToolNix 100.0.0); ffprobe 9.0.2; Java: the version in `environment.md` (Java 8, 1.8.0_471), with EXP-12's answer on whether MakeMKV used it. If EXP-06 made MediaInfo a detector, add a row for it (`mediainfo.exe`, what it detects, minimum version 26.05, installed 26.05). Otherwise leave it out.
 - **Section 5.** In the Fingerprint bullet, replace `phase 0 checks it against known discs` with the `Outcome:` sentence of `docs/phase0/environment.md` `## Fingerprint check (Task 8)`. In the Disc ID bullet, add that the DVD disc ID is not yet implemented: phase 0's capture tool computes only the AACS disc ID, so a DVD is looked up by its fingerprint alone until it is.
 - **Section 19.** In the first bullet say that the installs were made in phase 0, with the versions of 4.4. Replace the bullet `Which media servers the owner runs and their versions, and whether Plex Pass is available (for 8.9)` with the values from EXP-09's report: Plex Media Server version, Plex Pass yes or no, Jellyfin version.

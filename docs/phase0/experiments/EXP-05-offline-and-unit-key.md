@@ -1,7 +1,7 @@
 # Experiment 5: MakeMKV offline on a never-seen UHD, and the AACS unit key file
 
 - Date: 2026-10-06 (mini PC clock; 2026-10-05 evening on the Mac)
-- Disc(s): pans-labyrinth-2006-uhd, UHD (meta.json format bluray; `BDMV/index.bdmv` header `INDX0300`), drive 1 (D:, HL-DT-ST BD-RE BU40N 1.03) and drive 2 (D:, BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL)
+- Disc(s): pans-labyrinth-2006-uhd, UHD (meta.json format bluray; `BDMV/index.bdmv` header `INDX0300`), drive 1 (D:, HL-DT-ST BD-RE BU40N 1.03) and drive 2 (D:, BD-RE PIONEER BD-RW  BDR-XS07U 1.01)
 - MakeMKV version: MakeMKV v2.0.0 win(x64-release)
 - Spec reference: section 17, row 5
 
@@ -91,7 +91,7 @@ Disc ID: `disc_id` is 40 hex characters (`C337194670AF8C954C320875D671653F7EF2C2
 knowing the disc by fingerprint, and its record's `global_disc_id` (`B5F0E23E...`) differs from ours: the same
 DIFFERENT outcome as the first disc (Task 8's check), now on a UHD.
 
-Second drive (Task 14): Disc A in drive 2 (`D:`, `BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL`), snapshot in
+Second drive (Task 14): Disc A in drive 2 (`D:`, `BD-RE PIONEER BD-RW  BDR-XS07U 1.01`), snapshot in
 `corpus/owner/pans-labyrinth-2006-uhd/drive2/snapshot/meta.json`, made by `scripts/phase0/second-drive.ps1`.
 Fingerprint equal to drive 1's: yes. Disc ID in drive 2: read (40 hex characters). Equal to drive 1's: yes.
 

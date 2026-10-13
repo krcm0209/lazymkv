@@ -26,16 +26,16 @@ Does programmatic eject work on both drives?
 ## What was observed
 
 Drive 1:
-- Name as MakeMKV lists it: `BD-RE HL-DT-ST BD-RE BU40N 1.03 SERIAL` (from `docs/phase0/environment.md`),
-  letter `D:`, a tray-loading drive.
+- Name as MakeMKV lists it, up to the firmware revision: `BD-RE HL-DT-ST BD-RE BU40N 1.03` (from
+  `docs/phase0/environment.md`), letter `D:`, a tray-loading drive.
 - `tasklist | findstr /i makemkv` printed nothing.
 - EJECT1: `lock=ok, dismount=ok, allow-removal=ok, eject=ok`, `exit=0`.
 - TRAY1: the owner: "The tray opened."
 
 Drive 2:
-- Name as MakeMKV lists it: `BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL` (two spaces after `BD-RW`, as
-  MakeMKV prints it), letter `D:`, MakeMKV index 0. Its recorded `DRV` line, in
-  `corpus/owner/pans-labyrinth-2006-uhd/drive2/drives.txt`:
+- Name as MakeMKV lists it, up to the firmware revision: `BD-RE PIONEER BD-RW  BDR-XS07U 1.01` (two spaces after
+  `BD-RW`, as MakeMKV prints it), letter `D:`, MakeMKV index 0. Its recorded `DRV` line, in
+  `corpus/owner/pans-labyrinth-2006-uhd/drive2/drives.txt`, with the serial number replaced by `SERIAL`:
   `DRV:0,2,999,12,"BD-RE PIONEER BD-RW  BDR-XS07U 1.01 SERIAL","PANS_LABYRINTH","D:"`.
 - It is a slot-loading drive: it has no tray.
 - `tasklist | findstr /i makemkv` printed nothing.
