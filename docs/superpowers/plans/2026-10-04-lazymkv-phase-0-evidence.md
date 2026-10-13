@@ -10137,13 +10137,15 @@ Which disc is in the drive: does not matter.
 
 ```bash
 find corpus/owner corpus/scenarios -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus docs/phase0 docs/superpowers/specs
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus docs/phase0 docs/superpowers/specs
 git add corpus/scenarios scripts/phase0/list-leftovers.ps1 docs/phase0/REPORT.md docs/superpowers/specs/2026-10-04-lazymkv-design.md
+scripts/phase0/check-names.sh
 git status --short
 git commit -m "Fold phase 0 results into the spec; add the phase report"
 ```
 
 Expected:
 - `find` and `grep` print nothing: no AACS unit-key file, and no JSON Web Token (the TMDb read access token is one, and it starts with that text) in the corpus, the reports or the spec. If either prints a path, stop and do not commit.
+- `scripts/phase0/check-names.sh` prints nothing and exits 0: no tracked or staged file names the mini PC's Windows user (the user part of `LAZYMKV_BOX` in `scripts/phase0/box.env`) or the Mac's user (`id -un`). If it prints a line, remove the name from that file (write `USER`), add it again and rerun the check; do not commit before it prints nothing.
 - `git status --short` lists as staged only these: `corpus/scenarios/disc-a-scan/makemkvcon64.json`, `scan.txt` and `scan.txt.timing.jsonl`, `scripts/phase0/list-leftovers.ps1`, `docs/phase0/REPORT.md` and the spec (`M`). Anything else listed (for example a `Cargo.lock` that `box.sh` brought back) was not changed by this task: do not add it, and report it.
 - The commit succeeds. Phase 0 is finished: phase 1's plan is written against the updated spec.

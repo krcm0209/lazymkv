@@ -19,6 +19,29 @@ scp -q -r -o BatchMode=yes "$HOST:C:/lazymkv/phase0/recordings/$SLUG" "$TMP/"
 [ -f "$TMP/$SLUG/meta.json" ] || { echo "recording $SLUG on the mini PC has no meta.json; nothing was changed in corpus/owner" >&2; exit 1; }
 # The copies of the disc's navigation files may arrive read-only; make them replaceable by the next pull.
 chmod -R u+w "$TMP/$SLUG"
+# The repository is public: the mini PC's Windows user name never enters it. MakeMKV's debug lines and the experiment
+# logs name the user's folder (C:\Users\<name>, or C:\\Users\\<name> inside JSON); in every text file the name is
+# replaced by USER there, before anything reaches corpus/owner. The name is the user part of the ssh target. Other
+# places that name it are found by scripts/phase0/check-names.sh, which the commit checks run.
+BOX_USER="${HOST%%@*}"
+if [ "$BOX_USER" = "$HOST" ] || [ -z "$BOX_USER" ] || [ "$(printf '%s' "$BOX_USER" | tr '[:upper:]' '[:lower:]')" = user ]; then
+  echo "note: the ssh target names no user (or only the placeholder USER), so no user name was scrubbed; run scripts/phase0/check-names.sh before committing" >&2
+else
+  named="$(grep -rIil -F -e "$BOX_USER" "$TMP/$SLUG" || true)"
+  if [ -n "$named" ]; then
+    while IFS= read -r f; do
+      LAZYMKV_SCRUB_NAME="$BOX_USER" perl -0777 -i -pe 'BEGIN { $n = quotemeta $ENV{LAZYMKV_SCRUB_NAME} }
+        s/(C:(?:\\\\|\\)Users(?:\\\\|\\))$n(?![A-Za-z0-9._\$-])/${1}USER/gi' "$f"
+    done <<< "$named"
+  fi
+  left="$(grep -rail -F -e "$BOX_USER" "$TMP/$SLUG" | sed "s|^$TMP/$SLUG/||" || true)"  # binary files too
+  echo "user name: in $(printf '%s' "$named" | grep -c . || true) text file(s), replaced by USER in their C:\Users paths;" \
+       "$(printf '%s' "$left" | grep -c . || true) file(s) still name it"
+  if [ -n "$left" ]; then
+    echo "warning: these files still contain the mini PC's user name (outside a C:\Users path, or in a binary file); edit them before committing:" >&2
+    echo "$left" >&2
+  fi
+fi
 mkdir -p "corpus/owner/$SLUG"
 cp -Rf "$TMP/$SLUG/." "corpus/owner/$SLUG/"
 copied="$(find "$TMP/$SLUG" -type f | wc -l | tr -d ' ')"
