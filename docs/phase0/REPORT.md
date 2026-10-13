@@ -10,7 +10,7 @@ summarises them.
 |---|---|---|---|
 | 1 | Is the job profile honoured in robot mode: track order, output codecs, chapter count, forced-stream parent, Dolby Vision, statistics tags? | yes: the profile was honoured, the output track order equals the scan order, every output codec is the unconverted input codec (no attribute 41, 42 lossless throughout), and the chapter count equals attribute 8. The report adds that on a DVD the text-converted closed captions come before the bitmap subtitles, and that the Dolby Vision question is not answered (no Dolby Vision disc). | `EXP-01-profile-and-order.md` |
 | 2 | Do the title numbers MakeMKV prints while a rip scans the disc equal the index ripped, and come before saving starts? | yes on this disc, which has neither angles nor duplicate titles: both titles that reached the saving message have `match=yes` and `added-before-5014=yes`. The experiment's condition, a disc with angles or duplicate titles, is not yet met. | `EXP-02-index-guard.md` |
-| 3 | Does `backup --decrypt` to a network path work on a UHD, and does `info file:` on the copy list the same titles? | no: `backup --decrypt` to the network share worked on Disc A, but MakeMKV 2.0.0 crashed while scanning the copy, so `info file:` listed none of the disc scan's titles and nothing was extracted (Step 6 was skipped). | `EXP-03-whole-disc-copy.md` |
+| 3 | Does `backup --decrypt` to a network path work on a UHD, and does `info file:` on the copy list the same titles? | no: `backup --decrypt` to the network share worked on Disc A, but MakeMKV 2.0.0 crashed while scanning the copy, so `info file:` listed none of the disc scan's titles and nothing was extracted (Step 6 was skipped). The report's consequence, that 6.3 is replaced by its fallback from the start, was overridden by the owner's decision D18 (2026-10-06): 6.3 is kept, with a crash fallback to direct rips when the copy's scan fails (spec 6.3 step 6a; the report carries a dated note). | `EXP-03-whole-disc-copy.md` |
 | 4 | Does a UHD rip straight to the share keep free RAM above 1 GB with no slow-write warning at `cache_mb` 1024; what are the throughput, the share-drop messages and the remux time? | not run: the owner has not done the NAS step, and no report was written. The rips of experiments 1 and 3 give the throughput and RAM figures (spec sections 14 and 18). | `EXP-04-rip-to-share.md` |
 | 5 | What does MakeMKV report with its network blocked for a UHD it has never scanned, and can `Unit_Key_RO.inf` be read in both drives? | no distinct message was seen; the disc opened offline (rule 3) and listed the same two titles as online, so `NeedsNetwork` stays `Unknown`. Yes, `AACS/Unit_Key_RO.inf` was readable in both drives. | `EXP-05-offline-and-unit-key.md` |
 | 6 | Does `ffprobe` tell Atmos and DTS:X apart, and do the subtitle alignment values separate dialogue from commentary? | not run, and no report was written: no disc with Atmos or DTS:X and no title with two or more full English subtitle tracks was recorded; the one UHD recorded has neither format (EXP-01's `ffprobe` profile `DTS-HD MA`; its `notes.md`). Experiment 14 keeps 8.7's timing bands, so the alignment half stays open. | `EXP-06-audio-profiles-and-subtitles.md` |
@@ -20,12 +20,17 @@ summarises them.
 | 10 | What share of about 20 of the owner's discs does TheDiscDB know? | not run as an experiment: of the 4 discs recorded (of about 20), TheDiscDB knows 2 by fingerprint (the-office-2005-s3d3-bluray, pans-labyrinth-2006-uhd) and not the 2 DVDs; not yet verified. No report was written. | `EXP-10-thediscdb-hit-rate.md` |
 | 11 | Does a profile that selects by language rip exactly the streams predicted from the scan, in scan order? | not answered: two rips, Disc A's title 0 (UHD) and short-circuit-2-1988-dvd's title 0 (DVD), show no difference in the streams kept, but three parts of the selection were not exercised on either disc: `nolang`, `special` and `core` on its own. | `EXP-11-language-selection.md` |
 | 12 | On a UHD with Java menus, does the scan report a Java runtime (`3344`) and main-feature labels? | not answered by this disc, and leaning no: Pan's Labyrinth (2019 4K) has BD-J files, but MakeMKV printed no `3344` and no labels. | `EXP-12-java-labels.md` |
-| 13 | Measured over whole titles on the owner's own discs, and compared with the owner's label for every extra audio track in a wanted language, does the content rule of 8.6 give its commentary verdict to no programme track, and to at least one commentary on each of at least 3 different discs? | not answered: needs more discs. 0 of the 8 commentaries, 1 of the 20 programme tracks and 0 of the 6 separately encoded ones count so far, and there is no false verdict. | `EXP-13-design.md` |
-| 14 | (a) Read by OCR and judged by the text rule of 8.7, and compared with the owner's label for every English and no-language subtitle track of the titles read, does the rule give no costly verdict and place at least half of the labelled tracks without review? (b) On the J4125, does reading one English track take at most 150 s per hour of running time? | not answered: needs more discs. There was no costly verdict on the tracks read, but apart from the two fitting discs only one regular track (short-circuit-2-1988-dvd's English VobSub) is labelled. | `EXP-14-design.md` |
+| 13 | Measured over whole titles on the owner's own discs, and compared with the owner's label for every extra audio track in a wanted language, does the content rule of 8.6 give its commentary verdict to no programme track, and to at least one commentary on each of at least 3 different discs? | not answered: needs more discs. 0 of the 8 commentaries, 0 of the 20 programme tracks and 0 of the 6 separately encoded ones count so far, and there is no false verdict. Only a track whose content was checked before the verdict counts (D23): the one derived core counted before 2026-10-12 is labelled from its scan flag, an observation. | `EXP-13-design.md` |
+| 14 | (a) Read by OCR and judged by the text rule of 8.7, and compared with the owner's label for every English and no-language subtitle track of the titles read, does the rule give no costly verdict and place at least half of the labelled tracks without review? (b) On the J4125, does reading one English track take at most 150 s per hour of running time? | (a) not answered: needs more discs. There was no costly verdict on the tracks read, but apart from the two fitting discs only one regular track (short-circuit-2-1988-dvd's English VobSub) is labelled. (b) no (Tesseract, canvas and changes renders: 361-487 s per hour of running time on the UHD and the Blu-ray episodes, 117 s/h on the DVD; summary.json): as row 14's (b) fallback says, the text is read only where spec 6.4 step 10 runs (two or more English subtitle streams). | `EXP-14-design.md` |
 
-## Spec sections changed
+## Spec sections changed in phase 0
+
+Every section phase 0 changed: those Task 17 changed, and 2, 7 and 15, which phase 0 changed before Task 17 (2: the
+owner's decisions D13 to D23; 7: the tuning evidence of D16; 15: `retune`). The final review's fixes of 2026-10-12
+changed 4.4, 6.4, 7, 8.1, 8.7, 15 and 17 again.
 
 - 1. Purpose
+- 2. Owner requirements and decisions
 - 3. Target environment
 - 4.3 Platform interfaces
 - 4.4 External programs
@@ -34,6 +39,7 @@ summarises them.
 - 6.2 Direct mode
 - 6.3 Whole-disc copy mode
 - 6.4 File phase
+- 7. Storage
 - 8.1 Identification
 - 8.3 Movie titles
 - 8.6 Audio
@@ -53,6 +59,7 @@ summarises them.
 - 11. Review queue
 - 12. Notifications
 - 14. Settings
+- 15. Testing
 - 16. Build phases
 - 17. Experiments (phase 0)
 - 18. Risks
@@ -62,7 +69,7 @@ summarises them.
 
 | Slug | Format | What it covers |
 |---|---|---|
-| pans-labyrinth-2006-uhd | bluray | Disc A, a UHD with Java menus (2 titles), never scanned on the mini PC before phase 0: experiments 1 (`rehearsal`, `all-tracks`), 2 (`exp02`), 3 (`backup`), 5 (`scan-offline.txt`, `drives-offline.txt`), 7 and the second drive (`drive2`), 11 (`eng-only`), 12 (`scan.txt`, no Java labels), 13 (an English commentary on a Spanish-language film, named by the owner from the packaging) and 14 (English and Spanish PGS dialogue tracks); a TheDiscDB hit by fingerprint (experiment 10) |
+| pans-labyrinth-2006-uhd | bluray | Disc A, a UHD with Java menus (2 titles), never scanned on the mini PC before phase 0: experiments 1 (`rehearsal`, `all-tracks`), 2 (`exp02`), 3 (`backup`), 5 (`scan-offline.txt`, `drives-offline.txt`), 7 and the second drive (`drive2`), 11 (`eng-only`), 12 (`scan.txt`, no Java labels), 13 (an English commentary on a Spanish-language film; its label rests on the packaging, which D23 makes an observation, so it does not count, and the thresholds were fitted on it anyway) and 14 (English and Spanish PGS dialogue tracks); a TheDiscDB hit by fingerprint (experiment 10) |
 | short-circuit-1986-dvd | dvd | A Task 15 DVD (1 title) with no subtitle stream at all, no flagged stream and no closed captions; the feature ripped with all tracks (`all-tracks`); experiment 13 measured its second English audio track (a lossy companion of the 5.1 track); TheDiscDB's first miss by fingerprint (experiment 10) |
 | short-circuit-2-1988-dvd | dvd | A Task 15 DVD (7 titles): the closed-caption stream (`CC`, converted to text, marked lossy) and seven unflagged VobSub tracks; a failed rip on a damaged spot (`all-tracks`: `MSG:2003` read errors, `MSG:5003`), then a successful one after the disc was cleaned (`all-tracks-2`); experiment 1's DVD observations (`all-tracks-2`: closed captions first, duration, default flag); experiment 11's second disc (`eng-only`); experiment 14's first DVD VobSub track; a TheDiscDB miss by fingerprint (experiment 10) |
 | the-office-2005-s3d3-bluray | bluray | The first disc of phase 0 (11 titles), identified by its fingerprint: the rehearsals for experiments 1, 2 and 11 to 14 (`rehearsal`); two commentaries the owner named by listening (S03E16 in `e16-stereo`, S03E12-13 in `t3-all-tracks`) and an exact duplicate audio track (S03E15), on which experiment 13's thresholds were fitted; three SDH episodes (PGS), one of which (S03E16) fitted experiment 14's thresholds; a TheDiscDB hit by fingerprint (experiment 10) |
@@ -82,8 +89,8 @@ summarises them.
 - Experiment 10 (Task 15 Step 5): not run as an experiment. Only 4 discs were recorded of about 20: 2 TheDiscDB hits and 2 misses.
 - Experiment 11 (Task 13): not answered. `nolang` needs a disc with a language-less audio stream, `special` a DVD whose commentary is flagged, and `core` on its own an English-only rip of an Office title; none was ripped. `-sel:mvcvideo` on a 3D title was not tested either.
 - Experiment 12 (Task 15 Step 6): not answered. No later UHD was recorded to repeat the check on, and `app_Java` was not set to the installed Java 8, the one change the report names as worth trying.
-- Experiment 13 (Task 12 Steps 19 and 20): not answered. The owner's discs so far do not supply the labelled tracks row 13 requires (0 of 8 commentaries, 1 of 20 programme tracks and 0 of 6 separately encoded ones count).
-- Experiment 14 (Task 12 Steps 29 and 30): not answered. Apart from the two fitting discs only one regular track is labelled, and no report states part (b), the OCR time per hour of running time.
+- Experiment 13 (Task 12 Steps 19 and 20): not answered. The owner's discs so far do not supply the labelled tracks row 13 requires (0 of 8 commentaries, 0 of 20 programme tracks and 0 of 6 separately encoded ones count; only a track whose content was checked before the verdict counts, D23).
+- Experiment 14 (Task 12 Steps 29 and 30): (a) not answered. Apart from the two fitting discs only one regular track is labelled. (b) is answered by the recordings: no (Tesseract, canvas and changes renders: 361-487 s per hour of running time on the UHD and the Blu-ray episodes, 117 s/h on the DVD; summary.json, over each title's duration in its `mkvmerge.json`), so the text is read only where spec 6.4 step 10 runs.
 
 ## Installs and other changes on the mini PC
 
