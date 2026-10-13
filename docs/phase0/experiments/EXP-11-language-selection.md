@@ -45,7 +45,7 @@ The answer decides whether the rip-time fast path (section 16, item 1) can be bu
   bytes, 99.95 % of the difference. The other 2,146,762 bytes are in no track's tag: each file's size minus its
   tracks' tags is 4,484,039 bytes (all-tracks) and 2,337,277 bytes (eng-only), so they are container framing. The
   three kept tracks have the same byte counts in both files.
-- Read on the Mac, one command at a time (compare_tracks.py as of commit 0548a16, observation 6):
+- Read on the Mac, one command at a time (compare_tracks.py as of commit d7aef0c, observation 6):
 
   ```bash
   python3 scripts/phase0/exp11_tracks.py coverage corpus/owner/pans-labyrinth-2006-uhd@0
@@ -433,8 +433,8 @@ short-circuit-2-1988-dvd, title 0:
 `MSG:4047`'s "stream N" and "track #N" count the title's selected streams in scan order, from 0. These are the
 output file's tracks before the removal, not the scan's stream numbers. On this rip "#3" is scan stream 5, the
 fourth selected stream (scan 0, 3, 4, 5). On the all-tracks rip every stream is selected, so the two numberings
-coincide ("#5", "#7" are scan 5 and 7), which is why EXP-01 did not show the difference. Before commit 0548a16,
-compare_tracks.py read N as a scan stream number. Run on this rip, the pre-fix version (`0548a16^`) prints:
+coincide ("#5", "#7" are scan 5 and 7), which is why EXP-01 did not show the difference. Before commit d7aef0c,
+compare_tracks.py read N as a scan stream number. Run on this rip, the pre-fix version (`d7aef0c^`) prints:
 
 ```text
 REMOVED          scan stream 3 (audio eng DD f=0): MakeMKV left it out of the file (MSG:4047), so it is not expected
