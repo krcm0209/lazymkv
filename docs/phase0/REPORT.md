@@ -121,7 +121,7 @@ watchdogs, resume) follow in phase 3, editions and TV in phase 4, and the GPUI d
 
 ## Closing checks, and what was left behind
 
-- Stand-in replay (Task 17 Step 1): `fake-tool` replayed Disc A's online scan (`corpus/scenarios/disc-a-scan/`) with `LAZYMKV_FAKE_SPEED=0.001`; `fc /b` against the original recording on the mini PC: `FC: no differences encountered` (2026-10-06; checked before the machine user name in lines 2 and 47 of the scenario's `scan.txt` was scrubbed to `USER` for the public repository; the mini PC's recording was scrubbed the same way, so the two still match).
+- Stand-in replay (Task 17 Step 1): `fake-tool` replayed Disc A's online scan (`corpus/scenarios/disc-a-scan/`) with `LAZYMKV_FAKE_SPEED=0.001`; `fc /b` against the original recording on the mini PC: `FC: no differences encountered` (2026-10-06; checked before the machine user name in lines 2 and 47 of the scenario's `scan.txt` was scrubbed to `USER` for the public repository).
 - Tests (Task 17 Step 4): Rust: `20 tests passed, 0 failed (core 8 + 1, capture 7 + 1, fake-tools 2 + 1)` (on the mini PC, 2026-10-12). Python: `Ran 202 tests in 45.370s` / `OK` (2026-10-13; 200 at Step 4 on 2026-10-12, plus 2 tests added by the final-review fix wave).
 - What the experiments left on the share and on the mini PC, as `scripts/phase0/list-leftovers.ps1` listed it (job log `final-list`), and what the owner decided:
 
