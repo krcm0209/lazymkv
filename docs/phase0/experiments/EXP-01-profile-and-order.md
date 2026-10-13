@@ -116,8 +116,7 @@ says so with `MSG:4047`. Statistics tags are written. The Dolby Vision question 
 - 8.7's parent rule holds (the twin directly follows its parent); add: a twin that turns out empty is not in the
   file, announced by `MSG:4047`, and the verification must not count it as missing.
 - 8.10: wording for Dolby Vision waits for a Dolby Vision disc.
-- 6.4 step 10: subtitle event counts can be read from `NUMBER_OF_FRAMES` in the header without extraction (the
-  alignment measure still needs the packets).
+- 6.4 step 10: `NUMBER_OF_FRAMES` is in the header, but it counts PACKETS, not events: on the PGS tracks recorded it is twice the event count (a 30-byte clear packet follows every event), on DVD VobSub it equals it (corrected 2026-10-12, Task 17). The event counts and start times therefore still come from the subtitle extraction.
 - 6.2 step 7: the 2-second duration rule held on pans-labyrinth-2006-uhd (UHD, 0.1 s) and on the Blu-ray episodes
   (0.9 s), and failed by 17.6 s on a DVD (short-circuit-2-1988-dvd, 6623.6 s against the scan's 6606 s, in both
   rips). The rule needs a DVD-sized tolerance or a different reference (the file's own duration from the probe);

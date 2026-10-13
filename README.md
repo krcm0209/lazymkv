@@ -13,8 +13,8 @@ Design and evidence gathering. The design is in
 section 17 lists the experiments that phase 0 ran against real discs and real MakeMKV output, and the owner's decisions
 (D1-D23) record what was settled along the way. The phase 0 report is
 [`docs/phase0/REPORT.md`](docs/phase0/REPORT.md); each experiment has its own report in
-[`docs/phase0/experiments/`](docs/phase0/experiments/). Phase 1 (the engine, with a developer mode that keeps every
-rip's evidence for tuning) comes next.
+[`docs/phase0/experiments/`](docs/phase0/experiments/). The engine comes next (the spec's phases 1 and 2: the decision core, then the
+direct-mode engine), with a developer mode that keeps every rip's evidence for tuning.
 
 ## Layout
 
