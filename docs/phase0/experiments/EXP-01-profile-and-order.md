@@ -75,10 +75,14 @@ VERDICT          count=yes order=yes video=yes chapters=yes duration=yes
    Vision, so the two-track question is not answered by it.
 7. **Statistics tags.** `STATISTICS TAGS present`: every track has `BPS`, `DURATION`, `NUMBER_OF_FRAMES`,
    `NUMBER_OF_BYTES` and `SOURCE_ID` (the stream's PID: video `001011`, audio `001100`/`001100`/`001101`, subtitles
-   `0012A0`/`0012A1`), so a subtitle track's event count is in the header.
+   `0012A0`/`0012A1`). Corrected 2026-10-12 (final review): this does not put a subtitle track's event
+   count in the header. `NUMBER_OF_FRAMES` counts packets, not events: twice the event count on the PGS tracks
+   recorded (a 30-byte clear packet follows every event), equal to it on DVD VobSub (see the Consequence below).
 8. **Duration.** `DURATION scan=7150s file=7150.1s`, `duration=yes` (within 2 s).
 9. **Language codes.** The file carries `spa` and `eng`, the same ISO 639-2 form as the scan (terminology and
-   bibliographic forms coincide for these two languages; the question stays open for French or German).
+   bibliographic forms coincide for these two languages; the question stays open for French or German). Answered for
+   French on 2026-10-12 (final review) by short-circuit-2-1988-dvd: its scan prints the bibliographic `fre` (and
+   `chi` for Chinese), and its `all-tracks-2` file carries the same `fre` and `chi`. German is not yet seen.
 10. **Title identity.** `rip_source_file` = `scan_source_file` = `00800.mpls`. `mediainfo.json` reads as UTF-8
     (with a BOM).
 

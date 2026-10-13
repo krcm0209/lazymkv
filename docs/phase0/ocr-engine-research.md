@@ -286,8 +286,8 @@ tuning dataset: `lazymkv-tuning\the-office-2005-s3d3-bluray\e16-stereo\subs-ocr\
 | time per frame on the J4125 | about 95 ms (57 s for 600) | 933 ms (560 s for 600; model load 19 ms) |
 
 Reading: every measure the experiment 14 rule decides on comes out identical. The engines differ in the kind of
-error: Tesseract reads a standalone "I" as "|" (corrected by `subtitle_text.py`), ocrs drops it ("amost died",
-" am being honored", "l'a be stupid") and reads a few other glyphs wrongly ("uo" for "up"); neither error touches
+error: Tesseract reads a standalone "I" as "|" (corrected by `subtitle_text.py`), ocrs drops it, or misreads it in a
+contraction (three frames), and reads a few other glyphs wrongly (a "p" read as "o", for one); neither error touches
 brackets, capitals, colons or the stopwords. ocrs is about ten times slower on a full 1080p frame: a two-hour film's
 1,700 frames would take about 26 minutes per track against 2.5 with Tesseract. The frame is almost entirely white;
 the app, which decodes the PGS bitmap itself, would hand ocrs only the glyph box (typically under 1500 x 200), which

@@ -36,5 +36,5 @@ find "$DEST" -name 'disc*.json' | while read -r json; do
   [ -n "$id" ] && curl -fsS -m 60 "https://thediscdb.com/api/discid/$id" -o "$API/discid-$id.json"
   sleep 1
 done
-echo "saved $(ls "$API" | wc -l | tr -d ' ') API responses"
+echo "saved $(find "$API" -name '*.json' | wc -l | tr -d ' ') API responses"
 echo "fetched $(find "$DEST" -name 'disc*.txt' ! -name '*-summary.txt' | wc -l | tr -d ' ') logs"

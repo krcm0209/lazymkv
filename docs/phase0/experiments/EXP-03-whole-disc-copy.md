@@ -201,6 +201,10 @@ copy, so `info file:` listed none of the disc scan's titles and nothing was extr
 - 6.3 is replaced by its fallback (section 17, row 3): title-unsure discs rip every title that passes the
   candidate filter (8.2) in Direct mode, most likely first, waiting in `AwaitingSpace` if they do not fit. 6.3
   already switches to this when a copy fails twice; it now applies from the start.
+  Superseded (note of 2026-10-12, final review): the owner's decision D18 (2026-10-06) keeps 6.3 instead. The
+  whole-disc copy is still made; when MakeMKV's scan of the copy ends without `MSG:5011` and a `TCOUNT` line, that
+  scan counts as failed and the titles are ripped directly from the disc, with the copy kept on staging as the backup
+  (spec 6.3 step 6a, 9.2). Do not act on this bullet.
 - Labels: no design change. There were no labels to compare, and 6.3 already kept the disc-time scan, with its
   labels, as the reference.
 - 9.2 and 9.4, this experiment's own finding: MakeMKV 2.0.0 can crash without any message (exit code -1073741819,

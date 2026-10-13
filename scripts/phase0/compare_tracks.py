@@ -8,8 +8,9 @@ from robot import duration_seconds, parse
 
 TYPE = {"Video": "video", "Audio": "audio", "Subtitles": "subtitles"}
 
-# ISO 639-2 bibliographic codes and their terminology twins. MakeMKV's scan prints the
-# terminology form (fra, deu); a Matroska file may carry either.
+# ISO 639-2 bibliographic codes and their terminology twins. MakeMKV 2.0.0's scan of a DVD printed the
+# bibliographic form (fre, chi), and its file carried the same (short-circuit-2-1988-dvd, EXP-01 observation 9);
+# both sides are mapped to one form, so either side may carry either.
 B_TO_T = {
     "alb": "sqi", "arm": "hye", "baq": "eus", "bur": "mya", "chi": "zho", "cze": "ces",
     "dut": "nld", "fre": "fra", "geo": "kat", "ger": "deu", "gre": "ell", "ice": "isl",

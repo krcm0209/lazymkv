@@ -10,11 +10,16 @@ intended later.
 
 Design and evidence gathering. The design is in
 [`docs/superpowers/specs/2026-10-04-lazymkv-design.md`](docs/superpowers/specs/2026-10-04-lazymkv-design.md); its
-section 17 lists the experiments that phase 0 ran against real discs and real MakeMKV output, and the owner's decisions
-(D1-D23) record what was settled along the way. The phase 0 report is
+section 17 lists phase 0's fourteen experiments against real discs and real MakeMKV output, with what each found (five
+were not run, and say why), and the owner's decisions (D1-D23) record what was settled along the way. The phase 0 report is
 [`docs/phase0/REPORT.md`](docs/phase0/REPORT.md); each experiment has its own report in
 [`docs/phase0/experiments/`](docs/phase0/experiments/). The engine comes next (the spec's phases 1 and 2: the decision core, then the
 direct-mode engine), with a developer mode that keeps every rip's evidence for tuning.
+
+Installing (planned; decision D17): one installer carries every tool the app needs except MakeMKV: mkvmerge and
+ffmpeg/ffprobe, and the ocrs OCR engine compiled in with its models (decision D22); nothing is downloaded at run time.
+MakeMKV cannot be redistributed, so it is never shipped: the app detects it, checks its version and says what to
+install.
 
 ## Layout
 
