@@ -28,7 +28,7 @@
 - The agent must not fetch pages from dvdcompare.net (its robots.txt blocks AI agents).
 - Nothing is written to the owner's media library roots. Experiment 9 uses a separate test library folder.
 - Every experiment report states what was run, what was observed, and "yes" or "no" to the experiment's question, using `docs/phase0/experiments/TEMPLATE.md`. A step that could not be run is reported as not run, with the reason.
-- Commit after every task. End commit messages with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- Commit after every task. Commits are signed with the owner's key and carry no agent attribution (the owner's rule of 2026-10-12).
 - Tasks 8 to 17 were revised on 2026-10-04, before any disc session, after a pre-flight audit confirmed 49 defects in their steps. The experiments, their questions and their order are unchanged. The lines below are the conventions the revised tasks share.
 - The network share is reachable only from a script started with `scripts/phase0/job.sh`; a plain `ssh` command gets "Access is denied" there. Rips, copies, extractions and remuxes are written to `$Staging`, never to `C:`.
 - `env.ps1` provides `$Recordings`, `Assert-Slug`, `Assert-EmptyDir`, `Get-InsertedDisc` and `Assert-DiscIs`. Every name that becomes part of a path is checked with `Assert-Slug` (lowercase letters, digits and hyphens); every script that works on "the disc of recording <slug>" calls `Assert-DiscIs` before its first MakeMKV call; every folder MakeMKV writes into is checked with `Assert-EmptyDir` first.
