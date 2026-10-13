@@ -1176,10 +1176,24 @@ def audio_by_title(scan):
     return out
 
 
+def dvd_scan(scan):
+    """True for the scan of a DVD: no title names its source file (attribute 16, a Blu-ray's playlist), and the disc
+    says DVD (disc attribute 1) or a stream is DVD video or DVD subtitles (codec V_MPEG2 or S_VOBSUB). A DVD title's
+    segments (attribute 26) are the cells of its own program chain, numbered from 1 in every title, not clips shared
+    across the disc."""
+    if any(16 in a for a in scan.titles.values()):
+        return False
+    return "DVD" in scan.disc.get(1, "") or any(s.get(5) in ("V_MPEG2", "S_VOBSUB") for s in scan.streams.values())
+
+
 def titles_report(recording):
     """Every title of <recording>/scan.txt, longest first: its audio streams by language without derived streams, a
-    mark '<- <language> x<n>' when one language has two or more, the labels it was already ripped under (from each
-    <label>/rip-summary.json), and the titles it shares segments with (a play-all playlist)."""
+    mark '<- <language> x<n>' when one language has two or more, a mark '<- wanted x<n> (...)' when no wanted language
+    has two but the wanted languages (English, the original language from tmdb.json) and streams with no language
+    have two or more together (an English commentary on a Spanish film: EXP-13 addendum, section 9.1), the labels it
+    was already ripped under (from each <label>/rip-summary.json), and the titles it shares segments with (a play-all
+    playlist). On a DVD the segment numbers restart in every title (dvd_scan), so shared segments are not looked
+    for and the report says so."""
     d = pathlib.Path(recording)
     scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
     ripped = {}
@@ -1194,15 +1208,24 @@ def titles_report(recording):
     tmdb = d / "tmdb.json"
     original = json.loads(tmdb.read_text(encoding="utf-8-sig")).get("original_language") if tmdb.exists() else None
     info = audio_by_title(scan)
+    wanted = {"eng"} | set(ISO639.get(original, ()))
+    dvd = dvd_scan(scan)
     lines = [f"{d.name}: {len(info)} titles, longest first; TMDb original language: {original or 'unknown'}",
              "  audio: scan stream numbers by language, leaving out streams MakeMKV derived from another (flag 2048)"]
+    if dvd:
+        lines.append("  segments: a DVD's are the cells of each title's own program chain, numbered from 1 in every "
+                     "title, so shared segments are not looked for (a play-all title is not marked)")
     for title in sorted(info, key=lambda t: (-info[t][0], t)):
         seconds, segs, langs = info[title]
         audio = "; ".join(f"{lang} {','.join(map(str, s))}" for lang, s in sorted(langs.items())) or "none"
         notes = [f"<- {lang} x{len(s)}" for lang, s in sorted(langs.items()) if len(s) >= 2]
+        mine = {lang: s for lang, s in sorted(langs.items()) if lang in wanted or lang in NO_LANGUAGE}
+        if sum(len(s) for s in mine.values()) >= 2 and all(len(s) < 2 for s in mine.values()):
+            notes.append(f"<- wanted x{sum(len(s) for s in mine.values())} ("
+                         + ", ".join(f"{lang} {len(s)}" for lang, s in mine.items()) + ")")
         if title in ripped:
             notes.append("ripped as " + ", ".join(ripped[title]))
-        shared = [str(u) for u in sorted(info) if u != title and set(segs) & set(info[u][1])]
+        shared = [] if dvd else [str(u) for u in sorted(info) if u != title and set(segs) & set(info[u][1])]
         if shared:
             notes.append("shares segments with title " + ", ".join(shared))
         where = ",".join(map(str, segs)) or "?"
@@ -1234,6 +1257,8 @@ if __name__ == "__main__":
         sys.exit("usage: audio_similarity.py <audio-levels-20ms folder> ... | --titles corpus/owner/<slug>")
     main(sys.argv[1:])
 ```
+
+Listing refreshed on 2026-10-13 after the DVD change (c7fa936): from `segments()` to the end, it is the current text of `scripts/phase0/audio_similarity.py` (new: `dvd_scan()`, which makes `titles_report()` skip the shared-segment check on a DVD scan; also the `<- wanted` mark of section 9.1, which uses `ISO639` and `NO_LANGUAGE`, defined elsewhere in the script). The text above `segments()` is the design-time listing.
 
 ### `scripts/phase0/test_audio_similarity.py`
 
@@ -1497,10 +1522,50 @@ class Titles(unittest.TestCase):
         self.assertIn("<- eng x2; ripped as e16", lines[4])
         self.assertIn("<- eng x2", lines[5])  # no flags attribute at all: not derived
 
+    def test_a_dvds_segments_are_not_compared_across_titles(self):
+        # A DVD title's segments are the cells of its own program chain, numbered from 1 in every title.
+        self.assertFalse(sim.dvd_scan(robot.parse(self.SCAN)))
+        dvd = 'CINFO:1,6206,"DVD disc"\n' + self.SCAN
+        self.assertTrue(sim.dvd_scan(robot.parse(dvd)))
+        self.assertTrue(sim.dvd_scan(robot.parse(self.SCAN + 'SINFO:0,0,5,0,"V_MPEG2"\n')))
+        self.assertFalse(sim.dvd_scan(robot.parse(dvd + 'TINFO:0,16,0,"00800.mpls"\n')))  # a source file: a Blu-ray
+        firefly = REPO / "corpus" / "thediscdb" / "series" / "Firefly (2002)" / "2003-dvd-the-complete-series" / "disc01.txt"
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            d = pathlib.Path(tmp) / "firefly"
+            d.mkdir()
+            (d / "scan.txt").write_bytes(firefly.read_bytes())
+            lines = sim.titles_report(d)
+        self.assertIn("so shared segments are not looked for", lines[2])
+        self.assertFalse([line for line in lines if "shares segments" in line])
+        one = [line for line in lines if line.split()[:2] == ["title", "1"]]
+        self.assertEqual(len(one), 1)
+        self.assertIn("audio eng 1,4; fre 2; spa 3   <- eng x2", one[0])  # the episode with a commentary, not skipped
+
+    @unittest.skipUnless((REPO / "corpus" / "owner" / "short-circuit-2-1988-dvd" / "scan.txt").is_file(),
+                         "the evidence repository is not cloned at corpus/owner")
+    def test_the_short_circuit_2_dvd_shares_no_segment(self):
+        lines = sim.titles_report(REPO / "corpus" / "owner" / "short-circuit-2-1988-dvd")
+        self.assertIn("so shared segments are not looked for", lines[2])
+        self.assertFalse([line for line in lines if "shares segments" in line])
+
+    def test_a_title_with_one_stream_in_each_wanted_language_is_marked(self):
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            d = pathlib.Path(tmp) / "some-film"
+            d.mkdir()
+            (d / "scan.txt").write_text(self.SCAN.replace('SINFO:1,3,3,0,"fra"', 'SINFO:1,3,3,0,"spa"'), encoding="utf-8")
+            self.assertNotIn("<-", sim.titles_report(d)[3])  # original language unknown: English alone is wanted
+            (d / "tmdb.json").write_text('{"original_language": "es"}', encoding="utf-8")
+            lines = sim.titles_report(d)
+        self.assertIn("TMDb original language: es", lines[0])
+        self.assertEqual(lines[3].split()[1], "1")
+        self.assertIn("audio eng 1; spa 3   <- wanted x2 (eng 1, spa 1)", lines[3])
+
 
 if __name__ == "__main__":
     unittest.main()
 ```
+
+Listing refreshed on 2026-10-13 after the DVD change (c7fa936): `class Titles` is the current text from `scripts/phase0/test_audio_similarity.py` (new: the DVD and `<- wanted` tests; it uses `REPO`, set at the top of the current file as `REPO = pathlib.Path(__file__).resolve().parents[2]`). The rest of this listing is the design-time text.
 
 ## 7. Plan steps for Task 12
 

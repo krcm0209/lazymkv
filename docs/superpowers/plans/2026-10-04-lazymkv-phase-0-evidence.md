@@ -3046,9 +3046,15 @@ Which disc is in the drive: none needed.
 ```powershell
 # Experiment 5 evidence that record-disc.ps1 does not keep (Task 9). Run it over plain ssh: it needs C: and
 # the drive, never the share. It writes into $Recordings\<Slug>\ (C:\lazymkv\phase0\recordings\<Slug>\):
-#   makemkv-data-<Listing>.txt  one line per file in MakeMKV's data folders: last write time (UTC), size, path.
-#                               No file is opened. Of MakeMKV's registry settings only app_DataDir is read;
-#                               app_Key (the licence key) is never read.
+#   makemkv-data-<Listing>.txt  one line per file in MakeMKV's data folders: last write time (UTC), size, and the
+#                               file as keydb.cfg, as one of the extensions the experiment expects (.cfg .conf .tar
+#                               .tgz .gz .tmp .bin .dat), or as "file", each with #<a short keyed hash of its path>.
+#                               A name can name a disc (the MKB20_* cache files) or a drive (dump_FW_*), and the text
+#                               after a file's last dot can be part of its name, so no other name is written. The
+#                               hash key, made once, stays in $P0\exp05-name-key.txt (never in a recording), so a
+#                               file keeps its hash from one listing to the next. No file is opened.
+#                               Of MakeMKV's registry settings only app_DataDir is read; app_Key (the licence key) is
+#                               never read.
 #   <DriveList>.txt             only with -DriveList, and made before the folder listing: MakeMKV's drive
 #                               listing (info disc:9999, the call Get-DiscIndex makes before every scan),
 #                               recorded by lazymkv-capture with .timing.jsonl, .stderr and .exit.json.
@@ -3122,6 +3128,19 @@ try {
     } else {
         $lines = @("app_DataDir: (no $settings key in this session)")
     }
+    # Only keydb.cfg is listed by name (experiment 5 looks for it); a file with one of the extensions below by that
+    # extension; any other file as "file", since the text after the last dot of a name without a real extension is
+    # part of the name. The keyed hash of its full path tells the listings' files apart and shows which changed, and
+    # names nothing.
+    $shownExtensions = @('.cfg', '.conf', '.tar', '.tgz', '.gz', '.tmp', '.bin', '.dat')
+    $keyFile = "$P0\exp05-name-key.txt"
+    if (-not (Test-Path -LiteralPath $keyFile)) {
+        $key = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($key)
+        Set-Content -LiteralPath $keyFile -Value ([Convert]::ToBase64String($key)) -Encoding ASCII -ErrorAction Stop
+    }
+    $hmac = [System.Security.Cryptography.HMACSHA256]::new([Convert]::FromBase64String((Get-Content -LiteralPath $keyFile -Raw -ErrorAction Stop).Trim()))
+    $lines += "names: keydb.cfg by name; a file with an extension in $($shownExtensions -join ' ') by that extension; every other file as 'file'; #<hash>: a keyed hash of the path (exp05-evidence.ps1)"
     $folders = @("$env:USERPROFILE\.MakeMKV", "$env:APPDATA\MakeMKV", "$env:LOCALAPPDATA\MakeMKV", "$env:ProgramData\MakeMKV")
     if ($dataDir) { $folders = @([Environment]::ExpandEnvironmentVariables([string]$dataDir)) + $folders }
     $found = @()
@@ -3131,7 +3150,11 @@ try {
         $items = @(Get-ChildItem -LiteralPath $folder -Recurse -Force -File -ErrorAction Stop | Sort-Object FullName)
         $lines += "folder: $folder files=$($items.Count)"
         foreach ($item in $items) {
-            $lines += ('{0} UTC {1,12} {2}' -f $item.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss'), $item.Length, $item.FullName)
+            $digest = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($item.FullName.ToLowerInvariant()))
+            $hash = -join ($digest[0..5] | ForEach-Object { $_.ToString('x2') })
+            $shown = 'file'
+            if ($item.Name -eq 'keydb.cfg') { $shown = 'keydb.cfg' } elseif ($shownExtensions -contains $item.Extension) { $shown = $item.Extension.ToLowerInvariant() }
+            $lines += ('{0} UTC {1,12} {2} #{3}' -f $item.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss'), $item.Length, $shown, $hash)
         }
         $found += $folder
         $total += $items.Count
@@ -3208,7 +3231,7 @@ Expected:
    - Any other failure is a defect in the script: stop and report.
 3. Within seconds, `RESULT FAILED: C:\lazymkv\phase0\recordings\zz-exp05-test\makemkv-data-1-after-drives.txt already exists and is kept as evidence; choose another name`, then `exit=1`. MakeMKV was not started. If this run succeeds instead, the guard does not hold: stop and report.
 4. `drives.txt` shows the `MSG:1005` banner and the `DRV` lines. Note any other `MSG` lines and whether they come before or after the `DRV` lines.
-5. The listing shows the `app_DataDir:` line and one `folder:` line per candidate folder. Each file line shows only a time, a size and a path, never any file content.
+5. The listing shows the `app_DataDir:` line and one `folder:` line per candidate folder. Each file line shows only a time, a size, a name (`keydb.cfg`, a listed extension or `file`) and a `#` hash, never a path or any file content. The `names:` line says how.
 6. `fc` prints `FC: no differences encountered`, or the lines that differ. Those files were written or changed by the drive listing.
 
 Write down PROBE_ANSWER: `on a disc MakeMKV had <never|already> scanned on this machine, the drive listing printed <only the banner and DRV lines | MSG codes ..., before/after the DRV lines> and changed <nothing | these files: ...> in MakeMKV's data folders`. Whatever it shows, Disc A's drive listing is recorded in Step 5 before any scan, so MakeMKV's first messages about Disc A are kept either way.
@@ -3564,7 +3587,7 @@ Expected:
   - Every message only in one run is printed with its full text. So is every message in the 5000 range, and every message with code 1009, 1011, 2003, 3007, 3032, 3303, 3338, 3339 or 3344, in either run.
   - Title-list messages are only counted, because compare_scans.py judges the titles.
   - A `MISSING` line means that file was not recorded; that comparison is then reported as not made.
-- `grep` shows the folders, the `app_DataDir` value, and whether a `keydb.cfg` existed before MakeMKV first saw Disc A. Each `diff` prints nothing when MakeMKV's data folders did not change across that run. Otherwise it prints the files that appeared (`>`), disappeared (`<`) or changed (both). It exits 1 when they differ; that is a result.
+- `grep` shows the folders, the `app_DataDir` value, and whether a `keydb.cfg` existed before MakeMKV first saw Disc A (a file line `keydb.cfg #<hash>`; the `names:` line also contains the word, which proves nothing). Each `diff` prints nothing when MakeMKV's data folders did not change across that run. Otherwise it prints the files that appeared (`>`), disappeared (`<`) or changed (both). It exits 1 when they differ; that is a result.
 
 - [ ] **Step 10: Write the experiment 5 report**
 
@@ -3598,7 +3621,7 @@ Under "What was observed", record:
 - Every `3338` ("Downloading latest ...") line in the offline runs, and what follows it: a failure such as `3339`, or nothing.
 - Whether the drive listing opened Disc A: any message after its `DRV` lines, and the listing 0 to 1 diff. Compare this with PROBE_ANSWER.
 - If `meta.json`'s `volume_label` and the label in the `D:` DRV line of `drives-offline.txt` differed in Step 9, both labels.
-- MakeMKV's data folders: DATA_FOLDERS and the `app_DataDir` value. Say which data files existed before MakeMKV first saw Disc A, for example whether a `keydb.cfg` was present. Then say which files appeared or changed after each of the four runs, from the four diffs. Name the files only, never their contents. This replaces the old assumption that the data folder "already holds keydb.cfg and cached keys". A `keydb.cfg` present before the first sight can let a disc open offline. A file that the offline scan wrote, and the online scan then read, means the online scan was not a clean baseline.
+- MakeMKV's data folders: DATA_FOLDERS and the `app_DataDir` value. Say which data files existed before MakeMKV first saw Disc A, for example whether a `keydb.cfg` was present. Then say which files appeared or changed after each of the four runs, from the four diffs. Identify the files only by their listing entries (the `keydb.cfg` name or extension, size, time and `#` hash), never by their paths or contents. This replaces the old assumption that the data folder "already holds keydb.cfg and cached keys". A `keydb.cfg` present before the first sight can let a disc open offline. A file that the offline scan wrote, and the online scan then read, means the online scan was not a clean baseline.
 - Whether either scan printed `MSG:1009` (profile parsing error), which would mean MakeMKV rejected the job profile (spec 9.3).
 - The disc ID:
   - `disc_id` 40 hex characters: `AACS/Unit_Key_RO.inf` was readable in this drive.
