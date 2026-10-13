@@ -1799,7 +1799,7 @@ grep -rIl 'eyJhbGciOi' corpus/owner
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
 git add scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Run experiments 6 and 13: audio profiles, subtitle alignment, commentary by audio content" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiments 6 and 13: audio profiles, subtitle alignment, commentary by audio content"
 ```
 
 Expected:
