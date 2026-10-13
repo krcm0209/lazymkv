@@ -39,7 +39,7 @@
 - A job script parameter that takes a list is declared `[string[]]` (or `[int[]]` for numbers): `job.sh` hands the arguments to `run-interactive.ps1` as one `ArgLine`, which is evaluated inside `-Command`, where `eng,und` is an array literal, so a `[string]` parameter would receive `eng und`.
 - Evidence files written by PowerShell are UTF-8 (`-Encoding UTF8`); Python reads them with `encoding="utf-8-sig"`.
 - More than a trivial command on the mini PC is run as a `.ps1` file copied with `scp` and started with `powershell -NoProfile -ExecutionPolicy Bypass -File`; `C:\lazymkv\phase0\config.ps1` is changed by writing the whole file on the Mac and copying it over.
-- Commit commands take the form `git commit -m "<message>" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- Commit commands take the form `git commit -m "<message>"`.
 - The saving message is `MSG:5014`, or `MSG:5015` when a profile is in use. Found on 2026-10-05, on the first real rip: with `--profile`, MakeMKV 2.0.0 prints `MSG:5015` ("Saving %1 titles into directory %2 using profile '%3' from file '%4'") and no `MSG:5014`. Every rip in this plan uses a profile. Wherever a task says `MSG:5014`, read "`MSG:5014` or `MSG:5015`"; the scripts accept both, and their labels (`5014=`, `saw_5014`, `stopped-at-5014`, `added-before-5014`) keep their names and are true for either code. A `codes=` list then ends in 5015. The profile named in the `MSG:5015` line is the proof that MakeMKV used the job profile.
 - Decision D16 (owner, 2026-10-05): every MakeMKV call runs with `--debug` (`Get-MkFlags` adds it) and its debug log, which MakeMKV 2.0.0 always writes to `%USERPROFILE%\MakeMKV_log.txt`, is kept beside the call's output as `<output>.makemkv-debug.txt` by `Save-MkDebugLog`. With `--debug` the robot output also carries `MSG:1004` and `MSG:1003` lines. Every rip also keeps `system.csv` (CPU load, free RAM and bytes written every 5 s) and `system-events.json` (Windows warnings and errors about storage, USB and the network during the rip). A script that calls MakeMKV without `Get-MkFlags` adds `--debug` and calls `Save-MkDebugLog` itself. Exceptions: env.ps1's Get-DiscIndex drive listing runs without --debug (its log would be overwritten by the call that follows); scan-copy.ps1's nodebug/plain diagnosis modes leave it out on purpose; backup-disc.ps1 and extract-from-copy.ps1 keep the debug log and system events but not the free-RAM/CPU sampler.
 - Tuning dataset (decision D16): every rip that ends `RESULT ok` is added to the audio tuning dataset after its probe and pull, while the rip is still in staging, and at the latest before its task's commit. `python3 scripts/phase0/audio_dataset.py args corpus/owner/<slug> <label>` prints one job line and its `wait.sh` line for the title's programme reference against every other stream in a wanted language (or the reference alone), then one per language that is not wanted and has two or more streams (dataset only). Run each pair, then `scripts/phase0/pull-recording.sh <slug>`, `python3 scripts/phase0/audio_labels.py auto corpus/owner/<slug>` and `python3 scripts/phase0/audio_dataset.py`. audio-levels.ps1 writes, besides its level folder, a compact copy of every audio stream (`audio-proxy.mka`: FLAC, 8 kHz, mono, 24 bit) and a copy of the level folder to `$TuningData\<slug>\<label>\` (`\\unas-pro\media\lazymkv-tuning`); it writes `audio-proxy.json` into the level folder last, so a level folder without it is from a run that did not finish. The harness's last list names every successful rip not yet in the dataset. A rip in staging is deleted only once that list no longer names it. Nothing under `$TuningData` is deleted without the owner's say. The one exception to writing large files only to the share (never to `C:`): a proxy may be copied to C:\lazymkv\phase0\tmp\tuning-fetch for the minutes an scp takes, at most 2 GB, deleted right after. `scripts/phase0/tuning-fetch.ps1 -Slug <slug> -Label <label>` (a job) makes that copy of one title's dataset folder, refuses more than 2 GB or a second copy while one is still there, and prints the size, the `scp` command and the clean-up command; the Mac runs the clean-up command immediately after the `scp`. It is needed only when a future measure needs the proxies on the Mac, never in this routine. The owner's label for each measured track is asked for without showing any verdict and is recorded only with `audio_labels.py set` or `unset` (never by editing the JSON); whether a label counts for experiment 13 is worked out by the harness, never stored. `audio_dataset.py` exits 1 when a track the owner labelled as programme audio gets a drop verdict, when a level folder is measured against the wrong reference, when a reference is labelled as unwanted audio, when a labelled programme track gets `commentary-cross-language`, or when a labelled candidate, taken as the reference, would give the programme the commentary verdict (`swapped reference`) (stop and report); 2 when a labels file does not validate; 3 when something could not be checked (level files missing, a label with no measurement, a measured track gone).
@@ -2980,10 +2980,10 @@ Which disc is in the drive: does not matter.
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 git add scripts/phase0/record-disc.ps1 scripts/phase0/pull-recording.sh corpus/owner docs/phase0/environment.md
 git status --short
-git commit -m "Record the first discs, rehearse a scan job and check the fingerprint against TheDiscDB" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Record the first discs, rehearse a scan job and check the fingerprint against TheDiscDB"
 ```
 
 Expected:
@@ -3217,7 +3217,7 @@ Ask the owner to take the rehearsal disc out, keep the drive empty and keep Disc
 ```bash
 ssh USER@makemkv-box "vol D:"
 git add scripts/phase0/exp05-evidence.ps1
-git commit -m "Add the experiment 5 evidence script" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Add the experiment 5 evidence script"
 ```
 
 Expected: `vol` prints `The device is not ready.` (the drive is empty), and the commit succeeds.
@@ -3645,10 +3645,10 @@ Which disc is in the drive: Disc A. Leave it in: Tasks 10 to 14 use it.
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 git add corpus/owner/SLUG_A docs/phase0/experiments/EXP-05-offline-and-unit-key.md docs/phase0/experiments/EXP-12-java-labels.md
 git diff --cached --name-only
-git commit -m "Record Disc A offline and online; report experiments 5 and 12" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Record Disc A offline and online; report experiments 5 and 12"
 ```
 
 Expected:
@@ -4300,10 +4300,10 @@ Which disc is in the drive: does not matter. Tell the owner that the experiment 
 
 ```bash
 find corpus/owner/SLUG -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner/SLUG
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner/SLUG
 git add scripts/phase0/exp02-index-guard.ps1 corpus/owner/SLUG docs/phase0/experiments/EXP-02-index-guard.md
 git status --short
-git commit -m "Run experiment 2: index guard" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiment 2: index guard"
 ```
 
 Expected:
@@ -5358,10 +5358,10 @@ Which disc is in the drive: does not matter. Disc A stays in for Task 12.
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 git add scripts/phase0/rip-title.ps1 scripts/phase0/probe-title.ps1 corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Run experiments 1 and 4: all-tracks rip to the share" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiments 1 and 4: all-tracks rip to the share"
 ```
 
 Expected:
@@ -6547,14 +6547,14 @@ Which disc is in the drive: does not matter. Disc A is needed again in Task 13, 
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 find corpus/owner -name '*.ocr.jsonl' -o -name 'evidence.mks' -o -name 'f-*.png'
 grep -l '"examples"' corpus/owner/*/*/subs-ocr*/summary.json
 ls -d "$HOME"/lazymkv-text/* 2>/dev/null
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
 git add .gitignore scripts/phase0/probe-audio.ps1 scripts/phase0/audio-levels.ps1 scripts/phase0/audio_similarity.py scripts/phase0/test_audio_similarity.py scripts/phase0/audio_dataset.py scripts/phase0/audio_labels.py scripts/phase0/proxy_levels.py scripts/phase0/test_audio_dataset.py scripts/phase0/tuning-fetch.ps1 scripts/phase0/ocr-subs.ps1 scripts/phase0/subtitle_text.py scripts/phase0/test_subtitle_text.py corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Run experiments 6, 13 and 14: audio profiles, subtitle alignment, commentary by audio, subtitles by text" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiments 6, 13 and 14: audio profiles, subtitle alignment, commentary by audio, subtitles by text"
 ```
 
 Expected:
@@ -7312,11 +7312,11 @@ Which disc is in the drive: does not matter. Disc A should be back in for Task 1
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 python3 -m unittest discover -s scripts/phase0 -p 'test_*.py' 2>&1 | tail -1
 git add scripts/phase0/exp11_tracks.py scripts/phase0/test_exp11_tracks.py corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Run experiment 11: selection by language" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiment 11: selection by language"
 ```
 
 Expected:
@@ -8346,10 +8346,10 @@ Which disc is in the drive: none; Disc A is with the owner. Disc A's part in pha
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 git add scripts/phase0/backup-disc.ps1 scripts/phase0/extract-from-copy.ps1 scripts/phase0/second-drive.ps1 corpus/owner/SLUG_A docs/phase0 corpus/owner/audio-dataset.json
 git status --short
-git commit -m "Run experiments 3 and 7: whole-disc copy and eject" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiments 3 and 7: whole-disc copy and eject"
 ```
 
 Expected:
@@ -8619,10 +8619,10 @@ A pull never deletes `notes.md` (Task 8's pull-recording.sh), and committing str
 
 ```bash
 find corpus/owner/SLUG -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner/SLUG
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner/SLUG
 git add corpus/owner/SLUG
 git status --short
-git commit -m "Record SLUG for Task 15" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Record SLUG for Task 15"
 ```
 
 Expected:
@@ -8690,10 +8690,10 @@ Then commit:
 
 ```bash
 find corpus/owner/EXP2_SLUG -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner/EXP2_SLUG
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner/EXP2_SLUG
 git add corpus/owner/EXP2_SLUG docs/phase0/experiments/EXP-02-index-guard.md
 git status --short
-git commit -m "Repeat experiment 2 on EXP2_SLUG" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Repeat experiment 2 on EXP2_SLUG"
 ```
 
 When experiment 2 was not repeated, skip `find` and `grep`, stage only the report, and commit it:
@@ -8701,7 +8701,7 @@ When experiment 2 was not repeated, skip `find` and `grep`, stage only the repor
 ```bash
 git add docs/phase0/experiments/EXP-02-index-guard.md
 git status --short
-git commit -m "Record that experiment 2 could not be repeated" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Record that experiment 2 could not be repeated"
 ```
 
 Expected:
@@ -9071,10 +9071,10 @@ Which disc is in the drive: does not matter. Tell the owner that phase 0 needs n
 
 ```bash
 find corpus/owner -iname '*unit_key*'
-grep -rIl 'eyJhbGciOi' corpus/owner
+grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
 git add corpus/owner docs/phase0/experiments
 git status --short
-git commit -m "Record the remaining discs; run experiments 8 and 10" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Record the remaining discs; run experiments 8 and 10"
 ```
 
 Expected:
@@ -9474,7 +9474,7 @@ Which disc is in the drive: does not matter.
 ```bash
 git add scripts/phase0/make-test-library.ps1 docs/phase0/experiments/EXP-09-naming.md
 git status --short
-git commit -m "Run experiment 9: naming on the media servers" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Run experiment 9: naming on the media servers"
 ```
 
 Expected:
@@ -10140,7 +10140,7 @@ find corpus/owner corpus/scenarios -iname '*unit_key*'
 grep -rIl 'eyJhbGciOi' corpus docs/phase0 docs/superpowers/specs
 git add corpus/scenarios scripts/phase0/list-leftovers.ps1 docs/phase0/REPORT.md docs/superpowers/specs/2026-10-04-lazymkv-design.md
 git status --short
-git commit -m "Fold phase 0 results into the spec; add the phase report" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Fold phase 0 results into the spec; add the phase report"
 ```
 
 Expected:
