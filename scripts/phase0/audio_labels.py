@@ -20,10 +20,12 @@ has become invalid can be repaired with them, one entry at a time.
 
 Whether a label counts towards experiment 13 (spec section 17 row 13) is not stored: audio_dataset.py works it out
 each time from the label and from the discs and tracks the thresholds were fitted on, so a later fit never leaves a
-stale flag behind. A label counts when the owner named the track from listening, the packaging, the menu, a flag or
-TheDiscDB, before seeing the rule's verdict, and is sure; when it is not main, a duplicate or unknown; and when
-neither its disc nor the track is one the thresholds were fitted on: the disc row 13 names, and every disc or track
-in corpus/owner/audio-fitted.json. --spec <file> names the spec (default: the repository's).
+stale flag behind. A label counts when the track's content was checked before the rule's verdict was seen (how
+"listened": a person listened to it; decision D23), and the owner is sure; when it is not main, a duplicate or
+unknown; and when neither its disc nor the track is one the thresholds were fitted on: the disc row 13 names, and
+every disc or track in corpus/owner/audio-fitted.json. The packaging, the menu, a flag and TheDiscDB are recorded as
+observations (how "packaging", "menu", "flag", "thediscdb") and do not count on their own; "inferred" never counts.
+--spec <file> names the spec (default: the repository's).
 
 The labels file:
   {"format": "lazymkv audio labels v1", "slug": "<slug>",
@@ -83,15 +85,18 @@ KINDS = {
     "unknown": ("unknown", "unknown", "the owner does not know"),
 }
 HOW = {
-    "listened": "the owner listened to it",
-    "packaging": "the packaging says so",
-    "menu": "the disc's menu says so",
-    "flag": "a flag in MakeMKV's scan",
-    "thediscdb": "TheDiscDB's track description",
+    "listened": "a person listened to it: the track's content was checked (counts)",
+    "packaging": "the packaging says so (an observation: does not count on its own, D23)",
+    "menu": "the disc's menu says so (an observation: does not count on its own, D23)",
+    "flag": "a flag in MakeMKV's scan (an observation: does not count on its own, D23)",
+    "thediscdb": "TheDiscDB's track description (an observation: does not count on its own, D23)",
     "md5": "identical packet MD5 (an exact duplicate; no listening needed)",
     "inferred": "inferred, for example from the disc's layout; never counts",
 }
-COUNTING_HOW = ("listened", "packaging", "menu", "flag", "thediscdb")  # spec section 17, row 13
+# Spec section 17 row 13 and decision D23: a label counts only when the track's content was checked before the
+# verdict. The other sources are kept with the label as observations; they never make it count.
+COUNTING_HOW = ("listened",)
+OBSERVATION_HOW = ("packaging", "menu", "flag", "thediscdb")
 NOT_COUNTED = ("main", "duplicate", "unknown")
 COMMENTARY_KINDS = ("commentary", "partial-commentary")
 TITLE_KINDS = ("feature", "episode", "extra", "other")
@@ -208,8 +213,10 @@ def not_counted_because(entry, slug, fitted):
     """'' when the label counts towards experiment 13 (spec section 17 row 13), otherwise why it does not."""
     if entry["kind"] in NOT_COUNTED:
         return f"a {entry['kind']} track never counts"
+    if entry["how"] in OBSERVATION_HOW:
+        return f"'{entry['how']}' is an observation, not a check of the track's content (row 13, D23)"
     if entry["how"] not in COUNTING_HOW:
-        return f"'{entry['how']}' is not a source row 13 accepts"
+        return f"'{entry['how']}' is not a check of the track's content (row 13, D23)"
     if entry["saw_verdict"] is not False:
         return "the owner saw the verdict first"
     if entry["sure"] is not True:

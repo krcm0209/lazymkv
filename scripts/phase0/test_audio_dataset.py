@@ -203,16 +203,41 @@ class Labels(unittest.TestCase):
         fitted = {("fit-disc", None, None), ("disc-h", "t0", 2)}
         why = lambda slug="disc-b", stream=3, **e: labels.not_counted_because(entry("t0", stream, **e), slug, fitted)
         self.assertEqual(why(kind="commentary"), "")
-        self.assertEqual(why(kind="derived-core", how="flag"), "")
+        self.assertEqual(why(kind="derived-core"), "")
         self.assertIn("never counts", why(kind="main"))
         self.assertIn("never counts", why(kind="duplicate", how="md5"))
         self.assertIn("never counts", why(kind="unknown"))
-        self.assertIn("not a source row 13 accepts", why(kind="commentary", how="inferred"))
+        self.assertIn("is not a check of the track's content", why(kind="commentary", how="inferred"))
         self.assertIn("saw the verdict", why(kind="commentary", saw=True))
         self.assertIn("not sure", why(kind="commentary", sure=False))
         self.assertIn("fitted on it", why(kind="commentary", slug="fit-disc"))
         self.assertIn("fitted on it", why(kind="commentary", slug="disc-h", stream=2))
         self.assertEqual(why(kind="commentary", slug="disc-h", stream=3), "")
+
+    def test_only_a_check_of_the_tracks_content_counts_d23(self):
+        # Spec section 17 row 13 and D23: the packaging, the menu, a flag and TheDiscDB are observations, recorded with
+        # the label, never counted on their own; listening to the track is the one source that counts.
+        self.assertEqual(labels.COUNTING_HOW, ("listened",))
+        self.assertEqual(set(labels.HOW), set(labels.COUNTING_HOW) | set(labels.OBSERVATION_HOW) | {"md5", "inferred"})
+        why = lambda how, kind="commentary": labels.not_counted_because(entry("t0", 3, kind, how=how), "disc-b", set())
+        self.assertEqual(why("listened"), "")
+        for how in ("packaging", "menu", "flag", "thediscdb"):
+            self.assertIn(how, labels.OBSERVATION_HOW)
+            self.assertEqual(why(how), f"'{how}' is an observation, not a check of the track's content (row 13, D23)")
+            self.assertIn("observation", why(how, kind="lossy-companion"))
+            self.assertIn("does not count", labels.HOW[how])
+        self.assertIn("observation", why("flag", kind="derived-core"))  # what `auto` writes for a derived core
+        self.assertEqual(labels.problems({"format": labels.FORMAT, "slug": "disc-b", "titles": {}, "tracks": [
+            entry("t0", 3, "commentary", how="packaging")]}, "disc-b"), [])  # still a valid label: recorded, not counted
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            root = pathlib.Path(tmp)
+            (root / "spec.md").write_text(SPEC, encoding="utf-8")
+            (root / "disc-b").mkdir()
+            code, out = run_labels(["--spec", root / "spec.md", "set", root / "disc-b", "t0", "3", "commentary", "--how",
+                                    "packaging", "--saw-verdict", "no", "--date", "2026-10-12"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("labelled t0 stream 3: commentary (packaging, 2026-10-12, saw verdict no, sure yes), counts=False "
+                          "('packaging' is an observation, not a check of the track's content (row 13, D23))", out)
 
     def test_set_adds_replaces_keeps_history_and_refuses_a_new_problem(self):
         with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
@@ -226,7 +251,7 @@ class Labels(unittest.TestCase):
             self.assertIn("labelled t0 stream 3: commentary (listened, 2026-10-05, saw verdict no, sure yes), counts=True", out)
             code, out = run_labels(set_ + ["commentary", "--how", "listened", "--saw-verdict", "no", "--film-audible", "yes", "--date", "2026-10-07"])
             self.assertIn("unchanged t0 stream 3", out)
-            code, out = run_labels(set_ + ["partial-commentary", "--how", "menu", "--saw-verdict", "yes", "--date", "2026-10-06"])
+            code, out = run_labels(set_ + ["partial-commentary", "--how", "listened", "--saw-verdict", "yes", "--date", "2026-10-06"])
             self.assertEqual(code, 0, out)
             self.assertIn("counts=False (the owner saw the verdict first); replaces 1 earlier label(s)", out)
             code, out = run_labels(set_ + ["unknown", "--how", "listened", "--saw-verdict", "no", "--sure", "no", "--date", "2026-10-07"])
@@ -385,6 +410,26 @@ class Dataset(unittest.TestCase):
         self.assertIn("measures: 0 analysed now, 4 taken from the cache", out)
         self.assertIn("Changes since the previous snapshot", out)
         self.assertIn(section(out, "Changes since the previous snapshot").splitlines()[1], "  none")
+
+    def test_a_run_that_changes_nothing_leaves_the_baseline_file_as_it_is(self):
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            c = self.copy(tmp)
+            base = c / "audio-dataset.json"
+            data = json.loads(base.read_text(encoding="utf-8"))
+            data["created"], data["corpus"] = "2000-01-01T00:00:00", str(c)  # as if the run had been made on this copy
+            base.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+            before = base.read_text(encoding="utf-8")
+            code, out = run([c, "--spec", self.spec])
+            self.assertEqual(code, 0, out)
+            self.assertIn(f"snapshot: {base} (unchanged but for its time: not rewritten)", out)
+            self.assertEqual(base.read_text(encoding="utf-8"), before)  # not even its "created"
+            write_labels(c / "disc-b", [entry("all-tracks", 2, "lossy-companion"), entry("all-tracks", 3, "commentary",
+                                        film_audible=False), entry("all-tracks", 4, "duplicate", how="md5")],
+                         {"all-tracks": title("feature")})
+            code, out = run([c, "--spec", self.spec])
+            self.assertEqual(code, 0, out)
+            self.assertIn(f"snapshot: {base}\n", out)
+            self.assertNotEqual(json.loads(base.read_text(encoding="utf-8"))["created"], "2000-01-01T00:00:00")  # a new label
 
     def test_a_cached_measure_comes_back_with_its_nan(self):
         meas = ds.Measurer({})
@@ -566,7 +611,7 @@ class Joins(unittest.TestCase):
     def test_a_rerip_of_a_title_with_duplicates_takes_each_label_from_the_same_copy(self):
         for label in ("rehearsal", "rehearsal-512"):  # streams 1 and 3, 2 and 4 have the same packets
             folder(self.c / "disc-r" / label, "A", [(2, COPY, "B"), (3, MIX, "A"), (4, COPY, "B")])
-        write_labels(self.c / "disc-r", [entry("rehearsal", 2, "derived-core", how="flag"), entry("rehearsal", 3, "duplicate", how="md5"),
+        write_labels(self.c / "disc-r", [entry("rehearsal", 2, "derived-core"), entry("rehearsal", 3, "duplicate", how="md5"),
                                          entry("rehearsal", 4, "duplicate", how="md5")])
         code, out = run([self.c, "--spec", self.spec])
         self.assertEqual(code, 0, out)
@@ -780,11 +825,14 @@ class Joins(unittest.TestCase):
 
 def build_count_corpus(c):
     """Every counting rule of experiment 13 decides one of the numbers this corpus prints."""
-    folder(c / "disc-d" / "t0", "d1", [(2, COMMENT, "d2"), (3, COMMENT, "d3"), (4, COPY, "d4"), (5, COPY, "d5"), (6, COPY, "d6")])
+    folder(c / "disc-d" / "t0", "d1", [(2, COMMENT, "d2"), (3, COMMENT, "d3"), (4, COPY, "d4"), (5, COPY, "d5"), (6, COPY, "d6"),
+                                       (7, COPY, "d7"), (8, COMMENT, "d8")])
     folder(c / "disc-d" / "t1", "d1", [(2, COMMENT, "d2")])  # the same commentary again, labelled again: counts once
+    # Streams 7 and 8 are named from the packaging and from TheDiscDB only: observations, never counted (D23).
     write_labels(c / "disc-d", [entry("t0", 2, "commentary", film_audible=True), entry("t0", 3, "commentary", film_audible=None),
-                                entry("t0", 4, "lossy-companion"), entry("t0", 5, "derived-core", how="flag"),
-                                entry("t0", 6, "main"), entry("t1", 2, "commentary")],
+                                entry("t0", 4, "lossy-companion"), entry("t0", 5, "derived-core"),
+                                entry("t0", 6, "main"), entry("t0", 7, "lossy-companion", how="packaging"),
+                                entry("t0", 8, "commentary", how="thediscdb", film_audible=True), entry("t1", 2, "commentary")],
                  {"t0": title("feature", True), "t1": title("feature", True)})
     folder(c / "disc-e" / "t0", "e1", [(2, COMMENT, "e2"), (3, COMMENT, "e3"), (4, COMMENT, "e4"), (5, COMMENT, "e5")], fc=False, channels=2)
     write_labels(c / "disc-e", [entry("t0", 2, "commentary", film_audible=False), entry("t0", 3, "commentary", saw=True),
@@ -826,7 +874,7 @@ class Counts(unittest.TestCase):
         self.assertIn("no centre channel     2 of 1 titles", e)
         self.assertIn("dialogue-heavy        2 of 1 titles", e)
         self.assertIn("commentary verdicts   on 3 of 3 discs", e)
-        self.assertIn("not counted: disc-d 2, disc-e 3, disc-g 1, disc-h 2", e)
+        self.assertIn("not counted: disc-d 4, disc-e 3, disc-g 1, disc-h 2", e)  # disc-d: main, t1's copy, two observations
 
     def test_the_answer_follows_the_rules_of_row_13(self):
         self.assertIn("as it stands: not answered: too few commentaries, programme tracks, separately encoded programme tracks", self.out)
@@ -992,7 +1040,8 @@ class Routine(unittest.TestCase):
             lines = labels.auto(slug, "2026-10-05", "fit-disc")
             data = json.loads((slug / "audio-labels.json").read_text(encoding="utf-8"))
         self.assertEqual(lines, ["labelled t0 stream 5: duplicate (md5), counts=False (a duplicate track never counts)",
-                                 "labelled t0 stream 6: derived-core (flag), counts=True",
+                                 "labelled t0 stream 6: derived-core (flag), counts=False ('flag' is an observation, "
+                                 "not a check of the track's content (row 13, D23))",
                                  "labelled t0 stream 7: duplicate (md5), counts=False (a duplicate track never counts)",
                                  "t1: derived cores not labelled: the file has 2 audio streams and the scan's title 1 has 3"])
         got = {(t["stream"], t["kind"], t["how"]) for t in data["tracks"]}

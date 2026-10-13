@@ -10,7 +10,7 @@ The first form runs the current rule (audio_similarity.py, imported, never copie
 corpus/owner/<slug>/<label>/audio-levels-20ms-* folder, joins each candidate track with the owner's label in
 corpus/owner/<slug>/audio-labels.json (see audio_labels.py), and prints:
   1. the tracks to label: measured, with no label yet. No verdict is shown: a label counts towards experiment 13 only
-     when the owner gives it before seeing the verdict;
+     when the track's content was checked (a person listened to it) before the verdict was seen (D23);
   2. kind against verdict, over the labelled tracks;
   3. experiment 13: the tracks that count, against the totals of spec section 17 row 13 (read from the spec), and
      the answer as it stands. Whether a label counts is worked out here (audio_labels.not_counted_because), never
@@ -40,7 +40,9 @@ of another rip of the same disc with the same packets and the same place among t
 
 It writes a JSON snapshot of the run: every track's measures, verdict and label (an unlabelled track's verdict is kept
 apart, under "unlabelled_verdicts", not to be shown to the owner), the rule and constants used and the SHA-1 of
-audio_similarity.py. Without --set it replaces <corpus>/audio-dataset.json (committed), which doubles as a cache:
+audio_similarity.py. Without --set it replaces <corpus>/audio-dataset.json (committed), which doubles as a cache
+(a snapshot that would differ from the file it replaces only in its "created" time is not written, so a run that
+changes nothing leaves the committed baseline as it is):
 measures whose inputs, constants and code are unchanged are taken from it. It is not replaced when a folder cannot be
 read, when a track of it is no longer measured, or when no level folder is found: the snapshot then goes to the
 temporary folder, and --snapshot <corpus>/audio-dataset.json replaces the baseline on purpose. With --set it goes to
@@ -566,9 +568,10 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
     for t in cands:
         if not t["counts"]:
             not_counted[t["slug"]] = not_counted.get(t["slug"], 0) + 1
-    lines += ["", f"Experiment 13 (spec section 17 row 13; tracks that count: named before the verdict from listening, "
-                  f"packaging, menu, a flag or TheDiscDB, the owner sure, each disc's packets once, never "
-                  f"{req['fitting_slug']} or a disc or track in audio-fitted.json):",
+    lines += ["", f"Experiment 13 (spec section 17 row 13; tracks that count: content checked by listening before the "
+                  f"verdict, the owner sure, each disc's packets once, never {req['fitting_slug']} or a disc or track in "
+                  f"audio-fitted.json; the packaging, the menu, a flag and TheDiscDB are observations and do not count "
+                  f"on their own, D23):",
               f"  commentaries          {c['commentaries']} of {req['commentaries']}, from {c['commentary_discs']} of "
               f"{req['commentary_discs']} discs; on feature films {c['commentary_features']} of {req['commentary_features']}; "
               f"film clearly audible {c['commentary_audible']} of {req['commentary_audible']} (of them partial: {c['partial']})",
@@ -676,6 +679,7 @@ def load_snapshot(path):
 
 
 def write_snapshot(path, corpus, tracks, unreadable, rule, consts, overrides, req, fitted, meas):
+    """Writes the snapshot to path; False, and nothing written, when path already holds it with another "created"."""
     keep = ("slug", "label", "folder", "role", "stream", "main", "md5", "md5_rank", "codec", "channels", "language",
             "ref_fc", "ref_problem", "excluded", "secondary", "verdict", "not_judged", "duplicate_of", "measures", "key",
             "kind", "inherited_from", "counts", "why_not_counted", "outcome", "cross_language", "swapped_verdict",
@@ -695,9 +699,15 @@ def write_snapshot(path, corpus, tracks, unreadable, rule, consts, overrides, re
             "tracks": rows, "unlabelled_verdicts_note": "verdicts of tracks the owner has not labelled: never show them "
                                                         "to the owner before the label is given",
             "unlabelled_verdicts": hidden, "unreadable": unreadable, "measures_cache": dict(sorted(meas.used.items()))}
+    text = json.dumps(data, indent=1, sort_keys=False) + "\n"
+    old = load_snapshot(path)
+    timeless = lambda d: json.dumps(dict(d, created=None), indent=1, sort_keys=False)  # text, so NaN equals NaN
+    if old is not None and timeless(old) == timeless(json.loads(text)):
+        return False  # the same snapshot but for its time: the file (a committed baseline) is left as it is
     tmp = pathlib.Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1, sort_keys=False) + "\n", encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+    return True
 
 
 def same_rip(slug_dir, label):
@@ -899,9 +909,9 @@ def main(argv):
                f"run again with --snapshot {baseline_path})")
     else:
         out, why = baseline_path, ""
-    write_snapshot(out, corpus, tracks, unreadable, dict(sim.RULE, **rule_over), effective,
-                   {"rule": rule_over, "constants": const_over}, req, fitted, meas)
-    lines += ["", f"snapshot: {out}{why}"]
+    written = write_snapshot(out, corpus, tracks, unreadable, dict(sim.RULE, **rule_over), effective,
+                             {"rule": rule_over, "constants": const_over}, req, fitted, meas)
+    lines += ["", f"snapshot: {out}{why}" + ("" if written else " (unchanged but for its time: not rewritten)")]
     hint = " (see 'Folders that cannot be read', 'Labels without a measurement' and the changes above)"
     if failures:
         lines.append("RESULT FAILED: " + "; ".join(failures + ([f"not checked: {', '.join(unchecked)}"] if unchecked else [])))
