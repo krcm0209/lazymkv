@@ -118,3 +118,34 @@ engine on the mini PC), both with the developer (tuning) mode that keeps every r
 describes, so that the open experiments continue as the owner's discs come through; the owner intends to start the
 engine work next, with that developer mode. Unsure discs and failures (whole-disc copy mode, failure classes,
 watchdogs, resume) follow in phase 3, editions and TV in phase 4, and the GPUI desktop app in phase 5.
+
+## Closing checks, and what was left behind
+
+- Stand-in replay (Task 17 Step 1): `fake-tool` replayed Disc A's online scan (`corpus/scenarios/disc-a-scan/`) with `LAZYMKV_FAKE_SPEED=0.001`; `fc /b` against the original recording on the mini PC: `FC: no differences encountered` (2026-10-06; checked before the machine user name in lines 2 and 47 of the scenario's `scan.txt` was scrubbed to `USER` for the public repository; the mini PC's recording was scrubbed the same way, so the two still match).
+- Tests (Task 17 Step 4): Rust: `20 tests passed, 0 failed (core 8 + 1, capture 7 + 1, fake-tools 2 + 1)` (on the mini PC, 2026-10-12). Python: `Ran 202 tests in 45.370s` / `OK` (2026-10-13; 200 at Step 4 on 2026-10-12, plus 2 tests added by the final-review fix wave).
+- What the experiments left on the share and on the mini PC, as `scripts/phase0/list-leftovers.ps1` listed it (job log `final-list`), and what the owner decided:
+
+| Where | Item | Size | Decision |
+|---|---|---|---|
+| share | `pans-labyrinth-2006-uhd/all-tracks` | 50.6 GB | kept |
+| share | `pans-labyrinth-2006-uhd/backup` | 53.0 GB | deleted by the owner |
+| share | `pans-labyrinth-2006-uhd/eng-only` | 46.4 GB | deleted by the owner |
+| share | `pans-labyrinth-2006-uhd/rehearsal` | 0.2 GB | deleted by the owner |
+| share | `short-circuit-1986-dvd/all-tracks` | 4.0 GB | kept |
+| share | `short-circuit-2-1988-dvd/all-tracks` | 0.0 GB (the failed rip) | deleted by the owner |
+| share | `short-circuit-2-1988-dvd/all-tracks-2` | 3.6 GB | kept |
+| share | `short-circuit-2-1988-dvd/eng-only` | 3.1 GB | deleted by the owner |
+| share | `the-office-2005-s3d3-bluray/e16-stereo` | 4.4 GB | kept |
+| share | `the-office-2005-s3d3-bluray/rehearsal` | 5.0 GB | kept |
+| share | `the-office-2005-s3d3-bluray/t3-all-tracks` | 8.3 GB | kept |
+| share | test library | (not set in `config.ps1`) | none was made (Task 16 not run) |
+| share | tuning dataset `\\unas-pro\media\lazymkv-tuning` (8 title folders) | 2.4 GB | kept (never offered; decision D16) |
+| mini PC | `tmp` | 0.5 MB | kept |
+| mini PC | `exp09` | absent | nothing to decide |
+| mini PC | `recordings` | 71.3 MB | kept |
+| mini PC | `logs` | 0.1 MB | kept |
+
+The owner deleted the five folders through the NAS's web file manager instead of the PowerShell commands of Step 6; `final-list-2` (2026-10-13) confirmed they are gone and the kept folders unchanged; the all-tracks rips are kept as phase 1 test inputs.
+
+- Scheduled task `lazymkv-phase0`: kept (ssh check 2026-10-13: `TaskName: \lazymkv-phase0`); developer mode keeps running jobs on the mini PC, and `scripts/phase0/run-interactive.ps1` registers it again for any later job.
+- Firewall rule `lazymkv-exp05`: no rule (`netsh`: "No rules match the specified criteria.").

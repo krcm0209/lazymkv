@@ -31,6 +31,8 @@ install.
 - `corpus/` - recordings: MakeMKV scans and rip logs of the owner's discs, probe output, TheDiscDB and TMDb answers,
   pinned public scan logs, and replay scenarios. No disc content is stored here; subtitle text and audio proxies stay
   in a tuning dataset on the owner's NAS.
+  Before a commit the corpus is checked for tokens, unit-key files and machine user names
+  (`scripts/phase0/check-names.sh`), as [`corpus/owner/README.md`](corpus/owner/README.md) describes.
 - `docs/` - the design spec, the phase 0 plan, the experiment reports and the environment notes.
 - `experiments/ocrs-trial/` - the trial that compared the ocrs OCR engine with Tesseract on subtitle frames.
 
