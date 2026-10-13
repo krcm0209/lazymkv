@@ -128,11 +128,12 @@ try {
     if ($problems.Count -gt 0) { throw "the extraction failed: $($problems -join '; ')" }
     if ($summary['profile_errors'] -gt 0) { $note = " (MSG:1009 seen $($summary['profile_errors']) times: MakeMKV rejected the profile; see extract.txt)" }
 
-    # Identification: a header read. mkvmerge exits 1 for warnings only.
+    # Identification: a header read. mkvmerge exits 0, or 1 for warnings only; any other code is a failure, a crash
+    # too: lazymkv-capture passes the child's code on as it is, so a crash is a negative NTSTATUS.
     & $CAP record --out "$rec\mkvmerge.json" -- $MKVMERGE -J $mkvs[0].FullName | Out-Null
     $mkvmergeExit = $LASTEXITCODE
     $summary['mkvmerge_exit'] = $mkvmergeExit
-    if ($mkvmergeExit -gt 1) { throw "mkvmerge -J exited $mkvmergeExit; see mkvmerge.json" }
+    if ($mkvmergeExit -ne 0 -and $mkvmergeExit -ne 1) { throw "mkvmerge -J exited $mkvmergeExit; see mkvmerge.json" }
     $ident = Get-Content -LiteralPath "$rec\mkvmerge.json" -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
     $summary['tracks'] = @($ident.tracks | Where-Object { $_ }).Count
     if ($summary['tracks'] -eq 0) { throw 'mkvmerge -J lists no tracks; see mkvmerge.json' }
