@@ -7,6 +7,7 @@ import random
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import subtitle_text as st  # noqa: E402
@@ -91,6 +92,14 @@ def unread(n, events, tag):
     """Another language's stream without OCR text: its packets only (T4's timing)."""
     return {'n': n, 'tag': tag, 'forced': False, 'events': [dict(start=e['start'], dur=e['dur']) for e in events],
             'text': False}
+
+
+def distinct(words, start=10.0, step=4.0):
+    """One event per three words of the list, no word used twice: two tracks share exactly the bigrams of the events
+    they share, so a track's share of another's words is its share of events."""
+    return [{'start': start + i * step, 'dur': 2.5,
+             'lines': [('we %s the %s and the %s' % tuple(words[3 * i:3 * i + 3])).capitalize() + '.']}
+            for i in range(len(words) // 3)]
 
 
 class FoldAndLines(unittest.TestCase):
@@ -372,6 +381,85 @@ class Rule(unittest.TestCase):
         tracks = measured(track(0, sdh_version(base)), track(1, list(base)), track(2, near))
         v = self.decide(tracks, 'en')
         self.assertEqual((v[2]['role'], v[2]['review']), ('keep', 'subtitle_ambiguous'))
+
+    # T6's drop guards, one test each: the track meets every other T6 condition (outside the dialogue group, other
+    # words and other timing than every member, readable English, original language English) and fails just one.
+    def assert_t6_fixture(self, tracks, n, dialogue_ns):
+        t = tracks[n]
+        self.assertTrue(t['m']['readable'])
+        self.assertEqual(t['m']['lang'], 'en')
+        for k in dialogue_ns:
+            p = st.pair(t, tracks[k])
+            self.assertEqual((p['content'], p['timing']), ('different', 'diff'), 's%d against s%d' % (n, k))
+
+    def test_t6_keeps_a_track_with_sound_only_cues(self):
+        comm = dialogue(100, seed=5, nouns=OTHER, start=11.7, step=4.0)
+        comm += [{'start': comm[10 + 30 * k]['start'] + 2.8, 'dur': 0.9, 'lines': ['(DOOR SLAMS)']} for k in range(2)]
+        comm.sort(key=lambda e: e['start'])
+        base = dialogue()
+        tracks = measured(track(0, sdh_version(base)), track(1, list(base)), track(2, comm))
+        self.assert_t6_fixture(tracks, 2, (0, 1))
+        self.assertEqual(tracks[2]['m']['SO'], 2)
+        self.assertNotEqual(tracks[2]['m']['class'], 'sdh')
+        v = self.decide(tracks, 'en')
+        self.assertEqual((v[0]['role'], v[1]['role']), ('sdh', 'regular'))
+        self.assertEqual((v[2]['role'], v[2]['review']), ('keep', 'subtitle_ambiguous'))
+
+    def test_t6_keeps_an_sdh_track(self):
+        # With today's thresholds an SDH track always has sound-only events (SDH_SO); retuned to 0, the class guard
+        # alone must keep a track classed SDH whose cues all sit beside dialogue.
+        base = dialogue()
+        comm = [dict(e, lines=[e['lines'][0] + ' (DOOR SLAMS)']) if i % 12 == 3 else e
+                for i, e in enumerate(dialogue(100, seed=5, nouns=OTHER, start=11.7, step=4.0))]
+        with mock.patch.dict(st.RULE, {'SDH_SO': 0}):
+            tracks = measured(track(0, sdh_version(base)), track(1, list(base)), track(2, comm))
+            self.assert_t6_fixture(tracks, 2, (0, 1))
+            self.assertEqual(tracks[2]['m']['SO'], 0)
+            self.assertEqual(tracks[2]['m']['class'], 'sdh')
+            v = self.decide(tracks, 'en')
+        self.assertEqual((v[0]['role'], v[1]['role']), ('sdh', 'regular'))
+        self.assertEqual((v[2]['role'], v[2]['review']), ('keep', 'subtitle_ambiguous'))
+
+    def test_t6_keeps_a_track_of_a_two_track_group(self):
+        base = dialogue()
+        comm = dialogue(100, seed=5, nouns=OTHER, start=11.7, step=4.0)
+        tracks = measured(track(0, sdh_version(base)), track(1, list(base)),
+                          track(2, [dict(e, start=e['start'] + 0.05) for e in base]),
+                          track(3, comm), track(4, [dict(e, start=e['start'] + 0.1) for e in comm]))
+        for n in (3, 4):
+            self.assert_t6_fixture(tracks, n, (0, 1, 2))
+            self.assertEqual(tracks[n]['m']['SO'], 0)
+            self.assertNotEqual(tracks[n]['m']['class'], 'sdh')
+        self.assertEqual(st.pair(tracks[3], tracks[4])['content'], 'same')
+        v = self.decide(tracks, 'en')
+        self.assertEqual(v[0]['note'], 'more than two tracks in the dialogue group')
+        for n in (3, 4):
+            self.assertEqual((v[n]['role'], v[n]['review']), ('keep', 'subtitle_ambiguous'))
+
+    def test_one_way_chain_of_full_tracks_gives_the_same_verdicts_in_any_numbering(self):
+        # T2 on three full tracks: A's words in B, B's words in C, A's words not in C. A and B are both forced
+        # candidates, whatever their stream numbers (T2 compares with the full tracks as they were before it).
+        words = NOUNS + VERBS + OTHER + OTHER_VERBS
+        c = distinct(words[:600])
+        q = distinct(words[600:720], start=11.7)
+        b = sorted(c[:90] + q, key=lambda e: e['start'])
+        a = sorted(c[85:90] + q, key=lambda e: e['start'])
+        events = {'A': a, 'B': b, 'C': c}
+        verdicts = {}
+        for order in ('ABC', 'BAC'):
+            tracks = measured(*[track(n, events[k]) for n, k in enumerate(order)])
+            by = {k: tracks[n] for n, k in enumerate(order)}
+            self.assertTrue(st.subset_of(by['A'], by['B'], st.pair(by['A'], by['B'])))
+            self.assertTrue(st.subset_of(by['B'], by['C'], st.pair(by['B'], by['C'])))
+            self.assertFalse(st.subset_of(by['A'], by['C'], st.pair(by['A'], by['C'])))
+            v = self.decide(tracks, 'en')
+            verdicts[order] = {k: v[n] for n, k in enumerate(order)}
+        self.assertEqual(verdicts['ABC'], verdicts['BAC'])
+        self.assertEqual(verdicts['ABC'], {
+            'C': {'role': 'regular', 'review': None, 'note': None},
+            'B': {'role': 'forced', 'review': None, 'note': 'words found in the dialogue track'},
+            'A': {'role': 'keep', 'review': 'subtitle_ambiguous',
+                  'note': 'forced candidate shares no words with the dialogue track'}})
 
     def test_unreadable_track_outside_the_dialogue_group_is_kept(self):
         base = dialogue()

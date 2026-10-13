@@ -1,7 +1,8 @@
 # Records what can be learned about the disc in $Drive without ripping it, in $Recordings\<Slug>\
 # (C:\lazymkv\phase0\recordings\<Slug>\):
 #   meta.json, files.json, nav\     from lazymkv-capture disc (navigation-file copies; never Unit_Key_RO.inf)
-#   thediscdb-hash.json, thediscdb-discid.json, tmdb.json, lookup-status.txt     the lookups
+#   thediscdb-hash.json, thediscdb-discid.json, tmdb.json, lookup-status.txt     the lookups (tmdb.json slimmed to
+#                                   original_language, the ids, title and date, and fetched_at: TMDb's 6-month cap)
 #   <ScanName>.txt with .timing.jsonl, .stderr and .exit.json     MakeMKV's scan (unless -NoScan)
 # A new slug gets the snapshot and the lookups. An existing recording is only ever extended with the
 # same disc (Assert-DiscIs); its snapshot and lookups are kept, or replaced by new ones with -Force.
@@ -87,6 +88,29 @@ try {
         if ($tmdbId -and $env:TMDB_TOKEN) {
             $tmdbCode = curl.exe -s -m 30 -o "$stage\tmdb.json" -w '%{http_code}' -H "Authorization: Bearer $env:TMDB_TOKEN" "https://api.themoviedb.org/3/$kind/${tmdbId}?append_to_response=external_ids"
             $status += "tmdb $kind/$tmdbId $tmdbCode"
+            if ($tmdbCode -eq '200') {
+                # TMDb's terms let a copy of its data be kept six months at most: only what the scripts read
+                # (original_language), the ids, the work's title and date and the day of the fetch stay, and the file
+                # is fetched again once fetched_at is six months old (corpus/README.md).
+                try {
+                    $full = Get-Content -LiteralPath "$stage\tmdb.json" -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+                    $slim = [ordered]@{}
+                    foreach ($field in 'id', 'imdb_id', 'title', 'original_title', 'release_date', 'name', 'original_name', 'first_air_date', 'original_language') {
+                        if ($null -ne $full.$field) { $slim[$field] = $full.$field }
+                    }
+                    $ids = [ordered]@{}
+                    foreach ($field in 'imdb_id', 'tvdb_id', 'wikidata_id') {
+                        if ($full.external_ids.$field) { $ids[$field] = $full.external_ids.$field }
+                    }
+                    if ($ids.Count -gt 0) { $slim['external_ids'] = $ids }
+                    $slim['fetched_at'] = (Get-Date).ToString('yyyy-MM-dd')
+                    Set-Content -LiteralPath "$stage\tmdb.json" -Value ($slim | ConvertTo-Json -Depth 3) -Encoding UTF8 -ErrorAction Stop
+                } catch {
+                    # A full answer is never kept: without its slim form there is no tmdb.json.
+                    Remove-Item -LiteralPath "$stage\tmdb.json" -Force -ErrorAction Stop
+                    $status += "tmdb answer not kept: $($_.Exception.Message)"
+                }
+            }
             $tmdbNote = $null
         }
         Set-Content -LiteralPath "$stage\lookup-status.txt" -Value $status -Encoding UTF8 -ErrorAction Stop

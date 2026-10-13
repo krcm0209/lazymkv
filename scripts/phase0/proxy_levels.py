@@ -18,7 +18,9 @@ the tracks in one ffmpeg pass, the levels are rounded as PowerShell does, and th
 manifest.txt (first line "# lazymkv audio-levels v2 (experiment 13)"), main-mix.txt, main-fc.txt (when the main
 stream has a centre track), cand-<n>.txt, plus proxy.txt naming the proxy. The source facts and the packet MD5 of each
 stream (so exact duplicates are still found) come from audio-proxy.json. audio_similarity.py reads the result like
-any other folder. Measured (decision D16's design): on 48 kHz test files with 24-bit or float sources, the rebuilt
+any other folder. streams.json, the file's audio streams that the reference check and the position veto (row 0, D21)
+read, is written from audio-proxy.json too, when it records every audio stream of the rip with its codec, channels and
+language; otherwise there is none, and audio_dataset.py counts none of the folder's candidates. Measured (decision D16's design): on 48 kHz test files with 24-bit or float sources, the rebuilt
 levels differ from those measured on the source by 0.1 dB in at most 0.16% of frames; on 16-bit sources (the 16 kHz
 extracts of the two real cases, a 16-bit PCM 5.1 file) in up to 3.4% of frames, by up to 0.4 dB but never more than
 0.1 dB above -60 dB. Silent-frame counts, verdicts and the rule's measures were the same in every case (r_global and
@@ -87,6 +89,33 @@ def load_proxy_json(mka):
     return data
 
 
+def proxy_streams(info):
+    """The rip's audio streams as a level folder's streams.json lists them (the fields audio_similarity.ffprobe_audio
+    and position_veto read: index, codec_type, codec_name, profile, channels, channel_layout, the language and title
+    tags), from audio-proxy.json; None unless it records every audio stream of the rip (source.audio_streams) with its
+    codec, channels and language. An empty profile, layout or tag is left out, as ffprobe leaves it out."""
+    facts = {}
+    for t in info.get("tracks", []):
+        s = t.get("source") or {}
+        if not isinstance(t.get("source_stream"), int) or not all(k in s for k in ("codec", "channels", "language")):
+            return None
+        facts.setdefault(t["source_stream"], s)
+    if not facts or (info.get("source") or {}).get("audio_streams") != len(facts):
+        return None
+    out = []
+    for n, s in sorted(facts.items()):
+        stream = {"index": n, "codec_type": "audio", "codec_name": s["codec"], "channels": int(s["channels"] or 0)}
+        if s.get("profile"):
+            stream["profile"] = s["profile"]
+        if s.get("layout"):
+            stream["channel_layout"] = s["layout"]
+        tags = {k: s[k] for k in ("language", "title") if s.get(k)}
+        if tags:
+            stream["tags"] = tags
+        out.append(stream)
+    return out
+
+
 def build(mka, out, main, cands, info=None):
     """Write a level folder for reference stream `main` and candidate streams `cands` from the proxy `mka`.
     info: the parsed audio-proxy.json (read from beside the proxy when None)."""
@@ -144,6 +173,10 @@ def build(mka, out, main, cands, info=None):
                      f"layout={word(s.get('layout'))}{guess} language={word(s.get('language'))}{fc} frames={count} "
                      f"md5={s.get('md5') or 'unknown-' + str(n)}")
     (out / "manifest.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    streams = proxy_streams(info)
+    if streams is not None:
+        (out / "streams.json").write_text(json.dumps({"from_proxy": "audio-proxy.json (audio streams only)",
+                                                      "streams": streams}, indent=1) + "\n", encoding="utf-8")
     (out / "proxy.txt").write_text(f"levels rebuilt from {mka}\n", encoding="utf-8")
     return frames
 
@@ -156,6 +189,10 @@ def main(args):
         cands = [int(x) for x in args[5].split(",") if x]
     frames = build(args[0], args[1], int(args[3]), cands)
     print(f"levels from {args[0]}: " + ", ".join(f"{k} {v} frames" for k, v in frames.items()) + f" -> {args[1]}")
+    if not (pathlib.Path(args[1]) / "streams.json").is_file():
+        print("note: audio-proxy.json does not record every audio stream of the rip, so no streams.json was written: "
+              "audio_dataset.py counts none of this folder's candidates (copy the rip's ffprobe-streams.json there as "
+              "streams.json)")
 
 
 if __name__ == "__main__":

@@ -66,9 +66,10 @@ try {
     }
     "probe: $mkv ($($file.Length) bytes)"
 
-    # Identification and stream profiles: header reads. mkvmerge exits 1 for warnings only.
+    # Identification and stream profiles: header reads. mkvmerge exits 0, or 1 for warnings only; any other code is a
+    # failure, a crash too: lazymkv-capture passes the child's code on as it is, so a crash is a negative NTSTATUS.
     & $CAP record --out "$rec\mkvmerge.json" -- $MKVMERGE -J $mkv | Out-Null
-    if ($LASTEXITCODE -gt 1) { throw "mkvmerge -J exited $LASTEXITCODE; see mkvmerge.json" }
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) { throw "mkvmerge -J exited $LASTEXITCODE; see mkvmerge.json" }
     $ident = Get-Content -LiteralPath "$rec\mkvmerge.json" -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
     if (@($ident.tracks).Count -eq 0) { throw 'mkvmerge -J lists no tracks; see mkvmerge.json' }
     & $CAP record --out "$rec\ffprobe-streams.json" -- $FFPROBE -v error -show_streams -show_format -of json $mkv | Out-Null
@@ -90,7 +91,7 @@ try {
         & $CAP record --out "$rec\evidence-mkvmerge.txt" -- $MKVMERGE -q -o $evidence -D -A -s $ids $mkv | Out-Null
         $code = $LASTEXITCODE
         $summary['evidence_s'] = [int]((Get-Date) - $t0).TotalSeconds
-        if ($code -gt 1 -or -not (Test-Path -LiteralPath $evidence)) { throw "the subtitle extraction failed (mkvmerge exit $code); see evidence-mkvmerge.txt" }
+        if (($code -ne 0 -and $code -ne 1) -or -not (Test-Path -LiteralPath $evidence)) { throw "the subtitle extraction failed (mkvmerge exit $code); see evidence-mkvmerge.txt" }
         $summary['evidence_bytes'] = (Get-Item -LiteralPath $evidence -ErrorAction Stop).Length
         if ($summary['evidence_bytes'] -eq 0) { throw "$evidence is empty" }
         $index = @()
@@ -119,7 +120,7 @@ try {
         $summary['remux_exit'] = $code
         $summary['remux_bytes'] = 0
         if (Test-Path -LiteralPath $remux) { $summary['remux_bytes'] = (Get-Item -LiteralPath $remux).Length }
-        $summary['remux_valid'] = ($code -le 1 -and $summary['remux_bytes'] -gt 0.9 * $file.Length)
+        $summary['remux_valid'] = (($code -eq 0 -or $code -eq 1) -and $summary['remux_bytes'] -gt 0.9 * $file.Length)
         Remove-Item -LiteralPath $remux -Force -ErrorAction SilentlyContinue
         $summary['remux_deleted'] = -not (Test-Path -LiteralPath $remux)
         if (-not $summary['remux_valid']) { throw "the remux failed (mkvmerge exit $code, $($summary['remux_bytes']) of $($file.Length) bytes); see remux-mkvmerge.txt" }

@@ -5,8 +5,9 @@ corpus/owner/
 
 # Subtitle text stays in the tuning dataset (decision D16): an OCR run's text, wherever it lands in a checkout.
 *.ocr.jsonl
-# ocrs's text of the same frames (scripts/phase0/ocrs-trial.ps1) is subtitle text too.
-ocrs-s*.jsonl
+# ocrs's text of the same frames (scripts/phase0/ocrs-trial.ps1) is subtitle text too: ocrs-s<n>.jsonl and
+# ocrs-s<n>-crop<pad>.jsonl. Not the capture's ocrs-s<n>[-crop<pad>].txt.timing.jsonl, which holds no text.
+ocrs-s*[0-9].jsonl
 
 # The ocrs trial crate: its models are CC-BY-SA-4.0 downloads, never committed; a local build's target folder.
 experiments/ocrs-trial/models/

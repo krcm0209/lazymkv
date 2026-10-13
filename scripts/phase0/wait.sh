@@ -4,7 +4,8 @@
 #   0  the job finished and its script did not throw (PHASE0-DONE status=ok); the log is printed
 #   1  the job finished but its script threw (PHASE0-DONE status=error); the log is printed
 #   3  no PHASE0-DONE line yet: run this again
-#   4  the job is not running and its log has no PHASE0-DONE line (it never started, or was killed)
+#   4  the job is not running and its log has no PHASE0-DONE line (it never started, or was killed); a start that
+#      job.sh reports refused lands here, because run-interactive.ps1 removes an earlier run's log before refusing
 #   5  the mini PC cannot be reached over SSH
 set -uo pipefail
 [ "$#" -eq 1 ] || { echo "usage: scripts/phase0/wait.sh <log name>" >&2; exit 2; }

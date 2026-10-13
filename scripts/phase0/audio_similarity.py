@@ -771,13 +771,24 @@ def audio_by_title(scan):
     return out
 
 
+def dvd_scan(scan):
+    """True for the scan of a DVD: no title names its source file (attribute 16, a Blu-ray's playlist), and the disc
+    says DVD (disc attribute 1) or a stream is DVD video or DVD subtitles (codec V_MPEG2 or S_VOBSUB). A DVD title's
+    segments (attribute 26) are the cells of its own program chain, numbered from 1 in every title, not clips shared
+    across the disc."""
+    if any(16 in a for a in scan.titles.values()):
+        return False
+    return "DVD" in scan.disc.get(1, "") or any(s.get(5) in ("V_MPEG2", "S_VOBSUB") for s in scan.streams.values())
+
+
 def titles_report(recording):
     """Every title of <recording>/scan.txt, longest first: its audio streams by language without derived streams, a
     mark '<- <language> x<n>' when one language has two or more, a mark '<- wanted x<n> (...)' when no wanted language
     has two but the wanted languages (English, the original language from tmdb.json) and streams with no language
     have two or more together (an English commentary on a Spanish film: EXP-13 addendum, section 9.1), the labels it
     was already ripped under (from each <label>/rip-summary.json), and the titles it shares segments with (a play-all
-    playlist)."""
+    playlist). On a DVD the segment numbers restart in every title (dvd_scan), so shared segments are not looked
+    for and the report says so."""
     d = pathlib.Path(recording)
     scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
     ripped = {}
@@ -793,8 +804,12 @@ def titles_report(recording):
     original = json.loads(tmdb.read_text(encoding="utf-8-sig")).get("original_language") if tmdb.exists() else None
     info = audio_by_title(scan)
     wanted = {"eng"} | set(ISO639.get(original, ()))
+    dvd = dvd_scan(scan)
     lines = [f"{d.name}: {len(info)} titles, longest first; TMDb original language: {original or 'unknown'}",
              "  audio: scan stream numbers by language, leaving out streams MakeMKV derived from another (flag 2048)"]
+    if dvd:
+        lines.append("  segments: a DVD's are the cells of each title's own program chain, numbered from 1 in every "
+                     "title, so shared segments are not looked for (a play-all title is not marked)")
     for title in sorted(info, key=lambda t: (-info[t][0], t)):
         seconds, segs, langs = info[title]
         audio = "; ".join(f"{lang} {','.join(map(str, s))}" for lang, s in sorted(langs.items())) or "none"
@@ -805,7 +820,7 @@ def titles_report(recording):
                          + ", ".join(f"{lang} {len(s)}" for lang, s in mine.items()) + ")")
         if title in ripped:
             notes.append("ripped as " + ", ".join(ripped[title]))
-        shared = [str(u) for u in sorted(info) if u != title and set(segs) & set(info[u][1])]
+        shared = [] if dvd else [str(u) for u in sorted(info) if u != title and set(segs) & set(info[u][1])]
         if shared:
             notes.append("shares segments with title " + ", ".join(shared))
         where = ",".join(map(str, segs)) or "?"

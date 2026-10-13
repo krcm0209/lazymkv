@@ -11,6 +11,7 @@ import audio_similarity as sim
 import robot
 
 FPS = 50  # 20 ms frames
+REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 def speech(rnd, frames, loud, quiet):
@@ -257,6 +258,32 @@ class Titles(unittest.TestCase):
         self.assertNotIn("<-", lines[3])
         self.assertIn("<- eng x2; ripped as e16", lines[4])
         self.assertIn("<- eng x2", lines[5])  # no flags attribute at all: not derived
+
+    def test_a_dvds_segments_are_not_compared_across_titles(self):
+        # A DVD title's segments are the cells of its own program chain, numbered from 1 in every title.
+        self.assertFalse(sim.dvd_scan(robot.parse(self.SCAN)))
+        dvd = 'CINFO:1,6206,"DVD disc"\n' + self.SCAN
+        self.assertTrue(sim.dvd_scan(robot.parse(dvd)))
+        self.assertTrue(sim.dvd_scan(robot.parse(self.SCAN + 'SINFO:0,0,5,0,"V_MPEG2"\n')))
+        self.assertFalse(sim.dvd_scan(robot.parse(dvd + 'TINFO:0,16,0,"00800.mpls"\n')))  # a source file: a Blu-ray
+        firefly = REPO / "corpus" / "thediscdb" / "series" / "Firefly (2002)" / "2003-dvd-the-complete-series" / "disc01.txt"
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:
+            d = pathlib.Path(tmp) / "firefly"
+            d.mkdir()
+            (d / "scan.txt").write_bytes(firefly.read_bytes())
+            lines = sim.titles_report(d)
+        self.assertIn("so shared segments are not looked for", lines[2])
+        self.assertFalse([line for line in lines if "shares segments" in line])
+        one = [line for line in lines if line.split()[:2] == ["title", "1"]]
+        self.assertEqual(len(one), 1)
+        self.assertIn("audio eng 1,4; fre 2; spa 3   <- eng x2", one[0])  # the episode with a commentary, not skipped
+
+    @unittest.skipUnless((REPO / "corpus" / "owner" / "short-circuit-2-1988-dvd" / "scan.txt").is_file(),
+                         "the evidence repository is not cloned at corpus/owner")
+    def test_the_short_circuit_2_dvd_shares_no_segment(self):
+        lines = sim.titles_report(REPO / "corpus" / "owner" / "short-circuit-2-1988-dvd")
+        self.assertIn("so shared segments are not looked for", lines[2])
+        self.assertFalse([line for line in lines if "shares segments" in line])
 
     def test_a_title_with_one_stream_in_each_wanted_language_is_marked(self):
         with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp:

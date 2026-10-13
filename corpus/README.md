@@ -22,7 +22,9 @@ The recordings carry:
 
 - verbatim playlist and navigation files copied from commercial discs (each recording's `nav/` folder);
 - TMDb API answers (`tmdb.json`), which are TMDb's data under TMDb's API terms of use, not under this repository's
-  MIT licence;
+  MIT licence. Each is slimmed to the fields the scripts read, the ids, the work's title and date and its `fetched_at`
+  day (`scripts/phase0/record-disc.ps1` does it after the fetch), and is fetched again when it is older than six
+  months, the longest TMDb's terms let a copy be kept (spec 8.1);
 - the owner's drive and collection details: which discs the owner has, and the drives and machine that read them.
 
 ## Working with it

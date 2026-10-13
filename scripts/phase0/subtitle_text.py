@@ -536,9 +536,12 @@ def decide(tracks, orig_lang=None):
             rank[t['n']] = 1
         else:
             partial.append(t)
-    # A full track whose words are a one-way subset of a larger full track is a forced candidate.
-    for t in list(full):
-        if any(u is not t and subset_of(t, u, pairs[(t['n'], u['n'])]) for u in full):
+    # A full track whose words are a one-way subset of a larger full track is a forced candidate. Every track is
+    # compared with the full tracks as they were before this step, so the stream numbers never change the verdict:
+    # in a chain (A in B, B in C) A is a candidate although B is one too.
+    before = list(full)
+    for t in before:
+        if any(u is not t and subset_of(t, u, pairs[(t['n'], u['n'])]) for u in before):
             full.remove(t)
             cands.append(t)
             rank[t['n']] = 2

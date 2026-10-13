@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Start a phase 0 script in the owner's desktop session on the mini PC.
 # Usage: scripts/phase0/job.sh <script.ps1> <log name> [script arguments, without quotes]
+# Exits non-zero when the start is refused (run-interactive.ps1 throws: no such script, or a job still running).
+# Before refusing, run-interactive.ps1 removes the log of an earlier run under this name, so a wait.sh that follows
+# finds no PHASE0-DONE line of a finished run: it exits 4 (never started) once no job is running.
 set -euo pipefail
 [ "$#" -ge 2 ] || { echo "usage: scripts/phase0/job.sh <script.ps1> <log name> [arguments]" >&2; exit 2; }
 # The mini PC's ssh target comes from box.env beside this script (git-ignored: LAZYMKV_BOX=user@host) or the environment.

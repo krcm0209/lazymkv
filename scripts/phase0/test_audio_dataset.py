@@ -4,13 +4,17 @@ import json
 import math
 import pathlib
 import random
+import re
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import audio_dataset as ds
 import audio_labels as labels
 import audio_similarity as sim
+import proxy_levels as pl
 
 FPS = 50  # 20 ms frames
 REAL_SPEC = pathlib.Path(__file__).resolve().parents[2] / "docs" / "superpowers" / "specs" / "2026-10-04-lazymkv-design.md"
@@ -837,6 +841,112 @@ class Joins(unittest.TestCase):
         snap = {t["stream"]: t for t in json.loads((self.c / "audio-dataset.json").read_text(encoding="utf-8"))["tracks"]}
         self.assertEqual((snap[3]["verdict"], snap[3]["before_veto"]), ("reference-unclear", "commentary"))
         self.assertTrue(snap[2]["veto"].startswith("the reference, stream 2 (dts DTS-HD MA 6 ch t2), is not the first"))
+
+    def test_a_folder_without_streams_json_counts_none_of_its_candidates(self):
+        # The vetoed title above without its streams.json: the veto cannot be checked, so its commentary is neither a
+        # commentary verdict nor a counted commentary, and the report says why.
+        streams = [(1, 6, "dts", "DTS", "eng"), (2, 6, "dts", "DTS-HD MA", "eng"), (3, 2, "ac3", None, "eng")]
+        d = folder(self.c / "disc-q" / "t0", "q2", [(3, COMMENT, "q3")], main=2, streams=streams)
+        (d / "streams.json").unlink()
+        write_labels(self.c / "disc-q", [entry("t0", 3, "commentary", film_audible=True)], {"t0": title("feature")})
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("commentaries          0 of 8, from 0 of 4 discs", out)
+        self.assertIn("commentary verdicts   on 0 of 3 discs", out)
+        self.assertIn("not counted: disc-q 1", out)
+        self.assertIn("note: disc-q/t0/audio-levels-20ms-2-3: no streams.json, so neither its reference nor the position "
+                      "veto (row 0, D21) is checked: none of its candidates counts for experiment 13", out)
+        snap = {t["stream"]: t for t in json.loads((self.c / "audio-dataset.json").read_text(encoding="utf-8"))["tracks"]}
+        self.assertEqual(snap[3]["why_not_counted"], "the position veto (row 0, D21) is not checked: the folder has no "
+                                                     "streams.json")
+        self.assertEqual(snap[3]["verdict"], "commentary")  # measured and judged by rows 3 to 9, just not counted
+
+    def test_a_candidate_the_app_never_judges_is_measured_not_counted(self):
+        # An English film: a French 5.1 and its 2.0 companion (a dataset-only folder), and a commentary with no
+        # language code. The app judges neither language (R4), so neither counts, nor fails, whatever its verdict.
+        streams = [(1, 8, "truehd", None, "eng"), (2, 6, "ac3", None, "fra"), (3, 2, "ac3", None, "fra")]
+        folder(self.c / "disc-f" / "t0", "f1", [], streams=streams, channels=8)
+        fra = folder(self.c / "disc-f" / "t0", "f2", [(3, COPY, "f3")], main=2, streams=streams, langs={2: "fra", 3: "fra"})
+        write_labels(self.c / "disc-f", [entry("t0", 3, "lossy-companion")], {"t0": title("feature")})
+        folder(self.c / "disc-n" / "t0", "n1", [(2, COMMENT, "n2")], langs={2: "und"},
+               streams=[(1, 6, "dts", None, "eng"), (2, 2, "ac3", None, "und")])
+        write_labels(self.c / "disc-n", [entry("t0", 2, "commentary", film_audible=True)], {"t0": title("feature")})
+        code, out = run([self.c, "--spec", self.spec])
+        self.assertEqual(code, 0, out)
+        self.assertIn("programme tracks      0 of 20 other than the reference; separately encoded 0 of 6", out)
+        self.assertIn("commentaries          0 of 8, from 0 of 4 discs", out)
+        self.assertIn("commentary verdicts   on 0 of 3 discs", out)
+        self.assertIn("not counted: disc-f 1, disc-n 1", out)
+        self.assertIn("note: disc-f/t0 stream 3: fra is not a wanted language: the app never judges it, measured for the "
+                      "dataset only; labelled lossy-companion, verdict keep: not counted for experiment 13 and never a FAIL",
+                      out)
+        self.assertIn("note: disc-n/t0 stream 2: no language code (und): the app never judges it, measured for the dataset "
+                      "only; labelled commentary, verdict commentary", out)
+        rows = {line.split()[0]: line.split() for line in section(out, "Kind against verdict").splitlines()[2:]}
+        self.assertNotIn("commentary", rows)
+        self.assertNotIn("lossy-companion", rows)
+        self.assertEqual(rows["(not"][2:12], ["0", "1", "0", "0", "0", "0", "0", "1", "0", "2"])  # in (not judged): comm, keep
+        # The reverse case: the commentary pattern on the French companion is no FAIL and no false verdict.
+        level_file(fra / "cand-3.txt", COMMENT)
+        code, out = run([self.c, "--spec", self.spec, "--snapshot", self.c / "t.json"])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("  FAIL ", out)
+        self.assertTrue(out.rstrip().endswith("RESULT ok"))
+        self.assertIn("false verdicts        0", out)
+        self.assertIn("labelled lossy-companion, verdict commentary: not counted", out)
+        self.assertIn("as it stands: not answered", out)  # not "no: 1 programme track(s) with the commentary pattern"
+
+
+class ProxyStreams(unittest.TestCase):
+    """proxy_levels.py writes streams.json from audio-proxy.json, so a rebuilt folder keeps its position veto."""
+
+    @staticmethod
+    def info(streams, count=None):
+        """audio-proxy.json for streams [(index, codec, profile, channels, layout, language)]: a mix track each, and an
+        fc track for a layout with a centre."""
+        tracks = []
+        for n, codec, profile, ch, layout, lang in streams:
+            source = {"codec": codec, "profile": profile, "channels": ch, "layout": layout, "layout_guessed": "",
+                      "language": lang, "title": f"t{n}", "sample_fmt": "fltp", "md5": f"m{n}"}
+            for series in ("mix",) + (("fc",) if ch > 2 else ()):
+                tracks.append({"track": len(tracks), "source_stream": n, "series": series, "source": source})
+        return {"format": pl.PROXY_FORMAT, "source": {"file": "x.mkv", "bytes": 1,
+                                                      "audio_streams": len(streams) if count is None else count},
+                "encoding": {"gain_db": -18}, "tracks": tracks}
+
+    VETO = [(1, "dts", "DTS", 6, "5.1(side)", "eng"), (2, "dts", "DTS-HD MA", 6, "5.1(side)", "eng"),
+            (3, "ac3", "", 2, "stereo", "")]
+
+    def test_the_streams_are_those_ffprobe_lists(self):
+        streams = pl.proxy_streams(self.info(self.VETO))
+        self.assertEqual(streams[2], {"index": 3, "codec_type": "audio", "codec_name": "ac3", "channels": 2,
+                                      "channel_layout": "stereo", "tags": {"title": "t3"}})
+        self.assertEqual(sim.ffprobe_audio(streams), [
+            (1, 6, False, "eng", "dts DTS 6 ch 5.1(side) t1"), (2, 6, True, "eng", "dts DTS-HD MA 6 ch 5.1(side) t2"),
+            (3, 2, False, "und", "ac3 2 ch stereo t3")])
+        self.assertTrue(sim.position_veto(streams, 2)[0])
+        self.assertIsNone(pl.proxy_streams(self.info(self.VETO, count=4)))  # a stream of the rip is missing
+        partial = self.info(self.VETO)
+        del partial["tracks"][0]["source"]["language"]
+        self.assertIsNone(pl.proxy_streams(partial))
+
+    def test_build_writes_streams_json_beside_the_levels(self):
+        def ffmpeg(args, cwd=None, **kw):
+            graph = args[args.index("-filter_complex") + 1]
+            for name in re.findall(r"file=raw-([a-z0-9-]+)\.txt", graph):
+                (pathlib.Path(cwd) / f"raw-{name}.txt").write_text(
+                    "".join(f"{pl.KEY}{v:.6f}\n" for v in MIX[:200]), encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        tracks = {(1, "mix"): 0, (1, "fc"): 1, (2, "mix"): 2, (2, "fc"): 3, (3, "mix"): 4}
+        with tempfile.TemporaryDirectory(prefix="lazymkv-test-") as tmp, \
+                mock.patch.object(pl, "proxy_tracks", return_value=tracks), mock.patch.object(pl.subprocess, "run", ffmpeg):
+            root = pathlib.Path(tmp)
+            pl.build(root / "audio-proxy.mka", root / "veto", 2, [3], info=self.info(self.VETO))
+            self.assertEqual(sim.read_streams(root / "veto"), pl.proxy_streams(self.info(self.VETO)))
+            self.assertTrue(sim.position_veto(sim.read_streams(root / "veto"), 2)[0])
+            pl.build(root / "audio-proxy.mka", root / "short", 2, [3], info=self.info(self.VETO, count=4))
+            self.assertFalse((root / "short" / "streams.json").exists())
+            self.assertTrue((root / "short" / "manifest.txt").is_file())
 
 
 def build_count_corpus(c):

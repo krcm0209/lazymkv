@@ -1,8 +1,12 @@
 # Experiment 5 evidence that record-disc.ps1 does not keep (Task 9). Run it over plain ssh: it needs C: and
 # the drive, never the share. It writes into $Recordings\<Slug>\ (C:\lazymkv\phase0\recordings\<Slug>\):
-#   makemkv-data-<Listing>.txt  one line per file in MakeMKV's data folders: last write time (UTC), size, path.
-#                               No file is opened. Of MakeMKV's registry settings only app_DataDir is read;
-#                               app_Key (the licence key) is never read.
+#   makemkv-data-<Listing>.txt  one line per file in MakeMKV's data folders: last write time (UTC), size, and the
+#                               file as keydb.cfg or as its extension, each with #<a short keyed hash of its path>.
+#                               A name can name a disc (the MKB20_* cache files) or a drive (dump_FW_*), so no other
+#                               name is written. The hash key, made once, stays in $P0\exp05-name-key.txt (never in a
+#                               recording), so a file keeps its hash from one listing to the next. No file is opened.
+#                               Of MakeMKV's registry settings only app_DataDir is read; app_Key (the licence key) is
+#                               never read.
 #   <DriveList>.txt             only with -DriveList, and made before the folder listing: MakeMKV's drive
 #                               listing (info disc:9999, the call Get-DiscIndex makes before every scan),
 #                               recorded by lazymkv-capture with .timing.jsonl, .stderr and .exit.json.
@@ -76,6 +80,16 @@ try {
     } else {
         $lines = @("app_DataDir: (no $settings key in this session)")
     }
+    # Only keydb.cfg is listed by name (experiment 5 looks for it); any other file by its extension. The keyed hash of
+    # its full path tells the listings' files apart and shows which changed, and names nothing.
+    $keyFile = "$P0\exp05-name-key.txt"
+    if (-not (Test-Path -LiteralPath $keyFile)) {
+        $key = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($key)
+        Set-Content -LiteralPath $keyFile -Value ([Convert]::ToBase64String($key)) -Encoding ASCII -ErrorAction Stop
+    }
+    $hmac = [System.Security.Cryptography.HMACSHA256]::new([Convert]::FromBase64String((Get-Content -LiteralPath $keyFile -Raw -ErrorAction Stop).Trim()))
+    $lines += 'names: keydb.cfg by name, every other file by its extension; #<hash>: a keyed hash of the path (exp05-evidence.ps1)'
     $folders = @("$env:USERPROFILE\.MakeMKV", "$env:APPDATA\MakeMKV", "$env:LOCALAPPDATA\MakeMKV", "$env:ProgramData\MakeMKV")
     if ($dataDir) { $folders = @([Environment]::ExpandEnvironmentVariables([string]$dataDir)) + $folders }
     $found = @()
@@ -85,7 +99,10 @@ try {
         $items = @(Get-ChildItem -LiteralPath $folder -Recurse -Force -File -ErrorAction Stop | Sort-Object FullName)
         $lines += "folder: $folder files=$($items.Count)"
         foreach ($item in $items) {
-            $lines += ('{0} UTC {1,12} {2}' -f $item.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss'), $item.Length, $item.FullName)
+            $digest = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($item.FullName.ToLowerInvariant()))
+            $hash = -join ($digest[0..5] | ForEach-Object { $_.ToString('x2') })
+            $shown = if ($item.Name -eq 'keydb.cfg') { 'keydb.cfg' } elseif ($item.Extension) { $item.Extension } else { '(no extension)' }
+            $lines += ('{0} UTC {1,12} {2} #{3}' -f $item.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss'), $item.Length, $shown, $hash)
         }
         $found += $folder
         $total += $items.Count

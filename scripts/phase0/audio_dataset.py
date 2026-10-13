@@ -14,7 +14,10 @@ corpus/owner/<slug>/audio-labels.json (see audio_labels.py), and prints:
   2. kind against verdict, over the labelled tracks;
   3. experiment 13: the tracks that count, against the totals of spec section 17 row 13 (read from the spec), and
      the answer as it stands. Whether a label counts is worked out here (audio_labels.not_counted_because), never
-     stored, and no track of a disc or track the thresholds were fitted on counts (row 13, audio-fitted.json);
+     stored, and no track of a disc or track the thresholds were fitted on counts (row 13, audio-fitted.json). Nor does
+     a candidate the app never judges (no language code, or a language that is neither English nor the work's
+     original language: measured for the dataset only, never a FAIL), or any candidate of a folder without
+     streams.json (its position veto, row 0, cannot be checked);
   4. disagreements: FAIL for a programme track with a drop verdict (commentary or duplicate) or with the commentary
      pattern in another language than the reference (commentary-cross-language: kept, but the pattern fired on
      programme audio, so it counts as a false verdict), for a level folder
@@ -206,6 +209,18 @@ def wanted(a, original=()):
     return a[3] == "eng" or a[3] in original or a[3] in NO_LANGUAGE
 
 
+def not_judged_by_app(language, original=()):
+    """'' when the app judges a candidate in this language by its content: English or the work's original language
+    (R4; row 13 covers every extra audio track in a wanted language). Otherwise why it never does: a candidate with no
+    language code, or in another language, is measured for the dataset only, never counts and is never a FAIL."""
+    lang = language or ""
+    if lang == "eng" or lang in original:
+        return ""
+    if lang in NO_LANGUAGE:
+        return f"no language code ({lang or 'none'}): the app never judges it, measured for the dataset only"
+    return f"{lang} is not a wanted language: the app never judges it, measured for the dataset only"
+
+
 def find_folders(corpus):
     """[(slug, label, folder)] for every audio-levels-20ms-* folder, in name order."""
     out = []
@@ -283,13 +298,14 @@ def measure(found, rule, consts, cache):
             base = {"slug": slug, "label": label, "folder": folder.name, "main": main, "ref_fc": mi.get("fc") == "yes",
                     "ref_problem": problem, "excluded": bool(problem), "secondary": False,
                     "n_cands": len(res["candidates"]), "ref_first": first_of_language(streams, main),
-                    "veto": res["veto"]["why"] if res["veto"]["holds"] else ""}
+                    "veto": res["veto"]["why"] if res["veto"]["holds"] else "",
+                    "veto_unchecked": res["veto"]["why"] if res["veto"]["holds"] is None else ""}
             order = [(main, mi.get("md5"))] + [(int(c["stream"]), c["info"].get("md5")) for c in res["candidates"]]
             ranks = {n: sum(1 for m, h in order[:k] if h and h == md5) for k, (n, md5) in enumerate(order)}
             tracks.append(dict(base, role="reference", stream=main, md5=mi.get("md5"), md5_rank=0, codec=mi.get("codec"),
                                channels=mi.get("channels"), language=mi.get("language"), position=pos.get(main),
                                verdict=None, measures=None, key=None, not_judged="", duplicate_of=None,
-                               cross_language="", swapped_verdict=None, peer=None, before_veto=None))
+                               cross_language="", swapped_verdict=None, peer=None, before_veto=None, unjudged=""))
             for c in res["candidates"]:
                 n = int(c["stream"])
                 key = meas.key_of.get(id(c["measures"])) if c["measures"] is not None else None
@@ -300,7 +316,8 @@ def measure(found, rule, consts, cache):
                                    measures=nan_to_none(c["measures"]), key=key, not_judged=c["not_judged"],
                                    duplicate_of=c["duplicate_of"], cross_language=c.get("cross_language", ""),
                                    swapped_verdict=sim.verdict(back, rule) if back is not None else None,
-                                   peer=peer_row(c.get("peer"), meas), before_veto=c.get("before_veto")))
+                                   peer=peer_row(c.get("peer"), meas), before_veto=c.get("before_veto"),
+                                   unjudged=not_judged_by_app(c["info"].get("language"), originals[slug])))
     # The same stream in several valid folders of one title: each is judged; the table uses the folder with the most
     # candidates (it sees the most of the title's duplicates), the others are marked secondary.
     groups = {}
@@ -346,6 +363,10 @@ def join_labels(tracks, labelled, fitted):
         t["group"], t["wanted"] = group, wanted
         if t["role"] != "candidate" or t["excluded"] or t["secondary"]:
             why = "not a judged track of its title"
+        elif t["unjudged"]:
+            why = t["unjudged"]
+        elif t["veto_unchecked"]:
+            why = f"the position veto (row 0, D21) is {t['veto_unchecked']}"
         elif lab is None:
             why = "no label"
         elif t["inherited_from"]:
@@ -371,6 +392,8 @@ def join_labels(tracks, labelled, fitted):
                 t["outcome"] = f"reference labelled {k}"
         elif lab is None:
             t["outcome"] = "unlabelled"
+        elif t["unjudged"]:
+            t["outcome"] = "not judged by the app"
         elif group == "programme" and (v in DROP or v in PATTERN):
             t["outcome"] = "FAIL"
         elif group in ("unwanted", "duplicate") and v not in DROP:
@@ -389,7 +412,7 @@ def join_labels(tracks, labelled, fitted):
     for t in tracks:
         k = ref_kind.get((t["slug"], t["label"], t["folder"]))
         programme_ref = k is None or labels.KINDS[k][0] == "programme"
-        t["swap_fail"] = (t["role"] == "candidate" and not t["excluded"] and t["kind"] is not None
+        t["swap_fail"] = (t["role"] == "candidate" and not t["excluded"] and not t["unjudged"] and t["kind"] is not None
                           and t.get("swapped_verdict") == "commentary" and programme_ref)
     return tracks
 
@@ -424,7 +447,8 @@ def coverage(tracks, req, titles):
         "cross_comm": sum(1 for t in comm if t["cross_language"]),
         "cross_comm_pattern": sum(1 for t in comm if t["verdict"] == "commentary-cross-language"),
         "cross_prog": sum(1 for t in prog if t["cross_language"]),
-        "swapped": sum(1 for t in judged(tracks) if t["role"] == "candidate" and t["kind"] and t.get("swapped_verdict")),
+        "swapped": sum(1 for t in judged(tracks) if t["role"] == "candidate" and t["kind"] and t.get("swapped_verdict")
+                       and not t["unjudged"]),
         "swap_fails": sum(1 for t in tracks if t.get("swap_fail")),
     }
     false = sorted({(t["slug"], t["label"], t["stream"]) for t in tracks if t["outcome"] == "FAIL" and t["verdict"] in PATTERN})
@@ -453,12 +477,16 @@ def table(tracks):
     cands = [t for t in judged(tracks) if t["role"] == "candidate"]
     lines = [f"  {'kind':20} {'wanted':7} " + " ".join(f"{s:>5}" for s in SHORT) + "  total"]
     for kind, (group, wanted, _) in labels.KINDS.items():
-        rows = [t for t in cands if t["kind"] == kind]
+        rows = [t for t in cands if t["kind"] == kind and not t["unjudged"]]
         if rows:
             lines.append(f"  {kind:20} {wanted:7} " + " ".join(f"{sum(1 for t in rows if t['verdict'] == v):5}" for v in VERDICTS)
                          + f"  {len(rows):5}")
     rest = [t for t in cands if t["kind"] is None]
     lines.append(f"  {'(unlabelled)':20} {'':7} " + " ".join(f"{'-':>5}" for _ in VERDICTS) + f"  {len(rest):5}   verdicts hidden until labelled")
+    skipped = [t for t in cands if t["kind"] and t["unjudged"]]
+    if skipped:
+        lines.append(f"  {'(not judged)':20} {'':7} " + " ".join(f"{sum(1 for t in skipped if t['verdict'] == v):5}" for v in VERDICTS)
+                     + f"  {len(skipped):5}   no language code or not a wanted language: the app never judges them (notes below)")
     lines.append("  columns: " + ", ".join(f"{s} = {v}" for s, v in zip(SHORT, VERDICTS)))
     return lines
 
@@ -651,7 +679,12 @@ def report(corpus, tracks, unreadable, labelled, req, titles, meas, rule_changes
                             if differ else ""))
     for t in tracks:
         if t["ref_problem"] is None and t["role"] == "reference":
-            lines.append(f"  note: {t['slug']}/{t['label']}/{t['folder']}: no streams.json, so its reference is not checked")
+            lines.append(f"  note: {t['slug']}/{t['label']}/{t['folder']}: no streams.json, so neither its reference nor "
+                         f"the position veto (row 0, D21) is checked: none of its candidates counts for experiment 13 "
+                         f"(proxy_levels.py writes streams.json from audio-proxy.json, or copy the same rip's "
+                         f"ffprobe-streams.json there as streams.json)")
+    lines += [f"  note: {where(t)}: {t['unjudged']}; labelled {t['kind']}, verdict {t['verdict']}: not counted for "
+              f"experiment 13 and never a FAIL" for t in cands if t["kind"] and t["unjudged"]]
     lines += [f"  note: {name(t)} takes its label from {t['inherited_from']} (same packets)" for t in cands if t["inherited_from"]]
     if len(lines) == start:
         lines.append("  none")
