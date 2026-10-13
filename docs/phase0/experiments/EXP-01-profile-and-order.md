@@ -59,9 +59,12 @@ VERDICT          count=yes order=yes video=yes chapters=yes duration=yes
 2. **Order.** `ORDER MATCH yes`: the file's tracks are in the scan's order.
 3. **Output codecs.** The scan has attribute 42 `( Lossless conversion )` on all 8 streams and no attribute 41 on
    any (whole-scan count 0): MakeMKV 2.0.0 still gives 41 only to converted streams, and nothing was converted. By
-   input codec (attributes 6/7): MpegH HEVC Main10 → HEVC/H.265/MPEG-H; DTS-HD MA → DTS-HD Master Audio (ffprobe
-   profile `DTS-HD MA`, MediaInfo `DTS-HD Master Audio` / `XLL`); DTS core → DTS; DD → AC-3; PGS → HDMV PGS. No
-   LPCM and no closed-caption row on this disc.
+   input codec (attributes 6/7): MpegH HEVC Main10 -> HEVC/H.265/MPEG-H; DTS-HD MA -> DTS-HD Master Audio (ffprobe
+   profile `DTS-HD MA`, MediaInfo `DTS-HD Master Audio` / `XLL`); DTS core -> DTS; DD -> AC-3; PGS -> HDMV PGS. No
+   LPCM and no closed-caption row on this disc. On short-circuit-2-1988-dvd (2026-10-12), in both rips
+   (`all-tracks-2` and `eng-only`) MakeMKV sets the converted closed-caption SubRip track as the default subtitle
+   track (`default_track` true in `mkvmerge.json`), while the scan marks the English VobSub (stream 5) default
+   (attribute 38 `d`, 39 `Default`) and the closed-caption stream (12) not.
 4. **Chapters.** Scan attribute 8 = 22; file 22. The default profile's `insertFirstChapter00IfMissing="true"`
    added none here.
 5. **Forced-only streams.** In the scan, each `f=6144` twin directly follows the non-derived subtitle stream of
@@ -83,6 +86,23 @@ Also observed: the two derived cores on both discs so far are written as separat
 remux log stayed empty until mkvmerge finished (it does not flush progress to a pipe), so a remux cannot be
 watched through its output.
 
+Later observation (2026-10-12, short-circuit-2-1988-dvd, title 0, all-tracks profile, label `all-tracks-2`): on a
+DVD with a closed-caption stream, MakeMKV's output order is not the scan order. The scan lists the video, four
+audio streams (1 to 4), seven VobSub streams (5 to 11) and then the closed-caption stream (12: codec `CC`,
+attribute 41 `Text`, 42 `( Lossy conversion )`). The file carries that CC->Text track as SubRip/SRT at track 5,
+immediately after the audio tracks and before every VobSub track, and `compare_tracks.py` gives
+`count=yes order=no`. The English-only rip of the same title has the same order; EXP-11 (observation 5 and
+section 1b) has the detail. Observation 2's "order matches the scan" held on pans-labyrinth-2006-uhd, a UHD
+without such a stream. The Answer below stands for that disc, but the order rule needs this exception: a
+text-converted subtitle track comes before the bitmap subtitle tracks. The same file gives observation 3 the
+closed-caption row it lacked: attribute 41 `Text` is written as SubRip/SRT (`S_TEXT/UTF8`).
+
+Later observation (2026-10-12, short-circuit-2-1988-dvd, title 0): the duration does not match within 2 s on this
+DVD. The scan gives the title `TINFO:0,9,0,"1:50:06"` (6606 s); both files' `mkvmerge.json` give the container
+`duration` 6623617000000 ns (6623.6 s), in the `all-tracks-2` rip and in the `eng-only` rip alike. Each file is
+17.6 s longer than the scan, and `compare_tracks.py` gives `duration=no` on both. So the 2-second duration rule of
+6.2 step 7 (observation 8) does not hold on this DVD; it is not an effect of the profile, since both rips agree.
+
 ## Answer
 
 **Yes:** the profile was honoured, the output track order equals the scan order, every output codec is the
@@ -98,5 +118,8 @@ says so with `MSG:4047`. Statistics tags are written. The Dolby Vision question 
 - 8.10: wording for Dolby Vision waits for a Dolby Vision disc.
 - 6.4 step 10: subtitle event counts can be read from `NUMBER_OF_FRAMES` in the header without extraction (the
   alignment measure still needs the packets).
-- 6.2 step 7: the 2-second duration rule holds (0.1 s here, 0.9 s on the Blu-ray episodes).
+- 6.2 step 7: the 2-second duration rule held on pans-labyrinth-2006-uhd (UHD, 0.1 s) and on the Blu-ray episodes
+  (0.9 s), and failed by 17.6 s on a DVD (short-circuit-2-1988-dvd, 6623.6 s against the scan's 6606 s, in both
+  rips). The rule needs a DVD-sized tolerance or a different reference (the file's own duration from the probe);
+  to be settled in Task 17.
 - 18 (timing, on this hardware with a 54 GB UHD on the NAS): rip 37 min, subtitle evidence 13 min, remux 27 min.
