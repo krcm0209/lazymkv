@@ -31,7 +31,7 @@ With access, clone it in place: `git clone https://github.com/krcm0209/lazymkv-e
 scripts use it there: `scripts/phase0/audio_dataset.py` (the audio tuning harness, whose corpus folder defaults to
 `corpus/owner`) and `scripts/phase0/audio_labels.py` (the owner's audio labels, given `corpus/owner/<slug>` paths)
 read and write it, and `scripts/phase0/pull-recording.sh <slug>` copies a recording from the mini PC into it.
-Without the clone, `audio_dataset.py` says so and exits 3, and `pull-recording.sh` stops before it touches the mini
+Without the clone, a harness run of `audio_dataset.py` says so and exits 3, and `pull-recording.sh` stops before it touches the mini
 PC. A pulled recording is committed in the evidence repository
 (`git -C corpus/owner add <slug> && git -C corpus/owner commit`), never here.
 
@@ -47,5 +47,5 @@ Each of these prints nothing when all is well:
   Mac's), and no path under `corpus/owner/` is part of this repository. It checks this repository's files only.
 - `grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus docs/phase0 docs/superpowers/specs`: no TMDb token.
 - `find corpus/scenarios -iname '*unit_key*'`: no unit-key file (`AACS/Unit_Key_RO.inf` is never stored anywhere;
-  a recording's `meta.json` holds only its SHA-1). In the evidence repository the same check runs over
-  `corpus/owner`.
+  a recording's `meta.json` holds only its SHA-1). Before a commit in the evidence repository, run
+  `find corpus/owner -iname '*unit_key*'` there too.
