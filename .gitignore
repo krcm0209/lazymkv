@@ -12,3 +12,5 @@ ocrs-s*.jsonl
 # The ocrs trial crate: its models are CC-BY-SA-4.0 downloads, never committed; a local build's target folder.
 experiments/ocrs-trial/models/
 experiments/ocrs-trial/target/
+# The owner's ssh target for the mini PC (user@host), never committed.
+scripts/phase0/box.env

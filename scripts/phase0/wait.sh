@@ -8,6 +8,8 @@
 #   5  the mini PC cannot be reached over SSH
 set -uo pipefail
 [ "$#" -eq 1 ] || { echo "usage: scripts/phase0/wait.sh <log name>" >&2; exit 2; }
+# The mini PC's ssh target comes from box.env beside this script (git-ignored: LAZYMKV_BOX=user@host) or the environment.
+[ -f "$(dirname "$0")/box.env" ] && . "$(dirname "$0")/box.env"
 HOST="${LAZYMKV_BOX:-USER@makemkv-box}"
 LOG="C:\\lazymkv\\phase0\\logs\\$1.txt"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)

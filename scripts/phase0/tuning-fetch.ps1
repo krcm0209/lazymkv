@@ -21,7 +21,7 @@ param(
 
 $MaxBytes = 2GB
 # How the Mac reaches the mini PC (the default of scripts/phase0/job.sh, wait.sh and pull-recording.sh).
-$MacHost = 'USER@makemkv-box'
+if (-not $MacHost) { $MacHost = 'USER@makemkv-box' }   # set $MacHost in C:\lazymkv\phase0\config.ps1
 
 # "<path below the folder>=<bytes>" for every file of a folder, sorted: two folders hold the same files when these match.
 function Get-Listing([string]$Root) {

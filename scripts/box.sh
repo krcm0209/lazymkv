@@ -3,6 +3,8 @@
 # Usage: scripts/box.sh                 (sync only)
 #        scripts/box.sh cargo test -p lazymkv-core
 set -euo pipefail
+# The mini PC's ssh target comes from scripts/phase0/box.env (git-ignored: LAZYMKV_BOX=user@host) or the environment.
+[ -f "$(git rev-parse --show-toplevel)/scripts/phase0/box.env" ] && . "$(git rev-parse --show-toplevel)/scripts/phase0/box.env"
 HOST="${LAZYMKV_BOX:-USER@makemkv-box}"
 cd "$(git rev-parse --show-toplevel)"
 ARCHIVE="$(mktemp -t lazymkv-src)"

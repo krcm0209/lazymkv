@@ -9,6 +9,8 @@ set -euo pipefail
 SLUG="$1"
 # A slug is lowercase letters, digits and hyphens; it names a folder on both machines.
 [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "bad slug: '$SLUG'" >&2; exit 2; }
+# The mini PC's ssh target comes from box.env beside this script (git-ignored: LAZYMKV_BOX=user@host) or the environment.
+[ -f "$(dirname "$0")/box.env" ] && . "$(dirname "$0")/box.env"
 HOST="${LAZYMKV_BOX:-USER@makemkv-box}"
 cd "$(git rev-parse --show-toplevel)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lazymkv-pull.XXXXXX")"

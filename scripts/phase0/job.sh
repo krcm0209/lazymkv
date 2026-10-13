@@ -3,6 +3,8 @@
 # Usage: scripts/phase0/job.sh <script.ps1> <log name> [script arguments, without quotes]
 set -euo pipefail
 [ "$#" -ge 2 ] || { echo "usage: scripts/phase0/job.sh <script.ps1> <log name> [arguments]" >&2; exit 2; }
+# The mini PC's ssh target comes from box.env beside this script (git-ignored: LAZYMKV_BOX=user@host) or the environment.
+[ -f "$(dirname "$0")/box.env" ] && . "$(dirname "$0")/box.env"
 HOST="${LAZYMKV_BOX:-USER@makemkv-box}"
 SCRIPT="$1"
 LOG="$2"
