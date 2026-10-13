@@ -33,3 +33,8 @@ rip's evidence for tuning) comes next.
 
 This product uses the TMDB API but is not endorsed or certified by TMDB. Disc identification uses
 [TheDiscDB](https://thediscdb.com/). Ripping is done by MakeMKV, which is not part of this repository.
+
+## Licence
+
+MIT; see [`LICENSE`](LICENSE). The ocrs OCR models the app will ship are CC-BY-SA-4.0 and keep their own licence;
+MakeMKV is proprietary and is not redistributed.
