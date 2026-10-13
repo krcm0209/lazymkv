@@ -1,133 +1,153 @@
 # Rust port of the phase 0 analysers: design
 
-Date: 2026-10-13. Status: draft for the owner's review. Parent: `2026-10-04-lazymkv-design.md` (the design spec; its decisions D1 to D23 bind this document). Owner decisions taken while brainstorming this document (2026-10-13): the repository becomes Rust plus the mini PC's PowerShell jobs; the port is one pull request; of the fifteen Python modules the six that implement spec rules are ported and the nine one-off experiment readers are deleted; the committed baselines in the evidence repository are the acceptance tests.
+Date: 2026-10-13, revised the same day after an adversarial review. Status: for the owner's review. Parent: `2026-10-04-lazymkv-design.md` (the design spec; its decisions D1 to D23 bind this document). Owner decisions taken while brainstorming (2026-10-13): the repository becomes Rust plus the mini PC's PowerShell jobs; the port is one pull request; the committed baselines in the evidence repository are the acceptance tests. The owner first took the recommendation to delete the nine one-off readers; the review showed that five of them serve experiments the phase report lists as open and that the plan's routine still calls them, so this revision ports all fifteen modules (section 2) and records that correction for the owner's confirmation.
 
 ## 1. Purpose
 
-Phase 0 measured MakeMKV, mkvmerge and ffmpeg with Python analysers under `scripts/phase0/`. Three of them are the first versions of decision rules the product ships (the audio content rule of spec 8.6, the subtitle text rule of 8.7, the scan-versus-file reconciler of 6.2 step 7), and the tuning harness behind decision D16 only exists in Python. This pull request moves that logic into the `core` crate the design spec names for phase 1, adds the developer command that reads a recording and prints the decisions, and deletes every Python file. When it merges, `cargo test` on a checkout with the evidence clone proves that the Rust rules give the recorded verdicts, and no Python remains.
+Phase 0 measured MakeMKV, mkvmerge and ffmpeg with Python analysers under `scripts/phase0/`. Three of them are the first versions of decision rules the product ships (the audio content rule of spec 8.6, the subtitle text rule of 8.7, the scan-versus-file reconciler of 6.2 step 7), and the tuning harness behind decision D16 only exists in Python. This pull request moves that logic into the `core` crate the design spec names for phase 1, adds a `lazymkv-dev` binary that runs it over recordings, and deletes every Python file and every `python3` call in the repository. When it merges, `cargo test --workspace` on a checkout with the evidence clone proves that the Rust gives the recorded verdicts, and no Python remains.
 
 ## 2. Scope
 
-Ported (the module, what it becomes):
+Of the fifteen Python modules under `scripts/phase0/`, all fifteen are ported. Eight carry rule logic into `core`; seven are small readers (30 to 300 lines over the robot parser) that become `lazymkv-dev` commands, because experiments 2, 8, 10, 11 and 12 are still open and the plan's routine steps call them.
 
-| Python | Rust | Rule it implements |
+| Python | Rust home | What it is |
 |---|---|---|
 | `robot.py` | `core::robot` | spec 9.4, the robot-output parser |
-| `compare_tracks.py` | `core::reconcile` | 6.2 step 7, scan streams against file tracks |
-| `audio_similarity.py` | `core::audio::{levels, measures, rule, reference}` | 8.6 content rule, EXP-13 section 9, D21 veto |
+| `compare_tracks.py` | `core::reconcile` | 6.2 step 7, scan streams against file tracks, as the Python does it (section 3.3) |
+| `audio_similarity.py` | `core::audio::{levels, measures, rule, reference, titles, report}` | 8.6 content rule, EXP-13 section 9, the D21 veto, the `--titles` listing, the per-folder text report |
 | `audio_labels.py` | `core::audio::labels` | D16 labels, D23 counting |
-| `audio_dataset.py` | `core::audio::dataset` and `lazymkv-dev retune` | spec 15 `retune` |
-| `subtitle_text.py` | `core::subtitle::text` | 8.7 text rule, EXP-14 section 3 |
+| `audio_dataset.py` | `core::audio::dataset`; `lazymkv-dev retune`, `levels-args` | spec 15 `retune` |
+| `subtitle_text.py` | `core::subtitle::text` | 8.7 text rule, EXP-14 section 3, `spec87`, `before_yes` |
 | `subtitle_alignment.py` | `core::subtitle::align` | 8.7 timing bands |
-| `proxy_levels.py` | `lazymkv-dev levels-from-proxy` | D16, new measures without the disc |
+| `proxy_levels.py` | `lazymkv-dev levels-from-proxy` | D16, new measures without the disc (a driver around ffmpeg, so not in `core`) |
+| `summarize_scan.py` | `lazymkv-dev scan` | MakeMKV version, Java use, one row per title |
+| `exp02_check.py` | `lazymkv-dev exp02` | experiment 2, the 3307/3308 index guard |
+| `check_encoding.py` | `lazymkv-dev encoding` | experiment 8 |
+| `hit_rate.py` | `lazymkv-dev hit-rate` | experiment 10 |
+| `exp11_tracks.py` | `lazymkv-dev exp11 coverage\|match` | experiment 11 |
+| `compare_scans.py` | `lazymkv-dev compare-scans` | experiments 3 and 5, two scans by source file, segments and duration |
+| `ocr_compare.py` | `lazymkv-dev ocr-compare` | the Tesseract-against-ocrs comparison the phase 1 OCR remedy needs (D22) |
 
-`proxy_levels.py` is the seventh module: it is a driver around ffmpeg, so it lives in the dev binary, not in `core`.
+Every test case of the seven `test_*.py` files (213 functions: analysis 13, audio_dataset 64, audio_similarity 36, decisions 26, exp11_tracks 5, ocr_compare 20, subtitle_text 49) is ported to a Rust test; a mapping table (Python test name, Rust test path) is committed under `docs/phase1/rust-port-tests.md` so a reviewer can diff the count.
 
-Deleted without a port, because their answers are in `docs/phase0/REPORT.md` and the experiment reports: `check_encoding.py`, `compare_scans.py`, `exp02_check.py`, `exp11_tracks.py`, `hit_rate.py`, `ocr_compare.py`, `summarize_scan.py`, and every `test_*.py` once its cases are ported. Git history keeps their code.
-
-Out of scope: the OCR engine work (D22; the OCR text keeps coming from `ocr-subs.ps1` and Tesseract on the mini PC), the `tools`, `platform`, `clients` and `engine` crates of phase 2, any change to a PowerShell job beyond the commands it prints, any change to a rule's thresholds or measures. The port reproduces the Python; improving the rules is later work and goes through `retune`.
+Out of scope: the OCR engine work (D22; OCR text keeps coming from `ocr-subs.ps1` and Tesseract on the mini PC), the `tools`, `platform`, `clients` and `engine` crates of phase 2, any change to a PowerShell job beyond the commands it prints or documents, and any change to a rule's measures, thresholds or verdicts. The port reproduces the Python. The design spec's improvements the Python never had (6.2 step 7's caption-first alignment, the DVD duration band, codec comparison through attributes 41 and 42) are a named follow-up commit after the port, with re-baselined reconcile goldens; they are not in this pull request.
 
 ## 3. Architecture
 
-### 3.1 Crates
+### 3.1 Crates and dependencies
 
-`crates/core` (exists: `fingerprint`, `profile`) gains the modules of section 2 plus `lang` (ISO 639 bibliographic and terminology codes, the no-language codes `"", -, und, zxx, mul, mis`, TMDb's `xx`) and `recording` (the data model of a recording and the parsers of its files, from text and bytes handed in). `core` keeps the design spec's rule: no I/O, no OS-specific code, every function takes parsed inputs and returns values or typed errors. New dependency: `regex` (the subtitle text rule's patterns); `serde`, `serde_json`, `md-5` and `sha1` are already there.
+`crates/core` (exists: `fingerprint`, `profile`) gains the modules of section 2 plus `lang` (two tables, as the Python has them: `compare_tracks.B_TO_T` for the reconciler's bibliographic-to-terminology mapping, and `audio_similarity.ISO639` with `NO_LANGUAGE = "", -, und, zxx, mul, mis` and TMDb's `xx`) and `recording` (section 3.3). `core` keeps the design spec's rule: no I/O, nothing OS-specific; every function takes parsed inputs or an in-memory tree (section 3.2) and returns values or typed errors. Its `Cargo.toml` adds `serde` (derive), `serde_json` with the `preserve_order` and `float_roundtrip` features, `regex` (the marker patterns), `fancy-regex` (the seven OCR corrections, which use look-behind and look-ahead; `fancy_regex::Regex::replace_all` is one pass over the original text like `re.subn`), and `unicode-normalization` (NFKD plus the canonical combining class for `fold`). `md-5` and `sha1` are already there.
 
-`crates/dev` is new and builds the binary `lazymkv-dev`. It owns the I/O: walking a recording directory, reading files, running ffmpeg for `levels-from-proxy`, printing reports and JSON, exit codes. It is the first form of decision D16's developer and tuning mode; phase 2 folds `retune` and `decide` into `lazymkvctl` and this crate keeps whatever the engine does not take over.
+`crates/dev` is new, a workspace member, and builds the binary `lazymkv-dev`. It owns all I/O: building the in-memory tree from a directory, reading files, writing files and snapshots, running `ffprobe` and `ffmpeg` through an injectable runner trait (so the mocked Python tests port as they are), printing, exit codes. Argument parsing is by hand or `clap`; either way the flag spellings of section 3.4 are the Python's. It is the first form of decision D16's developer and tuning mode; phase 2 folds `retune` and `decide` into `lazymkvctl`, and this crate keeps what the engine does not take over.
 
 `crates/capture` and `crates/fake-tools` are unchanged.
 
-### 3.2 Data flow
+### 3.2 The core/dev boundary: the in-memory tree
 
-```
-recording dir --(dev::evidence reads files)--> core::recording::Recording
-   scan.txt ----------------> core::robot::Scan
-   mkvmerge.json, ffprobe-streams.json, rip.txt --> core::reconcile::Report
-   audio-levels-20ms-*/ -----> core::audio::levels::Folder --> measures --> rule verdicts
-   audio-labels.json, audio-fitted.json, tmdb.json --> core::audio::labels, reference
-   subs/, subs-ocr/, TEXT/*.ocr.jsonl --> core::subtitle::text::Report, align::Report
-all of it --> lazymkv-dev decide --> JSON on stdout
-all titles of the evidence clone --> lazymkv-dev retune --> the harness report, audio-dataset.json
-```
+`core::recording::Tree` is a `BTreeMap<RelPath, Lazy<Bytes>>` of a recording directory, or of the whole evidence directory, with `list(dir)`, `glob(pattern)` and `read(path)`; entries are ordered by the byte order of their relative paths (Python's `sorted()` on names). `crates/dev` builds it from disk, lazily for level series, and hands it to `core`. Every walker in the Python (`find_folders`, `ripped`, the `*/*/audio-levels-20ms-*/audio-proxy.json` scan, `no_audio`, `same_rip`, labels `auto` and `_scan_flags`, `refusal`, `load_title`, `levels_args`) becomes a function over the tree. Folder names `golden/` are skipped by every walker (section 5 reserves the name). A missing file is `Missing(RelPath)`, raised by the tree, never a silent default. Text files are decoded as UTF-8 with an optional byte-order mark, lossily (`from_utf8_lossy`) where the Python read with `errors="replace"`, and lines end only at `\n` (the Python's `split("\n")`, never `splitlines`), with a trailing `\r` stripped where the Python strips it.
 
 ### 3.3 Module contracts
 
-- `core::robot`: `parse(&str) -> Result<Scan, RobotError>`; `Scan { drives, titles: Vec<Title>, messages }` with every attribute id of spec 9.4 as a typed accessor and the raw map kept; `RobotError { line: usize, kind }`, never a panic on recorded input; `duration_seconds(&str) -> Option<f64>`; a splitter for the quoted CSV fields that matches `robot.split_fields` on every line of every recorded scan.
-- `core::reconcile`: `expected_rows(scan, title, selection)`, `removed_streams(rip_text)` (MSG:4047 indices mapped through the selection, as phase 0 found), `file_rows(mkvmerge_json)`, `checks(want, got, title, ident) -> Report { count, order, duration, rows }` with the caption-first exception (a text-converted subtitle track before the bitmap ones is in order) and the duration tolerance: 2 s on a Blu-ray; on a DVD 2 s shorter to 1 % longer (provisional, spec section 17 row 1).
-- `core::audio::levels`: readers of `manifest.txt` (first line `# lazymkv audio-levels v2`), `main-mix.txt`, `main-fc.txt`, `cand-<n>.txt` (one dB level per 20 ms frame, floor -100), `streams.json`, `audio-proxy.json`; a folder of the first measurement form is refused with the message the Python prints.
-- `core::audio::measures`: `analyse(main, cand, dialogue, reverse) -> Measures` with the constants of `audio_similarity.CONSTANTS` as a `Constants` struct (defaults equal to the Python's), DC, AG, tenths, SMI (the 64-point modulation spectrum with precomputed twiddles, computed in the Python's order), LS, ADL, lags, `swapped`, `reverse_measures`.
-- `core::audio::rule`: `Rule` (the thresholds of `audio_similarity.RULE`), `Verdict` (`duplicate, commentary, commentary-cross-language, reference-unclear, ad-pattern, note-commentary, note-ad, keep, not-judged`), `verdict(measures, rule)`, the reverse and peer runs, `cross_language`, `MEANING` texts, the position veto (row 0, D21: `first_of_language`, `position_veto`).
-- `core::audio::reference`: `is_lossless`, `rank`, `placed_first` (8.6 step 3 with guards G1 and G2 as far as ffprobe's facts go), `programme_reference` (the original language from `tmdb.json`, else English, as spec 8.6 now states), `wanted`.
-- `core::audio::labels`: the labels file `lazymkv audio labels v1` and the fitted file `lazymkv audio fitted v1` as serde types with the same validation as `audio_labels.check`; `KINDS`, `HOW`, `COUNTING_HOW = (listened)`, `OBSERVATION_HOW`, `NOT_COUNTED`; `not_counted_because`; the edits `set`, `unset`, `title`, `auto`, `fitted` as pure functions from a file's content to its new content (the dev binary writes the file in one step, only when the change adds no problem).
-- `core::audio::dataset`: the harness: every level folder of every title, the join with labels, the counting against the totals of spec section 17 row 13 (read from the spec file the caller hands in, as the Python does, so the numbers have one source), the FAIL rules (a programme track with a drop verdict or the cross-language pattern, a folder measured against another reference than the rule's own choice, an unwanted reference, a swapped reference), the not-judged exclusions (no language, a language that is neither English nor the original, a folder without `streams.json`), the missing-title list, the snapshot `lazymkv audio dataset snapshot v2` with its cache. The cache key uses the rule version instead of a script hash: `RULE_VERSION`, a constant string bumped by hand whenever a measure or threshold changes, plus a hash of the constants in force. The report text and exit codes (0; 1 for a FAIL; 3 when evidence could not be read) are the Python's.
-- `core::subtitle::text`: `Rule` (the thresholds of `subtitle_text.RULE`), the ASCII folding map and OCR corrections, the marker regexes (`CUE`, `LABEL`, `>>`, note lines, wrapped lines), `measure(stream_text, packets, frames) -> Measures` (events, readability, language shares, markers CUE/LABEL/M/SO/CS, capital style), the pair measures (time-free bigram containment, timing alignment), `decide(measures, rule) -> Vec<Decision>` with rules T0 to T7, the closed-caption set-aside, the "before a yes" mode that only adds reviews; the report prints numbers only, never a line of subtitle text.
-- `core::subtitle::align`: `events(packets, clear_max_bytes)`, `aligned(a, b, tolerance_s)`, `buckets`, `is_text(codec)`, the index of a `subs/` folder.
-- `core::recording`: the types for `meta.json`, `files.json`, `rip-summary.json`, `extract-summary.json`, `probe-summary.json`, `mkvmerge.json` (the parts used), `ffprobe-streams.json`, `subs/index.json`, `sub-<n>.packets.json`, `subs-ocr/summary.json`, `sub-<n>.frames.json`, `tmdb.json` (slimmed form, `original_language` and `fetched_at`), and `Missing(path)` as the one error for an absent file. Every text file is read as UTF-8 with an optional byte-order mark, because PowerShell wrote them.
+- `core::robot`: `parse(&str) -> Scan`, infallible: a line without `:` or whose fields do not parse is skipped, as `robot.parse` skips it (an optional `skipped: Vec<(line, reason)>` is kept for diagnostics); `PRGC`, `PRGT`, `PRGV`, `TCOUNT` and `HSH` lines are ignored as the Python ignores them (D18 may need `TCOUNT` later; that is a later change). `Scan { messages: Vec<Message>, drives: Vec<Drive>, disc: BTreeMap<u32, String>, titles: BTreeMap<u32, Attrs>, streams: BTreeMap<(u32, u32), Attrs> }` with sparse title numbering kept; `split_fields` matches the Python on every line of every recorded and pinned scan; `duration_seconds(&str) -> Option<u32>` with the caller's default stated where the Python raised.
+- `core::reconcile`: exactly `compare_tracks.py`: `expected_rows(scan, title, selection)` (selection `all` or `eng`), `removed_streams(rip_text)` (MSG:4047 indices mapped through the selection; an index beyond the prediction is reported, not dropped), `file_rows(mkvmerge_json)`, `same_track` (type; language except on video; audio channels when both sides state them; position by position, no exception), `checks` giving the five verdicts `count`, `order`, `video`, `chapters`, `duration` with their numbers (`scan_chapters`, `file_chapters`, `scan_seconds`, `file_seconds`, the symmetric `DURATION_TOLERANCE_S = 2` for every format), the rows, the removed rows, the unknown MSG:4047 indices, `statistics_tags` and `video_tracks`; exit 1 when any verdict is `no`.
+- `core::audio::levels`: parsers over text: `parse_manifest(&str)` (first line `# lazymkv audio-levels v2 (experiment 13)`), `parse_levels(&str)` (one dB level per 20 ms frame, floor -100), `parse_streams(&str)` (`streams.json`), `parse_proxy(&str)` (`audio-proxy.json`), and `refusal(tree, folder)` with the Python's messages (a first-form folder, a missing file, a frame length other than 20 ms).
+- `core::audio::measures`: `Constants` (the Python's `CONSTANTS`, same defaults, each marked `Int` or `Float`), `analyse(main, cand, dialogue, reverse, &Constants) -> Measures` in the Python's loop order (DC, AG, tenths, SMI with the 64-point precomputed twiddles, LS, ADL, the three lag searches), `reverse_measures`, `swapped`. `SILENT_DB` also decides, outside `analyse`, whether `main-fc.txt` is used (`max(fc) <= SILENT_DB`), as in `results`.
+- `core::audio::rule`: `Rule` (the Python's `RULE`), `Verdict` (`duplicate`, `commentary`, `commentary-cross-language`, `reference-unclear`, `ad-pattern`, `note-commentary`, `note-ad`, `keep`, `not-judged`), `verdict`, `commentary_pattern`, `ad_pattern`, `reverse_pattern`, `not_judged`, `cross_language`, the `MEANING` and `VETO_MEANING` texts, and `results(tree, folder, &Rule, &Constants, cache) -> FolderResults` as the folder-level orchestration (duplicates by packet MD5, forward, reverse and peer runs, the veto). `Rule::set(name, value)` and `Constants::set` reproduce `--set`: a rule key matched case-insensitively, a constant upper-cased, a finite number, a whole number for an `Int` key, and the Python's error text listing the valid names.
+- `core::audio::reference`: `is_lossless`, `rank`, `placed_first` (8.6 step 3 with guards G1 and G2 as far as ffprobe's facts go), `programme_reference` with the Python's three steps (the original language from `tmdb.json`, else English, else any language when no stream is in a wanted language), `wanted`, `first_of_language`, `position_veto` (row 0, D21).
+- `core::audio::titles`: `segments`, `audio_by_title` (the derived flag 2048 left out, `""` becomes `und`), `dvd_scan` (CINFO 1 contains `DVD`, or a `V_MPEG2` or `S_VOBSUB` stream, and no title attribute 16), `titles_report` with the `<- <lang> x<n>`, `<- wanted x<n>`, `ripped as` and `shares segments with` lines and the DVD line that says no segment check was made.
+- `core::audio::report`: the per-folder text report of `audio_similarity.report` line for line (header, `veto:` line, measure lines, reverse and peer lines, the meaning texts, `row:` lines); every folder is checked before anything is printed; a refusal is exit 1.
+- `core::audio::labels`: the labels file `lazymkv audio labels v1` and the fitted file `lazymkv audio fitted v1` are handled as `serde_json::Value` with insertion order kept; `problems` and `fitted_problems` run over the value and produce the Python's sentences verbatim; typed views are derived only after validation passes; the edits `set`, `unset`, `title`, `auto` (which also reads `scan.txt` and the rips' `ffprobe-streams.json` through the tree) and `fitted` are functions from a value and its inputs to the new value, sorting tracks by `(label, stream)` and titles by key as `save` does; `KINDS`, `HOW`, `COUNTING_HOW = (listened)`, `OBSERVATION_HOW`, `NOT_COUNTED`, `not_counted_because`.
+- `core::audio::dataset`: the harness over the tree: every level folder of every title, the join with labels, the counting against the totals of spec section 17 row 13 read from the spec text handed in (one source for the numbers, as the Python), the FAIL rules, the not-judged exclusions (no language, a language that is neither English nor the original, a folder without `streams.json`), the missing-title list, the report lines, the snapshot. The snapshot format becomes `lazymkv audio dataset snapshot v3`: `code` is `{"rule_version": RULE_VERSION}`; the cache key is `sha1("lazymkv-rule:" + RULE_VERSION + canonical constants JSON (sorted keys, Python number spelling) + per series its little-endian f64 bytes + "|", "|" for none)`; a v2 file is read for `--compare` and as the cache seed. `RULE_VERSION` starts at `1` and is bumped by hand with every change to a measure or threshold; a test runs the harness with the cache off and on and compares, so a missed bump is caught. Exit codes 0, 1 (a FAIL), 2 (an argument or spec problem), 3 (evidence could not be read) are the Python's.
+- `core::subtitle::text`: `Rule` (the Python's `RULE`), `fold` (NFKD, canonical combining class, the `FOLD_MAP`), the seven `CORRECTIONS` with their `subn` counts, the marker patterns (`RE_CUE`, `RE_LABEL`, `RE_CHEV`, `RE_NOTE`, `RE_NOTE_LOOSE`, `RE_WRAP`, `RE_WORD`, `RE_WORDLIKE`, confirmed pattern by pattern to need no look-around), `packet_events` (events with durations; packets above `clear_max_bytes`, every packet for a text codec), `measure` (events, readability, language shares, markers CUE/LABEL/M/SO/CS, capital style), `pair_text` (time-free bigram containment), text's `aligned` (rounded to 3 decimals), `split_joined`, `uc`, `subset_of`, `spec87(tracks) -> roles` (8.7 today, by counts and timing), `decide(tracks, orig_lang, &Rule)` with T0 to T7 as `subtitle_text.decide` implements them (without T4's forced-only-parent and TheDiscDB steps and T5's TheDiscDB rows, which the Python never had), `before_yes(verdict, today)`, the closed-caption set-aside, the report of numbers only. Every measure the Python rounds (`round(x, 3)` and `round(x, 4)`) is rounded by a helper that rounds the exact decimal expansion half to even, with tests at the `.0005` boundaries, because those rounded values meet thresholds.
+- `core::subtitle::align`: `events(packets, clear_max_bytes)`, `aligned(a, b, tolerance_s)` (unrounded; a different function from text's), `buckets`, `is_text(codec)`, the `subs/` index.
+- `core::recording`: the types for `meta.json`, `files.json`, `rip-summary.json`, `extract-summary.json`, `probe-summary.json`, `mkvmerge.json` (the parts used), `ffprobe-streams.json`, `subs/index.json`, `sub-<n>.packets.json`, `subs-ocr/summary.json`, `sub-<n>.frames.json`, `tmdb.json` (slimmed form: `original_language`, `fetched_at`), `thediscdb-*.json`, `lookup-status.txt`; a rip label is a folder with an `ok` `rip-summary.json` or `extract-summary.json` and an `mkvmerge.json`; the title number comes from that summary and the selection from its profile file name (`eng-only.mmcp.xml` means `eng`, otherwise `all`); the disc format from `meta.json`.
+- Writers (in `crates/dev`): a Python-compatible JSON writer (indent `n`, `": "` and `","` separators, insertion order, `ensure_ascii` as a flag, Python float `repr` spelling, ints and floats kept distinct, `NaN` written as `null`), used for the snapshot (indent 1, ASCII), the labels file (indent 2, non-ASCII kept, trailing newline, written through a temporary file and a rename), `streams.json` (indent 1); level files with the Python's decimal-string rounding half away from zero and `CRLF` line ends, `manifest.txt` with `LF`.
 
 ### 3.4 The dev binary
 
-`lazymkv-dev <command>`; every command takes `--evidence DIR` (default `corpus/owner`, or the environment variable `LAZYMKV_EVIDENCE`) and fails with exit 3 and one line naming the evidence repository when the directory is not a clone of it.
+Synopsis, flag spellings as the Python's, and exit codes:
 
-| Command | Replaces | Output |
+| Command | Replaces | Exit codes |
 |---|---|---|
-| `scan <slug>` | `summarize_scan.py` (the useful part) | the title table of `scan.txt` as JSON |
-| `decide <slug> <label>` | spec phase 1's command | reconciler report, audio verdicts, subtitle verdicts, reviews and measures, as JSON |
-| `retune [--set K=V ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured]` | `audio_dataset.py` | the harness report; writes `audio-dataset.json` as the Python did |
-| `levels-args <slug> <label>` | `audio_dataset.py args` | the `audio-levels.ps1` job lines |
-| `labels kinds\|check\|set\|unset\|title\|auto\|fitted ...` | `audio_labels.py` | the same arguments and messages |
-| `subs <slug> <label> --text DIR [--orig-lang CODE]` | `subtitle_text.py` | the numbers-only report; exit 2 when input cannot be read |
-| `align --subs-dir DIR \| name=path ... [--clear-max-bytes N] [--tolerance S]` | `subtitle_alignment.py` | the alignment table |
-| `levels-from-proxy <audio-proxy.mka> <out> --main N [--cand N,...]` | `proxy_levels.py` | a level folder; needs `ffmpeg` and `ffprobe` on PATH |
-| `golden check` | new | runs every golden comparison of section 5; exit 1 on any difference |
+| `scan <slug\|dir> [--title N]` | `summarize_scan.py`; with `--title`, the plan's stream listings (attributes 3, 6, 22, 42, the derived and forced-only flags) | 0; 2 unreadable |
+| `reconcile <scan> <title> <mkvmerge_json> [--selection all\|eng] [--rip-log FILE]` | `compare_tracks.py` | 0; 1 a verdict is no; 2 unreadable |
+| `decide <slug> <label> [--text DIR] [--selection all\|eng]` | new (spec phase 1's first form) | 0; 1 a reconcile verdict is no; 2 unreadable; 3 no evidence |
+| `retune [--evidence DIR] [--set K=V ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured]` | `audio_dataset.py` | 0; 1; 2; 3 |
+| `levels-args <slug> <label>` | `audio_dataset.py args` | 0; 2 |
+| `titles <slug\|dir>` | `audio_similarity.py --titles` | 0; 1 no `scan.txt` |
+| `audio-report <folder> ...` | `audio_similarity.py <folder> ...` | 0; 1 refusal |
+| `labels kinds\|check\|set\|unset\|title\|auto\|fitted` with the Python's path arguments and `--spec` | `audio_labels.py` | 0; 2 |
+| `subs --rec DIR --text DIR [--orig-lang CODE]` | `subtitle_text.py` | 0; 2 |
+| `align [name=path ...] [--subs-dir DIR] [--clear-max-bytes N] [--tolerance-ms N]` | `subtitle_alignment.py` | 0; 2 |
+| `levels-from-proxy <audio-proxy.mka> <out> --main N [--cand N,...]` | `proxy_levels.py` | 0; 1 |
+| `exp02 <dir>`, `encoding <file>`, `hit-rate <dir>`, `exp11 coverage <where>... \| match <folder> <title> <label>`, `compare-scans <A> <B>`, `ocr-compare <tess> <ocrs> [--rec DIR] [--tag CODE]` | the seven readers | the Python's (0/1, 0, 0/1, 0/2, 0/1, 0/2) |
+| `golden write`, `golden check [--text DIR]` | new (section 5) | 0; 1 a difference; 3 nothing could run |
 
-Exit codes follow the Python command each replaces. A command never writes outside the evidence clone, the output path it is given, or the temporary directory.
+`--evidence DIR` (default `corpus/owner`, or `LAZYMKV_EVIDENCE`) applies to the commands that read the evidence (`scan`, `decide`, `retune`, `levels-args`, `titles`, `labels` other than `kinds`, `subs` when given a slug, `golden`); the check is the Python's: the directory exists, else exit 3 with the line naming the evidence repository and where to clone it. `scan`, `titles`, `decide` and `subs` also accept a recording directory path, so a contributor's own recording, `corpus/scenarios/disc-a-scan` or a pinned log directory works without the clone. `align`, `levels-from-proxy`, `reconcile`, `labels kinds` and the seven readers take explicit paths and make no evidence check.
+
+`decide` prints one JSON document: `reconcile` (the section 3.3 report), `audio` (one entry per level folder of the label: the `results` rows), `subtitles` (`decide`, `spec87` and `before_yes` per stream, or `{"skipped": "<reason>"}` when `--text` is absent or holds no text for the title), `reviews` (every review reason the three parts raise). Its inputs are derived as section 3.3's `recording` states; a label that is not a rip label is reported with its reason and exit 2.
+
+Paths in every report are printed relative to the evidence root as `corpus/owner/<slug>/...` whatever `--evidence` says, and the snapshot's `corpus` field is that literal; the lines that carry a decision (the To-label list, the kind-against-verdict table, the experiment 13 block, FAIL, kept and note lines, RESULT, `verdict:` and `row:` lines) are the Python's byte for byte; lines that name a command or a code hash are rewritten (`python3 scripts/phase0/audio_labels.py set ...` becomes `lazymkv-dev labels set ...`; `rule: audio_similarity.py <sha>` becomes `rule: version <n>`), and the goldens of section 5 record which lines are compared.
 
 ## 4. Exactness
 
-The port reproduces the Python, not an improvement of it:
+The port reproduces the Python of commit `75fa76a`'s tree (the review fixes of 2026-10-13 included: T2 over a snapshot, the T6 guards, unjudged tracks, the veto without `streams.json`, DVD segment numbers), written by Python 3.9.6 on the Mac:
 
-- Verdicts, markers, classes, counts, orders, review reasons, exit codes and report lines that carry a decision are identical.
-- Floating-point measures agree within 1e-9 absolute, except SMI within 1e-6 (its spectrum sums 64 complex products). The Rust code computes in `f64` in the Python's order of operations; where that is impossible, the test documents the deviation and the golden records the Rust value with the Python value beside it.
-- The random-free parts are byte-identical where a file is written (`manifest.txt`, level files, `streams.json`, the labels file after an edit, `audio-dataset.json` apart from `created` and the rule-version key).
-- The review's fixes of 2026-10-13 (T2 over a snapshot, the T6 guards, unjudged tracks, the veto without `streams.json`, DVD segment numbers) are part of the Python the port reproduces.
+- Verdicts, markers, classes, roles, counts, orders, review reasons, exit codes and the decision-carrying report lines of section 3.4 are identical.
+- Floating-point measures agree within 1e-9 absolute, SMI within 1e-6 (its spectrum sums 64 complex products). The Rust computes in `f64` in the Python's loop order; Python 3.9's `sum` adds left to right, and so does the Rust.
+- Files the Python writes deterministically are byte-identical when written by the Rust from the same inputs: `manifest.txt`, level files, `streams.json`, a labels file after an edit, and a second run's snapshot apart from `created`. The first Rust snapshot differs from the committed v2 baseline in `created`, `code`, every `tracks[].key`, every peer `key` and every `measures_cache` key (the key formula changed), and in nothing else once floats are compared within the tolerance; the comparison is structural (parsed JSON, `NaN` as `null`), and that structural equality is the acceptance.
+- `proxy.txt` of a rebuilt level folder names the proxy by its path relative to the current directory as given, not resolved.
 
 ## 5. Acceptance: goldens and ported tests
 
-**Goldens.** Before any Python is deleted, a one-off script `scripts/phase0/write_goldens.py` (added and deleted in this pull request) runs every Python analyser over the evidence clone and writes, per recording, into `corpus/owner/<slug>/golden/`:
+**Goldens.** `lazymkv-dev golden write` has a Python twin, `scripts/phase0/write_goldens.py`, which is committed in a separate commit before the port (so its source is in `main`'s history) and deleted with the rest of the Python. Run on the Mac with the evidence clone, the level series present (the ignored side files under `audio-levels-*`), and the OCR text fetched for every title read (`tuning-fetch.ps1 -Text` per title, then deleted), it writes into `corpus/owner/<slug>/golden/` of the evidence repository:
 
-- `scan.json`: the parsed title table (`robot.parse`) and `duration_seconds` of every title;
-- `<label>/reconcile.json`: `compare_tracks` rows and verdicts for every rip label;
-- `<label>/audio-<folder>.json`: for every level folder, every candidate's measures (forward, reverse, swapped, peer where it exists), verdict, veto line;
-- `<label>/subs.json`: per stream the measures, markers, class, language and decision of `subtitle_text.py`, the pair measures, the exit code; written only where the OCR text is present on the Mac (the text itself is never written);
-- `<label>/align.json`: `subtitle_alignment.py` over the `subs/` folder;
-- `labels.json`: `audio_labels.check` output and `not_counted_because` for every labelled track.
+- `scan.json`: `titles`, `streams` and `disc` of `robot.parse` and `duration_seconds` per title (no `drives`, no `messages`);
+- `titles.txt`: the `titles` report;
+- `<label>/reconcile.json`: the full section 3.3 reconcile report for every rip label (selection from the profile name, title from the summary);
+- `<label>/audio-<folder>.json`: for every level folder, every candidate's forward, reverse, swapped and peer measures, verdict and the veto line; `<label>/audio-<folder>.txt`: the `audio-report` lines (the five committed `audio-content-20ms-*.txt` files are checked against them);
+- `<label>/subs.json`: per stream the measures `m`, markers, class, language, `decide`, `spec87` and `before_yes` outcomes, the pair measures, the corrections' counts, the pairing line and the exit code, plus the reading folder it came from and a SHA-1 of each text file; built from the measures and decisions only, never from the event features, words or bigrams, so no subtitle text reaches the file; `<label>/subs.txt`: the report lines (the six committed `subtitle-text.txt` files are checked against them where the Python still gives the same lines);
+- `<label>/align.json`: the `align` table over `subs/`;
+- `labels.json`: `labels check` output and `not_counted_because` per labelled track;
+- `proxy-<folder>/`: for one proxy fetched from the tuning dataset, the folder `levels-from-proxy` writes (manifest, levels, `streams.json`, `proxy.txt`) with the ffmpeg version recorded;
+- `README.md` (once, at `corpus/owner/golden/README.md`): the schema of every file, `NaN` as `null`, the `written_by` block (main-repository commit, Python version, ffmpeg version, input hashes), the rule for re-recording a golden (only in a named commit that says why, keeping the Python value beside the Rust one when they differ by design).
 
-`audio-dataset.json` stays the baseline of `retune`. The goldens are committed in the evidence repository (they hold numbers and verdicts, no subtitle text, no serials, no user names); the Python that wrote them is deleted in the same pull request.
+`audio-dataset.json` stays the baseline of `retune`. Before the goldens are committed in the evidence repository, the checks its README prescribes run there: `git grep -nia` for the mini PC's and the Mac's user names, a grep for the drive serial pattern, and the unit-key find; all print nothing.
 
-**Rust tests.** Every Python test case becomes a Rust test in the module it exercises (synthetic fixtures become Rust helpers; the count is reported in the pull request). The golden comparisons are `#[test]`s in `crates/dev` that read the evidence clone when it is present and otherwise print `skipped: no evidence clone at <path>` and pass, so a public CI without the clone stays green and honest. The parser also runs over the pinned public scan logs under `corpus/thediscdb` (title count and duration of every title, against the counts in their parsed forms), which does run in CI. `cargo test --workspace` on the Mac with the clone, and on the mini PC, must pass before the pull request is marked ready.
+**`golden check`.** Every comparison ends `pass`, `fail` or `skipped: <reason>` (no evidence clone; no `golden/` folder for the recording; level series absent, with the Python's "its level files are not here" message; OCR text absent, taken from `--text DIR` or `LAZYMKV_OCR_TEXT`; `ffmpeg` absent or not the recorded version for the proxy golden). A missing golden is listed as not covered. Exit 1 on any `fail`, 3 when nothing could run, 0 otherwise; the summary prints the three counts. The same comparisons are `#[test]`s in `crates/dev` that pass with a printed skip reason when their inputs are absent, so a future CI without the clone stays green and honest. The parser also runs over the pinned public scan logs under `corpus/thediscdb` (title count and the duration of every title against their parsed forms), which needs no clone.
 
-**Harness round trip.** `lazymkv-dev retune` on the evidence clone must end `RESULT ok`, reproduce every verdict of `audio-dataset.json`, and write a snapshot that differs from the committed one only in `created` and the rule-version key; that snapshot is committed in the evidence repository with the pull request.
+**Ported tests.** The 213 Python cases become Rust tests one for one, listed in `docs/phase1/rust-port-tests.md`. The synthetic audio and subtitle signals come from Python's `random.Random(seed)`: `crates/core` gets a test-support MT19937 with Python's `random`, `randint` (rejection sampling on `getrandbits`) and `uniform`, verified against values Python printed once and committed as a fixture, so the ported tests test the same data. The mocked ffmpeg tests port through the runner trait of `crates/dev`. `cargo test --workspace` on the Mac with the clone, the series and the text, and on the mini PC, pass before the pull request is marked ready.
+
+**Harness round trip.** `lazymkv-dev retune` on the evidence clone ends `RESULT ok`, reproduces every verdict and outcome of `audio-dataset.json` under section 4's structural comparison, and writes the v3 snapshot, which is committed in the evidence repository with the pull request.
+
+**Review means.** One commit per module in dependency order (`lang`, `recording`, `robot`, `reconcile`, `audio::levels` to `audio::dataset`, `subtitle`, the dev commands, the readers), each with its ported tests and golden comparisons; then the deletions and the documents. The pull request description gives the evidence-repository commit the goldens are at, the `golden check` summary, and the test count against 213.
 
 ## 6. Deletion and hand-over
 
-In the same pull request, after the goldens and tests pass:
+In the same pull request, after the goldens and tests pass, every `python3` call and `.py` reference in the repository goes; the plan for this pull request lists them from `git grep -n 'python3\|\.py\b'` at the time, with this policy:
 
-- `scripts/phase0/*.py` and `scripts/phase0/test_*.py` are deleted; `__pycache__/` leaves `.gitignore`.
-- Every PowerShell script that prints or documents a `python3 scripts/phase0/...` follow-up prints the `lazymkv-dev` equivalent; the plan's D16 routine (Task 11 Step 11, Task 12 Steps 15 to 20) is rewritten to the new commands; `README.md`, `corpus/README.md`, `corpus/owner/README.md` (in the evidence repository), `docs/phase0/REPORT.md` and the experiment designs say where each rule now lives.
-- The design spec's section 15 names `lazymkv-dev retune` as the form `retune` takes until `lazymkvctl` exists, and section 16's phase 1 row names this pull request as its first step.
+- `scripts/phase0/*.py` and `test_*.py` are deleted (including `write_goldens.py`); `__pycache__/` leaves `.gitignore`.
+- `scripts/phase0/fetch-thediscdb-fixtures.sh` loses its three `python3 -c` calls (URL encoding and two JSON field reads) for `jq` or `curl --data-urlencode`.
+- PowerShell comments and strings that name a Python script are rewritten to the `lazymkv-dev` command (`audio-levels.ps1`, `exp02-index-guard.ps1`, `ocr-subs.ps1`, `ocrs-trial.ps1`, `tuning-fetch.ps1`); the `proxy_levels.py` string `audio-levels.ps1` writes into `audio-proxy.json` becomes `lazymkv-dev levels-from-proxy`, and the Rust reader accepts both.
+- The plan `2026-10-04-lazymkv-phase-0-evidence.md`: the routine steps that are still run (Task 8 Steps 6 and 7, Task 11 Step 11, Task 12 Steps 5, 6, 15 to 20 and 27, Task 13, Task 15 Steps 2, 4 and 5, Task 17's guard) are rewritten to `lazymkv-dev`; every other `python3` line, including the inline heredocs and the embedded listings, is marked historical with the commit that last had the script (`git show <commit>:scripts/phase0/<file>`).
+- `README.md`, `corpus/README.md`, `corpus/owner/README.md` (in the evidence repository), `docs/phase0/REPORT.md`, `docs/phase0/environment.md`, `docs/phase0/ocr-engine-research.md`, `experiments/ocrs-trial/README.md` and the experiment designs say where each tool now lives; the designs' embedded Python listings are marked as history.
+- The design spec: section 15 names `lazymkv-dev retune` as the form `retune` takes until `lazymkvctl` exists, section 4.2's table gains the `dev` crate, and section 16's phase 1 row names this pull request as its first step.
 
 ## 7. Risks
 
-- **Regex semantics.** Python `re` and Rust `regex` differ (no look-around in `regex`; the OCR patterns use none, which the port must confirm pattern by pattern; Unicode classes differ, which the ASCII folding sidesteps).
-- **Float order.** Python's `sum` and Rust iterators differ in accumulation order; the measures use explicit loops in the Python's order. The 1e-9 bound catches a slip.
-- **The spec as data.** `retune` reads row 13's totals from the design spec, so an edit of that row changes the harness; the Python already does this, and the golden check pins the numbers read.
+- **Regex semantics.** The seven corrections use look-around: `fancy-regex` runs them; a differential test per pattern (the Python's cases plus every distinct line shape in the recorded OCR text, generated once and committed as a public fixture of synthetic lines) pins `replace_all` against `subn`, counts included. The marker patterns run on `regex`.
+- **Unicode tables.** `fold` uses Python 3.9's Unicode 13 tables; `unicode-normalization`'s may be newer. The goldens pin the Mac's Python; a difference on a character the recorded text contains is a finding, not a tolerance.
+- **Float order and rounding.** The measures use explicit loops in the Python's order; the 1e-9 bound catches a slip; the half-even decimal helper covers every `round()` that meets a threshold.
+- **The spec as data.** `retune` reads row 13's totals from the design spec, so an edit of that row changes the harness; the golden check pins the numbers read.
 - **Evidence drift.** A new recording pulled before the port lands changes nothing here: goldens are per recording and the harness ignores unlabelled tracks for its FAIL rules.
-- **ffmpeg on the Mac.** `levels-from-proxy` and its test need `ffmpeg` on PATH; the test skips with a message when it is absent.
+- **ffmpeg.** `levels-from-proxy`'s real test needs the recorded ffmpeg version on PATH and a fetched proxy; it skips with a message otherwise, and the mocked tests always run.
+- **Size.** About 7,000 lines of Rust and 4,000 of tests in one pull request; the per-module commits, the mapping table and `golden check` are the reviewer's means.
 
 ## 8. Decisions recorded by this document
 
 - RP1. The port is one pull request, executed as one plan (owner, 2026-10-13).
-- RP2. Six rule modules are ported, nine one-off readers are deleted; `proxy_levels.py` is ported as a dev command (owner, 2026-10-13, on the recommendation).
+- RP2. All fifteen modules are ported: eight into `core`, seven as `lazymkv-dev` commands (this revision; replaces the first recommendation to delete seven readers, after the review found five of them serving open experiments and routine steps). For the owner's confirmation.
 - RP3. Acceptance is by goldens written by the Python once plus the Python tests ported one for one (approach A of the brainstorm; owner: "the design holds").
-- RP4. `core` stays free of I/O: directory walking and file reading live in `crates/dev`.
-- RP5. The rule version replaces the script hash in the harness's cache key.
+- RP4. `core` stays free of I/O: the in-memory tree, directory walking, file reading and writing live in `crates/dev`.
+- RP5. `RULE_VERSION` replaces the script hash in the harness's cache key; the snapshot format becomes v3 with a v2 reader.
+- RP6. `reconcile` is the Python's, not the design spec's 6.2 step 7; the spec's improvements follow in a named commit with re-baselined goldens.
