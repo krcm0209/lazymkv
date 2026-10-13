@@ -4,6 +4,9 @@
 # git-ignored scripts/phase0/box.env or the environment, and the Mac's is `id -un`. Every line that names either
 # (case-insensitive) is printed, as git grep prints it, from the working tree's tracked files and from the index;
 # binary files are searched too (git grep -a).
+# Then no path under corpus/owner/ may be tracked, staged or committed at HEAD: that folder is the owner's disc
+# recordings, the private repository lazymkv-evidence cloned in place and ignored here, and a recording is committed
+# there, never here. Each such path is printed with a line saying it belongs in the evidence repository.
 # Exit 0 when nothing is printed, 1 when a line was, 2 on a usage error.
 # Usage: scripts/phase0/check-names.sh
 set -euo pipefail
@@ -29,4 +32,16 @@ for name in "${names[@]}"; do
     found=1
   fi
 done
+# The pathspec corpus/owner also matches a gitlink at corpus/owner itself (what "git add -f corpus/owner" would stage).
+owned="$( { git ls-files -- corpus/owner
+            if git rev-parse -q --verify HEAD >/dev/null; then git ls-tree -r --name-only HEAD -- corpus/owner; fi
+          } | sort -u )"
+if [ -n "$owned" ]; then
+  while IFS= read -r path; do
+    echo "$path: belongs in the evidence repository lazymkv-evidence (cloned at corpus/owner/), never in this one"
+  done <<< "$owned"
+  echo "commit recordings with git -C corpus/owner; take a path out of this repository's index with" \
+       "git rm -r --cached -- corpus/owner, and out of a commit by rewriting that commit" >&2
+  found=1
+fi
 exit "$found"

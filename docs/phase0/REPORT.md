@@ -2,7 +2,8 @@
 
 Date: 2026-10-12. The design spec is `docs/superpowers/specs/2026-10-04-lazymkv-design.md`; its section 17
 lists the experiments. Each experiment has its own report in `docs/phase0/experiments/`; this page
-summarises them.
+summarises them. The owner's disc recordings, which the reports cite as `corpus/owner/<slug>/...`, live in the private
+repository `lazymkv-evidence`, cloned at `corpus/owner/`.
 
 ## The fourteen experiments
 

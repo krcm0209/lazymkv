@@ -567,6 +567,22 @@ class NotChecked(unittest.TestCase):
         self.assertIn("RESULT ok (not checked, allowed by --allow-unmeasured: 4 folder(s) cannot be read", out)
         self.assertEqual((self.c / "audio-dataset.json").read_text(encoding="utf-8"), self.baseline)
 
+    def test_no_corpus_folder_as_without_the_evidence_clone(self):
+        missing = pathlib.Path(self.work.name) / "owner"
+        for extra in ([], ["--allow-unmeasured"]):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = ds.main([str(missing), "--spec", str(self.spec)] + extra)
+            self.assertEqual(code, 3, err.getvalue())
+            self.assertEqual(out.getvalue(), "")
+            self.assertEqual(err.getvalue(), f"{missing}: no such folder; the evidence repository lazymkv-evidence is not "
+                                             f"cloned there (git clone https://github.com/krcm0209/lazymkv-evidence "
+                                             f"{missing})\n")
+        self.assertFalse(missing.exists())
+        missing.write_text("", encoding="utf-8")  # a file in its place is a usage error, as before
+        code, out = run([missing, "--spec", self.spec])
+        self.assertEqual((code, out), (2, f"{missing}: not a folder\n"))
+
     def test_no_level_folder_at_all(self):
         empty = pathlib.Path(self.work.name) / "empty"
         empty.mkdir()

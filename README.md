@@ -28,11 +28,13 @@ install.
 - `scripts/phase0/` - the PowerShell jobs that ran on the ripping machine and the Python analyses that read their
   output (track comparison, subtitle text rules, audio content rules, the tuning-dataset harness), with unit tests:
   `python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'`.
-- `corpus/` - recordings: MakeMKV scans and rip logs of the owner's discs, probe output, TheDiscDB and TMDb answers,
-  pinned public scan logs, and replay scenarios. No disc content is stored here; subtitle text and audio proxies stay
-  in a tuning dataset on the owner's NAS.
-  Before a commit the corpus is checked for tokens, unit-key files and machine user names
-  (`scripts/phase0/check-names.sh`), as [`corpus/owner/README.md`](corpus/owner/README.md) describes.
+- `corpus/` - recordings: pinned public scan logs, TheDiscDB's API answers and replay scenarios. The owner's
+  recordings (MakeMKV scans and rip logs of the owner's discs, probe output, TheDiscDB and TMDb answers) are the private
+  evidence repository [`lazymkv-evidence`](https://github.com/krcm0209/lazymkv-evidence), cloned at `corpus/owner/`
+  and ignored by this repository. No disc's audio, video or subtitle streams are stored in either; subtitle text and
+  audio proxies stay in a tuning dataset on the owner's NAS.
+  Before a commit the corpus is checked for tokens, unit-key files, machine user names and any path under
+  `corpus/owner/` (`scripts/phase0/check-names.sh`), as [`corpus/README.md`](corpus/README.md) describes.
 - `docs/` - the design spec, the phase 0 plan, the experiment reports and the environment notes.
 - `experiments/ocrs-trial/` - the trial that compared the ocrs OCR engine with Tesseract on subtitle frames.
 

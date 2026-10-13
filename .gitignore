@@ -1,11 +1,10 @@
 /target
 .DS_Store
-# Raw audio level files and their side files (up to 0.5 MB each); audio-levels.ps1 recreates them from the rip.
-corpus/owner/*/*/audio-levels-*/*.txt
+# The owner's disc recordings: the private repository lazymkv-evidence, cloned here, never part of this repository.
+corpus/owner/
 
-# Subtitle text and bitmaps stay in the tuning dataset (decision D16).
+# Subtitle text stays in the tuning dataset (decision D16): an OCR run's text, wherever it lands in a checkout.
 *.ocr.jsonl
-corpus/owner/**/*.mks
 # ocrs's text of the same frames (scripts/phase0/ocrs-trial.ps1) is subtitle text too.
 ocrs-s*.jsonl
 

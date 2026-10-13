@@ -40,9 +40,9 @@ of another rip of the same disc with the same packets and the same place among t
 
 It writes a JSON snapshot of the run: every track's measures, verdict and label (an unlabelled track's verdict is kept
 apart, under "unlabelled_verdicts", not to be shown to the owner), the rule and constants used and the SHA-1 of
-audio_similarity.py. Without --set it replaces <corpus>/audio-dataset.json (committed), which doubles as a cache
-(a snapshot that would differ from the file it replaces only in its "created" time is not written, so a run that
-changes nothing leaves the committed baseline as it is):
+audio_similarity.py. Without --set it replaces <corpus>/audio-dataset.json (committed in the evidence repository),
+which doubles as a cache (a snapshot that would differ from the file it replaces only in its "created" time is not
+written, so a run that changes nothing leaves the committed baseline as it is):
 measures whose inputs, constants and code are unchanged are taken from it. It is not replaced when a folder cannot be
 read, when a track of it is no longer measured, or when no level folder is found: the snapshot then goes to the
 temporary folder, and --snapshot <corpus>/audio-dataset.json replaces the baseline on purpose. With --set it goes to
@@ -57,7 +57,9 @@ Exit status: 0; 1 when the rule reported drops a programme track (or gives one c
 is measured against the wrong reference, or a labelled candidate taken as the reference would give the programme the
 commentary verdict; 2 for usage errors, a labels or fitted file that does not validate, or a spec row 13 that cannot be
 read; 3 when something could not be checked (no level folder, a folder that cannot be read, a labelled track not
-measured, a track of the previous snapshot gone), unless --allow-unmeasured is given.
+measured, a track of the previous snapshot gone), unless --allow-unmeasured is given, and always when the corpus folder
+does not exist: corpus/owner is the private repository lazymkv-evidence, cloned in place (EVIDENCE), and without that
+clone nothing can be checked.
 """
 import argparse
 import array
@@ -83,6 +85,8 @@ DROP = ("duplicate", "commentary")  # the verdicts that drop a track: by MD5 (D1
 PATTERN = ("commentary", "commentary-cross-language")
 CODE = hashlib.sha1(pathlib.Path(sim.__file__).read_bytes()).hexdigest()
 SPEC = labels.SPEC
+# The owner's recordings: a private repository, cloned at corpus/owner and ignored by this repository.
+EVIDENCE = "https://github.com/krcm0209/lazymkv-evidence"
 
 
 def nan_to_none(m):
@@ -837,8 +841,12 @@ def main(argv):
     except (OSError, ValueError) as e:
         print(e, file=sys.stderr)
         return 2
+    if not corpus.exists():
+        print(f"{corpus}: no such folder; the evidence repository lazymkv-evidence is not cloned there "
+              f"(git clone {EVIDENCE} {corpus})", file=sys.stderr)
+        return 3
     if not corpus.is_dir():
-        print(f"{corpus}: no such folder", file=sys.stderr)
+        print(f"{corpus}: not a folder", file=sys.stderr)
         return 2
     labelled, bad = {}, []
     for f in sorted(corpus.glob("*/audio-labels.json")):
