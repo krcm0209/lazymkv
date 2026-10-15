@@ -30,6 +30,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("labels", cmd::labels::run as Command, "[--spec FILE] kinds|check|set|unset|title|auto|fitted ..."),
     ("subs", cmd::subs::run as Command, cmd::subs::SYNOPSIS),
     ("align", cmd::align::run as Command, "[name=path ...] [--subs-dir DIR] [--clear-max-bytes N] [--tolerance-ms N]"),
+    ("levels-from-proxy", cmd::levels_from_proxy::run as Command, "<audio-proxy.mka> <out> --main N [--cand N,...]"),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";
