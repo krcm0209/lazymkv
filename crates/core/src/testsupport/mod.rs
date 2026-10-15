@@ -258,6 +258,12 @@ pub fn level_file_text(values: &[f64]) -> String {
     )
 }
 
+/// MANIFEST.format(fc=..., main=..., cand=...) of test_audio_similarity.py: what audio-levels.ps1 writes for main
+/// stream 1 (DTS-HD MA 5.1, English) and candidate 3 (AC-3 stereo).
+pub fn manifest(fc: &str, main: &str, cand: &str) -> String {
+    format!("# lazymkv audio-levels v2 (experiment 13)\nfile=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400\nmain=1 codec=dts profile=DTS-HD_MA channels=6 layout=5.1(side) language=eng fc={fc} frames=1 md5={main}\ncand=3 codec=ac3 profile=- channels=2 layout=stereo language=eng frames=1 md5={cand}\n")
+}
+
 /// ffmpeg's ametadata output, one frame every `step_s` seconds: "frame:k    pts:k    pts_time:<k * step_s :g>" and
 /// "lavfi.astats.Overall.RMS_level=<v :.6f>" per value. Py: test_audio_similarity.raw_file (its write_text body).
 pub fn raw_file_text(values: &[f64], step_s: f64) -> String {

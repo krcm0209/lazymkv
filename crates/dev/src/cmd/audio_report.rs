@@ -55,7 +55,8 @@ fn open_folder(ctx: &Ctx, arg: &str) -> Result<Folder, String> {
     let parent = resolved.parent().map(Path::to_path_buf).unwrap_or_else(|| resolved.clone());
     let (shown, key) =
         if name == resolved_name { (parent_shown, name) } else { (parent.display().to_string(), resolved_name) };
-    let tree = DiskTree::open(&parent, &shown).map_err(|e| format!("{}: {e}", parent.display()))?;
+    // Only the folder itself is read: its siblings may be unreadable or loop (the Python never touched them).
+    let tree = DiskTree::open_sub(&parent, &shown, &key).map_err(|e| format!("{}: {e}", parent.display()))?;
     Ok(Folder { tree: Box::new(tree), key: PathKey::new(&key) })
 }
 
@@ -108,10 +109,9 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazymkv_core::testsupport::{commentary, level_file_text, programme, raw_file_text};
+    use crate::testutil::{call, Scratch};
+    use lazymkv_core::testsupport::{commentary, level_file_text, manifest, programme, raw_file_text};
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The Python's refusal of a folder named "nope" that does not exist.
     const NOPE_REFUSAL: &str = "nope: no manifest.txt, so it was not written by the new audio-levels.ps1 (the first measurement's folders, audio-levels-<main>-<cand>, hold 100 ms full-band levels); this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>";
@@ -125,45 +125,6 @@ mod tests {
         "    verdict: duplicate of stream 1 (exact duplicate (same packets): keep the first copy, drop this one; no audio analysis needed)",
         "    row: | lv/x.mkv | 3 | same packets as stream 1 | duplicate |",
     ];
-
-    /// MANIFEST of test_audio_similarity.py: main stream 1 (DTS-HD MA 5.1, English) and candidate 3 (AC-3 stereo).
-    fn manifest(fc: &str, main: &str, cand: &str) -> String {
-        let mut text = String::from("# lazymkv audio-levels v2 (experiment 13)\n");
-        text.push_str("file=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400\n");
-        text.push_str(&format!(
-            "main=1 codec=dts profile=DTS-HD_MA channels=6 layout=5.1(side) language=eng fc={fc} frames=1 md5={main}\n"
-        ));
-        text.push_str(&format!("cand=3 codec=ac3 profile=- channels=2 layout=stereo language=eng frames=1 md5={cand}\n"));
-        text
-    }
-
-    /// A fresh folder under the system's temporary directory, removed when dropped.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(tag: &str) -> Scratch {
-            static COUNT: AtomicUsize = AtomicUsize::new(0);
-            let n = COUNT.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("lazymkv-test-{tag}-{}-{n}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Scratch(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Runs the command; (exit code, stdout, stderr).
-    fn call(ctx: &Ctx, args: &[&str]) -> (i32, String, String) {
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run(ctx, &args, &mut out, &mut err);
-        (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
-    }
 
     /// <tmp>/lv/audio-levels-20ms-1-3: MIX[:2000] as main and as candidate 3 with one md5 (nothing to measure).
     fn duplicate_folder(tmp: &Path) {
@@ -190,7 +151,7 @@ mod tests {
         let tree = DiskTree::open(&tmp.0, &tmp.0.display().to_string()).unwrap();
         assert_eq!(refusal(&tree, &PathKey::new("audio-levels-20ms-1-3")).unwrap(), "");
         let shown = d.display().to_string();
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &[shown.as_str()]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &[shown.as_str()]);
         assert_eq!(code, 0, "{err}");
         assert!(out.contains("dialogue reference: its centre channel"), "{out}");
         assert!(out.contains("verdict: commentary"), "{out}");
@@ -207,7 +168,7 @@ mod tests {
             fs::write(d.join(name), raw_file_text(&coarse, 0.1)).unwrap();
         }
         let shown = d.display().to_string();
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &[shown.as_str()]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &[shown.as_str()]);
         assert_eq!(code, 1);
         assert!(err.contains("no manifest.txt"), "{err}");
         assert!(err.contains("measure the title again"), "{err}");
@@ -220,7 +181,7 @@ mod tests {
     fn every_folder_is_checked_before_anything_is_printed() {
         let tmp = Scratch::new("audio-report");
         duplicate_folder(&tmp.0);
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &["lv/audio-levels-20ms-1-3", "nope"]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &["lv/audio-levels-20ms-1-3", "nope"]);
         assert_eq!((code, out.as_str()), (1, ""));
         assert_eq!(err, format!("{NOPE_REFUSAL}\n"));
     }
@@ -230,7 +191,25 @@ mod tests {
         let tmp = Scratch::new("audio-report");
         duplicate_folder(&tmp.0);
         // a trailing separator, as a shell completes a folder name, is dropped as pathlib drops it
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &["lv/audio-levels-20ms-1-3/"]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &["lv/audio-levels-20ms-1-3/"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out, LV_DUPLICATE.join("\n") + "\n");
+    }
+
+    #[test]
+    fn the_siblings_of_a_folder_are_not_read() {
+        let tmp = Scratch::new("audio-report");
+        duplicate_folder(&tmp.0);
+        // folders and files beside the level folder: another level folder, a stray folder with a file, a plain file
+        let beside = tmp.0.join("lv");
+        fs::create_dir_all(beside.join("audio-levels-20ms-2-4")).unwrap();
+        fs::create_dir_all(beside.join("stray").join("deeper")).unwrap();
+        fs::write(beside.join("stray").join("deeper").join("note.txt"), "x").unwrap();
+        fs::write(beside.join("readme.txt"), "x").unwrap();
+        // a link back to the parent makes the walk of the parent loop until the OS refuses (exit 2 before this fix)
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&beside, beside.join("loop")).unwrap();
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &["lv/audio-levels-20ms-1-3"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert_eq!(out, LV_DUPLICATE.join("\n") + "\n");
     }
@@ -238,7 +217,7 @@ mod tests {
     #[test]
     fn no_folder_prints_the_usage_and_exits_1() {
         let tmp = Scratch::new("audio-report");
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &[]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &[]);
         assert_eq!((code, out.as_str()), (1, ""));
         assert_eq!(err, "usage: lazymkv-dev audio-report <folder> ...\n");
     }

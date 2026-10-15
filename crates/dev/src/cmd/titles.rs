@@ -65,9 +65,9 @@ fn usage(err: &mut dyn Write, message: &str) -> i32 {
 mod tests {
     use super::*;
     use crate::evidence::{repo_root, skip, Ctx};
+    use crate::testutil::{call, Scratch};
     use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::path::Path;
 
     /// A made-up recording's scan: one title with two English streams.
     const SCAN: &str = concat!(
@@ -87,34 +87,6 @@ mod tests {
         "  title   0   0:21:49  segments 7         audio eng 1,2   <- eng x2; ripped as e16",
     ];
 
-    /// A fresh folder under the system's temporary directory, removed when dropped.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(tag: &str) -> Scratch {
-            static COUNT: AtomicUsize = AtomicUsize::new(0);
-            let n = COUNT.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("lazymkv-test-{tag}-{}-{n}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Scratch(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Runs the command; (exit code, stdout, stderr).
-    fn call(ctx: &Ctx, args: &[&str]) -> (i32, String, String) {
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run(ctx, &args, &mut out, &mut err);
-        (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
-    }
-
     #[test]
     fn the_short_circuit_2_dvd_shares_no_segment() {
         let repo = repo_root(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("the workspace root");
@@ -122,7 +94,7 @@ mod tests {
             skip("the evidence repository is not cloned at corpus/owner");
             return;
         }
-        let (code, out, err) = call(&Ctx::for_test(&repo), &["short-circuit-2-1988-dvd"]);
+        let (code, out, err) = call(run, &Ctx::for_test(&repo), &["short-circuit-2-1988-dvd"]);
         assert_eq!(code, 0, "{err}");
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[2].contains("so shared segments are not looked for"), "{out}");
@@ -136,7 +108,7 @@ mod tests {
         fs::create_dir_all(d.join("e16")).unwrap();
         fs::write(d.join("scan.txt"), SCAN).unwrap();
         fs::write(d.join("e16").join("rip-summary.json"), r#"{"ok": true, "title": 0}"#).unwrap();
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &["some-disc"]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &["some-disc"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert_eq!(out, SOME_DISC.join("\n") + "\n");
     }
@@ -145,7 +117,7 @@ mod tests {
     fn a_recording_without_scan_txt_exits_1() {
         let tmp = Scratch::new("titles");
         fs::create_dir_all(tmp.0.join("empty-disc")).unwrap();
-        let (code, out, err) = call(&Ctx::for_test(&tmp.0), &["empty-disc"]);
+        let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &["empty-disc"]);
         assert_eq!((code, out.as_str()), (1, ""));
         assert_eq!(err, "empty-disc: no scan.txt (record and pull the disc first)\n");
     }
@@ -155,7 +127,7 @@ mod tests {
         let tmp = Scratch::new("titles");
         let mut ctx = Ctx::for_test(&tmp.0);
         ctx.env.insert("LAZYMKV_EVIDENCE".to_string(), tmp.0.join("no-evidence").display().to_string());
-        let (code, out, err) = call(&ctx, &["some-slug"]);
+        let (code, out, err) = call(run, &ctx, &["some-slug"]);
         assert_eq!((code, out.as_str()), (3, ""));
         assert!(err.contains("no such folder; the evidence repository lazymkv-evidence is not cloned there"), "{err}");
     }
@@ -165,7 +137,7 @@ mod tests {
         let tmp = Scratch::new("titles");
         let ctx = Ctx::for_test(&tmp.0);
         for args in [&[][..], &["some-disc", "other-disc"][..]] {
-            let (code, out, err) = call(&ctx, args);
+            let (code, out, err) = call(run, &ctx, args);
             assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
             assert!(err.starts_with("usage: lazymkv-dev titles [--evidence DIR] <slug|dir>\n"), "{err}");
         }

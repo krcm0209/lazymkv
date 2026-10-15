@@ -6,6 +6,8 @@ pub mod cmd;
 pub mod evidence;
 pub mod pyjson;
 pub mod runner;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 use evidence::Ctx;
 use lazymkv_core::recording::py_repr_str;

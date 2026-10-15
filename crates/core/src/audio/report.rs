@@ -320,7 +320,7 @@ mod tests {
     use crate::audio::levels::refusal;
     use crate::audio::measures::{RevBlock, Run};
     use crate::recording::{MemTree, PathKey};
-    use crate::testsupport::{commentary, level_file_text, programme, raw_file_text};
+    use crate::testsupport::{commentary, level_file_text, manifest, programme, raw_file_text};
 
     /// The Python's report of <tmp>/audio-levels-20ms-1-3: MIX[:2000] as main and as candidate 3, one md5.
     const DUPLICATE: &[&str] = &[
@@ -452,17 +452,6 @@ mod tests {
 
     /// Its streams.json: the TrueHD stream first, an AC-3 stereo stream after it.
     const NO_CANDIDATE_STREAMS: &str = r#"{"streams": [{"index": 0, "codec_type": "video"}, {"index": 1, "codec_type": "audio", "codec_name": "truehd", "profile": null, "channels": 8, "tags": {"language": "eng"}}, {"index": 2, "codec_type": "audio", "codec_name": "ac3", "profile": null, "channels": 2, "tags": {"language": "eng"}}]}"#;
-
-    /// MANIFEST of test_audio_similarity.py: main stream 1 (DTS-HD MA 5.1, English) and candidate 3 (AC-3 stereo).
-    fn manifest(fc: &str, main: &str, cand: &str) -> String {
-        let mut text = String::from("# lazymkv audio-levels v2 (experiment 13)\n");
-        text.push_str("file=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400\n");
-        text.push_str(&format!(
-            "main=1 codec=dts profile=DTS-HD_MA channels=6 layout=5.1(side) language=eng fc={fc} frames=1 md5={main}\n"
-        ));
-        text.push_str(&format!("cand=3 codec=ac3 profile=- channels=2 layout=stereo language=eng frames=1 md5={cand}\n"));
-        text
-    }
 
     /// [-100.0] * 3 + [v - 6 for v in values[:-3]]: the same sound 60 ms late and 6 dB down.
     fn late_copy(values: &[f64]) -> Vec<f64> {

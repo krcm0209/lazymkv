@@ -604,12 +604,7 @@ mod cross_language {
     use crate::audio::rule::{cross_language, verdict, Rule, Verdict};
     use crate::lang::{iso639, ISO639, TMDB_NO_LANGUAGE};
     use crate::recording::{py_fixed, MemTree, Ordered, PathKey};
-    use crate::testsupport::{level_file_text, speech, PyRandom};
-
-    /// MANIFEST.format(fc=..., main=..., cand=...): what audio-levels.ps1 writes for main stream 1 and candidate 3.
-    fn manifest(fc: &str, main: &str, cand: &str) -> String {
-        format!("# lazymkv audio-levels v2 (experiment 13)\nfile=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400\nmain=1 codec=dts profile=DTS-HD_MA channels=6 layout=5.1(side) language=eng fc={fc} frames=1 md5={main}\ncand=3 codec=ac3 profile=- channels=2 layout=stereo language=eng frames=1 md5={cand}\n")
-    }
+    use crate::testsupport::{level_file_text, manifest, speech, PyRandom};
 
     /// A candidate of CrossLanguage.folder: (stream, levels, channels, language, codec, profile). The Python's
     /// defaults (language eng, codec ac3, profile "-") are written out at every call.
