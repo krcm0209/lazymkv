@@ -18,3 +18,4 @@ pub mod hit_rate;
 pub mod compare_scans;
 pub mod exp11;
 pub mod ocr_compare;
+pub mod decide;
