@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use lazymkv_core::audio::dataset::LEVELS_NOT_HERE;
 use lazymkv_core::audio::labels::is_slug;
 use lazymkv_core::audio::report::FolderJson;
 use lazymkv_core::recording::files::rip_labels;
@@ -64,6 +65,13 @@ fn diff_into(name: &str, expected: &Value, actual: &Value, failures: &mut Vec<St
     if diff.len() > SHOWN {
         failures.push(format!("{}: ... and {} more differences", name, diff.len() - SHOWN));
     }
+}
+
+/// Whether a level folder's skip reason is the one missing-input case: the folder's level files are not in the
+/// clone (git keeps only streams.json), "<slug>/<label>/<folder>: " + LEVELS_NOT_HERE. Any other reason where the
+/// golden exists is a regression of the port.
+fn levels_not_here(skipped: &str) -> bool {
+    skipped.ends_with(LEVELS_NOT_HERE)
 }
 
 /// decide over every rip label of `slug`, each section against its golden.
@@ -174,7 +182,15 @@ fn check_label(ctx: &Ctx, rec: &Recording, label: &str, golden_label: &Path, tex
                 let file = format!("audio-{}.json", folder);
                 skip(skipped);
                 if golden_label.join(&file).is_file() {
-                    comparable = false;
+                    if levels_not_here(skipped) {
+                        comparable = false;
+                    } else {
+                        failures.push(format!(
+                            "{}: decide skipped the level folder ({}) where the golden measured it",
+                            name(&file),
+                            skipped
+                        ));
+                    }
                 }
                 seen.insert(file);
             }
@@ -283,4 +299,12 @@ fn recordings_without_a_test_are_listed_as_not_covered() {
             skip(&format!("not covered: {} (crates/dev/tests/decide.rs has no test for it)", slug));
         }
     }
+}
+
+#[test]
+fn only_the_level_files_not_here_line_excuses_a_skipped_level_folder() {
+    let absent = format!("disc/label/audio-levels-20ms-1-2: {}", LEVELS_NOT_HERE);
+    assert!(levels_not_here(&absent));
+    assert!(!levels_not_here("disc/label/audio-levels-20ms-1-2: manifest.txt does not begin with '# lazymkv audio-levels v2'"));
+    assert!(!levels_not_here(""));
 }

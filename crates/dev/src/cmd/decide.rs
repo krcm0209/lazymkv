@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use lazymkv_core::audio::dataset::LEVELS_NOT_HERE;
 use lazymkv_core::audio::measures::Constants;
 use lazymkv_core::audio::report::{folder_json, FolderJson};
 use lazymkv_core::audio::rule::{results, Plain, Rule as AudioRule, Verdict};
@@ -56,10 +57,6 @@ const LEVEL_FOLDERS: &str = "audio-levels-20ms-*";
 /// The reading folder decide looks for first under --text DIR, in the goldens' layout DIR/<slug>/<label>/<reading>/
 /// (port spec 5): the one ocr-subs.ps1 writes.
 const READING: &str = "subs-ocr";
-/// After "<slug>/<label>/<folder>: " when git kept only a level folder's streams.json, verbatim.
-/// Py: audio_dataset.measure's unreadable line.
-const LEVEL_FILES_ABSENT: &str =
-    "its level files are not here (git keeps only streams.json): pull the recording or copy the folder from the dataset share";
 /// How to give decide the OCR text, at the end of every no-text reason.
 const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 /// The review reasons decide raises (design spec 8.6, 8.7 and 8.8).
@@ -208,7 +205,7 @@ fn audio_section(rec: &Recording, label: &str) -> Vec<AudioEntry> {
         }
         let name = folder.name().to_string();
         if !tree.is_file(&folder.join("manifest.txt")) && tree.is_file(&folder.join("streams.json")) {
-            let skipped = format!("{}/{}/{}: {}", rec.slug, label, name, LEVEL_FILES_ABSENT);
+            let skipped = format!("{}/{}/{}: {}", rec.slug, label, name, LEVELS_NOT_HERE);
             out.push(AudioEntry::Skipped { folder: name, skipped });
             continue;
         }
