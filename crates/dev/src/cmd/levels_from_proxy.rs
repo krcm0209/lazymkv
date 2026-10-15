@@ -21,7 +21,7 @@ use lazymkv_core::recording::{
 };
 use serde_json::{Map, Value};
 
-use crate::evidence::{pathlib_str as py_path_str, Ctx};
+use crate::evidence::{os_error_text, pathlib_str as py_path_str, Ctx};
 use crate::pyjson::{write_level_file, write_manifest, write_streams_json};
 use crate::runner::Output;
 
@@ -417,15 +417,9 @@ fn first_chars(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
 
-/// ctx.runner.run, with Python's FileNotFoundError text when the program is not on PATH (the Python crashed there).
+/// ctx.runner.run, with Python's OSError text when the program cannot be run (the Python crashed there).
 fn run_tool(ctx: &Ctx, program: &str, args: &[String], cwd: Option<&Path>) -> Result<Output, String> {
-    ctx.runner.run(program, args, cwd).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            format!("[Errno 2] No such file or directory: {}", py_repr_str(program))
-        } else {
-            format!("{program}: {e}")
-        }
-    })
+    ctx.runner.run(program, args, cwd).map_err(|e| os_error_text(&e, program))
 }
 
 /// Writes a text file as Path.write_text(text, encoding="utf-8") does on the Mac: UTF-8, no newline translation.
@@ -582,9 +576,7 @@ mod tests {
 
     /// The command's exit code, stdout and stderr for `list`.
     fn call(ctx: &Ctx, list: &[&str]) -> (i32, String, String) {
-        let (mut out, mut err): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
-        let code = run(ctx, &words(list), &mut out, &mut err);
-        (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        crate::testutil::call(run, ctx, list)
     }
 
     /// The same, as expected.
@@ -1130,10 +1122,10 @@ mod tests {
     fn levels_from_proxy_is_a_command() {
         let tmp = TempDir::new("dispatch");
         let ctx = Ctx::for_test(&tmp.0);
-        let (mut out, mut err): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
-        assert_eq!(crate::dispatch(&ctx, &words(&["levels-from-proxy", "audio-proxy.mka", "out"]), &mut out, &mut err), 1);
+        let (code, out, err) = crate::testutil::call(crate::dispatch, &ctx, &["levels-from-proxy", "audio-proxy.mka", "out"]);
+        assert_eq!(code, 1);
         assert_eq!(
-            String::from_utf8(err).unwrap(),
+            err,
             "usage: lazymkv-dev levels-from-proxy <audio-proxy.mka> <new folder> --main <stream> [--cand <stream>[,<stream>...]]\n"
         );
         assert!(out.is_empty());
