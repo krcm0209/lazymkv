@@ -30,7 +30,10 @@ install.
   `lazymkv-dev` binary that runs them over recordings (scan summaries, track comparison, the tuning-dataset harness
   `retune`, the audio labels, the phase 0 readers, the goldens). Tests: `cargo test --workspace`; with the evidence
   clone at `corpus/owner/` they also compare the Rust with the goldens phase 0's Python wrote, and without it those
-  comparisons print `skipped: ...` and pass.
+  comparisons print `skipped: ...` and pass. The port was built and tested on the mini PC (Windows) only; the
+  cfg(unix) code (runner.rs's signal exit status, audio_report.rs's symlink test, the `date` clock path, the
+  Unix-only assertions in align.rs, ocr_compare.rs and labels/tests.rs) has not been compiled. A Unix
+  `cargo test --workspace` run is pending the owner's decision.
 - `scripts/phase0/` - the PowerShell jobs that run on the ripping machine, and the Mac's shell helpers that sync,
   start and wait for them and pull their recordings. Phase 0's Python analyses are now `crates/core` and
   `lazymkv-dev`; [`docs/phase1/rust-port-tests.md`](docs/phase1/rust-port-tests.md) maps each of their tests to
