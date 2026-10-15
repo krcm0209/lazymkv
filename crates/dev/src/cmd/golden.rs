@@ -6,7 +6,7 @@
 //! (the round trip). Every comparison ends pass, fail or skipped with its reason; a golden that is not there is "not
 //! covered", a skip. `golden write` writes the same files from the Rust, for a re-recording commit only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,10 @@ const WRITTEN_BY_FENCE: &str = "```json written_by";
 const USAGE: &str = "golden write|check [--evidence DIR] [--text DIR]";
 /// How many differences a fail line shows.
 const SHOWN_DIFFERENCES: usize = 3;
+/// write_goldens.py, beside README.md: neither is a golden.
+const WRITER: &str = "write_goldens.py";
+/// The comparison that says the golden table's proxy row is not covered (no <slug>/golden/proxy-* folder).
+const NO_PROXY: &str = "*/golden/proxy-*";
 
 /// The README's written_by block: provenance of every golden.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -720,10 +724,55 @@ fn readme_comparison(evidence: &Path) -> Option<Comparison> {
     Some(Comparison { name, outcome })
 }
 
+/// The files of a golden folder, recursively, as names below the evidence (`prefix` is the folder's own name): README.md,
+/// write_goldens.py and kept .python files are not goldens; a proxy-* folder is one golden, its contents are not
+/// walked. Adds to `files`; true when a proxy-* folder (not a kept proxy-*.python one) was seen.
+fn walk_goldens(folder: &Path, prefix: &str, files: &mut Vec<String>) -> bool {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    let mut proxy = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            if name.starts_with("proxy-") {
+                if !name.ends_with(PYTHON_SUFFIX) {
+                    proxy = true;
+                    files.push(format!("{prefix}/{name}"));
+                }
+            } else {
+                proxy |= walk_goldens(&path, &format!("{prefix}/{name}"), files);
+            }
+        } else if name != README && name != WRITER && !name.ends_with(PYTHON_SUFFIX) {
+            files.push(format!("{prefix}/{name}"));
+        }
+    }
+    proxy
+}
+
+/// Every golden file of the evidence: below golden/ and below the golden/ folder of every folder of the evidence
+/// (a recording or not), as `walk_goldens` names them; and whether any proxy-* folder is among them.
+fn golden_files(evidence: &Path) -> (Vec<String>, bool) {
+    let mut files = Vec::new();
+    let mut proxy = walk_goldens(&evidence.join(GOLDEN_DIR), GOLDEN_DIR, &mut files);
+    if let Ok(entries) = std::fs::read_dir(evidence) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let gold = entry.path().join(GOLDEN_DIR);
+            if name != GOLDEN_DIR && gold.is_dir() {
+                proxy |= walk_goldens(&gold, &format!("{name}/{GOLDEN_DIR}"), &mut files);
+            }
+        }
+    }
+    (files, proxy)
+}
+
 /// Every comparison of the golden table for every recording with a golden/ folder, in PathKey order of their names,
 /// plus one skip per recording without a golden/ folder ("no golden/ folder for <slug>") and per rip label without a
 /// golden folder ("not covered: no golden for the rip label <slug>/<label>"), the retune report, the round trip
-/// against audio-dataset.json and the README's written_by block.
+/// against audio-dataset.json and the README's written_by block; one fail per golden file no computation produces
+/// (its input is gone: a removed rip label, level folder or recording), and one skip when there is no proxy golden.
 pub fn check(ctx: &Ctx, evidence: &Path, text: Option<&Path>) -> Vec<Comparison> {
     if !evidence.is_dir() {
         return vec![skipped("evidence", format!("no evidence clone at {}", evidence.display()))];
@@ -760,6 +809,15 @@ pub fn check(ctx: &Ctx, evidence: &Path, text: Option<&Path>) -> Vec<Comparison>
         }
     }
     units.extend(corpus_units(ctx, &tree));
+    let named: BTreeSet<String> = units.iter().flat_map(|unit| unit.names.iter().cloned()).collect();
+    let (files, proxy) = golden_files(evidence);
+    for name in files.into_iter().filter(|name| !named.contains(name)) {
+        let outcome = Outcome::Fail(format!("{name}: no computation produces this golden (its input is gone)"));
+        out.push(Comparison { name, outcome });
+    }
+    if !proxy {
+        out.push(skipped(NO_PROXY, "not covered: no proxy golden".to_string()));
+    }
     for unit in units {
         compare_unit(evidence, unit, &mut out);
     }
@@ -1138,5 +1196,76 @@ mod tests {
             }]
         );
         assert_eq!(write(&ctx, &missing, None), Err(format!("no evidence clone at {shown}")));
+    }
+
+    #[test]
+    fn a_golden_no_computation_produces_fails_with_its_name() {
+        use crate::testutil::{Scratch, ScratchExt};
+        let dir = Scratch::new("golden-orphan");
+        dir.write("disc-z/notes.txt", "a recording folder without a rip label\n");
+        dir.write("disc-z/golden/all-tracks/reconcile.json", "{}\n");
+        dir.write("golden/stale.txt", "x\n");
+        dir.write("golden/README.md", "not a golden\n");
+        dir.write("golden/write_goldens.py", "# not a golden\n");
+        dir.write("golden/retune-report.txt.python", "kept, never read\n");
+        let ctx = Ctx::for_test(Path::new("."));
+        let gone = |name: &str| Comparison {
+            name: name.to_string(),
+            outcome: Outcome::Fail(format!("{name}: no computation produces this golden (its input is gone)")),
+        };
+        let not_covered = |name: &str| Comparison {
+            name: name.to_string(),
+            outcome: Outcome::Skipped(format!("not covered: {name} is not in the goldens")),
+        };
+        let comparisons = check(&ctx, &dir.0, None);
+        assert_eq!(
+            comparisons,
+            vec![
+                Comparison {
+                    name: NO_PROXY.to_string(),
+                    outcome: Outcome::Skipped("not covered: no proxy golden".to_string()),
+                },
+                not_covered("audio-dataset.json"),
+                gone("disc-z/golden/all-tracks/reconcile.json"),
+                not_covered("disc-z/golden/labels.json"),
+                Comparison {
+                    name: "golden/README.md".to_string(),
+                    outcome: Outcome::Fail(
+                        "corpus/owner/golden/README.md: no ```json written_by block".to_string()
+                    ),
+                },
+                not_covered("golden/retune-report.txt"),
+                gone("golden/stale.txt"),
+            ]
+        );
+        assert_eq!(summary(&comparisons), ("golden check: 0 pass, 3 fail, 4 skipped".to_string(), 1));
+    }
+
+    #[test]
+    fn without_a_proxy_golden_one_line_says_the_proxy_row_is_not_covered() {
+        use crate::testutil::{Scratch, ScratchExt};
+        let ctx = Ctx::for_test(Path::new("."));
+        let proxy_line = |root: &Path| -> Vec<Comparison> {
+            check(&ctx, root, None).into_iter().filter(|c| c.name == NO_PROXY).collect()
+        };
+        let dir = Scratch::new("golden-no-proxy");
+        dir.write("disc-z/notes.txt", "x\n");
+        dir.write("disc-z/golden/proxy-audio-levels-20ms-1.python/main-mix.txt", "kept, never read\n");
+        assert_eq!(
+            proxy_line(&dir.0),
+            vec![Comparison {
+                name: "*/golden/proxy-*".to_string(),
+                outcome: Outcome::Skipped("not covered: no proxy golden".to_string()),
+            }]
+        );
+        dir.write(
+            "disc-z/golden/proxy-audio-levels-20ms-1/golden.json",
+            r#"{"slug": "disc-z", "label": "all-tracks", "folder": "audio-levels-20ms-1", "main": 1, "cands": [],
+ "ffmpeg_version": "ffmpeg version 0.0-test", "proxy_sha1": "0000000000000000000000000000000000000000"}"#,
+        );
+        assert_eq!(proxy_line(&dir.0), Vec::<Comparison>::new());
+        let (files, proxy) = golden_files(&dir.0);
+        assert!(proxy);
+        assert_eq!(files, vec!["disc-z/golden/proxy-audio-levels-20ms-1".to_string()]);
     }
 }

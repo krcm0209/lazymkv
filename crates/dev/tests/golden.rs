@@ -303,9 +303,11 @@ fn golden_write_then_check_passes_and_a_changed_golden_fails() {
     let comparisons = check(&ctx, root, Some(&text.0));
     let mut expected: Vec<Comparison> = names.iter().map(|name| passed(name)).collect();
     expected.push(passed("audio-dataset.json"));
+    // disc-a has no proxy golden: the golden table's proxy row is reported as not covered.
+    expected.push(skipped(NO_PROXY, "not covered: no proxy golden"));
     expected.sort_by(|a, b| sorted_key(&a.name).cmp(&sorted_key(&b.name)));
     assert_eq!(comparisons, expected);
-    assert_eq!(summary(&comparisons), ("golden check: 11 pass, 0 fail, 0 skipped".to_string(), 0));
+    assert_eq!(summary(&comparisons), ("golden check: 11 pass, 0 fail, 1 skipped".to_string(), 0));
 
     // The lines that state the cache and the baseline are not compared ...
     let report = root.join("golden").join("retune-report.txt");
@@ -329,17 +331,58 @@ fn golden_write_then_check_passes_and_a_changed_golden_fails() {
     let not_passing: Vec<&Comparison> = comparisons.iter().filter(|c| c.outcome != Outcome::Pass).collect();
     assert_eq!(
         not_passing,
-        vec![&Comparison {
-            name: "disc-a/golden/scan.json".to_string(),
-            outcome: Outcome::Fail("/titles/0/9: \"0:07:01\" != \"0:07:00\"".to_string()),
-        }]
+        vec![
+            &skipped(NO_PROXY, "not covered: no proxy golden"),
+            &Comparison {
+                name: "disc-a/golden/scan.json".to_string(),
+                outcome: Outcome::Fail("/titles/0/9: \"0:07:01\" != \"0:07:00\"".to_string()),
+            },
+        ]
     );
-    assert_eq!(summary(&comparisons), ("golden check: 10 pass, 1 fail, 0 skipped".to_string(), 1));
+    assert_eq!(summary(&comparisons), ("golden check: 10 pass, 1 fail, 1 skipped".to_string(), 1));
 }
+
+/// The name of the comparison that reports a clone without a proxy golden.
+const NO_PROXY: &str = "*/golden/proxy-*";
 
 /// The order check sorts its comparisons in: component by component, each by code point (PathKey's order).
 fn sorted_key(name: &str) -> Vec<String> {
     name.split('/').map(str::to_string).collect()
+}
+
+/// How many golden files a clone holds below golden/ and every <dir>/golden/: README.md, write_goldens.py and kept
+/// .python files aside, a proxy-* folder counting as one.
+fn golden_files(evidence: &Path) -> usize {
+    fn walk(folder: &Path) -> usize {
+        let Ok(entries) = fs::read_dir(folder) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.path().is_dir() {
+                    if name.starts_with("proxy-") {
+                        usize::from(!name.ends_with(".python"))
+                    } else {
+                        walk(&entry.path())
+                    }
+                } else {
+                    usize::from(name != "README.md" && name != "write_goldens.py" && !name.ends_with(".python"))
+                }
+            })
+            .sum()
+    }
+    walk(&evidence.join("golden"))
+        + fs::read_dir(evidence)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name() != "golden")
+                    .map(|entry| walk(&entry.path().join("golden")))
+                    .sum::<usize>()
+            })
+            .unwrap_or(0)
 }
 
 #[test]
@@ -360,6 +403,12 @@ fn the_goldens_of_the_evidence_clone_pass() {
             skip(&format!("{}: {reason}", comparison.name));
         }
     }
+    let walked = golden_files(&evidence);
+    assert!(
+        comparisons.len() >= walked,
+        "{} comparison(s) for {walked} golden file(s): a golden is not compared",
+        comparisons.len()
+    );
     let failed: Vec<String> = comparisons
         .iter()
         .filter(|c| matches!(c.outcome, Outcome::Fail(_)))
