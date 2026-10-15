@@ -175,6 +175,7 @@ mod tests {
 
     use super::*;
     use crate::evidence::{repo_root, skip};
+    use crate::testutil::{printed, sha1_hex};
 
     /// One title: video, then two audio tracks of the same language with 8 and 2 channels. Py: TRACK_SCAN.
     const TRACK_SCAN: &str = r#"TINFO:0,8,0,"2"
@@ -410,16 +411,6 @@ MSG:5014,0,2,"Saving 1 titles into directory x","Saving %1 titles into directory
         let (code, out, err) = run_in(cwd, args);
         assert_eq!((code, err.as_str()), (1, ""), "{args:?}");
         out.lines().find(|line| line.starts_with("RIP LOG")).unwrap_or_default().to_string()
-    }
-
-    /// The lines as print() writes them.
-    fn printed(lines: &[&str]) -> String {
-        lines.iter().map(|line| format!("{line}\n")).collect()
-    }
-
-    fn sha1_hex(bytes: &[u8]) -> String {
-        use sha1::{Digest, Sha1};
-        Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]

@@ -202,7 +202,7 @@ mod tests {
     use super::*;
     use crate::evidence::{repo_root, skip, DiskTree, EVIDENCE_SHOWN};
     use crate::pyjson::{dumps, Style};
-    use crate::testutil::{call, Scratch as TempDir};
+    use crate::testutil::{call, printed, sha1_hex, Scratch as TempDir};
 
     /// The byte-order mark probe-title.ps1 writes before index.json.
     const BOM: &str = "\u{feff}";
@@ -342,16 +342,6 @@ mod tests {
     /// The command run with `cwd` as the current directory: (exit code, stdout, stderr).
     fn run_in(cwd: &Path, args: &[&str]) -> (i32, String, String) {
         call(run, &Ctx::for_test(cwd), args)
-    }
-
-    /// The lines as print() writes them.
-    fn printed(lines: &[&str]) -> String {
-        lines.iter().map(|line| format!("{line}\n")).collect()
-    }
-
-    fn sha1_hex(bytes: &[u8]) -> String {
-        use sha1::{Digest, Sha1};
-        Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     /// index.json as probe-title.ps1 writes it (UTF-8 with a byte-order mark), and one packets file per stream.

@@ -40,3 +40,14 @@ pub(crate) fn write(path: &Path, text: impl AsRef<[u8]>) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
 }
+
+/// The lines as print() writes them.
+pub(crate) fn printed(lines: &[&str]) -> String {
+    lines.iter().map(|line| format!("{line}\n")).collect()
+}
+
+/// The SHA-1 of `bytes` as lowercase hex.
+pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
