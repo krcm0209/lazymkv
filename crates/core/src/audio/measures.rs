@@ -623,7 +623,7 @@ fn py_max_pair(items: impl IntoIterator<Item = (f64, i64)>) -> (f64, i64) {
 }
 
 /// Python's max() of floats: the first item, replaced by every later item that is greater.
-fn py_max(items: impl IntoIterator<Item = f64>) -> f64 {
+pub(crate) fn py_max(items: impl IntoIterator<Item = f64>) -> f64 {
     let mut items = items.into_iter();
     let mut best = items.next().expect("max() arg is an empty sequence");
     for item in items {

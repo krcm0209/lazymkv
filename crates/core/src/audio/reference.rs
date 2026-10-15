@@ -194,7 +194,7 @@ pub fn first_of_language(streams: Option<&[FfprobeStream]>, main: i64) -> Option
 
 /// int() of a manifest value as the Python calls it: its ValueError text for a value that is not an int, its
 /// TypeError text for a key that is absent (None).
-fn int_text(text: Option<&str>) -> Result<i64, String> {
+pub(crate) fn int_text(text: Option<&str>) -> Result<i64, String> {
     match text {
         None => Err("int() argument must be a string, a bytes-like object or a number, not 'NoneType'".to_string()),
         Some(text) => {

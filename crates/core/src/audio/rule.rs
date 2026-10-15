@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 
 use crate::audio::levels::{read_levels, read_manifest, refusal, Fields, Manifest};
 use crate::audio::measures::{
-    analyse, ok, reverse_measures, Constants, Measures, Num, NumKind, Reverse, Run, SetError,
+    analyse, ok, py_max, reverse_measures, Constants, Measures, Num, NumKind, Reverse, Run, SetError,
 };
-use crate::audio::reference::{ffprobe_audio, manifest_stream, placed_first, read_streams, AudioStream};
+use crate::audio::reference::{ffprobe_audio, int_text, manifest_stream, placed_first, read_streams, AudioStream};
 use crate::lang::NO_LANGUAGE;
 use crate::recording::files::FfprobeStream;
-use crate::recording::{py_int, py_repr_str, PathKey, Tree};
+use crate::recording::{py_repr_str, PathKey, Tree};
 
 /// The rule's version, in the harness's cache key and the snapshot's "code"; bumped by hand with every change to a
 /// measure, a constant's default or a threshold (spec 3.3, RP5). Replaces the Python's SHA-1 of audio_similarity.py.
@@ -559,7 +559,7 @@ pub fn results(
     let main = read_levels(tree, &folder.join("main-mix.txt"))?;
     let fc_path = folder.join("main-fc.txt");
     let mut fc = if tree.exists(&fc_path) { read_levels(tree, &fc_path)? } else { Vec::new() };
-    if !fc.is_empty() && py_max(&fc) <= consts.SILENT_DB {
+    if !fc.is_empty() && py_max(fc.iter().copied()) <= consts.SILENT_DB {
         fc = Vec::new();
     }
     let mainfo: Fields = manifest.main.clone().unwrap_or_default();
@@ -657,28 +657,6 @@ pub fn results(
         candidates,
         veto,
     })
-}
-
-/// int() of a manifest value as the Python calls it: its ValueError text for a value that is not an int, its
-/// TypeError text for a key that is absent (None).
-fn int_text(text: Option<&str>) -> Result<i64, String> {
-    match text {
-        None => Err("int() argument must be a string, a bytes-like object or a number, not 'NoneType'".to_string()),
-        Some(text) => {
-            py_int(text).ok_or_else(|| format!("invalid literal for int() with base 10: {}", py_repr_str(text)))
-        }
-    }
-}
-
-/// max() of a non-empty list as Python's max: a later value replaces the one kept only when it is greater.
-fn py_max(values: &[f64]) -> f64 {
-    let mut top = values[0];
-    for &v in &values[1..] {
-        if v > top {
-            top = v;
-        }
-    }
-    top
 }
 
 #[cfg(test)]
