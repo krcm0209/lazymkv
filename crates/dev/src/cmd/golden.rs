@@ -259,7 +259,7 @@ fn recording_units<'a>(
             let (owned_slug, label) = (slug.to_string(), rip.label.clone());
             units.push(Unit::pair(
                 [format!("{label_gold}/subs.json"), format!("{label_gold}/subs.txt")],
-                move || subs_goldens(tree, &owned_slug, &label, text),
+                move || subs_goldens(tree, &owned_slug, &label, text, writing),
             ));
         }
         let subs = label_dir.join("subs");
@@ -357,8 +357,11 @@ fn holds_ocr_text(folder: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// subs.json and subs.txt: the subs run over <text>/<slug>/<label>/subs-ocr, the original language from tmdb.json.
-fn subs_goldens(tree: &dyn Tree, slug: &str, label: &str, text: Option<&Path>) -> [Production; 2] {
+/// subs.json and subs.txt: the subs run over <text>/<slug>/<label>/subs-ocr, the original language from tmdb.json. The
+/// text folder is shown as TEXT/<slug>/<label>/subs-ocr (write_goldens.py's name for it), so no absolute path reaches
+/// a golden or a line. A run that does not exit 0 produces no golden: `golden write` fails, as write_goldens.py's
+/// fail() stopped, and `golden check` skips with the run's lines, as there is nothing complete to compare.
+fn subs_goldens(tree: &dyn Tree, slug: &str, label: &str, text: Option<&Path>, writing: bool) -> [Production; 2] {
     let Some(root) = text else {
         return both(NotProduced::Skipped(format!(
             "no OCR text: {slug}/{label}/{READING} (give --text DIR or LAZYMKV_OCR_TEXT)"
@@ -372,14 +375,19 @@ fn subs_goldens(tree: &dyn Tree, slug: &str, label: &str, text: Option<&Path>) -
             reading.display()
         )));
     }
-    let text_tree = match DiskTree::open_sub(&label_text, &label_text.display().to_string(), READING) {
+    let shown = format!("TEXT/{slug}/{label}");
+    let text_tree = match DiskTree::open_sub(&label_text, &shown, READING) {
         Ok(text_tree) => text_tree,
-        Err(error) => return both(NotProduced::Failed(format!("{}: {error}", reading.display()))),
+        Err(error) => return both(NotProduced::Failed(format!("{shown}/{READING}: {error}"))),
     };
     let rule = TextRule::default();
     let rec = PathKey::new(&format!("{slug}/{label}"));
     let reading_key = PathKey::new(READING);
     let run = subs_run(tree, &rec, &text_tree, &reading_key, None, rule.CLEAR_MAX_BYTES, &rule);
+    if run.exit_code != 0 {
+        let reason = format!("the subs run exited {}: {}", run.exit_code, run.stderr.join("; "));
+        return both(if writing { NotProduced::Failed(reason) } else { NotProduced::Skipped(reason) });
+    }
     let lines = run.stdout.iter().chain(run.stderr.iter()).cloned().collect();
     [to_json(&subs_json(&run, READING, &text_tree, &reading_key)), Ok(Produced::Lines(lines))]
 }

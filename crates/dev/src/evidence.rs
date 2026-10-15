@@ -432,10 +432,19 @@ pub struct Recording {
     pub slug: String,
 }
 
-/// `arg` is a path when it names an existing directory (relative to cwd), else a slug under
-/// resolve_evidence(flag) (exit 3 as there; code 2 "corpus/owner/<arg>: no such recording (neither a recording
-/// folder nor a slug under corpus/owner)" when the slug is not a folder there). The path form prints paths as given
-/// and makes no evidence check (spec 3.4).
+/// The argument as pathlib prints it when it is shaped like a path (it holds '/' or '\\', or is "", "." or "..") and
+/// names no directory (relative to cwd); None for a directory or a simple name, which may be a slug. Such a path is
+/// never looked up as a slug, and no evidence check is made for it.
+pub fn missing_recording_path(ctx: &Ctx, arg: &str) -> Option<String> {
+    let path_shaped = arg.is_empty() || arg == "." || arg == ".." || arg.contains('/') || arg.contains('\\');
+    (path_shaped && !ctx.abs(arg).is_dir()).then(|| pathlib_split(arg).0)
+}
+
+/// `arg` is a path when it names an existing directory (relative to cwd); a path-shaped argument that names none
+/// (missing_recording_path) is refused with code 2 "<arg>: no such folder" before any evidence check; any other
+/// argument is a slug under resolve_evidence(flag) (exit 3 as there; code 2 "corpus/owner/<arg>: no such recording
+/// (neither a recording folder nor a slug under corpus/owner)" when the slug is not a folder there). The path form
+/// prints paths as given and makes no evidence check (spec 3.4).
 pub fn resolve_recording(ctx: &Ctx, evidence_flag: Option<&str>, arg: &str) -> Result<Recording, Refused> {
     let given = ctx.abs(arg);
     if given.is_dir() {
@@ -457,9 +466,11 @@ pub fn resolve_recording(ctx: &Ctx, evidence_flag: Option<&str>, arg: &str) -> R
             .map_err(|error| Refused { code: 2, line: format!("{}: {}", arg, error) })?;
         return Ok(Recording { tree, dir: PathKey::new(&name), slug: name });
     }
+    if let Some(shown) = missing_recording_path(ctx, arg) {
+        return Err(Refused { code: 2, line: format!("{shown}: no such folder") });
+    }
     let evidence = resolve_evidence(ctx, evidence_flag)?;
-    let simple = !arg.is_empty() && arg != "." && arg != ".." && !arg.contains('/') && !arg.contains('\\');
-    if !simple || !evidence.join(arg).is_dir() {
+    if !evidence.join(arg).is_dir() {
         return Err(Refused {
             code: 2,
             line: format!(
@@ -725,6 +736,21 @@ mod tests {
         );
         let bare = Ctx::for_test(&repository("recording-no-clone", false));
         assert_eq!(resolve_recording(&bare, None, "disc-a").err().unwrap().code, 3);
+    }
+
+    #[test]
+    fn a_missing_path_is_no_such_folder_with_or_without_the_clone() {
+        // Before the fix, a path that names no folder was taken for a slug: exit 3 without the clone (the argument
+        // never named), "corpus/owner/<path>" with it.
+        let missing = Refused { code: 2, line: "recs/nope: no such folder".to_string() };
+        for (tag, clone) in [("missing-path-clone", true), ("missing-path-no-clone", false)] {
+            let ctx = Ctx::for_test(&repository(tag, clone));
+            assert_eq!(resolve_recording(&ctx, None, "recs/nope").err().unwrap(), missing);
+            assert_eq!(resolve_recording(&ctx, None, "recs//nope/").err().unwrap(), missing);
+            assert_eq!(missing_recording_path(&ctx, "recs/nope"), Some("recs/nope".to_string()));
+            assert_eq!(missing_recording_path(&ctx, "disc-a"), None, "a simple name may be a slug");
+            assert_eq!(missing_recording_path(&ctx, "."), None, "a folder");
+        }
     }
 
     #[test]

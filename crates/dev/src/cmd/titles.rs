@@ -7,7 +7,7 @@ use std::io::Write;
 use lazymkv_core::audio::titles::titles_report;
 use lazymkv_core::recording::Tree;
 
-use crate::evidence::{resolve_recording, Ctx, Refused};
+use crate::evidence::{missing_recording_path, resolve_recording, Ctx, Refused};
 use crate::{usage_error, Args};
 
 /// The synopsis after "usage: lazymkv-dev ".
@@ -29,6 +29,11 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         0 => return usage(err, "the following arguments are required: slug|dir"),
         1 => {}
         _ => return usage(err, &format!("unrecognized arguments: {}", words[1..].join(" "))),
+    }
+    // A path that names no folder has no scan.txt: the Python's line and exit 1, with no evidence check.
+    if let Some(shown) = missing_recording_path(ctx, &words[0]) {
+        let _ = writeln!(err, "{shown}: {NO_SCAN}");
+        return 1;
     }
     let rec = match resolve_recording(ctx, evidence.as_deref(), &words[0]) {
         Ok(rec) => rec,
@@ -120,6 +125,22 @@ mod tests {
         let (code, out, err) = call(run, &Ctx::for_test(&tmp.0), &["empty-disc"]);
         assert_eq!((code, out.as_str()), (1, ""));
         assert_eq!(err, "empty-disc: no scan.txt (record and pull the disc first)\n");
+    }
+
+    #[test]
+    fn a_missing_path_has_no_scan_txt_with_or_without_the_clone() {
+        // d3a754d's `audio_similarity.py --titles recs/nope` exited 1 with "recs/nope: no scan.txt (record and pull
+        // the disc first)", clone or not; before the fix the port took the path for a slug (exit 3, or exit 2 naming
+        // corpus/owner/recs/nope).
+        let tmp = Scratch::new("titles");
+        fs::create_dir_all(tmp.0.join("evidence")).unwrap();
+        for evidence in ["evidence", "no-evidence"] {
+            let mut ctx = Ctx::for_test(&tmp.0);
+            ctx.env.insert("LAZYMKV_EVIDENCE".to_string(), tmp.0.join(evidence).display().to_string());
+            let (code, out, err) = call(run, &ctx, &["recs/nope"]);
+            assert_eq!((code, out.as_str()), (1, ""), "{evidence}");
+            assert_eq!(err, "recs/nope: no scan.txt (record and pull the disc first)\n", "{evidence}");
+        }
     }
 
     #[test]

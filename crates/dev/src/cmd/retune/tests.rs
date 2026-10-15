@@ -577,6 +577,40 @@ fn a_constant_trial_measures_again_and_bad_values_are_refused() {
     assert!(retune(&tmp, &["--set", "DC_MAX=nan"]).1.contains("not a finite number"));
 }
 
+/// `--set <name>=-1` for a lag constant: the Python's max() over an empty range raised "max() arg is an empty
+/// sequence", which audio_dataset.py caught, so every folder with a candidate was listed as unreadable and the run
+/// exited 3. Pinned to d3a754d's audio_dataset.main on the Python test's main corpus, for each of the three constants.
+fn a_negative_lag_constant_lists_the_folders_as_unreadable(name: &str) {
+    let (tmp, baseline) = checked_corpus(&format!("lag-{}", name.to_lowercase()));
+    let (set, trial) = (format!("{name}=-1"), tmp.path("trial.json"));
+    let (code, out) = retune(&tmp, &["--set", set.as_str(), "--snapshot", trial.as_str()]);
+    assert_eq!(code, 3, "{out}");
+    assert_eq!(
+        section(&out, "Folders that cannot be read:"),
+        "\n  disc-b/all-tracks/audio-levels-20ms-1-2-3-4: max() arg is an empty sequence\
+         \n  disc-b/eng-only/audio-levels-20ms-1-3: max() arg is an empty sequence\
+         \n  fit-disc/t0/audio-levels-20ms-1-3: max() arg is an empty sequence",
+        "{out}"
+    );
+    assert!(out.contains("RESULT FAILED: not everything was checked: 3 folder(s) cannot be read, 3 labelled track(s) not measured (see 'Folders that cannot be read', 'Labels without a measurement' and the changes above)"), "{out}");
+    assert_eq!(fs::read_to_string(tmp.corpus().join(BASELINE_FILE)).unwrap(), baseline);
+}
+
+#[test]
+fn a_negative_coarse_lag_lists_the_folders_as_unreadable() {
+    a_negative_lag_constant_lists_the_folders_as_unreadable("COARSE_LAG");
+}
+
+#[test]
+fn a_negative_block_lag_lists_the_folders_as_unreadable() {
+    a_negative_lag_constant_lists_the_folders_as_unreadable("BLOCK_LAG");
+}
+
+#[test]
+fn a_negative_win_lag_lists_the_folders_as_unreadable() {
+    a_negative_lag_constant_lists_the_folders_as_unreadable("WIN_LAG");
+}
+
 #[test]
 fn a_programme_track_with_the_commentary_verdict_fails_loudly() {
     let tmp = baseline_corpus("fail-commentary");

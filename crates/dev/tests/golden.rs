@@ -176,11 +176,6 @@ fn a_fresh_clone_reports_every_series_and_text_comparison_as_skipped_and_exits_3
             skipped("golden/retune-report.txt", SERIES_ABSENT),
         ]
     );
-    for comparison in &comparisons {
-        if let Outcome::Skipped(reason) = &comparison.outcome {
-            skip(&format!("{}: {reason}", comparison.name));
-        }
-    }
     assert_eq!(summary(&comparisons), ("golden check: 0 pass, 0 fail, 12 skipped".to_string(), 3));
 
     // What needs neither the series nor the text still runs on such a clone.
@@ -220,6 +215,45 @@ fn a_fresh_clone_reports_every_series_and_text_comparison_as_skipped_and_exits_3
         ]
     );
     assert_eq!(summary(&comparisons), ("golden check: 5 pass, 0 fail, 7 skipped".to_string(), 0));
+}
+
+#[test]
+fn a_subs_run_with_an_english_stream_without_text_gives_no_subs_golden() {
+    // Two English PGS streams, OCR text for s0 only: the subs run exits 2. write_goldens.py stopped there (fail());
+    // golden write must write neither subs file and fail, and golden check must skip, its line carrying no absolute
+    // path (the text folder is shown as TEXT/<slug>/<label>/subs-ocr).
+    let dir = TempDir::new("subs-missing");
+    let root = dir.0.as_path();
+    recording(root, false);
+    put(
+        root,
+        "disc-a/all-tracks/subs/index.json",
+        SUBS_INDEX.replacen(
+            "}]",
+            r#"}, {"n": 1, "track_id": 4, "language": "eng", "codec": "HDMV PGS", "track_name": null, "forced": false, "default": false}]"#,
+            1,
+        ),
+    );
+    put(root, "disc-a/all-tracks/subs/sub-1.packets.json", packets());
+    let text = TempDir::new("subs-missing-text");
+    put(&text.0, "disc-a/all-tracks/subs-ocr/sub-0.ocr.jsonl", ocr_text());
+    let ctx = ctx();
+    let reason = "the subs run exited 2: stream s1 eng: no OCR text (no sub-1.ocr.jsonl in \
+                  TEXT/disc-a/all-tracks/subs-ocr); read it with ocr-subs.ps1";
+    let error = write(&ctx, root, Some(&text.0)).unwrap_err();
+    for name in ["subs.json", "subs.txt"] {
+        assert!(error.contains(&format!("failed disc-a/golden/all-tracks/{name}: {reason}\n")), "{error}");
+        assert!(!root.join("disc-a/golden/all-tracks").join(name).exists(), "{name} was written");
+    }
+    put(root, "disc-a/golden/all-tracks/subs.json", "{}\n");
+    put(root, "disc-a/golden/all-tracks/subs.txt", "x\n");
+    let subs: Vec<Comparison> =
+        check(&ctx, root, Some(&text.0)).into_iter().filter(|c| c.name.contains("/subs.")).collect();
+    assert_eq!(
+        subs,
+        vec![skipped("disc-a/golden/all-tracks/subs.json", reason), skipped("disc-a/golden/all-tracks/subs.txt", reason)]
+    );
+    assert!(!reason.contains(&text.0.display().to_string()));
 }
 
 #[test]

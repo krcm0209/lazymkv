@@ -559,6 +559,19 @@ SINFO:2,2,1,6203,"Subtitles"
     }
 
     #[test]
+    fn run_refuses_a_missing_path_with_or_without_the_clone() {
+        // A path is never taken for a slug: "<arg>: no such folder", exit 2, with no evidence check (summarize_scan
+        // crashed on it; before the fix the port exited 3 without the clone, or named corpus/owner/<arg> with it).
+        let tmp = fixture("missing-path");
+        let (evidence, missing) = (tmp.0.join("evidence"), tmp.0.join("no-evidence"));
+        std::fs::create_dir_all(&evidence).unwrap();
+        for flag in [&evidence, &missing] {
+            let (code, out, err) = run_in(&tmp.0, &["recs/nope", "--evidence", flag.to_str().unwrap()]);
+            assert_eq!((code, out.as_str(), err.as_str()), (2, "", "recs/nope: no such folder\n"), "{flag:?}");
+        }
+    }
+
+    #[test]
     fn run_exits_2_when_a_file_is_missing() {
         let tmp = fixture("missing");
         tmp.write("empty-disc/meta.json", b"{}");
