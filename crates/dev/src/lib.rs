@@ -21,6 +21,8 @@ pub type Command = fn(&Ctx, &[String], &mut dyn Write, &mut dyn Write) -> i32;
 pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("scan", cmd::scan::run as Command, "<slug|dir> [--title N] [--label L]"),
     ("reconcile", cmd::reconcile::run as Command, "<scan> <title> <mkvmerge_json> [--selection all|eng] [--rip-log FILE]"),
+    ("titles", cmd::titles::run as Command, "[--evidence DIR] <slug|dir>"),
+    ("audio-report", cmd::audio_report::run as Command, "<folder> ..."),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";

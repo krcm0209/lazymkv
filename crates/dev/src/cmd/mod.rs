@@ -4,3 +4,5 @@
 
 pub mod scan;
 pub mod reconcile;
+pub mod titles;
+pub mod audio_report;
