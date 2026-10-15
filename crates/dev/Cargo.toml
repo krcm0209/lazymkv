@@ -20,3 +20,4 @@ serde_json.workspace = true
 [dev-dependencies]
 # PyRandom and the level generators for the integration tests of Tasks 8, 11 and 12.
 lazymkv-core = { path = "../core", features = ["testsupport"] }
+sha1.workspace = true

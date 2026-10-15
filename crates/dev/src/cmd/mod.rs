@@ -3,3 +3,4 @@
 //! it adds the file's `pub mod` line here and its row to `crate::COMMANDS`.
 
 pub mod scan;
+pub mod reconcile;

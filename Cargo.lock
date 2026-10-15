@@ -156,6 +156,7 @@ dependencies = [
  "lazymkv-core",
  "serde",
  "serde_json",
+ "sha1",
 ]
 
 [[package]]

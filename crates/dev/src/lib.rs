@@ -20,6 +20,7 @@ pub type Command = fn(&Ctx, &[String], &mut dyn Write, &mut dyn Write) -> i32;
 /// Tasks 2 to 14 adds its row, for example `("scan", cmd::scan::run as Command, "<slug|dir> [--title N] [--label L]")`.
 pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("scan", cmd::scan::run as Command, "<slug|dir> [--title N] [--label L]"),
+    ("reconcile", cmd::reconcile::run as Command, "<scan> <title> <mkvmerge_json> [--selection all|eng] [--rip-log FILE]"),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";
