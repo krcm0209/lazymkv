@@ -24,6 +24,13 @@ use std::fmt;
 use std::ops::Bound;
 use std::sync::{Arc, OnceLock};
 
+use sha1::{Digest, Sha1};
+
+/// The SHA-1 of `bytes` as 40 lowercase hex digits (Python's `hashlib.sha1(bytes).hexdigest()`).
+pub fn sha1_hex(bytes: &[u8]) -> String {
+    Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The folder name the port spec (section 5) reserves for goldens: `list` and `glob` never return one, nor anything
 /// under one.
 const GOLDEN: &str = "golden";

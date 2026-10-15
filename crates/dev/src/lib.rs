@@ -38,6 +38,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("exp11", cmd::exp11::run as Command, "coverage <where>... | match <folder> <title> <label>"),
     ("compare-scans", cmd::compare_scans::run as Command, "<A> <B>"),
     ("ocr-compare", cmd::ocr_compare::run as Command, "<tess> <ocrs> [--rec DIR] [--tag CODE]"),
+    ("golden", cmd::golden::run as Command, "write|check [--evidence DIR] [--text DIR]"),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";

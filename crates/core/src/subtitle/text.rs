@@ -1983,10 +1983,8 @@ pub fn before_yes(v: &Decision, today: &str) -> String {
 }
 // ------------------------------------------------------------------ printing and the title
 
-use sha1::{Digest, Sha1};
-
 use crate::recording::files::{read_jsonl, FrameEntry, PacketsFile, SubsIndexEntry, Tmdb};
-use crate::recording::{read_json, read_text, Encoding, Errors, PathKey, Tree};
+use crate::recording::{read_json, read_text, sha1_hex, Encoding, Errors, PathKey, Tree};
 
 /// The table analyse prints, header and rule. Py: analyse's two literal lines.
 const TABLE_HEADER: &str = "| Stream | Tag | Events | Class | Rule | Review | Note | 8.7 today | Before yes |";
@@ -2398,11 +2396,6 @@ pub struct PairJson {
     #[serde(flatten)]
     pub pair: Pair,
     pub subset: String,
-}
-
-/// Lowercase hex SHA-1 of some bytes.
-fn sha1_hex(bytes: &[u8]) -> String {
-    Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// SubsJson of a run: per stream its facts, status, pairing, measures and the three outcomes (decide, spec87 and

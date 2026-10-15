@@ -366,9 +366,52 @@ pub fn disc_d_files() -> Vec<(String, Vec<u8>)> {
 }
 
 /// The SHA-1 of `bytes` as lowercase hex: the digest the evidence tests compare recorded outputs by.
-pub fn sha1_hex(bytes: &[u8]) -> String {
-    use sha1::{Digest, Sha1};
-    Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+pub use crate::recording::sha1_hex;
+
+/// A fresh folder under the system's temporary directory, removed when dropped.
+pub struct Scratch(pub std::path::PathBuf);
+
+impl Scratch {
+    pub fn new(tag: &str) -> Scratch {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("lazymkv-test-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Writes `text` to `path`, making its folders first.
+pub fn write(path: &std::path::Path, text: impl AsRef<[u8]>) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// A file written under a scratch folder by a path relative to it, its folders made first.
+pub trait ScratchExt {
+    fn write(&self, rel: &str, data: impl AsRef<[u8]>);
+    /// Like `write`, and returns the full path of the file.
+    fn write_path(&self, rel: &str, data: impl AsRef<[u8]>) -> std::path::PathBuf;
+}
+
+impl ScratchExt for Scratch {
+    fn write(&self, rel: &str, data: impl AsRef<[u8]>) {
+        write(&self.0.join(rel), data);
+    }
+
+    fn write_path(&self, rel: &str, data: impl AsRef<[u8]>) -> std::path::PathBuf {
+        let path = self.0.join(rel);
+        write(&path, data);
+        path
+    }
 }
 
 #[cfg(test)]

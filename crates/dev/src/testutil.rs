@@ -1,31 +1,14 @@
 //! Test helpers the command tests share: a scratch folder, a file writer and a call of a command that collects its output.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::Path;
 
 use crate::evidence::Ctx;
 use crate::Command;
 
-/// A fresh folder under the system's temporary directory, removed when dropped.
-pub(crate) struct Scratch(pub(crate) PathBuf);
-
-impl Scratch {
-    pub(crate) fn new(tag: &str) -> Scratch {
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
-        let n = COUNT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("lazymkv-test-{tag}-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+/// The scratch folder, its file writer and the plain writer live once in lazymkv_core::testsupport, so that the
+/// integration tests under crates/dev/tests share them.
+pub(crate) use lazymkv_core::testsupport::{write, Scratch, ScratchExt};
 
 /// Runs `run`, a command's entry point; (exit code, stdout, stderr).
 pub(crate) fn call(run: Command, ctx: &Ctx, args: &[&str]) -> (i32, String, String) {
@@ -35,37 +18,12 @@ pub(crate) fn call(run: Command, ctx: &Ctx, args: &[&str]) -> (i32, String, Stri
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
 
-/// Writes `text` to `path`, making its folders first.
-pub(crate) fn write(path: &Path, text: impl AsRef<[u8]>) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, text).unwrap();
-}
-
 /// The lines as print() writes them.
 pub(crate) fn printed(lines: &[&str]) -> String {
     lines.iter().map(|line| format!("{line}\n")).collect()
 }
 
 pub(crate) use lazymkv_core::testsupport::sha1_hex;
-
-/// A file written under a scratch folder by a path relative to it, its folders made first.
-pub(crate) trait ScratchExt {
-    fn write(&self, rel: &str, data: impl AsRef<[u8]>);
-    /// Like `write`, and returns the full path of the file.
-    fn write_path(&self, rel: &str, data: impl AsRef<[u8]>) -> PathBuf;
-}
-
-impl ScratchExt for Scratch {
-    fn write(&self, rel: &str, data: impl AsRef<[u8]>) {
-        write(&self.0.join(rel), data);
-    }
-
-    fn write_path(&self, rel: &str, data: impl AsRef<[u8]>) -> PathBuf {
-        let path = self.0.join(rel);
-        write(&path, data);
-        path
-    }
-}
 
 /// The bytes the evidence tests hash for a subs folder: index.json, then every `sub-<n>.packets.json` in name order.
 pub(crate) fn evidence_inputs(folder: &Path) -> Vec<u8> {
