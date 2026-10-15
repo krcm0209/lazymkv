@@ -15,9 +15,9 @@ use lazymkv_core::audio::dataset::{
     UNCHECKED_FILE,
 };
 use lazymkv_core::audio::labels::exp13_requirements;
-use lazymkv_core::recording::{decode_text, py_repr_str, Encoding, Errors};
+use lazymkv_core::recording::{decode_text, Encoding, Errors};
 
-use crate::evidence::{default_spec, os_error_text as errno_text, resolve_evidence, Ctx, DiskTree, Refused, EVIDENCE_SHOWN};
+use crate::evidence::{default_spec, os_error_text, resolve_evidence, Ctx, DiskTree, Refused, EVIDENCE_SHOWN};
 use crate::pyjson::{dumps, write_snapshot, Style};
 use crate::{usage_error, Args};
 
@@ -153,15 +153,6 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 fn fail(err: &mut dyn Write, line: &str, code: i32) -> i32 {
     let _ = writeln!(err, "{line}");
     code
-}
-
-/// Python's OSError text, with the missing file spelled "[Errno 2] No such file or directory: '<shown>'" on every OS
-/// (Python takes it from the C library's errno table, Windows included); the rest is evidence::os_error_text.
-fn os_error_text(e: &std::io::Error, shown: &str) -> String {
-    if e.kind() == std::io::ErrorKind::NotFound {
-        return format!("[Errno 2] No such file or directory: {}", py_repr_str(shown));
-    }
-    errno_text(e, shown)
 }
 
 /// Path.read_text(encoding) with strict errors; Err with the OSError or UnicodeDecodeError text.

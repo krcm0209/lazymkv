@@ -57,14 +57,13 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::Path;
 
-    use serde_json::json;
 
     use super::run;
     use crate::evidence::Ctx;
-    use crate::testutil::{self, Scratch as TempDir};
+    use crate::testutil::{self, write, Scratch as TempDir};
+    use lazymkv_core::testsupport::probe_streams_json;
 
     /// What `audio_dataset.py args some-film commentary` printed, tmdb.json saying "es".
     const COMMENTARY: &str = concat!(
@@ -77,19 +76,9 @@ mod tests {
         "scripts/phase0/wait.sh audio-levels-some-film-commentary\n",
     );
 
-    fn write(path: &Path, text: &str) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
-    }
-
     /// The Python test's probe_file(): video, then the given audio streams (codec, profile, channels, language).
     fn probe_file(path: &Path, streams: &[(&str, Option<&str>, i64, &str)]) {
-        let mut list = vec![json!({"index": 0, "codec_type": "video"})];
-        for (k, (codec, profile, channels, language)) in streams.iter().enumerate() {
-            list.push(json!({"index": k + 1, "codec_type": "audio", "codec_name": codec, "profile": profile,
-                             "channels": channels, "tags": {"language": language}}));
-        }
-        write(path, &serde_json::to_string(&json!({"streams": list})).unwrap());
+        write(path, probe_streams_json(streams));
     }
 
     /// Runs the command with `dir` as the current directory: (exit code, stdout, stderr).

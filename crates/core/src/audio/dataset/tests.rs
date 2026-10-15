@@ -16,17 +16,12 @@ use crate::audio::labels::{auto, load_fitted, open_for_change, FORMAT};
 use crate::audio::measures::{Constants, Measures, Num};
 use crate::audio::rule::AnalyseFn;
 use crate::recording::{MemTree, Ordered, PathKey};
-use crate::testsupport::{disc_d_files, entry, programme, with};
+use crate::testsupport::{disc_d_files, entry, probe_streams_json, programme, with};
 
 /// The Python test's probe_file(): an ffprobe-streams.json with a video stream and the given audio streams
 /// (codec, profile, channels, language), numbered from 1.
 fn probe_file(tree: &mut MemTree, path: &str, streams: &[(&str, Option<&str>, i64, &str)]) {
-    let mut list = vec![json!({"index": 0, "codec_type": "video"})];
-    for (k, (codec, profile, channels, language)) in streams.iter().enumerate() {
-        list.push(json!({"index": k + 1, "codec_type": "audio", "codec_name": codec, "profile": profile,
-                         "channels": channels, "tags": {"language": language}}));
-    }
-    tree.insert_file(path, serde_json::to_string(&json!({"streams": list})).unwrap());
+    tree.insert_file(path, probe_streams_json(streams));
 }
 
 /// The job lines of levels_args. Py: Routine.jobs.

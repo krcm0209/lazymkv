@@ -287,8 +287,16 @@ fn walk(dir: &Path, prefix: &str, tree: &mut MemTree) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Python's OSError text: "[Errno <n>] <strerror>: '<path>'" (Rust's message without its " (os error n)").
+/// Python's FileNotFoundError text up to the path.
+pub(crate) const NO_SUCH_FILE: &str = "[Errno 2] No such file or directory: ";
+
+/// Python's OSError text: "[Errno <n>] <strerror>: '<path>'" (Rust's message without its " (os error n)"). A missing
+/// file (`ErrorKind::NotFound`) is spelt `NO_SUCH_FILE` + the path on every platform, as Python's errno table has it
+/// (Windows reports error 3 or 2 with its own wording).
 pub(crate) fn os_error_text(error: &std::io::Error, shown: &str) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return format!("{NO_SUCH_FILE}{}", py_repr_str(shown));
+    }
     match error.raw_os_error() {
         Some(code) => {
             let text = error.to_string();
@@ -419,6 +427,7 @@ pub fn skip(reason: &str) {
 mod tests {
     use super::*;
     use crate::runner::Output;
+    use crate::testutil::write;
     use std::fs;
 
     #[test]
@@ -429,6 +438,10 @@ mod tests {
         assert!(!text.contains("(os error"), "{text}");
         let other = std::io::Error::new(std::io::ErrorKind::Other, "odd (os error 5) text");
         assert_eq!(os_error_text(&other, "x"), "odd (os error 5) text");
+        // A missing file reads the same on every platform, with or without an OS error number.
+        for missing in [std::io::Error::from(std::io::ErrorKind::NotFound), std::io::Error::from_raw_os_error(2)] {
+            assert_eq!(os_error_text(&missing, "a/b"), "[Errno 2] No such file or directory: 'a/b'");
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -436,11 +449,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    fn write(path: &Path, text: &str) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
     }
 
     /// A repository: a workspace manifest, a crates/dev folder, and with `clone` an evidence clone holding one

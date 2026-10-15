@@ -306,6 +306,18 @@ pub fn with(mut value: serde_json::Value, key: &str, v: serde_json::Value) -> se
     value
 }
 
+/// The text of an ffprobe-streams.json (or a level folder's streams.json) with a video stream, index 0, then the given
+/// audio streams numbered from 1, each as (codec, profile, channels, language). Py: test_audio_dataset.probe_file's
+/// content.
+pub fn probe_streams_json(streams: &[(&str, Option<&str>, i64, &str)]) -> String {
+    let mut list = vec![serde_json::json!({"index": 0, "codec_type": "video"})];
+    for (k, (codec, profile, channels, language)) in streams.iter().enumerate() {
+        list.push(serde_json::json!({"index": k + 1, "codec_type": "audio", "codec_name": codec, "profile": profile,
+                                     "channels": channels, "tags": {"language": language}}));
+    }
+    serde_json::to_string(&serde_json::json!({"streams": list})).expect("serialisable")
+}
+
 /// One level folder's manifest.txt and streams.json as audio-levels.ps1 writes them (main stream 1 with six
 /// channels, streams.json listing every stream up to the highest measured one), as (path under the label folder,
 /// bytes). Py: test_audio_dataset.folder, without the level series (`labels auto` reads none).

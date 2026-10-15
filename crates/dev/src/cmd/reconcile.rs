@@ -14,7 +14,7 @@ use lazymkv_core::recording::{
 use lazymkv_core::reconcile::{reconcile, report_lines, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::robot::parse;
 
-use crate::evidence::Ctx;
+use crate::evidence::{Ctx, NO_SUCH_FILE};
 use crate::{usage_error, Args};
 
 /// The command's name as typed.
@@ -41,8 +41,6 @@ const INVALID_INT: &str = "argument title: invalid int value: ";
 const INVALID_CHOICE: &str = "argument --selection: invalid choice: ";
 const CHOICES: &str = " (choose from 'all', 'eng')";
 const UNRECOGNIZED: &str = "unrecognized arguments: ";
-/// Python's FileNotFoundError text.
-const NO_SUCH_FILE: &str = "[Errno 2] No such file or directory: ";
 /// A title no scan lists (a negative one): core::reconcile's sentence for the Python's KeyError.
 const NO_SUCH_TITLE: &str = "the scan lists no title ";
 

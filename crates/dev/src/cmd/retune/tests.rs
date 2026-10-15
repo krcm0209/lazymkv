@@ -20,12 +20,12 @@ use lazymkv_core::audio::labels::{exp13_requirements, is_slug, FORMAT};
 use lazymkv_core::audio::measures::{Constants, Measures};
 use lazymkv_core::audio::rule::Verdict;
 use lazymkv_core::recording::{decode_text, py_repr_str, Encoding, Errors, MemTree};
-use lazymkv_core::testsupport::{commentary, entry, level_file_text, programme, with, PyRandom, FPS};
+use lazymkv_core::testsupport::{commentary, entry, level_file_text, probe_streams_json, programme, with, PyRandom, FPS};
 
 use super::run;
 use crate::evidence::{repo_root, skip, Ctx, DiskTree, EVIDENCE_SHOWN};
 use crate::pyjson::{dumps, structural_diff, Style, Tolerance};
-use crate::testutil::{self, Scratch as TempDir};
+use crate::testutil::{self, write, Scratch as TempDir};
 
 /// Row 13 of the Python test (ROW13), with its eight numbers as {names}.
 const ROW13: &str = "| 13 | Measured over whole titles on the owner's own discs, does the content rule give its commentary verdict to **no** programme track, and to at least one commentary on each of at least {verdict_discs} different discs? Before the answer may be yes, the labelled tracks must include: at least {comm} commentaries from at least {discs} discs, at least {features} of them on feature films and at least 1 with the film clearly audible under the voices; at least 1 audio-description track if the owner has a disc with one (all that the owner has, up to 3); at least {prog} programme tracks other than the reference, at least {sep} of them separately encoded lossy companions or alternate mixes; at least {centre} title whose reference has no centre channel (mono or 2.0) and at least {heavy} dialogue-heavy or speech-only title, each with an extra track. Every threshold was fitted on two tracks of one disc (`fit-disc`: the S03E16 commentary), so no track of that disc counts. | fallback |";
@@ -238,17 +238,7 @@ fn write_labels(slug_dir: &Path, tracks: Vec<Value>, titles: Value) {
 
 /// The Python test's probe_file(path, streams): video, then the audio streams (codec, profile, channels, language).
 fn probe_file(path: &Path, streams: &[(&str, Option<&str>, i64, &str)]) {
-    let mut list = vec![json!({"index": 0, "codec_type": "video"})];
-    for (k, (codec, profile, channels, language)) in streams.iter().enumerate() {
-        list.push(json!({"index": k + 1, "codec_type": "audio", "codec_name": codec, "profile": profile,
-                         "channels": channels, "tags": {"language": language}}));
-    }
-    write(path, serde_json::to_string(&json!({"streams": list})).unwrap());
-}
-
-fn write(path: &Path, text: impl AsRef<[u8]>) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, text).unwrap();
+    write(path, probe_streams_json(streams));
 }
 
 /// The Python test's build_main_corpus(c): fit-disc (the disc the thresholds were fitted on); disc-b (a programme

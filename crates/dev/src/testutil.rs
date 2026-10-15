@@ -1,7 +1,7 @@
-//! Test helpers the command tests share: a scratch folder and a call of a command that collects its output.
+//! Test helpers the command tests share: a scratch folder, a file writer and a call of a command that collects its output.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::evidence::Ctx;
@@ -33,4 +33,10 @@ pub(crate) fn call(run: Command, ctx: &Ctx, args: &[&str]) -> (i32, String, Stri
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(ctx, &args, &mut out, &mut err);
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+}
+
+/// Writes `text` to `path`, making its folders first.
+pub(crate) fn write(path: &Path, text: impl AsRef<[u8]>) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
 }
