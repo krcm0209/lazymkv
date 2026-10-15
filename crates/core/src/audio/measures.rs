@@ -1136,8 +1136,9 @@ fn mix_centre() -> &'static (Vec<f64>, Vec<f64>) {
 #[cfg(test)]
 #[allow(clippy::module_inception)] // named after the Python class it ports
 mod measures {
-    //! Ported from test_audio_similarity.py::Measures (6 tests): every assertion on the measures. The tests' verdict()
-    //! and not_judged() assertions need core::audio::rule; Task 5 appends them to these six functions.
+    //! Ported from test_audio_similarity.py::Measures (6 tests), every assertion: Task 4 wrote the assertions on the
+    //! measures; Task 5 appended the verdict() and not_judged() assertions of core::audio::rule after them (Task 4's
+    //! "Hand-over to Task 5" lines, with absolute paths).
     use super::*;
     use crate::testsupport::{commentary, FPS};
 
@@ -1152,6 +1153,7 @@ mod measures {
         assert_eq!(r.lag_ms, Some(60));
         assert!(r.dc >= 0.9, "dc {}", r.dc);
         assert_eq!(r.ag, 0.0);
+        assert_eq!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::Keep);
     }
 
     #[test]
@@ -1164,6 +1166,8 @@ mod measures {
         assert_eq!(r.tenths_comm, r.tenths);
         assert!(r.smi >= 0.50, "smi {}", r.smi);
         assert!(r.ls_db <= 13.0, "ls_db {}", r.ls_db);
+        assert_eq!(crate::audio::rule::not_judged(&m, &crate::audio::rule::Rule::default()), "");
+        assert_eq!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::Commentary);
     }
 
     #[test]
@@ -1182,6 +1186,8 @@ mod measures {
         // what not_judged() reads to give its "digitally silent" reason: the overlap passes, main_silent does not
         assert!(r.overlap >= 0.90, "overlap {}", r.overlap);
         assert!(r.main_silent > 0.10, "main_silent {}", r.main_silent);
+        assert!(crate::audio::rule::not_judged(&m, &crate::audio::rule::Rule::default()).contains("silent"));
+        assert_ne!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::Commentary);
     }
 
     #[test]
@@ -1192,6 +1198,8 @@ mod measures {
         let m = analyse(mix, &cand, Some(centre.as_slice()), true, &Constants::default());
         let r = m.run().expect("measured");
         assert!(r.dc >= 0.8, "dc {}", r.dc);
+        let v = crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default());
+        assert!(![crate::audio::rule::Verdict::Commentary, crate::audio::rule::Verdict::ReferenceUnclear].contains(&v), "{v:?}");
     }
 
     #[test]
@@ -1201,6 +1209,7 @@ mod measures {
         let m = analyse(mix, &comm[..mix.len() * 7 / 10], Some(centre.as_slice()), true, &Constants::default());
         let r = m.run().expect("measured");
         assert!(r.overlap < 0.9, "overlap {}", r.overlap);
+        assert_ne!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::Commentary);
     }
 
     #[test]
@@ -1208,6 +1217,7 @@ mod measures {
         let (mix, _) = mix_centre();
         let m = analyse(&mix[..500], &mix[..500], None, true, &Constants::default());
         assert_eq!(m, Measures::Error { frames: Some(500), error: "too short".to_string() });
+        assert_eq!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::NotJudged);
     }
 }
 
