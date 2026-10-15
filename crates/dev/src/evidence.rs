@@ -4,6 +4,7 @@
 
 use crate::runner::{FakeRunner, RealRunner, Runner};
 use lazymkv_core::recording::{py_repr_str, Kind, Loader, MemTree, PathKey, ReadError, Tree};
+pub use lazymkv_core::recording::pathlib_str;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -54,8 +55,20 @@ impl Ctx {
     /// -NoProfile -Command "Get-Date -Format s"` (the mini PC), through the runner; when that fails, UTC with a
     /// warning on stderr (02-interfaces.md, open point 5).
     pub fn now(&self) -> String {
+        match self.local_time() {
+            Ok(time) => time,
+            Err((utc, warning)) => {
+                let _ = writeln!(std::io::stderr(), "{}", warning);
+                utc
+            }
+        }
+    }
+
+    /// The clock logic of `now`, without the printing: Ok(the local time) when the fixed clock or the clock program
+    /// gives a valid local time; Err((the UTC time, the warning line `now` prints on stderr)) otherwise.
+    pub fn local_time(&self) -> Result<String, (String, String)> {
         if let Some(clock) = &self.clock {
-            return clock.clone();
+            return Ok(clock.clone());
         }
         let (program, args): (&str, Vec<String>) = if cfg!(windows) {
             ("powershell", vec!["-NoProfile".to_string(), "-Command".to_string(), "Get-Date -Format s".to_string()])
@@ -65,11 +78,10 @@ impl Ctx {
         if let Ok(output) = self.runner.run(program, &args, None) {
             let text = output.stdout.trim();
             if output.status == 0 && is_local_time(text) {
-                return text.to_string();
+                return Ok(text.to_string());
             }
         }
-        let _ = writeln!(std::io::stderr(), "warning: {} did not give the local time; the time is given in UTC", program);
-        utc_now()
+        Err((utc_now(), format!("warning: {} did not give the local time; the time is given in UTC", program)))
     }
 
     /// The local date, YYYY-MM-DD (the first 10 characters of now()). Py: datetime.date.today().isoformat().
@@ -392,22 +404,15 @@ fn split_recording_path(ctx: &Ctx, arg: &str) -> Option<(PathBuf, String, String
     Some((parent, head, name))
 }
 
-/// `str(PurePosixPath(text))`: empty and "." components dropped, a leading "/" kept, "." for nothing.
-fn pathlib_str(text: &str) -> String {
-    let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
-    if text.starts_with('/') {
-        format!("/{}", parts.join("/"))
-    } else if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
+/// The line `skip` writes: "skipped: <reason>" and a newline.
+pub fn skip_line(reason: &str) -> String {
+    format!("skipped: {}\n", reason)
 }
 
-/// A test whose input is absent: writes "skipped: <reason>" straight to std::io::stderr() (not through eprintln!,
+/// A test whose input is absent: writes `skip_line(reason)` straight to std::io::stderr() (not through eprintln!,
 /// which the test harness captures), so `cargo test` shows it; the test then returns and passes.
 pub fn skip(reason: &str) {
-    let _ = writeln!(std::io::stderr(), "skipped: {}", reason);
+    let _ = std::io::stderr().write_all(skip_line(reason).as_bytes());
 }
 
 #[cfg(test)]
@@ -534,18 +539,27 @@ mod tests {
     }
 
     #[test]
-    fn now_asks_the_runner_and_falls_back_to_utc() {
+    fn local_time_asks_the_runner_and_falls_back_to_utc_with_a_warning() {
         let mut ctx = Ctx::for_test(Path::new("/work"));
+        assert_eq!(ctx.local_time(), Ok("2026-10-13T12:00:00".to_string()));
         ctx.clock = None;
         ctx.runner = Box::new(FakeRunner::scripted(vec![Output {
             status: 0,
             stdout: "2026-10-13T21:30:05\n".to_string(),
             stderr: String::new(),
         }]));
-        assert_eq!(ctx.now(), "2026-10-13T21:30:05");
+        assert_eq!(ctx.local_time(), Ok("2026-10-13T21:30:05".to_string()));
         ctx.runner = Box::new(FakeRunner::absent());
-        let utc = ctx.now();
+        let (utc, warning) = ctx.local_time().unwrap_err();
         assert!(is_local_time(&utc), "{}", utc);
+        let program = if cfg!(windows) { "powershell" } else { "date" };
+        assert_eq!(warning, format!("warning: {} did not give the local time; the time is given in UTC", program));
+        ctx.runner = Box::new(FakeRunner::scripted(vec![Output {
+            status: 0,
+            stdout: "not a time\n".to_string(),
+            stderr: String::new(),
+        }]));
+        assert_eq!(ctx.local_time().unwrap_err().1, warning);
     }
 
     #[test]
@@ -610,7 +624,10 @@ mod tests {
     }
 
     #[test]
-    fn skip_writes_its_reason_past_the_test_harness() {
-        skip("an example reason (this line shows that cargo test does not swallow skip lines)");
+    fn skip_line_is_the_reason_after_skipped_and_ends_in_a_newline() {
+        assert_eq!(skip_line("no clone"), "skipped: no clone\n");
+        assert_eq!(skip_line(""), "skipped: \n");
+        // `skip` itself writes to the real stderr, so no test calls it; this only checks that it takes a &str.
+        let _: fn(&str) = skip;
     }
 }

@@ -335,7 +335,7 @@ impl Tree for MemTree {
 }
 
 /// `str(PurePosixPath(text))`: empty and "." components dropped, a leading "/" kept, "." for nothing.
-fn pathlib_str(text: &str) -> String {
+pub fn pathlib_str(text: &str) -> String {
     let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
     if text.starts_with('/') {
         format!("/{}", parts.join("/"))
