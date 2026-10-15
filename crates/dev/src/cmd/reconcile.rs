@@ -573,8 +573,8 @@ MSG:5014,0,2,"Saving 1 titles into directory x","Saving %1 titles into directory
             let (code, out, err) =
                 run_in(&root, &[scan.as_str(), r.title, json.as_str(), "--selection", r.selection]);
             let context = format!(
-                "{}/{}: compare with `python3 scripts/phase0/compare_tracks.py {scan} {} {json} --selection {}` \
-                 (until Task 15 deletes it)\n{out}{err}",
+                "{}/{}: the expected output is what compare_tracks printed, at the last commit with the Python, for \
+                 {scan} {} {json} --selection {}\n{out}{err}",
                 r.slug, r.label, r.title, r.selection
             );
             assert_eq!(out.lines().find(|line| line.starts_with("VERDICT")), Some(r.verdict), "{context}");
