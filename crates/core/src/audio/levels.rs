@@ -2,6 +2,7 @@
 //! level files (one speech-band RMS level in dB per 20 ms frame), streams.json and audio-proxy.json, and the refusal
 //! of a folder the analysis must not measure. Text in, values out: the caller's Tree supplies the bytes.
 
+use super::measures::py_sorted;
 use crate::recording::files::FfprobeStreams;
 use crate::recording::{
     py_float, py_g, py_repr_str, py_split, py_splitlines, py_strip, read_text, universal_lines, Encoding, Errors,
@@ -141,17 +142,6 @@ pub fn read_levels(tree: &dyn Tree, path: &PathKey) -> Result<Levels, String> {
     parse_levels(&read_text(tree, path, Encoding::Utf8Sig, Errors::Replace)?)
 }
 
-/// Python's sorted() of floats: a stable ascending sort (equal values keep their order, -0.0 equals 0.0); a NaN,
-/// which no level file yields, sorts last.
-fn sort_floats(values: &mut [f64]) {
-    values.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
-        (false, false) => a.partial_cmp(b).expect("two numbers compare"),
-        (false, true) => std::cmp::Ordering::Less,
-        (true, false) => std::cmp::Ordering::Greater,
-        (true, true) => std::cmp::Ordering::Equal,
-    });
-}
-
 /// The frame length a level file states, in ms: float() of "frame_ms=" in a first line starting with '#' (None when
 /// that word does not parse), else the median spacing of the first 50 "pts_time:" values (lines from universal_lines,
 /// as Python iterates a text file; at most 201 lines read) times 1000, rounded half to even; None when neither is
@@ -177,11 +167,11 @@ pub fn frame_ms_of(text: &str) -> Option<f64> {
             break;
         }
     }
-    let mut steps: Vec<f64> = times.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let steps: Vec<f64> = times.windows(2).map(|pair| pair[1] - pair[0]).collect();
     if steps.is_empty() {
         return None;
     }
-    sort_floats(&mut steps);
+    let steps = py_sorted(&steps);
     Some((steps[steps.len() / 2] * 1000.0).round_ties_even())
 }
 

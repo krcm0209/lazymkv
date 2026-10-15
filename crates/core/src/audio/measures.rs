@@ -568,7 +568,7 @@ fn py_sum(values: &[f64]) -> f64 {
 
 /// Python's sorted() of floats: a stable ascending sort (equal values keep their order, -0.0 equals 0.0); a NaN,
 /// which the level series never hold, sorts last.
-fn py_sorted(values: &[f64]) -> Vec<f64> {
+pub(crate) fn py_sorted(values: &[f64]) -> Vec<f64> {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
         (false, false) => a.partial_cmp(b).expect("two numbers compare"),
@@ -649,7 +649,7 @@ fn py_median(data: &[f64]) -> f64 {
 
 /// C pow() as CPython's float `**` calls it. black_box keeps LLVM from rewriting pow(10, x) as exp10(x) and
 /// pow(x, 2.0) as x * x; on the Mac the C library's pow(x, 2.0) differs from x * x in about 1 case in 750.
-fn py_pow(base: f64, exponent: f64) -> f64 {
+pub(crate) fn py_pow(base: f64, exponent: f64) -> f64 {
     std::hint::black_box(base).powf(std::hint::black_box(exponent))
 }
 

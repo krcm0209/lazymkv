@@ -177,14 +177,10 @@ mod tests {
 // them identically). Each draws from PyRandom in the Python's order, so the ported tests measure the Python's numbers.
 // ------------------------------------------------------------------------------------------------------------------
 
+use crate::audio::measures::py_pow;
+
 /// 20 ms frames per second. Py: FPS.
 pub const FPS: usize = 50;
-
-/// C pow() as CPython's `10 ** x` calls it. black_box keeps LLVM from rewriting pow(10, x) as exp10(x), which is not
-/// always bit-identical to the C library's pow.
-fn generator_pow(base: f64, exponent: f64) -> f64 {
-    std::hint::black_box(base).powf(std::hint::black_box(exponent))
-}
 
 /// Syllables: `loud + uniform(-1, 1)` for randint(4, 7) frames, then `quiet + uniform(-1, 1)` for randint(4, 8)
 /// frames, until `frames` levels are made; cut to `frames`. Py: speech(rnd, frames, loud, quiet).
@@ -233,7 +229,7 @@ pub fn programme(seconds: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
 
 /// 10 * log10(10 ** (a / 10) + 10 ** (b / 10)). Py: power_sum.
 pub fn power_sum(a: f64, b: f64) -> f64 {
-    10.0 * (generator_pow(10.0, a / 10.0) + generator_pow(10.0, b / 10.0)).log10()
+    10.0 * (py_pow(10.0, a / 10.0) + py_pow(10.0, b / 10.0)).log10()
 }
 
 /// Two people talking all the way through: speech(-18, -27) for randint(150, 300) frames (the count drawn before the
