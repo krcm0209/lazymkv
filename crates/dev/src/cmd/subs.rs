@@ -7,12 +7,11 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use lazymkv_core::recording::{py_int, py_repr_str, Loader, MemTree, PathKey, Tree};
+use lazymkv_core::recording::{py_int, py_repr_str, MemTree, PathKey, Tree};
 use lazymkv_core::subtitle::text::{subs_run, Rule};
 
-use crate::evidence::{ocr_text_dir, os_error_text, pathlib_str, resolve_recording, Ctx};
+use crate::evidence::{insert_disk_file, ocr_text_dir, pathlib_split, resolve_recording, Ctx};
 use crate::{usage_error, Args};
 
 /// The command's name as typed.
@@ -96,7 +95,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
             }
         },
     };
-    let mut text_tree = MemTree::new(&pathlib_str(&slashes(&text_given)), "");
+    let mut text_tree = MemTree::new(&pathlib_split(&text_given).0, "");
     add_folder_files(&mut text_tree, &PathKey::root(), &text_dir);
     let run = subs_run(
         rec_tree.as_ref(),
@@ -116,37 +115,13 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
     run.exit_code
 }
 
-/// A path argument with Windows separators written as '/' (on the mini PC), as the evidence module does.
-fn slashes(arg: &str) -> String {
-    if cfg!(windows) {
-        arg.replace('\\', "/")
-    } else {
-        arg.to_string()
-    }
-}
-
-/// (str(Path(arg)), str(Path(arg).parent), Path(arg).name) as pathlib prints them: `pathlib_str` split at its last
-/// '/'; for "." and "/" (no name) the parent is the path itself, as Path('.').parent is Path('.').
-fn split_shown(arg: &str) -> (String, String, String) {
-    let shown = pathlib_str(&slashes(arg));
-    let (parent, name) = match shown.rsplit_once('/') {
-        Some(("", name)) => ("/".to_string(), name.to_string()),
-        Some((parent, name)) => (parent.to_string(), name.to_string()),
-        None => (".".to_string(), shown.clone()),
-    };
-    if name.is_empty() || name == "." {
-        (shown.clone(), shown, String::new())
-    } else {
-        (shown, parent, name)
-    }
-}
-
 /// The --rec folder as the rule reads it: a tree printed as pathlib prints the argument's parent, holding the
 /// parent's tmdb.json and the files of the folder's subs/ and subs-ocr/ (the only files the rule reads), so that the
 /// rest of the parent is not walked; and the folder's key in it. For ".", "/" and the like (no name), the folder is
 /// its own parent, as Path('.').parent is Path('.').
 fn rec_folder_tree(ctx: &Ctx, arg: &str) -> (Box<dyn Tree>, PathKey) {
-    let (text, parent, name) = split_shown(arg);
+    let (text, parent, name) = pathlib_split(arg);
+    let name = if name == "." { String::new() } else { name };
     let rec_dir = ctx.abs(arg);
     let (display, rec, parent_dir): (String, PathKey, PathBuf) = if name.is_empty() {
         (text, PathKey::root(), rec_dir.clone())
@@ -155,22 +130,14 @@ fn rec_folder_tree(ctx: &Ctx, arg: &str) -> (Box<dyn Tree>, PathKey) {
         (parent, PathKey::new(&name), parent_dir)
     };
     let mut tree = MemTree::new(&display, &name);
-    add_file(&mut tree, &rec.parent().join("tmdb.json"), &parent_dir.join("tmdb.json"));
+    let tmdb = parent_dir.join("tmdb.json");
+    if tmdb.is_file() {
+        insert_disk_file(&mut tree, &rec.parent().join("tmdb.json"), &tmdb);
+    }
     for folder in ["subs", "subs-ocr"] {
         add_folder_files(&mut tree, &rec.join(folder), &rec_dir.join(folder));
     }
     (Box::new(tree), rec)
-}
-
-/// Adds the file at `path` under `key`, read on first use, when `path` is a file.
-fn add_file(tree: &mut MemTree, key: &PathKey, path: &Path) {
-    if !path.is_file() {
-        return;
-    }
-    let shown = tree.display(key);
-    let path = path.to_path_buf();
-    let load: Loader = Arc::new(move || std::fs::read(&path).map_err(|error| os_error_text(&error, &shown)));
-    tree.insert_lazy(&key.to_string(), load);
 }
 
 /// Adds every file directly in `dir` under `key`; nothing when `dir` cannot be listed (its files are then missing,
@@ -184,7 +151,10 @@ fn add_folder_files(tree: &mut MemTree, key: &PathKey, dir: &Path) {
         entries.filter_map(|entry| entry.ok()).filter_map(|entry| entry.file_name().into_string().ok()).collect();
     names.sort();
     for name in names {
-        add_file(tree, &key.join(&name), &dir.join(&name));
+        let path = dir.join(&name);
+        if path.is_file() {
+            insert_disk_file(tree, &key.join(&name), &path);
+        }
     }
 }
 
@@ -197,7 +167,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{run, SYNOPSIS};
-    use crate::evidence::{repo_root, resolve_recording, skip, Ctx};
+    use crate::evidence::{pathlib_split, repo_root, resolve_recording, skip, Ctx};
     use crate::testutil::{call, evidence_inputs, sha1_hex, Scratch as TempDir, ScratchExt};
 
     /// Made-up words: no real subtitle text.
@@ -493,8 +463,7 @@ mod tests {
             return;
         }
         let empty = TempDir::new("evidence-no-text");
-        let empty_shown = empty.0.to_str().unwrap().to_string();
-        let empty_shown = if cfg!(windows) { empty_shown.replace('\\', "/") } else { empty_shown };
+        let empty_shown = pathlib_split(empty.0.to_str().unwrap()).0;
         let ctx = Ctx::for_test(&root);
         for r in &EVIDENCE {
             let subs = evidence.join(r.slug).join(r.label).join("subs");

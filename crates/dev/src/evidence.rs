@@ -279,12 +279,19 @@ fn walk(dir: &Path, prefix: &str, tree: &mut MemTree) -> std::io::Result<()> {
             tree.insert_dir(&key);
             walk(&path, &key, tree)?;
         } else {
-            let shown = tree.display(&PathKey::new(&key));
-            let load: Loader = Arc::new(move || std::fs::read(&path).map_err(|error| os_error_text(&error, &shown)));
-            tree.insert_lazy(&key, load);
+            insert_disk_file(tree, &PathKey::new(&key), &path);
         }
     }
     Ok(())
+}
+
+/// Adds the file at `path` to `tree` under `key`, read on first use; a failed read gives Python's OSError text with
+/// the path as the tree shows it.
+pub(crate) fn insert_disk_file(tree: &mut MemTree, key: &PathKey, path: &Path) {
+    let shown = tree.display(key);
+    let path = path.to_path_buf();
+    let load: Loader = Arc::new(move || std::fs::read(&path).map_err(|error| os_error_text(&error, &shown)));
+    tree.insert_lazy(&key.to_string(), load);
 }
 
 /// Python's FileNotFoundError text up to the path.
@@ -395,9 +402,10 @@ pub fn resolve_recording(ctx: &Ctx, evidence_flag: Option<&str>, arg: &str) -> R
     Ok(Recording { tree, dir: PathKey::new(arg), slug: arg.to_string() })
 }
 
-/// (the parent folder on disk, the parent as the user wrote it, the recording's name) for a recording path, split
-/// as pathlib splits str(Path(arg)); None for ".", "..", "/" or a path ending in "..", which are resolved instead.
-fn split_recording_path(ctx: &Ctx, arg: &str) -> Option<(PathBuf, String, String)> {
+/// (str(Path(arg)), str(Path(arg).parent), Path(arg).name) as pathlib prints them: `pathlib_str` of the argument
+/// (Windows separators read as '/') split at its last '/'; the parent of a path without a '/' is ".". The name of
+/// "/" is "" and that of "." is ".".
+pub(crate) fn pathlib_split(arg: &str) -> (String, String, String) {
     let normal = if cfg!(windows) { arg.replace('\\', "/") } else { arg.to_string() };
     let shown = pathlib_str(&normal);
     let (head, name) = match shown.rsplit_once('/') {
@@ -405,6 +413,13 @@ fn split_recording_path(ctx: &Ctx, arg: &str) -> Option<(PathBuf, String, String
         Some((head, name)) => (head.to_string(), name.to_string()),
         None => (".".to_string(), shown.clone()),
     };
+    (shown, head, name)
+}
+
+/// (the parent folder on disk, the parent as the user wrote it, the recording's name) for a recording path, split
+/// as pathlib splits str(Path(arg)); None for ".", "..", "/" or a path ending in "..", which are resolved instead.
+fn split_recording_path(ctx: &Ctx, arg: &str) -> Option<(PathBuf, String, String)> {
+    let (_, head, name) = pathlib_split(arg);
     if name.is_empty() || name == "." || name == ".." {
         return None;
     }
@@ -647,5 +662,18 @@ mod tests {
         assert_eq!(skip_line(""), "skipped: \n");
         // `skip` itself writes to the real stderr, so no test calls it; this only checks that it takes a &str.
         let _: fn(&str) = skip;
+    }
+
+    #[test]
+    fn pathlib_split_gives_the_path_its_parent_and_its_name_as_pathlib_prints_them() {
+        let split = pathlib_split;
+        let t = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+        assert_eq!(split("a/b/"), t("a/b", "a", "b"));
+        assert_eq!(split("a"), t("a", ".", "a"));
+        assert_eq!(split("./a//b"), t("a/b", "a", "b"));
+        assert_eq!(split("/a"), t("/a", "/", "a"));
+        assert_eq!(split("."), t(".", ".", "."));
+        assert_eq!(split("/"), t("/", "/", ""));
+        assert_eq!(split(".."), t("..", ".", ".."));
     }
 }

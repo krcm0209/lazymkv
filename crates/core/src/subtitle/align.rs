@@ -80,7 +80,7 @@ pub struct AlignPair {
 }
 
 /// `int(p.get("size", 0))`: a packet without a size is 0.
-fn size_of(packet: &Packet) -> Result<i64, String> {
+pub(crate) fn size_of(packet: &Packet) -> Result<i64, String> {
     match &packet.size {
         None => Ok(0),
         Some(size) => py_int_value(size),
@@ -108,7 +108,7 @@ pub fn events(packets: &[Packet], clear_max_bytes: i64) -> Result<Vec<f64>, Stri
 }
 
 /// bisect.bisect_left: the first index whose start is not below `x`, by CPython's halving loop.
-fn bisect_left(starts: &[f64], x: f64) -> usize {
+pub(crate) fn bisect_left(starts: &[f64], x: f64) -> usize {
     let (mut lo, mut hi) = (0, starts.len());
     while lo < hi {
         let mid = (lo + hi) / 2;

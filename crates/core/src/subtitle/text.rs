@@ -630,7 +630,8 @@ fn wordlike(tok: &str) -> bool {
 // ------------------------------------------------------------------ loading
 
 use crate::recording::files::{OcrLine, Packet};
-use crate::recording::{py_float_value, py_int_value, py_str};
+use crate::recording::{py_float_value, py_str};
+use crate::subtitle::align::{self, bisect_left, size_of};
 
 /// Python's `a < b` for two floats as a total order for sorting: -0.0 equals 0.0 (Python's == says so and its
 /// stable sort keeps their order); a NaN, which no input holds, sorts after every number instead of breaking the
@@ -638,20 +639,6 @@ use crate::recording::{py_float_value, py_int_value, py_str};
 fn py_cmp(a: f64, b: f64) -> std::cmp::Ordering {
     let zero_is_zero = |x: f64| if x == 0.0 { 0.0 } else { x };
     zero_is_zero(a).total_cmp(&zero_is_zero(b))
-}
-
-/// bisect.bisect_left on a list of floats, CPython's loop (the list need not be sorted). Py: bisect.bisect_left.
-fn bisect_left(a: &[f64], x: f64) -> usize {
-    let (mut lo, mut hi) = (0, a.len());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if a[mid] < x {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
 }
 
 /// A displayed event: start and duration in seconds, and its OCR lines (empty when it has none). Holds subtitle
@@ -698,11 +685,7 @@ pub fn packet_events(packets: &[Packet], clear_max_bytes: i64) -> Result<Vec<Eve
         let Some(pts) = &p.pts_time else {
             continue;
         };
-        let size = match &p.size {
-            Some(size) => py_int_value(size)?,
-            None => 0,
-        };
-        if size <= clear_max_bytes {
+        if size_of(p)? <= clear_max_bytes {
             continue;
         }
         let start = py_float_value(pts)?;
@@ -1254,18 +1237,8 @@ pub fn classify(m: &Measures, rule: &Rule) -> (Class, String) {
 /// Share of `a`'s events that start within `tol` of some event of `b` (spec 8.7), py_round(.., 3); 0.0 for no event.
 /// Py: subtitle_text.aligned.
 pub fn aligned(a: &[Event], b: &[Event], tol: f64) -> f64 {
-    let bs: Vec<f64> = b.iter().map(|e| e.start).collect();
-    if a.is_empty() {
-        return 0.0;
-    }
-    let mut hit = 0usize;
-    for e in a {
-        let i = bisect_left(&bs, e.start - tol);
-        if i < bs.len() && bs[i] <= e.start + tol {
-            hit += 1;
-        }
-    }
-    py_round(hit as f64 / a.len() as f64, 3)
+    let starts = |events: &[Event]| -> Vec<f64> { events.iter().map(|e| e.start).collect() };
+    py_round(align::aligned(&starts(a), &starts(b), tol), 3)
 }
 
 /// Share of `a`'s bigrams that also occur in `b`'s, anywhere in the title (time-free), py_round(.., 3); None when
@@ -2014,7 +1987,6 @@ use sha1::{Digest, Sha1};
 
 use crate::recording::files::{read_jsonl, FrameEntry, PacketsFile, SubsIndexEntry, Tmdb};
 use crate::recording::{read_json, read_text, Encoding, Errors, PathKey, Tree};
-use crate::subtitle::align::TEXT_CODECS;
 
 /// The table analyse prints, header and rule. Py: analyse's two literal lines.
 const TABLE_HEADER: &str = "| Stream | Tag | Events | Class | Rule | Review | Note | 8.7 today | Before yes |";
@@ -2072,8 +2044,7 @@ fn codec_or_question(t: &Track) -> &str {
 /// A text codec name (the DVD closed captions, which MakeMKV converts to SubRip): one of the words of mkvmerge's
 /// text subtitle codec names. Py: is_text_codec.
 pub fn is_text_codec(codec: Option<&str>) -> bool {
-    let codec = codec.unwrap_or("");
-    TEXT_CODECS.iter().any(|word| codec.contains(word))
+    align::is_text(codec)
 }
 
 /// One printed pair: its numbers and the subset phrase ("s0 in s1" or "no").
