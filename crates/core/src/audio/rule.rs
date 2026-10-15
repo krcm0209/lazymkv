@@ -449,9 +449,10 @@ pub fn cross_language(main_info: &Fields, cand_info: &Fields) -> String {
 /// What `results` calls to measure a pair: the Python's analyse_fn(main, cand, dialogue). Plain is the Python's
 /// default (analyse, no cache). Task 8's Measurer keeps the cache of spec 3.3 (keyed by sha1 of "lazymkv-rule:",
 /// RULE_VERSION, the canonical constants JSON, then per series its little-endian f64 bytes and "|", or "|" alone for
-/// none) and returns the key with the measures, in place of the Python's Measurer.key_of[id(m)] lookup.
+/// none) and returns the key with the measures, in place of the Python's Measurer.key_of[id(m)] lookup. Err is
+/// analyse's Err (the Python's ValueError from max(), which `results` passed on to its caller).
 pub trait AnalyseFn {
-    fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Measured;
+    fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Result<Measured, String>;
 }
 
 /// Measures and the cache key they are kept under (None when no cache is used).
@@ -467,8 +468,8 @@ pub struct Plain<'c> {
 }
 
 impl AnalyseFn for Plain<'_> {
-    fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Measured {
-        Measured { measures: analyse(main, cand, dialogue, true, self.consts), key: None }
+    fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Result<Measured, String> {
+        Ok(Measured { measures: analyse(main, cand, dialogue, true, self.consts)?, key: None })
     }
 }
 
@@ -541,8 +542,8 @@ pub struct Peer {
 /// 6. when the veto holds, every candidate that is not a duplicate becomes reference-unclear, its earlier verdict
 ///    kept in before_veto.
 ///
-/// Err also when a file cannot be read, a level does not parse, streams.json does not parse, or a manifest stream
-/// number is not an int (the Python's ValueError and OSError texts). `consts` is the set of measure constants in
+/// Err also when a file cannot be read, a level does not parse, streams.json does not parse, a manifest stream
+/// number is not an int, or `analyse_fn` fails (the Python's ValueError and OSError texts). `consts` is the set of measure constants in
 /// force: SILENT_DB is read here, `analyse_fn` applies the others. Py: audio_similarity.results.
 pub fn results(
     tree: &dyn Tree,
@@ -559,7 +560,7 @@ pub fn results(
     let main = read_levels(tree, &folder.join("main-mix.txt"))?;
     let fc_path = folder.join("main-fc.txt");
     let mut fc = if tree.exists(&fc_path) { read_levels(tree, &fc_path)? } else { Vec::new() };
-    if !fc.is_empty() && py_max(fc.iter().copied()) <= consts.SILENT_DB {
+    if !fc.is_empty() && py_max(fc.iter().copied())? <= consts.SILENT_DB {
         fc = Vec::new();
     }
     let mainfo: Fields = manifest.main.clone().unwrap_or_default();
@@ -601,7 +602,7 @@ pub fn results(
                     seen.insert(md5.clone(), sid.clone());
                 }
                 let cand = read_levels(tree, &folder.join(&format!("cand-{sid}.txt")))?;
-                let measured = analyse_fn.measure(&main, &cand, dialogue);
+                let measured = analyse_fn.measure(&main, &cand, dialogue)?;
                 r.verdict = verdict(&measured.measures, rule);
                 r.not_judged = match measured.measures.error() {
                     Some(error) => error.to_string(),
@@ -628,7 +629,7 @@ pub fn results(
         if peer != int_text(Some(candidates[i].stream.as_str()))? {
             let peer_levels = read_levels(tree, &folder.join(&format!("cand-{peer}.txt")))?;
             let own_levels = read_levels(tree, &folder.join(&format!("cand-{}.txt", candidates[i].stream)))?;
-            let measured = analyse_fn.measure(&peer_levels, &own_levels, None);
+            let measured = analyse_fn.measure(&peer_levels, &own_levels, None)?;
             let peer_verdict = verdict(&measured.measures, rule);
             let r = &mut candidates[i];
             r.peer = Some(Peer {

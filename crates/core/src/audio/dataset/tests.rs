@@ -249,13 +249,13 @@ fn a_cached_measure_comes_back_with_its_nan() {
     let consts = Constants::default();
     let mut cache: BTreeMap<String, Measures> = BTreeMap::new();
     let mut meas = Measurer::new(&mut cache, &consts, true);
-    let first = meas.measure(&mix, &copy, Some(&centre[..]));
+    let first = meas.measure(&mix, &copy, Some(&centre[..])).unwrap();
     assert!(first.measures.run().expect("a measured pair").smi.is_nan());
     let text = serde_json::to_string(&cache).unwrap();
     assert!(text.contains("\"smi\":null"), "NaN is written as null");
     let mut again_cache: BTreeMap<String, Measures> = serde_json::from_str(&text).unwrap();
     let mut again = Measurer::new(&mut again_cache, &consts, true);
-    let second = again.measure(&mix, &copy, Some(&centre[..]));
+    let second = again.measure(&mix, &copy, Some(&centre[..])).unwrap();
     assert!(second.measures.run().expect("a measured pair").smi.is_nan());
     assert_eq!((again.computed, again.reused), (0, 1));
     assert_eq!(second.key, first.key);

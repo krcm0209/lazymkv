@@ -199,7 +199,9 @@ impl<'a> Measurer<'a> {
 }
 
 impl AnalyseFn for Measurer<'_> {
-    fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Measured {
+    /// An Err of analyse is passed on and nothing is cached, counted or marked used, as the Python's Measurer did
+    /// when sim.analyse raised.
+    fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Result<Measured, String> {
         let key = cache_key(&self.prefix, main, cand, dialogue);
         let cached = if self.use_cache { self.cache.get(&key).cloned() } else { None };
         let measures = match cached {
@@ -208,14 +210,14 @@ impl AnalyseFn for Measurer<'_> {
                 m
             }
             None => {
-                let m = analyse(main, cand, dialogue, true, self.consts);
+                let m = analyse(main, cand, dialogue, true, self.consts)?;
                 self.computed += 1;
                 self.cache.insert(key.clone(), m.clone());
                 m
             }
         };
         self.used.insert(key.clone(), measures.clone());
-        Measured { measures, key: Some(key) }
+        Ok(Measured { measures, key: Some(key) })
     }
 }
 

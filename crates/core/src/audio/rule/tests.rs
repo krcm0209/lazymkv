@@ -260,7 +260,7 @@ mod reverse_run {
 
     #[test]
     fn the_programme_against_a_commentary_taken_as_the_reference_is_kept_and_flagged() {
-        let m = analyse(comment(), mix(), None, true, &Constants::default());
+        let m = analyse(comment(), mix(), None, true, &Constants::default()).unwrap();
         assert!(reverse_pattern(&m, &Rule::default()));
         assert_eq!(verdict(&m, &Rule::default()), Verdict::ReferenceUnclear);
     }
@@ -277,7 +277,7 @@ mod reverse_run {
             voice.extend(std::iter::repeat(-100.0).take((1.2 * FPS as f64) as usize));
         }
         let cand: Vec<f64> = voice.iter().zip(&film_mix).map(|(&v, &x)| power_sum(v, x - 26.0)).collect();
-        let m = analyse(&film_mix, &cand, Some(film_centre.as_slice()), true, &Constants::default());
+        let m = analyse(&film_mix, &cand, Some(film_centre.as_slice()), true, &Constants::default()).unwrap();
         let Reverse::Block(block) = &m.run().expect("measured").rev else { panic!("analyse gives a reverse block") };
         // the earlier reverse test would block it
         assert!(block.rev_gap_s >= 90.0 && block.rev_ag >= 0.30);
@@ -484,14 +484,17 @@ mod position_veto {
     }
 
     impl AnalyseFn for Cache {
-        fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Measured {
+        fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Result<Measured, String> {
             let key = (main.len(), cand.iter().sum::<f64>().to_bits(), dialogue.is_none());
-            let measures = self
-                .measured
-                .entry(key)
-                .or_insert_with(|| analyse(main, cand, dialogue, true, &Constants::default()))
-                .clone();
-            Measured { measures, key: None }
+            let measures = match self.measured.get(&key) {
+                Some(m) => m.clone(),
+                None => {
+                    let m = analyse(main, cand, dialogue, true, &Constants::default())?;
+                    self.measured.insert(key, m.clone());
+                    m
+                }
+            };
+            Ok(Measured { measures, key: None })
         }
     }
 
@@ -751,7 +754,7 @@ mod cross_language {
             .zip(centre())
             .map(|((&o, &x), &c)| if c > -50.0 { o } else { x })
             .collect();
-        let m = analyse(mix(), &dub, Some(centre()), true, &Constants::default());
+        let m = analyse(mix(), &dub, Some(centre()), true, &Constants::default()).unwrap();
         let run = m.run().expect("measured");
         assert!(run.dc < 0.9, "{}", run.dc);
         assert!(run.ag < 0.10, "{}", run.ag);
@@ -862,7 +865,7 @@ mod results_contract {
     }
 
     impl AnalyseFn for Stub {
-        fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Measured {
+        fn measure(&mut self, main: &[f64], cand: &[f64], dialogue: Option<&[f64]>) -> Result<Measured, String> {
             self.calls.push((main.len(), cand.len(), dialogue.is_some()));
             let commentary = Run {
                 overlap: 1.0,
@@ -880,7 +883,7 @@ mod results_contract {
                 added_s: 518.0,
                 ..Run::blank()
             };
-            Measured { measures: Measures::Run(commentary), key: Some(format!("key-{}", self.calls.len())) }
+            Ok(Measured { measures: Measures::Run(commentary), key: Some(format!("key-{}", self.calls.len())) })
         }
     }
 
@@ -972,7 +975,7 @@ mod results_contract {
         // Plain is analyse with the reverse run and no cache key
         let consts = Constants::default();
         let short = vec![-30.0; 500];
-        let measured = Plain { consts: &consts }.measure(&short, &short, None);
+        let measured = Plain { consts: &consts }.measure(&short, &short, None).unwrap();
         assert_eq!(measured.key, None);
         assert_eq!(measured.measures.error(), Some("too short"));
     }

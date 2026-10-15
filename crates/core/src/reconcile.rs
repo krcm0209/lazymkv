@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use crate::lang::norm_lang;
 use crate::recording::files::{MkvmergeIdent, Selection};
-use crate::recording::{py_fixed, py_isdigit, py_int, py_repr, py_repr_str, py_str};
+use crate::recording::{py_fixed, py_isdigit, py_int, py_repr, py_repr_str, py_str, text_mode};
 use crate::robot::{duration_seconds, int_attr, parse, Attrs, Scan};
 
 /// Scan stream type -> file track type ("Video" -> "video", "Audio" -> "audio", "Subtitles" -> "subtitles"); any
@@ -321,7 +321,8 @@ pub fn reconcile(
     let rows = expected_rows(scan, title, selection)?;
     let got = file_rows(ident)?;
     let (rip_log, removed) = match rip {
-        Some(log) => (Some(log.shown), removed_streams(log.text)),
+        // The Python read the rip log with read_text (universal newlines); parse translates too (idempotent).
+        Some(log) => (Some(log.shown), removed_streams(&text_mode(log.text))),
         None => (None, BTreeSet::new()),
     };
     let (want, dropped) = without_removed(&rows, &removed);
@@ -747,6 +748,24 @@ SINFO:0,1,6,0,"PGS"
         let log = RipLog { shown: "rip.txt".to_string(), text: &rip };
         let report = reconcile(&scan, 0, &file, Selection::All, Some(log)).unwrap();
         assert_eq!(report_lines(&report), REPORT_E);
+        assert_eq!(report.exit_code, 0);
+    }
+
+    #[test]
+    fn a_lone_cr_in_the_rip_log_ends_a_line() {
+        // Two removals (output tracks 5 and 1) separated and ended by a lone CR. Pinned to d3a754d's
+        // compare_tracks.py run on SCAN_E, this rip.txt and one video track (exit 0): both lines are read, so scan
+        // stream 1 is REMOVED and track 5 is beyond the prediction.
+        let scan = parse(SCAN_E);
+        let file = ident(&[("video", "und", None)], 0, 600);
+        let line = |n: &str| RIP_REMOVING.replace("{n}", n).trim_end().to_string();
+        let rip = format!("{}\r{}\r", line("5"), line("1"));
+        let log = RipLog { shown: "rip.txt".to_string(), text: &rip };
+        let report = reconcile(&scan, 0, &file, Selection::All, Some(log)).unwrap();
+        let mut expected: Vec<&str> = REPORT_E.to_vec();
+        expected.insert(5, "REMOVED          MSG:4047 names output track 5, which the prediction does not have");
+        assert_eq!(report_lines(&report), expected);
+        assert_eq!(report.unknown_removed, [5]);
         assert_eq!(report.exit_code, 0);
     }
 

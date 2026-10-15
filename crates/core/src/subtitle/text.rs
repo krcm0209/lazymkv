@@ -783,7 +783,7 @@ use crate::recording::py_split;
 
 /// max(x, 0.0) as Python evaluates it: x unless 0.0 > x. Py: max(e['dur'], 0.0).
 fn py_max0(x: f64) -> f64 {
-    py_max([x, 0.0])
+    py_max([x, 0.0]).expect("max() of two items has an item")
 }
 
 /// bisect.bisect_right on a list of floats, CPython's loop. Py: bisect.bisect_right.

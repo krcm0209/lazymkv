@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::recording::{py_int, py_repr_str, strip_cr_lines, Ordered};
+use crate::recording::{py_int, py_repr_str, strip_cr_lines, text_mode, Ordered};
 
 /// A title's or stream's attributes: attribute number -> value (the last line wins). Py: the inner dicts of Scan.
 pub type Attrs = BTreeMap<u32, String>;
@@ -76,10 +76,13 @@ pub fn split_fields(text: &str) -> Vec<String> {
     fields
 }
 
-/// Parses a robot-mode log, never failing. Py: robot.parse.
+/// Parses a robot-mode log, never failing. Every Python caller read the log with `read_text` (universal newlines), so
+/// parse first translates "\r\n" and a lone "\r" itself (`text_mode`, idempotent), and every caller parses alike.
+/// Py: robot.parse(path.read_text(...)).
 pub fn parse(text: &str) -> Scan {
     let mut scan = Scan::default();
-    for raw in strip_cr_lines(text) {
+    let text = text_mode(text);
+    for raw in strip_cr_lines(&text) {
         let line = raw.trim_start_matches('\u{feff}');
         let Some((kind, rest)) = line.split_once(':') else {
             continue;
@@ -383,6 +386,23 @@ mod tests {
                     ("CINFO:x,0,\"v\"", "field 0 is not a number: 'x'"),
                 ]
             );
+        }
+
+        #[test]
+        fn a_lone_cr_ends_a_line_as_read_text_made_it() {
+            // Pinned to d3a754d's robot.parse(path.read_text(encoding="utf-8", errors="replace")) on these bytes:
+            // {0: {9: '0:10:00', 2: 'A'}}, {(0, 1): {1: 'Audio'}}, [(5010, 'x', [])]. The CR inside the quoted value
+            // ends that line too; its tail 'B"' has no ':' and is not recorded.
+            let scan = parse(concat!(
+                "\u{feff}TINFO:0,9,0,\"0:10:00\"\rTINFO:0,2,0,\"A\rB\"\r\n",
+                "SINFO:0,1,1,6202,\"Audio\"\rMSG:5010,0,0,\"x\",\"y\"\r",
+            ));
+            let title: Attrs = BTreeMap::from([(9, "0:10:00".to_string()), (2, "A".to_string())]);
+            assert_eq!(scan.titles, BTreeMap::from([(0, title)]));
+            let stream: Attrs = BTreeMap::from([(1, "Audio".to_string())]);
+            assert_eq!(scan.streams, BTreeMap::from([((0, 1), stream)]));
+            assert_eq!(scan.messages, [Message { code: 5010, text: "x".to_string(), params: vec![] }]);
+            assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
         }
 
         #[test]

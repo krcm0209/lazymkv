@@ -610,28 +610,33 @@ fn pair_gt(a: (f64, i64), b: (f64, i64)) -> bool {
     }
 }
 
-/// Python's max() of (r, lag) tuples: the first item, replaced by every later item that is greater.
-fn py_max_pair(items: impl IntoIterator<Item = (f64, i64)>) -> (f64, i64) {
+/// The ValueError text of Python's max() of an empty iterable.
+const EMPTY_MAX: &str = "max() arg is an empty sequence";
+
+/// Python's max() of (r, lag) tuples: the first item, replaced by every later item that is greater. Err with the
+/// Python's ValueError text when there is no item.
+fn py_max_pair(items: impl IntoIterator<Item = (f64, i64)>) -> Result<(f64, i64), String> {
     let mut items = items.into_iter();
-    let mut best = items.next().expect("max() arg is an empty sequence");
+    let mut best = items.next().ok_or(EMPTY_MAX)?;
     for item in items {
         if pair_gt(item, best) {
             best = item;
         }
     }
-    best
+    Ok(best)
 }
 
-/// Python's max() of floats: the first item, replaced by every later item that is greater.
-pub(crate) fn py_max(items: impl IntoIterator<Item = f64>) -> f64 {
+/// Python's max() of floats: the first item, replaced by every later item that is greater. Err with the Python's
+/// ValueError text when there is no item.
+pub(crate) fn py_max(items: impl IntoIterator<Item = f64>) -> Result<f64, String> {
     let mut items = items.into_iter();
-    let mut best = items.next().expect("max() arg is an empty sequence");
+    let mut best = items.next().ok_or(EMPTY_MAX)?;
     for item in items {
         if item > best {
             best = item;
         }
     }
-    best
+    Ok(best)
 }
 
 /// statistics.median of Python 3.9: the middle of the sorted values, or the mean of the two middle ones.
@@ -775,10 +780,19 @@ pub fn smi(levels_db: &[f64]) -> f64 {
 /// The measures of `cand` against `main` (levels in dB per 20 ms frame), in the Python's loop order: clamp, coarse
 /// and fine lag, block lags, gaps, windows, DC, gain, added, tenths, SMI, LS, ADL; with `reverse`, the reverse run
 /// analyse(cand, main, None, false) as the rev_ block. `dialogue` is the centre channel; None or Some(empty) means
-/// `main` (`dialogue or main`). Error "too short" when either series has fewer than 10 windows. Panics with the
-/// Python's exception text where the Python raised (only for --set values outside their sense: a negative lag
-/// constant, a negative GAP_TRIM, a GAIN_PCT outside 0 to 1, a TENTH_GAP_S at or below 0). Py: analyse.
-pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bool, consts: &Constants) -> Measures {
+/// `main` (`dialogue or main`). Error "too short" when either series has fewer than 10 windows.
+///
+/// Err("max() arg is an empty sequence") where the Python's max() raised that ValueError, which audio_dataset.py
+/// caught and listed the folder as unreadable: a negative COARSE_LAG, BLOCK_LAG or WIN_LAG from --set. Other --set
+/// values outside their sense (a GAIN_PCT below about -1, a negative GAP_TRIM, a TENTH_GAP_S at or below 0) still
+/// panic with the Python's exception text, where the Python also crashed without catching it. Py: analyse.
+pub fn analyse(
+    main: &[f64],
+    cand: &[f64],
+    dialogue: Option<&[f64]>,
+    reverse: bool,
+    consts: &Constants,
+) -> Result<Measures, String> {
     let c = consts;
     let dialogue: &[f64] = match dialogue {
         Some(d) if !d.is_empty() => d,
@@ -786,7 +800,7 @@ pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bo
     };
     let n = main.len();
     if n < 10 * WIN || cand.len() < 10 * WIN {
-        return Measures::Error { frames: Some(n as i64), error: "too short".to_string() };
+        return Ok(Measures::Error { frames: Some(n as i64), error: "too short".to_string() });
     }
     let mc = clamp(main);
     let xc = clamp(cand);
@@ -796,9 +810,9 @@ pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bo
     let xk: Vec<f64> = (0..xc.len() - 4).step_by(5).map(|i| py_sum(&xc[i..i + 5]) / 5.0).collect();
     let (_, lag_k) = py_max_pair(
         (-c.COARSE_LAG..c.COARSE_LAG + 1).map(|l| (corr_at(&mk, &xk, 0, mk.len() as i64, l, 2), l)),
-    );
+    )?;
     let (r_glob, fine) =
-        py_max_pair((5 * lag_k - 5..5 * lag_k + 6).map(|l| (corr_at(&mc, &xc, 0, n as i64, l, 5), l)));
+        py_max_pair((5 * lag_k - 5..5 * lag_k + 6).map(|l| (corr_at(&mc, &xc, 0, n as i64, l, 5), l)))?;
     let lag = if r_glob < c.LAG_MIN_R { 0 } else { fine };
     let n_blocks = n.div_ceil(BLOCK);
     let mut block_lag: Vec<i64> = Vec::with_capacity(n_blocks);
@@ -808,7 +822,7 @@ pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bo
             (lag - c.BLOCK_LAG..lag + c.BLOCK_LAG + 1)
                 .step_by(2)
                 .map(|l| (corr_at(&mc, &xc, b0 as i64, b1 as i64, l, 4), l)),
-        );
+        )?;
         block_lag.push(if r >= c.LAG_MIN_R { lb } else { lag });
     }
     let lag_of = |t: usize| block_lag[t / BLOCK];
@@ -857,7 +871,7 @@ pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bo
     for &w in &wins {
         rw[w / WIN] = Some(py_max(
             (-c.WIN_LAG..c.WIN_LAG + 1).map(|d| corr_at(&mc, &xc, w as i64, (w + WIN) as i64, lag_of(w) + d, 1)),
-        ));
+        )?);
     }
     let rw_at = |w: usize| rw[w / WIN].expect("a window of wins has its correlation");
     let dwins: Vec<usize> =
@@ -906,11 +920,11 @@ pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bo
         .collect();
 
     let rev = if reverse {
-        Reverse::Block(rev_block(&analyse(cand, main, None, false, consts)))
+        Reverse::Block(rev_block(&analyse(cand, main, None, false, consts)?))
     } else {
         Reverse::Absent
     };
-    Measures::Run(Run {
+    Ok(Measures::Run(Run {
         frames: Some(n as i64),
         lag_ms: Some(lag * 20),
         r_global: Some(r_glob),
@@ -934,7 +948,7 @@ pub fn analyse(main: &[f64], cand: &[f64], dialogue: Option<&[f64]>, reverse: bo
         ls_db: x95 - percentile(&xa_inside, 0.50),
         added_s: added.iter().filter(|&&b| b).count() as f64 * FRAME_S,
         rev,
-    })
+    }))
 }
 
 /// A forward run's values as a reverse block (rev_error "").
@@ -1148,7 +1162,7 @@ mod measures {
         // 60 ms late, 6 dB down
         let mut copy = vec![-100.0; 3];
         copy.extend(mix[..mix.len() - 3].iter().map(|v| v - 6.0));
-        let m = analyse(mix, &copy, Some(centre.as_slice()), true, &Constants::default());
+        let m = analyse(mix, &copy, Some(centre.as_slice()), true, &Constants::default()).unwrap();
         let r = m.run().expect("measured");
         assert_eq!(r.lag_ms, Some(60));
         assert!(r.dc >= 0.9, "dc {}", r.dc);
@@ -1159,7 +1173,7 @@ mod measures {
     #[test]
     fn a_voice_talking_through_the_programme_has_the_commentary_pattern() {
         let (mix, centre) = mix_centre();
-        let m = analyse(mix, &commentary(mix, 7), Some(centre.as_slice()), true, &Constants::default());
+        let m = analyse(mix, &commentary(mix, 7), Some(centre.as_slice()), true, &Constants::default()).unwrap();
         let r = m.run().expect("measured");
         assert!(r.dc <= 0.30, "dc {}", r.dc);
         assert!(r.ag >= 0.50, "ag {}", r.ag);
@@ -1181,7 +1195,7 @@ mod measures {
                 centre[u] = -100.0;
             }
         }
-        let m = analyse(&mix, &commentary(mix0, 7), Some(centre.as_slice()), true, &Constants::default());
+        let m = analyse(&mix, &commentary(mix0, 7), Some(centre.as_slice()), true, &Constants::default()).unwrap();
         let r = m.run().expect("measured");
         // what not_judged() reads to give its "digitally silent" reason: the overlap passes, main_silent does not
         assert!(r.overlap >= 0.90, "overlap {}", r.overlap);
@@ -1195,7 +1209,7 @@ mod measures {
         let (mix, centre) = mix_centre();
         let cand: Vec<f64> =
             mix.iter().zip(centre.iter()).map(|(&m, &c)| if c > -50.0 { m } else { -35.0 }).collect();
-        let m = analyse(mix, &cand, Some(centre.as_slice()), true, &Constants::default());
+        let m = analyse(mix, &cand, Some(centre.as_slice()), true, &Constants::default()).unwrap();
         let r = m.run().expect("measured");
         assert!(r.dc >= 0.8, "dc {}", r.dc);
         let v = crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default());
@@ -1206,7 +1220,8 @@ mod measures {
     fn a_candidate_covering_only_part_of_the_main_is_not_confirmed() {
         let (mix, centre) = mix_centre();
         let comm = commentary(mix, 7);
-        let m = analyse(mix, &comm[..mix.len() * 7 / 10], Some(centre.as_slice()), true, &Constants::default());
+        let m =
+            analyse(mix, &comm[..mix.len() * 7 / 10], Some(centre.as_slice()), true, &Constants::default()).unwrap();
         let r = m.run().expect("measured");
         assert!(r.overlap < 0.9, "overlap {}", r.overlap);
         assert_ne!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::Commentary);
@@ -1215,7 +1230,7 @@ mod measures {
     #[test]
     fn too_little_audio_gives_no_verdict() {
         let (mix, _) = mix_centre();
-        let m = analyse(&mix[..500], &mix[..500], None, true, &Constants::default());
+        let m = analyse(&mix[..500], &mix[..500], None, true, &Constants::default()).unwrap();
         assert_eq!(m, Measures::Error { frames: Some(500), error: "too short".to_string() });
         assert_eq!(crate::audio::rule::verdict(&m, &crate::audio::rule::Rule::default()), crate::audio::rule::Verdict::NotJudged);
     }
@@ -1329,8 +1344,9 @@ mod analysis_tests {
         let mut copy = vec![-100.0; 3];
         copy.extend(mix[..mix.len() - 3].iter().map(|v| v - 6.0));
         let consts = Constants::default();
-        assert_like_python(COPY_PY, &analyse(mix, &copy, Some(centre.as_slice()), true, &consts));
-        assert_like_python(COMMENTARY_PY, &analyse(mix, &commentary(mix, 7), Some(centre.as_slice()), true, &consts));
+        assert_like_python(COPY_PY, &analyse(mix, &copy, Some(centre.as_slice()), true, &consts).unwrap());
+        let comm = analyse(mix, &commentary(mix, 7), Some(centre.as_slice()), true, &consts).unwrap();
+        assert_like_python(COMMENTARY_PY, &comm);
     }
 
     #[test]
@@ -1338,15 +1354,15 @@ mod analysis_tests {
         let (mix, _) = mix_centre();
         let consts = Constants::default();
         let empty: &[f64] = &[];
-        let with_empty = analyse(&mix[..3000], &mix[..3000], Some(empty), true, &consts);
-        let with_none = analyse(&mix[..3000], &mix[..3000], None, true, &consts);
+        let with_empty = analyse(&mix[..3000], &mix[..3000], Some(empty), true, &consts).unwrap();
+        let with_none = analyse(&mix[..3000], &mix[..3000], None, true, &consts).unwrap();
         assert_eq!(serde_json::to_value(&with_empty).unwrap(), serde_json::to_value(&with_none).unwrap());
         assert_eq!(
-            analyse(&mix[..999], mix, None, true, &consts),
+            analyse(&mix[..999], mix, None, true, &consts).unwrap(),
             Measures::Error { frames: Some(999), error: "too short".to_string() }
         );
         assert_eq!(
-            analyse(mix, &mix[..999], None, true, &consts),
+            analyse(mix, &mix[..999], None, true, &consts).unwrap(),
             Measures::Error { frames: Some(21000), error: "too short".to_string() }
         );
     }
