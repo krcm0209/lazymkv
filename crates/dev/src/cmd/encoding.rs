@@ -1,8 +1,7 @@
 //! `lazymkv-dev encoding <file>`: experiment 8, which encoding does makemkvcon use for robot output?
 //! Py: check_encoding, its lines verbatim. Exit 0; 2 where the Python crashed (no argument, the file unreadable).
 
-use crate::evidence::Ctx;
-use crate::usage_error;
+use crate::evidence::{first_word, os_error_text, pathlib_str, Ctx};
 use lazymkv_core::recording::{decode_text, py_bytes_splitlines, Encoding, Errors};
 use std::io::Write;
 
@@ -10,8 +9,6 @@ use std::io::Write;
 const NAME: &str = "encoding";
 /// Its usage after "usage: lazymkv-dev ". The Python read sys.argv[1] and ignored any further word; so does this.
 const USAGE: &str = "encoding <file>";
-/// A missing file argument (the Python crashed with an IndexError).
-const REQUIRED: &str = "the following arguments are required: file";
 /// How many lines with a byte above 127 are shown, and how many characters of each shown line.
 const SHOW_NON_ASCII: usize = 5;
 const SHOW_CHARS: usize = 160;
@@ -77,14 +74,11 @@ fn first_chars(text: &str, n: usize) -> String {
 
 /// `lazymkv-dev encoding <file>`. Py: check_encoding's `main(sys.argv[1])`.
 pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let Some(file) = args.first() else {
-        return usage_error(err, NAME, USAGE, REQUIRED);
+    let file = match first_word(args, out, err, NAME, USAGE, "file") {
+        Ok(file) => file,
+        Err(code) => return code,
     };
-    if file == "-h" || file == "--help" {
-        let _ = writeln!(out, "usage: lazymkv-dev {USAGE}");
-        return 0;
-    }
-    match std::fs::read(ctx.abs(file)) {
+    match std::fs::read(ctx.abs(file)).map_err(|error| os_error_text(&error, &pathlib_str(file))) {
         Ok(data) => {
             for line in report_lines(&data) {
                 let _ = writeln!(out, "{line}");
@@ -92,7 +86,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
             0
         }
         Err(error) => {
-            let _ = writeln!(err, "lazymkv-dev {NAME}: error: {file}: {error}");
+            let _ = writeln!(err, "lazymkv-dev {NAME}: error: {error}");
             2
         }
     }
@@ -183,5 +177,18 @@ mod tests {
         assert_eq!(run(&ctx, &args, &mut out2, &mut err2), 2);
         assert!(out.is_empty() && out2.is_empty());
         assert!(String::from_utf8(err2).unwrap().starts_with("lazymkv-dev encoding: error: "));
+    }
+
+    #[test]
+    fn encoding_names_a_missing_file_as_python_does() {
+        let ctx = Ctx::for_test(Path::new("."));
+        let args = vec!["./lazymkv-no-such-folder//x.txt".to_string()];
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(run(&ctx, &args, &mut out, &mut err), 2);
+        assert!(out.is_empty());
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "lazymkv-dev encoding: error: [Errno 2] No such file or directory: 'lazymkv-no-such-folder/x.txt'\n"
+        );
     }
 }

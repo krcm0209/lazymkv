@@ -3,7 +3,8 @@
 //! folder, a directory on disk as a `Tree`, and a recording named as a slug or a path.
 
 use crate::runner::{FakeRunner, RealRunner, Runner};
-use lazymkv_core::recording::{py_repr_str, Kind, Loader, MemTree, PathKey, ReadError, Tree};
+use lazymkv_core::recording::{decode_text, py_repr_str, read_text, text_mode, Encoding, Errors, Kind, Loader, MemTree, PathKey, ReadError, Tree};
+use lazymkv_core::robot::{parse, Scan};
 pub use lazymkv_core::recording::pathlib_str;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -314,6 +315,76 @@ pub(crate) fn os_error_text(error: &std::io::Error, shown: &str) -> String {
             format!("[Errno {}] {}: {}", code, description, py_repr_str(shown))
         }
         None => error.to_string(),
+    }
+}
+
+/// `Path(path).read_text(encoding, errors)`: Err is Python's exception text alone (the OSError text with the path as
+/// `shown`, or the UnicodeDecodeError text), as a crash of the Python printed it.
+pub(crate) fn read_file_text(path: &Path, shown: &str, encoding: Encoding, errors: Errors) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| os_error_text(&error, shown))?;
+    decode_text(&bytes, encoding, errors)
+}
+
+/// A robot log read from a file as `Path.read_text` gives it (newlines as text mode translates them), parsed.
+pub(crate) fn read_scan_file(path: &Path, shown: &str, encoding: Encoding, errors: Errors) -> Result<Scan, String> {
+    Ok(parse(&text_mode(&read_file_text(path, shown, encoding, errors)?)))
+}
+
+/// A robot log read from a recording's tree as `Path.read_text` gives it, parsed.
+pub(crate) fn read_scan_in(tree: &dyn Tree, path: &PathKey, encoding: Encoding, errors: Errors) -> Result<Scan, String> {
+    Ok(parse(&text_mode(&read_text(tree, path, encoding, errors)?)))
+}
+
+/// The first word of a reader's arguments, which the Python read as `sys.argv[1]` and ignored any further word. Err
+/// holds the exit code when the command is done: 2 after the usage lines for a missing word (`positional` names it),
+/// 0 after the usage line for `-h` or `--help`.
+pub(crate) fn first_word<'a>(
+    args: &'a [String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    name: &str,
+    usage: &str,
+    positional: &str,
+) -> Result<&'a String, i32> {
+    let Some(word) = args.first() else {
+        return Err(crate::usage_error(err, name, usage, &format!("the following arguments are required: {positional}")));
+    };
+    if word == "-h" || word == "--help" {
+        let _ = writeln!(out, "usage: lazymkv-dev {usage}");
+        return Err(0);
+    }
+    Ok(word)
+}
+
+/// A reader of one folder: `lazymkv-dev <name> <dir>`. Opens the folder as a tree, then `report` writes the lines and
+/// returns the exit code, or Err for a crash of the Python (exit 2 after the lines written so far). An unreadable
+/// folder, a missing argument and `-h` end as `first_word` and the folder's error say.
+pub(crate) fn run_on_folder(
+    ctx: &Ctx,
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    name: &str,
+    usage: &str,
+    report: impl FnOnce(&dyn Tree, &PathKey, &mut dyn Write) -> Result<i32, String>,
+) -> i32 {
+    let dir = match first_word(args, out, err, name, usage, "dir") {
+        Ok(dir) => dir,
+        Err(code) => return code,
+    };
+    let tree = match DiskTree::open(&ctx.abs(dir), dir) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = writeln!(err, "lazymkv-dev {name}: error: {dir}: {error}");
+            return 2;
+        }
+    };
+    match report(&tree, &PathKey::root(), out) {
+        Ok(code) => code,
+        Err(message) => {
+            let _ = writeln!(err, "lazymkv-dev {name}: error: {message}");
+            2
+        }
     }
 }
 

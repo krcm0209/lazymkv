@@ -2,8 +2,7 @@
 //! Py: hit_rate, its lines verbatim. Exit 0 when there is a recording and every lookup answered; 1 otherwise; 2
 //! where the Python crashed (no argument; the folder or a meta.json unreadable; a lookup-status.txt not UTF-8).
 
-use crate::evidence::{Ctx, DiskTree};
-use crate::usage_error;
+use crate::evidence::{run_on_folder, Ctx};
 use lazymkv_core::recording::files::{lookup_statuses, thediscdb_answer, DiscDbAnswer, Meta};
 use lazymkv_core::recording::{decode_text, read_json, Encoding, Errors, Ordered, PathKey, Tree};
 use std::io::Write;
@@ -12,8 +11,6 @@ use std::io::Write;
 const NAME: &str = "hit-rate";
 /// Its usage after "usage: lazymkv-dev ". The Python read sys.argv[1] and ignored any further word; so does this.
 const USAGE: &str = "hit-rate <dir>";
-/// A missing folder argument (the Python crashed with an IndexError).
-const REQUIRED: &str = "the following arguments are required: dir";
 
 /// How a lookup ended. Py: lookup's strings.
 const HIT: &str = "hit";
@@ -89,27 +86,7 @@ pub fn report(tree: &dyn Tree, root: &PathKey, out: &mut dyn Write) -> Result<i3
 
 /// `lazymkv-dev hit-rate <dir>`. Py: hit_rate's `sys.exit(main(sys.argv[1]))`.
 pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let Some(dir) = args.first() else {
-        return usage_error(err, NAME, USAGE, REQUIRED);
-    };
-    if dir == "-h" || dir == "--help" {
-        let _ = writeln!(out, "usage: lazymkv-dev {USAGE}");
-        return 0;
-    }
-    let tree = match DiskTree::open(&ctx.abs(dir), dir) {
-        Ok(tree) => tree,
-        Err(error) => {
-            let _ = writeln!(err, "lazymkv-dev {NAME}: error: {dir}: {error}");
-            return 2;
-        }
-    };
-    match report(&tree, &PathKey::root(), out) {
-        Ok(code) => code,
-        Err(message) => {
-            let _ = writeln!(err, "lazymkv-dev {NAME}: error: {message}");
-            2
-        }
-    }
+    run_on_folder(ctx, args, out, err, NAME, USAGE, report)
 }
 
 #[cfg(test)]

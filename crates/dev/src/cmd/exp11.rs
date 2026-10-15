@@ -4,12 +4,12 @@
 //! Python's sys.exit message, on stderr); 2 for an argument error (argparse's lines) and where the Python crashed (a
 //! scan, mkvmerge.json or rip-summary.json unreadable, a title word that is not a number, a flag that is not one).
 
-use crate::evidence::Ctx;
+use crate::evidence::{read_file_text, read_scan_file, Ctx};
 use crate::{usage_error, Args};
 use lazymkv_core::recording::files::{MkvTrack, MkvmergeIdent, Selection, Summary};
-use lazymkv_core::recording::{decode_text, pathlib_str, pathlib_under, py_int, py_repr, py_repr_str, py_str, text_mode, Encoding, Errors};
+use lazymkv_core::recording::{pathlib_str, pathlib_under, py_int, py_repr, py_repr_str, py_str, Encoding, Errors};
 use lazymkv_core::reconcile::{expected_rows, file_rows, same_track, ExpectedRow, FileRow};
-use lazymkv_core::robot::{duration_seconds, int_attr, parse, Attrs, Scan};
+use lazymkv_core::robot::{duration_seconds, int_attr, Attrs, Scan};
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -204,53 +204,57 @@ fn describe(track: &MkvTrack) -> String {
     )
 }
 
-/// `<path>/scan.txt` when `path` is a folder, else `path` itself. Py: exp11_tracks.scan_path.
-fn scan_path_of(path: &Path) -> PathBuf {
+/// (the file on disk, the path as str(Path) shows it) of the scan `place` names: `<place>/scan.txt` when `place` is a
+/// folder, else `place` itself. Py: exp11_tracks.scan_path.
+fn scan_target(ctx: &Ctx, place: &str) -> (PathBuf, String) {
+    let path = ctx.abs(place);
+    let shown = pathlib_str(place);
     if path.is_dir() {
-        path.join("scan.txt")
+        (path.join("scan.txt"), pathlib_under(&shown, "scan.txt"))
     } else {
-        path.to_path_buf()
+        (path, shown)
     }
 }
 
-/// A scan read as Path.read_text(encoding="utf-8-sig", errors="replace") gives it. Py: exp11_tracks.load_scan.
-fn load_scan(path: &Path) -> Result<Scan, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(parse(&text_mode(&decode_text(&bytes, Encoding::Utf8Sig, Errors::Replace)?)))
+/// A scan read as Path.read_text(encoding="utf-8-sig", errors="replace") gives it, a read error naming the path as
+/// `shown`. Py: exp11_tracks.load_scan.
+fn load_scan_shown(path: &Path, shown: &str) -> Result<Scan, String> {
+    read_scan_file(path, shown, Encoding::Utf8Sig, Errors::Replace)
 }
 
-/// A JSON file's text, read as Path.read_text(encoding="utf-8-sig").
-fn read_json_text(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    decode_text(&bytes, Encoding::Utf8Sig, Errors::Strict).map_err(|error| format!("{}: {error}", path.display()))
+/// `load_scan_shown` with the path shown as given (the tests' scans are named by their full path).
+#[cfg(test)]
+fn load_scan(path: &Path) -> Result<Scan, String> {
+    load_scan_shown(path, &path.to_string_lossy())
 }
 
 /// mkvmerge -J output, read as json.loads and then ["tracks"]: Err where the Python crashed (unreadable, not JSON,
 /// no "tracks").
-fn load_ident(path: &Path) -> Result<MkvmergeIdent, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(&read_json_text(path)?).map_err(|error| format!("{}: {error}", path.display()))?;
+fn load_ident(path: &Path, shown: &str) -> Result<MkvmergeIdent, String> {
+    let value: serde_json::Value = serde_json::from_str(&read_file_text(path, shown, Encoding::Utf8Sig, Errors::Strict)?)
+        .map_err(|error| format!("{shown}: {error}"))?;
     if value.get("tracks").is_none() {
-        return Err(format!("{}: KeyError: 'tracks'", path.display()));
+        return Err(format!("{shown}: KeyError: 'tracks'"));
     }
-    serde_json::from_value(value).map_err(|error| format!("{}: {error}", path.display()))
+    serde_json::from_value(value).map_err(|error| format!("{shown}: {error}"))
 }
 
 /// rip-summary.json, read as json.loads.
-fn load_summary(path: &Path) -> Result<Summary, String> {
-    serde_json::from_str(&read_json_text(path)?).map_err(|error| format!("{}: {error}", path.display()))
+fn load_summary(path: &Path, shown: &str) -> Result<Summary, String> {
+    serde_json::from_str(&read_file_text(path, shown, Encoding::Utf8Sig, Errors::Strict)?)
+        .map_err(|error| format!("{shown}: {error}"))
 }
 
 /// `exp11 coverage <where>[@<title>] ...`: Ok(0), or Ok(1) after the sys.exit line on stderr. Py: run_coverage.
 fn run_coverage(ctx: &Ctx, places: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32, String> {
     for arg in places {
         let (place, title) = arg.rsplit_once('@').unwrap_or((arg.as_str(), ""));
-        let path = scan_path_of(&ctx.abs(place));
+        let (path, shown) = scan_target(ctx, place);
         if !path.is_file() {
             let _ = writeln!(out, "{place}: no scan.txt");
             continue;
         }
-        let scan = load_scan(&path)?;
+        let scan = load_scan_shown(&path, &shown)?;
         if title.is_empty() {
             for (t, a) in &scan.titles {
                 // duration_seconds raising ValueError (None here) is "not long enough".
@@ -297,12 +301,14 @@ fn run_coverage(ctx: &Ctx, places: &[String], out: &mut dyn Write, err: &mut dyn
 /// as they are made, so an Err (the Python's crash) comes after the lines before it. Py: run_match.
 fn run_match(ctx: &Ctx, folder: &str, title: i64, label: &str, out: &mut dyn Write, err: &mut dyn Write) -> Result<i32, String> {
     let d = ctx.abs(folder);
-    let scan = load_scan(&scan_path_of(&d))?;
+    let (scan_file, scan_shown) = scan_target(ctx, folder);
+    let scan = load_scan_shown(&scan_file, &scan_shown)?;
     let Some(number) = u32::try_from(title).ok().filter(|number| scan.titles.contains_key(number)) else {
         let _ = writeln!(err, "{} lists no title {title}", pathlib_under(&pathlib_str(folder), "scan.txt"));
         return Ok(1);
     };
-    let ident = load_ident(&d.join(label).join("mkvmerge.json"))?;
+    let ident_shown = pathlib_str(&format!("{folder}/{label}/mkvmerge.json"));
+    let ident = load_ident(&d.join(label).join("mkvmerge.json"), &ident_shown)?;
     let every = expected_rows(&scan, number, Selection::All)?;
     let rows = match_tracks(&scan, number, &ident)?;
     let predicted = expected_rows(&scan, number, Selection::Eng)?.len();
@@ -343,11 +349,13 @@ fn run_match(ctx: &Ctx, folder: &str, title: i64, label: &str, out: &mut dyn Wri
     }
     let base = d.join("all-tracks").join("mkvmerge.json");
     let summary = d.join("all-tracks").join("rip-summary.json");
-    if !(base.is_file() && summary.is_file() && load_summary(&summary)?.title == Some(title)) {
+    let all_tracks = pathlib_str(&format!("{folder}/all-tracks"));
+    let summary_shown = pathlib_under(&all_tracks, "rip-summary.json");
+    if !(base.is_file() && summary.is_file() && load_summary(&summary, &summary_shown)?.title == Some(title)) {
         let _ = writeln!(out, "{NO_ALL_TRACKS}");
         return Ok(0);
     }
-    let tracks = load_ident(&base)?.tracks;
+    let tracks = load_ident(&base, &pathlib_under(&all_tracks, "mkvmerge.json"))?.tracks;
     for line in ALL_TRACKS_HEAD {
         let _ = writeln!(out, "{line}");
     }
@@ -683,5 +691,18 @@ mod tests {
         let (code, out, _) = run_in(&tmp.0, &["match", "a", "-h"]);
         assert_eq!(code, 0);
         assert!(out.starts_with("usage: lazymkv-dev exp11 match [-h] folder title label\n"), "{out}");
+    }
+
+    #[test]
+    fn exp11_names_a_missing_file_as_python_does() {
+        let tmp = TempDir::new("missing-file");
+        write_m(&tmp);
+        // The path as str(Path) shows it: the scan's folder missing, then the label's mkvmerge.json missing.
+        let (code, out, err) = run_in(&tmp.0, &["match", "./nope//", "0", "x"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "lazymkv-dev exp11: error: [Errno 2] No such file or directory: 'nope'\n");
+        let (code, out, err) = run_in(&tmp.0, &["match", "./m//", "0", "./no-such-label/"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "lazymkv-dev exp11: error: [Errno 2] No such file or directory: 'm/no-such-label/mkvmerge.json'\n");
     }
 }

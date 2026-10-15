@@ -5,11 +5,11 @@
 //! title is on one side only; 1 when one is, or when a scan has no title; 2 where the Python crashed (fewer than two
 //! arguments, a scan unreadable).
 
-use crate::evidence::Ctx;
+use crate::evidence::{pathlib_str, read_scan_file, Ctx};
 use crate::pyjson::{dumps, Style};
 use crate::usage_error;
-use lazymkv_core::recording::{decode_text, py_repr_str, text_mode, Encoding, Errors};
-use lazymkv_core::robot::{parse, Scan};
+use lazymkv_core::recording::{py_repr_str, Encoding, Errors};
+use lazymkv_core::robot::Scan;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -139,9 +139,7 @@ pub fn report_lines(a: &[(Key, String)], b: &[(Key, String)]) -> (Vec<String>, i
 
 /// A scan's titles, read as Path.read_text(encoding="utf-8", errors="replace"). Py: compare_scans.titles.
 fn read_titles(ctx: &Ctx, arg: &str) -> Result<Vec<(Key, String)>, String> {
-    let bytes = std::fs::read(ctx.abs(arg)).map_err(|error| format!("{arg}: {error}"))?;
-    let text = decode_text(&bytes, Encoding::Utf8, Errors::Replace)?;
-    Ok(titles(&parse(&text_mode(&text))))
+    Ok(titles(&read_scan_file(&ctx.abs(arg), &pathlib_str(arg), Encoding::Utf8, Errors::Replace)?))
 }
 
 /// `lazymkv-dev compare-scans <A> <B>`. Py: compare_scans' `sys.exit(main(sys.argv[1], sys.argv[2]))`.
@@ -332,5 +330,15 @@ mod tests {
         let (code, out, err) = quiet(&tmp.0, &a, &tmp.0.join("missing.txt"));
         assert_eq!((code, out.as_str()), (2, ""));
         assert!(err.starts_with("lazymkv-dev compare-scans: error: "), "{err}");
+    }
+
+    #[test]
+    fn compare_scans_names_a_missing_scan_as_python_does() {
+        // FileNotFoundError names str(Path(arg)): "./nope//b.txt" is shown as "nope/b.txt".
+        let tmp = TempDir::new("missing-text");
+        let a = tmp.write_path("a.txt", "");
+        let (code, out, err) = quiet(&tmp.0, &a, Path::new("./nope//b.txt"));
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "lazymkv-dev compare-scans: error: [Errno 2] No such file or directory: 'nope/b.txt'\n");
     }
 }

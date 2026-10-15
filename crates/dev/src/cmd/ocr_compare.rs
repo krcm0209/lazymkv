@@ -3,11 +3,11 @@
 //! numbers only, never subtitle text: the frames' lines are held in memory, folded, compared and measured. Exit 0 when
 //! frames were compared; 2 when an input cannot be read, no frame is in both files, or an argument is wrong.
 
-use crate::evidence::{os_error_text, Ctx};
+use crate::evidence::{pathlib_split, read_file_text, Ctx};
 use crate::{usage_error, Args};
 use lazymkv_core::recording::files::{read_jsonl, FrameEntry, OcrSummary};
 use lazymkv_core::recording::{
-    decode_text, pathlib_str, py_fixed, py_float_value, py_int_value, py_repr, py_split, py_str, py_strip, py_truthy, Encoding, Errors,
+    pathlib_str, py_fixed, py_float_value, py_int_value, py_repr, py_split, py_str, py_strip, py_truthy, Encoding, Errors,
     Ordered,
 };
 use lazymkv_core::subtitle::text::{correct, fold, measure, split_joined, Event, Measures, Rule, Track};
@@ -126,13 +126,6 @@ pub fn norm_text(lines: &[String], english: bool) -> String {
     norm_lines(lines, english).join(" ")
 }
 
-/// A file's text as Path.read_text(encoding="utf-8-sig") gives it; Err is the OSError or UnicodeDecodeError text,
-/// the path shown as `shown`.
-fn read_file_text(path: &Path, shown: &str) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|error| os_error_text(&error, shown))?;
-    decode_text(&bytes, Encoding::Utf8Sig, Errors::Strict)
-}
-
 /// (frames, summary) of a JSON-lines text: the frames in file order, with any OCRS_FIELDS the record has, and the
 /// last `{"summary": {...}}` line of ocrs-trial, or None. A record with a "lines" array is taken as it is (each item
 /// str()-ed and stripped, blanks dropped); an older Tesseract record with only joined "text" is split with
@@ -173,7 +166,7 @@ pub fn frames_from_text(text: &str, line_counts: &BTreeMap<i64, Option<i64>>) ->
 /// frames_from_text of the file at `path` (read as "utf-8-sig"), its errors naming the path as `shown`.
 /// Py: ocr_compare.read_frames.
 pub fn read_frames(path: &Path, shown: &str, line_counts: &BTreeMap<i64, Option<i64>>) -> Result<(Vec<Frame>, Option<Map<String, Value>>), String> {
-    frames_from_text(&read_file_text(path, shown)?, line_counts)
+    frames_from_text(&read_file_text(path, shown, Encoding::Utf8Sig, Errors::Strict)?, line_counts)
 }
 
 /// What two records are paired by: the file name, or the frame number when a record lacks a name.
@@ -373,12 +366,6 @@ pub fn report_lines(c: &Compared) -> Vec<String> {
     lines
 }
 
-/// The last component of a path as pathlib names it (empty and "." components dropped; on Windows "\\" separates
-/// too). Py: Path(p).name.
-fn path_name(text: &str) -> &str {
-    text.split(|c: char| c == '/' || (cfg!(windows) && c == '\\')).filter(|part| !part.is_empty() && *part != ".").last().unwrap_or("")
-}
-
 /// The ASCII digits at the start of `text` (at least one) and what follows them.
 fn leading_digits(text: &str) -> Option<(&str, &str)> {
     let end = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
@@ -393,7 +380,7 @@ fn leading_digits(text: &str) -> Option<(&str, &str)> {
 /// has one, or None. Py: ocr_compare.stream_number, re.match(r'(?:sub-|ocrs-s)(\d+)(?:-crop\d+)?\.', name).
 pub fn stream_number(paths: &[&str]) -> Option<i64> {
     for path in paths {
-        let name = path_name(path);
+        let name = pathlib_split(path).2;
         let Some(rest) = name.strip_prefix("sub-").or_else(|| name.strip_prefix("ocrs-s")) else {
             continue;
         };
@@ -416,7 +403,8 @@ pub fn stream_number(paths: &[&str]) -> Option<i64> {
 /// The padding in ocrs-s<n>-crop<pad>.jsonl; 0 (the full frame) for any other name.
 /// Py: ocr_compare.crop_number, re.match(r'ocrs-s\d+-crop(\d+)\.', name).
 pub fn crop_number(path: &str) -> i64 {
-    path_name(path)
+    pathlib_split(path)
+        .2
         .strip_prefix("ocrs-s")
         .and_then(leading_digits)
         .and_then(|(_, rest)| rest.strip_prefix("-crop"))
@@ -437,7 +425,7 @@ pub fn stream_entry(path: &Path, n: Option<i64>, crop: Option<i64>) -> Result<Op
         return Ok(None);
     }
     let summary: OcrSummary =
-        serde_json::from_str(&read_file_text(path, &path.to_string_lossy())?).map_err(|error| error.to_string())?;
+        serde_json::from_str(&read_file_text(path, &path.to_string_lossy(), Encoding::Utf8Sig, Errors::Strict)?).map_err(|error| error.to_string())?;
     for entry in summary.streams {
         let entry_n = match entry.get("n") {
             Some(value) => py_int_value(value)?,
@@ -617,7 +605,7 @@ fn read_and_compare(ctx: &Ctx, tess_arg: &str, ocrs_arg: &str, rec: Option<&Path
     if let (Some(rec), Some(n)) = (rec, n) {
         let frames_json = rec.join(format!("sub-{n}.frames.json"));
         if frames_json.is_file() {
-            let text = read_file_text(&frames_json, &frames_json.to_string_lossy())?;
+            let text = read_file_text(&frames_json, &frames_json.to_string_lossy(), Encoding::Utf8Sig, Errors::Strict)?;
             let entries: Vec<FrameEntry> = serde_json::from_str(&text).map_err(|error| error.to_string())?;
             for entry in entries {
                 counts.insert(entry.frame, entry.lines);

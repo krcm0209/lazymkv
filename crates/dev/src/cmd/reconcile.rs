@@ -9,12 +9,11 @@ use std::path::Path;
 
 use lazymkv_core::recording::files::{MkvmergeIdent, Selection};
 use lazymkv_core::recording::{
-    decode_text, pathlib_str, pathlib_str_beside, py_int, py_repr_str, text_mode, Encoding, Errors,
+    pathlib_str, pathlib_str_beside, py_int, py_repr_str, text_mode, Encoding, Errors,
 };
 use lazymkv_core::reconcile::{reconcile, report_lines, RipLog, RIP_LOG_NAMES};
-use lazymkv_core::robot::parse;
 
-use crate::evidence::{Ctx, NO_SUCH_FILE};
+use crate::evidence::{read_file_text, read_scan_file, Ctx};
 use crate::{usage_error, Args};
 
 /// The command's name as typed.
@@ -115,8 +114,7 @@ fn compare(
     selection: Selection,
 ) -> Result<(Vec<String>, i32), String> {
     let scan_shown = shown(scan_arg);
-    let scan_text = read_file_text(&ctx.abs(&scan_shown), &scan_shown, Encoding::Utf8, Errors::Replace)?;
-    let scan = parse(&text_mode(&scan_text));
+    let scan = read_scan_file(&ctx.abs(&scan_shown), &scan_shown, Encoding::Utf8, Errors::Replace)?;
     let json_shown = shown(json_arg);
     let json_path = ctx.abs(&json_shown);
     let json_text = read_file_text(&json_path, &json_shown, Encoding::Utf8Sig, Errors::Strict)?;
@@ -147,16 +145,6 @@ fn compare(
     let rip = rip_found.zip(rip_text.as_deref()).map(|((_, path_shown), text)| RipLog { shown: path_shown, text });
     let report = reconcile(&scan, title, &ident, selection, rip)?;
     Ok((report_lines(&report), report.exit_code))
-}
-
-/// `Path(given).read_text(encoding, errors)`: Err is the FileNotFoundError text for a missing file, else the path
-/// and the error.
-fn read_file_text(path: &Path, shown: &str, encoding: Encoding, errors: Errors) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => format!("{NO_SUCH_FILE}{}", py_repr_str(shown)),
-        _ => format!("{shown}: {e}"),
-    })?;
-    decode_text(&bytes, encoding, errors).map_err(|e| format!("{shown}: {e}"))
 }
 
 /// str(Path(text)): how compare_tracks printed (and opened) a path it was given.

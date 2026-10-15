@@ -2,10 +2,9 @@
 //! Py: exp02_check, its lines verbatim. Exit 0 when every run says yes; 1 when a run says no or there is no run;
 //! 2 where the Python crashed (no argument; the folder, its scan.txt or a run unreadable).
 
-use crate::evidence::{Ctx, DiskTree};
-use crate::usage_error;
-use lazymkv_core::recording::{py_int, py_isdigit, read_text, text_mode, Encoding, Errors, PathKey, Tree};
-use lazymkv_core::robot::{parse, Scan};
+use crate::evidence::{read_scan_in, run_on_folder, Ctx};
+use lazymkv_core::recording::{py_int, py_isdigit, Encoding, Errors, PathKey, Tree};
+use lazymkv_core::robot::Scan;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
@@ -13,8 +12,6 @@ use std::io::Write;
 const NAME: &str = "exp02";
 /// Its usage after "usage: lazymkv-dev ". The Python read sys.argv[1] and ignored any further word; so does this.
 const USAGE: &str = "exp02 <dir>";
-/// A missing folder argument (the Python crashed with an IndexError).
-const REQUIRED: &str = "the following arguments are required: dir";
 /// The runs below <dir>/exp02, as the Python's glob names them.
 const RUN_PATTERN: &str = "title-[0-9]*.txt";
 
@@ -118,10 +115,10 @@ fn run_number(name: &str) -> Result<i64, String> {
     py_int(&digits).ok_or_else(|| format!("{name}: the title number {digits} is too large"))
 }
 
-/// Writes exp02_check.main's lines for the recording `rec` of `tree` as it goes, and returns whether experiment 2
-/// says yes; Err where the Python crashed, after the lines written so far. Py: exp02_check.main.
-pub fn report(tree: &dyn Tree, rec: &PathKey, out: &mut dyn Write) -> Result<bool, String> {
-    let scan = parse(&text_mode(&read_text(tree, &rec.join("scan.txt"), Encoding::Utf8, Errors::Replace)?));
+/// Writes exp02_check.main's lines for the recording `rec` of `tree` as it goes, and returns the exit code (0 when
+/// experiment 2 says yes, else 1); Err where the Python crashed, after the lines written so far. Py: exp02_check.main.
+pub fn report(tree: &dyn Tree, rec: &PathKey, out: &mut dyn Write) -> Result<i32, String> {
+    let scan = read_scan_in(tree, &rec.join("scan.txt"), Encoding::Utf8, Errors::Replace)?;
     let mut runs: Vec<(i64, PathKey)> = Vec::new();
     for path in tree.glob(&rec.join("exp02"), RUN_PATTERN) {
         runs.push((run_number(path.name())?, path));
@@ -130,7 +127,7 @@ pub fn report(tree: &dyn Tree, rec: &PathKey, out: &mut dyn Write) -> Result<boo
     runs.sort_by_key(|(number, _)| *number);
     let mut all_ok = !runs.is_empty();
     for (title, path) in &runs {
-        let log = parse(&text_mode(&read_text(tree, path, Encoding::Utf8Sig, Errors::Replace)?));
+        let log = read_scan_in(tree, path, Encoding::Utf8Sig, Errors::Replace)?;
         let r = check_run(&scan, *title, &log);
         all_ok = all_ok && r.saw_5014 && r.before && r.matched;
         let _ = writeln!(
@@ -149,33 +146,12 @@ pub fn report(tree: &dyn Tree, rec: &PathKey, out: &mut dyn Write) -> Result<boo
     }
     let _ = writeln!(out);
     let _ = writeln!(out, "EXPERIMENT 2: {} ({} titles)", if all_ok { "yes" } else { "no" }, runs.len());
-    Ok(all_ok)
+    Ok(if all_ok { 0 } else { 1 })
 }
 
 /// `lazymkv-dev exp02 <dir>`. Py: exp02_check's `sys.exit(0 if main(sys.argv[1]) else 1)`.
 pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let Some(dir) = args.first() else {
-        return usage_error(err, NAME, USAGE, REQUIRED);
-    };
-    if dir == "-h" || dir == "--help" {
-        let _ = writeln!(out, "usage: lazymkv-dev {USAGE}");
-        return 0;
-    }
-    let tree = match DiskTree::open(&ctx.abs(dir), dir) {
-        Ok(tree) => tree,
-        Err(error) => {
-            let _ = writeln!(err, "lazymkv-dev {NAME}: error: {dir}: {error}");
-            return 2;
-        }
-    };
-    match report(&tree, &PathKey::root(), out) {
-        Ok(true) => 0,
-        Ok(false) => 1,
-        Err(message) => {
-            let _ = writeln!(err, "lazymkv-dev {NAME}: error: {message}");
-            2
-        }
-    }
+    run_on_folder(ctx, args, out, err, NAME, USAGE, report)
 }
 
 #[cfg(test)]

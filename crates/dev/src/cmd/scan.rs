@@ -8,10 +8,10 @@ use std::collections::BTreeSet;
 use std::io::Write;
 
 use lazymkv_core::recording::files::{FfprobeStream, FfprobeStreams, ProbeSummary, Summary};
-use lazymkv_core::recording::{py_int, py_repr_str, read_json, read_text, text_mode, Encoding, Errors, Tree};
-use lazymkv_core::robot::{int_attr, parse, Attrs, Scan};
+use lazymkv_core::recording::{py_int, py_repr_str, read_json, Encoding, Errors, Tree};
+use lazymkv_core::robot::{int_attr, Attrs, Scan};
 
-use crate::evidence::{resolve_recording, Ctx, Recording};
+use crate::evidence::{read_scan_in, resolve_recording, Ctx, Recording};
 use crate::{usage_error, Args};
 
 /// The usage line, after "usage: lazymkv-dev ".
@@ -262,8 +262,7 @@ fn or_none<T: std::fmt::Display>(value: Option<T>) -> String {
 /// The recording's scan.txt, decoded with errors="replace" in `encoding` (summarize_scan: utf-8; the heredocs:
 /// utf-8-sig), newlines as text mode gives them, parsed.
 fn read_scan(rec: &Recording, encoding: Encoding) -> Result<Scan, String> {
-    let text = read_text(&rec.tree, &rec.dir.join("scan.txt"), encoding, Errors::Replace)?;
-    Ok(parse(&text_mode(&text)))
+    read_scan_in(&rec.tree, &rec.dir.join("scan.txt"), encoding, Errors::Replace)
 }
 
 /// summarize_scan's main.
