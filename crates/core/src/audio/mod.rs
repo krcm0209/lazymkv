@@ -9,3 +9,4 @@ pub mod rule;
 pub mod titles;
 pub mod report;
 pub mod labels;
+pub mod dataset;

@@ -23,6 +23,8 @@ pub type Command = fn(&Ctx, &[String], &mut dyn Write, &mut dyn Write) -> i32;
 pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("scan", cmd::scan::run as Command, "<slug|dir> [--title N] [--label L]"),
     ("reconcile", cmd::reconcile::run as Command, "<scan> <title> <mkvmerge_json> [--selection all|eng] [--rip-log FILE]"),
+    ("retune", cmd::retune::run as Command, "[--evidence DIR] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured]"),
+    ("levels-args", cmd::levels_args::run as Command, "[--evidence DIR] <slug|dir> <label>"),
     ("titles", cmd::titles::run as Command, "[--evidence DIR] <slug|dir>"),
     ("audio-report", cmd::audio_report::run as Command, "<folder> ..."),
     ("labels", cmd::labels::run as Command, "[--spec FILE] kinds|check|set|unset|title|auto|fitted ..."),
