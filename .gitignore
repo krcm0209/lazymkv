@@ -16,3 +16,6 @@ experiments/ocrs-trial/target/
 scripts/phase0/box.env
 # Python's byte-code caches: the unit-test command writes them unless PYTHONDONTWRITEBYTECODE is set.
 __pycache__/
+
+# Plan-execution scratch (ledgers, briefs, review packages)
+.superpowers/
