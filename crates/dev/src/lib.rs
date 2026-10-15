@@ -18,7 +18,9 @@ pub type Command = fn(&Ctx, &[String], &mut dyn Write, &mut dyn Write) -> i32;
 
 /// (name as typed, the command, its arguments as spec 3.4 writes them after the name), in spec 3.4's order. Each of
 /// Tasks 2 to 14 adds its row, for example `("scan", cmd::scan::run as Command, "<slug|dir> [--title N] [--label L]")`.
-pub const COMMANDS: &[(&str, Command, &str)] = &[];
+pub const COMMANDS: &[(&str, Command, &str)] = &[
+    ("scan", cmd::scan::run as Command, "<slug|dir> [--title N] [--label L]"),
+];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";
 
