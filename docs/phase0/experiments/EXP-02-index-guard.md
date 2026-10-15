@@ -4,6 +4,7 @@
 - Disc(s): pans-labyrinth-2006-uhd, format bluray (a UHD), drive D: (HL-DT-ST BD-RE BU40N)
 - MakeMKV version: MakeMKV v2.0.0 win(x64-release)
 - Spec reference: section 17, row 2
+- Tools: the Python this report names was deleted by the Rust port (pull request krcm0209/lazymkv#2); `exp02_check.py` is now `lazymkv-dev exp02`, with the same arguments and lines. The commands below are as they were run; the scripts as they last were are `git show d3a754d:scripts/phase0/<file>`.
 
 ## Question
 

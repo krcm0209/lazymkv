@@ -14,7 +14,8 @@ section 17 lists phase 0's fourteen experiments against real discs and real Make
 were not run, and say why), and the owner's decisions (D1-D23) record what was settled along the way. The phase 0 report is
 [`docs/phase0/REPORT.md`](docs/phase0/REPORT.md); each experiment has its own report in
 [`docs/phase0/experiments/`](docs/phase0/experiments/). The engine comes next (the spec's phases 1 and 2: the decision core, then the
-direct-mode engine), with a developer mode that keeps every rip's evidence for tuning.
+direct-mode engine), with a developer mode that keeps every rip's evidence for tuning. Phase 1 began by porting
+phase 0's Python analysers to Rust ([`docs/superpowers/specs/2026-10-13-rust-port-design.md`](docs/superpowers/specs/2026-10-13-rust-port-design.md)).
 
 Installing (planned; decision D17): one installer carries every tool the app needs except MakeMKV: mkvmerge and
 ffmpeg/ffprobe, and the ocrs OCR engine compiled in with its models (decision D22); nothing is downloaded at run time.
@@ -24,10 +25,16 @@ install.
 ## Layout
 
 - `crates/` - the Rust workspace: `capture` (records tool output with timing, snapshots a disc, ejects),
-  `fake-tools` (a stand-in that replays recorded MakeMKV output for tests), `core`.
-- `scripts/phase0/` - the PowerShell jobs that ran on the ripping machine and the Python analyses that read their
-  output (track comparison, subtitle text rules, audio content rules, the tuning-dataset harness), with unit tests:
-  `python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'`.
+  `fake-tools` (a stand-in that replays recorded MakeMKV output for tests), `core` (the decision rules: the
+  robot-output parser, the track reconciler, the audio content rule, the subtitle text rule) and `dev`, the
+  `lazymkv-dev` binary that runs them over recordings (scan summaries, track comparison, the tuning-dataset harness
+  `retune`, the audio labels, the phase 0 readers, the goldens). Tests: `cargo test --workspace`; with the evidence
+  clone at `corpus/owner/` they also compare the Rust with the goldens phase 0's Python wrote, and without it those
+  comparisons print `skipped: ...` and pass.
+- `scripts/phase0/` - the PowerShell jobs that run on the ripping machine, and the Mac's shell helpers that sync,
+  start and wait for them and pull their recordings. Phase 0's Python analyses are now `crates/core` and
+  `lazymkv-dev`; [`docs/phase1/rust-port-tests.md`](docs/phase1/rust-port-tests.md) maps each of their tests to
+  its Rust port.
 - `corpus/` - recordings: pinned public scan logs, TheDiscDB's API answers and replay scenarios. The owner's
   recordings (MakeMKV scans and rip logs of the owner's discs, probe output, TheDiscDB and TMDb answers) are the private
   evidence repository [`lazymkv-evidence`](https://github.com/krcm0209/lazymkv-evidence), cloned at `corpus/owner/`

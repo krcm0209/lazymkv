@@ -240,9 +240,10 @@ Built to answer the first two settling checks above on the mini PC; results to b
   `lazymkv-capture record`, keeps the text as `ocrs-s<n>.jsonl` beside Tesseract's in the tuning dataset, and writes
   `ocrs-summary.json` (counts, ocr-subs.ps1's five marker counts, timing, model hashes; no text) to the recording.
   `tuning-fetch.ps1 -Text` now also fetches `ocrs-s<n>.jsonl`.
-- `scripts/phase0/ocr_compare.py <sub-<n>.ocr.jsonl> <ocrs-s<n>.jsonl> [--rec <recording>/subs-ocr]`: pairs the frames,
-  folds both texts with subtitle_text.py's fold and corrections, and prints numbers only: frames with text in each,
-  exact matches, character error rate, subtitle_text's marker counts, readability and stopword language per engine,
+- `lazymkv-dev ocr-compare <sub-<n>.ocr.jsonl> <ocrs-s<n>.jsonl> [--rec <recording>/subs-ocr]` (a Python script of
+  `scripts/phase0/` until the Rust port): pairs the frames, folds both texts with the subtitle text rule's fold and
+  corrections (`core::subtitle::text`), and prints numbers only: frames with text in each,
+  exact matches, character error rate, the text rule's marker counts, readability and stopword language per engine,
   the speed of each, and the 10 frames that differ most (lengths and CER).
 
 How to run it (Mac, controller):
@@ -260,7 +261,8 @@ scripts/phase0/wait.sh ocrs-SLUG-LABEL
 scripts/phase0/pull-recording.sh SLUG
 scripts/phase0/job.sh tuning-fetch.ps1 fetch-SLUG-LABEL -Slug SLUG -Label LABEL -Text
 scripts/phase0/wait.sh fetch-SLUG-LABEL        # then the scp and the clean-up it prints
-python3 scripts/phase0/ocr_compare.py TEXT/sub-N.ocr.jsonl TEXT/ocrs-sN.jsonl --rec corpus/owner/SLUG/LABEL/subs-ocr
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev ocr-compare TEXT/sub-N.ocr.jsonl TEXT/ocrs-sN.jsonl --rec corpus/owner/SLUG/LABEL/subs-ocr
 ```
 
 Results (to be filled in): build time and exe size on the J4125; whether it runs without SIGILL; ms per frame for ocrs
@@ -271,7 +273,8 @@ music notes became.
 
 Same frames for both engines (the canvas render of `ocr-subs.ps1`, 1920x1080, inverted); Tesseract 5.4.0 `eng` psm 6
 against ocrs 0.13.1 with the `.onnx` models (SHA-1 7091768... and b16f361...), run on the mini PC by
-`scripts/phase0/ocrs-trial.ps1`, compared with `scripts/phase0/ocr_compare.py` (numbers only; the text stays in the
+`scripts/phase0/ocrs-trial.ps1`, compared with phase 0's Python comparison, now `lazymkv-dev ocr-compare` (numbers
+only; the text stays in the
 tuning dataset: `lazymkv-tuning\the-office-2005-s3d3-bluray\e16-stereo\subs-ocr\ocrs-s0.jsonl`).
 
 | Measure | Tesseract | ocrs |
@@ -286,7 +289,7 @@ tuning dataset: `lazymkv-tuning\the-office-2005-s3d3-bluray\e16-stereo\subs-ocr\
 | time per frame on the J4125 | about 95 ms (57 s for 600) | 933 ms (560 s for 600; model load 19 ms) |
 
 Reading: every measure the experiment 14 rule decides on comes out identical. The engines differ in the kind of
-error: Tesseract reads a standalone "I" as "|" (corrected by `subtitle_text.py`), ocrs drops it, or misreads it in a
+error: Tesseract reads a standalone "I" as "|" (corrected by the text rule's corrections, `core::subtitle::text`), ocrs drops it, or misreads it in a
 contraction (three frames), and reads a few other glyphs wrongly (a "p" read as "o", for one); neither error touches
 brackets, capitals, colons or the stopwords. ocrs is about ten times slower on a full 1080p frame: a two-hour film's
 1,700 frames would take about 26 minutes per track against 2.5 with Tesseract. The frame is almost entirely white;

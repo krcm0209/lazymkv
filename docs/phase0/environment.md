@@ -85,7 +85,8 @@ private evidence repository (`corpus/owner/`).
 ## Fingerprint check (Task 8)
 
 The fingerprint and AACS disc ID computed on this machine by `scripts/phase0/record-disc.ps1`
-(drive D:), compared with TheDiscDB (`scripts/phase0/hit_rate.py` and the check in Task 8 Step 7).
+(drive D:), compared with TheDiscDB (phase 0's hit-rate reader, now `lazymkv-dev hit-rate`, and the check in Task 8
+Step 7).
 A dischash hit proves the fingerprint; the content_hash of a discid record is an independent check
 of it, and the global_disc_id of a dischash record checks the disc ID.
 
