@@ -125,9 +125,9 @@ Phase 1 began with the Rust port of phase 0's analysers (pull request krcm0209/l
 the experiment reports name (the scan summary, the reconciler, the audio content rule with its tuning harness and
 labels, the subtitle text and alignment rules, and the readers of experiments 2, 3, 5, 8, 10 and 11 and of the
 ocrs trial) is now `crates/core` and the `lazymkv-dev` binary, one command per script with the same arguments,
-checked against goldens the Python wrote (kept in the evidence repository). The last commit with the Python is
-`d3a754d`; the Python test count below records its last run, and `docs/phase1/rust-port-tests.md` maps each of
-those tests to its Rust port.
+checked against goldens the Python wrote (kept in the evidence repository). The Python test count below records
+the phase 0 close-out run (202 tests at that commit). The last commit with the Python is `d3a754d`, which held 213
+tests; `docs/phase1/rust-port-tests.md` lists them and maps each one to its Rust port.
 
 ## Closing checks, and what was left behind
 
