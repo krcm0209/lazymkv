@@ -1,6 +1,6 @@
 # The ocrs trial (decisions D17 and D19; docs/phase0/ocr-engine-research.md, section "Trial"): reads the frames that
 # ocr-subs.ps1 kept for one subtitle stream with the pure-Rust OCR engine ocrs (experiments/ocrs-trial), so that
-# scripts/phase0/ocr_compare.py can set its text beside Tesseract's on the same frames, and so that its speed on the
+# lazymkv-dev ocr-compare can set its text beside Tesseract's on the same frames, and so that its speed on the
 # J4125 (no AVX2) is measured.
 # Input: $TuningData\<Slug>\<Label>\<Folder>\s<Stream>\f-*.png (ocr-subs.ps1). The frames are first copied to
 # $P0\tmp\ocrs-trial\<Slug>-<Label>-s<Stream>[-crop<pad>]\ on C: so that the timing measures OCR, not the share;

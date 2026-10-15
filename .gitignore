@@ -14,8 +14,6 @@ experiments/ocrs-trial/models/
 experiments/ocrs-trial/target/
 # The owner's ssh target for the mini PC (user@host), never committed.
 scripts/phase0/box.env
-# Python's byte-code caches: the unit-test command writes them unless PYTHONDONTWRITEBYTECODE is set.
-__pycache__/
 
 # Plan-execution scratch (ledgers, briefs, review packages)
 .superpowers/

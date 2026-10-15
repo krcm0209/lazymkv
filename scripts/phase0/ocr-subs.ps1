@@ -1,5 +1,5 @@
 # Experiment 14 (decision D15; design: docs/phase0/experiments/EXP-14-design.md, section 6): reads a ripped title's
-# bitmap subtitle tracks with Tesseract so that scripts/phase0/subtitle_text.py can tell SDH, regular, forced and
+# bitmap subtitle tracks with Tesseract so that lazymkv-dev subs can tell SDH, regular, forced and
 # commentary subtitle tracks apart by their text. Input: the subtitle-only evidence.mks that probe-title.ps1 left in
 # $Staging\<Slug>\<Label>\. It reads the subtitle streams given with -Streams, or else every subtitle stream whose
 # language tag is in -Languages (default eng and und; a stream without a tag counts as und; "all" reads every one).
