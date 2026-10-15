@@ -28,6 +28,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("titles", cmd::titles::run as Command, "[--evidence DIR] <slug|dir>"),
     ("audio-report", cmd::audio_report::run as Command, "<folder> ..."),
     ("labels", cmd::labels::run as Command, "[--spec FILE] kinds|check|set|unset|title|auto|fitted ..."),
+    ("align", cmd::align::run as Command, "[name=path ...] [--subs-dir DIR] [--clear-max-bytes N] [--tolerance-ms N]"),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";

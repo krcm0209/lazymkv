@@ -9,3 +9,4 @@ pub mod audio_report;
 pub mod labels;
 pub mod levels_args;
 pub mod retune;
+pub mod align;
