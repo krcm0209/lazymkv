@@ -373,6 +373,17 @@ pub fn pathlib_str_beside(text: &str, name: &str) -> String {
     pathlib_join(root, &parts)
 }
 
+/// str(Path(base) / name) for a base already as pathlib prints it.
+pub fn pathlib_under(base: &str, name: &str) -> String {
+    if base == "." {
+        name.to_string()
+    } else if base.ends_with('/') {
+        format!("{base}{name}")
+    } else {
+        format!("{base}/{name}")
+    }
+}
+
 /// Whether a glob component holds a wildcard (pathlib then lists the folder instead of testing one name).
 fn has_magic(part: &str) -> bool {
     part.chars().any(|c| matches!(c, '*' | '?' | '['))
@@ -516,6 +527,13 @@ mod tests {
         assert_eq!(pathlib_str_beside("//x/m.json", "rip.txt"), "//x/rip.txt");
         assert_eq!(pathlib_str_beside("a/", "rip.txt"), "rip.txt");
         assert_eq!(pathlib_str_beside("", "rip.txt"), "rip.txt");
+    }
+
+    #[test]
+    fn pathlib_under_puts_a_name_under_a_base_as_pathlib_printed_it() {
+        assert_eq!(pathlib_under(".", "audio-fitted.json"), "audio-fitted.json");
+        assert_eq!(pathlib_under("/", "audio-fitted.json"), "/audio-fitted.json");
+        assert_eq!(pathlib_under("corpus/owner", "audio-fitted.json"), "corpus/owner/audio-fitted.json");
     }
 
     #[test]

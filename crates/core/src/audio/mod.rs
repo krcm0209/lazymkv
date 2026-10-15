@@ -8,3 +8,4 @@ pub mod reference;
 pub mod rule;
 pub mod titles;
 pub mod report;
+pub mod labels;
