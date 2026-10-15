@@ -1,0 +1,22 @@
+[package]
+name = "lazymkv-dev"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lazymkv_dev"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lazymkv-dev"
+path = "src/main.rs"
+
+[dependencies]
+lazymkv-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# PyRandom and the level generators for the integration tests of Tasks 8, 11 and 12.
+lazymkv-core = { path = "../core", features = ["testsupport"] }

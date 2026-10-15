@@ -4,9 +4,16 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+# PyRandom and the synthetic level series of the ported tests, for lazymkv-dev's integration tests (cfg(test) only
+# reaches this crate's own tests).
+testsupport = []
+
 [dependencies]
 md-5.workspace = true
 sha1.workspace = true
-
-[dev-dependencies]
+serde.workspace = true
 serde_json.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true
+unicode-normalization.workspace = true
