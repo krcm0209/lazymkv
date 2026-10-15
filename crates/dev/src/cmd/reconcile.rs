@@ -8,7 +8,9 @@ use std::io::Write;
 use std::path::Path;
 
 use lazymkv_core::recording::files::{MkvmergeIdent, Selection};
-use lazymkv_core::recording::{decode_text, py_int, py_repr_str, Encoding, Errors};
+use lazymkv_core::recording::{
+    decode_text, pathlib_str, pathlib_str_beside, py_int, py_repr_str, text_mode, Encoding, Errors,
+};
 use lazymkv_core::reconcile::{reconcile, report_lines, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::robot::parse;
 
@@ -159,45 +161,14 @@ fn read_file_text(path: &Path, shown: &str, encoding: Encoding, errors: Errors) 
     decode_text(&bytes, encoding, errors).map_err(|e| format!("{shown}: {e}"))
 }
 
-/// Python's text-mode read (universal newlines): "\r\n" and a lone "\r" become "\n", as `Path.read_text` gave the
-/// scan and the rip log to robot.parse (which then splits on "\n" only).
-fn text_mode(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-/// The root and the components of a path as Python 3.9's PurePosixPath parses it: exactly two leading slashes are a
-/// root of their own, one or more than two are "/"; empty and "." components are dropped.
-fn pathlib_parts(text: &str) -> (&'static str, Vec<&str>) {
-    let root = if text.starts_with("//") && !text.starts_with("///") {
-        "//"
-    } else if text.starts_with('/') {
-        "/"
-    } else {
-        ""
-    };
-    (root, text.split('/').filter(|part| !part.is_empty() && *part != ".").collect())
-}
-
-/// str() of a parsed path: the root and the components joined by "/", "." for nothing.
-fn pathlib_str(root: &str, parts: &[&str]) -> String {
-    if root.is_empty() && parts.is_empty() {
-        return ".".to_string();
-    }
-    format!("{root}{}", parts.join("/"))
-}
-
 /// str(Path(text)): how compare_tracks printed (and opened) a path it was given.
 fn shown(text: &str) -> String {
-    let (root, parts) = pathlib_parts(text);
-    pathlib_str(root, &parts)
+    pathlib_str(text)
 }
 
-/// str(Path(text).parent / name): `name` beside the file `text` names (the parent is lexical, as pathlib's).
+/// str(Path(text).parent / name): `name` beside the file `text` names.
 fn shown_beside(text: &str, name: &str) -> String {
-    let (root, mut parts) = pathlib_parts(text);
-    parts.pop();
-    parts.push(name);
-    pathlib_str(root, &parts)
+    pathlib_str_beside(text, name)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 
 use lazymkv_core::recording::files::{FfprobeStream, FfprobeStreams, ProbeSummary, Summary};
-use lazymkv_core::recording::{py_int, py_repr_str, read_json, read_text, Encoding, Errors, Tree};
+use lazymkv_core::recording::{py_int, py_repr_str, read_json, read_text, text_mode, Encoding, Errors, Tree};
 use lazymkv_core::robot::{int_attr, parse, Attrs, Scan};
 
 use crate::evidence::{resolve_recording, Ctx, Recording};
@@ -257,11 +257,6 @@ fn tag<'a>(stream: &'a FfprobeStream, key: &str) -> Option<&'a String> {
 /// An f-string of a value that may be None: the value, or "None".
 fn or_none<T: std::fmt::Display>(value: Option<T>) -> String {
     value.map_or_else(|| "None".to_string(), |value| value.to_string())
-}
-
-/// Python's text-mode read (universal newlines): "\r\n" and a lone "\r" become "\n", as Path.read_text gave them.
-fn text_mode(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// The recording's scan.txt, decoded with errors="replace" in `encoding` (summarize_scan: utf-8; the heredocs:

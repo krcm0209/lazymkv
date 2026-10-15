@@ -15,7 +15,9 @@ pub use python::{
     py_fixed, py_float, py_float_repr, py_float_value, py_g, py_int, py_int_value, py_is_space, py_isdigit, py_repr,
     py_repr_str, py_split, py_str, py_strip, py_truthy,
 };
-pub use text::{decode_text, py_bytes_splitlines, py_splitlines, strip_cr_lines, universal_lines, Encoding, Errors};
+pub use text::{
+    decode_text, py_bytes_splitlines, py_splitlines, strip_cr_lines, text_mode, universal_lines, Encoding, Errors,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -334,16 +336,41 @@ impl Tree for MemTree {
     }
 }
 
-/// `str(PurePosixPath(text))`: empty and "." components dropped, a leading "/" kept, "." for nothing.
-pub fn pathlib_str(text: &str) -> String {
-    let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
-    if text.starts_with('/') {
-        format!("/{}", parts.join("/"))
-    } else if parts.is_empty() {
-        ".".to_string()
+/// The root and the components of a path as Python 3.9's PurePosixPath parses it: exactly two leading slashes are a
+/// root of their own, one or more than two are "/"; empty and "." components are dropped.
+fn pathlib_parts(text: &str) -> (&'static str, Vec<&str>) {
+    let root = if text.starts_with("//") && !text.starts_with("///") {
+        "//"
+    } else if text.starts_with('/') {
+        "/"
     } else {
-        parts.join("/")
+        ""
+    };
+    (root, text.split('/').filter(|part| !part.is_empty() && *part != ".").collect())
+}
+
+/// str() of a parsed path: the root and the components joined by "/", "." for nothing.
+fn pathlib_join(root: &str, parts: &[&str]) -> String {
+    if root.is_empty() && parts.is_empty() {
+        return ".".to_string();
     }
+    format!("{root}{}", parts.join("/"))
+}
+
+/// `str(PurePosixPath(text))`, Python 3.9: empty and "." components dropped, exactly two leading slashes kept (one,
+/// or three or more, make one), "." for nothing.
+pub fn pathlib_str(text: &str) -> String {
+    let (root, parts) = pathlib_parts(text);
+    pathlib_join(root, &parts)
+}
+
+/// `str(PurePosixPath(text).parent / name)`, Python 3.9: `name` beside the file `text` names (the parent is lexical:
+/// the last component is replaced, "a/.." gives "a/<name>").
+pub fn pathlib_str_beside(text: &str, name: &str) -> String {
+    let (root, mut parts) = pathlib_parts(text);
+    parts.pop();
+    parts.push(name);
+    pathlib_join(root, &parts)
 }
 
 /// Whether a glob component holds a wildcard (pathlib then lists the folder instead of testing one name).
@@ -465,6 +492,30 @@ mod tests {
         }
         assert!(PathKey::new("B") < PathKey::new("a"), "by code point, capitals first");
         assert!(PathKey::new("a") < PathKey::new("a/b"));
+    }
+
+    #[test]
+    fn pathlib_str_keeps_exactly_two_leading_slashes_as_python_3_9_does() {
+        // Checked against Python 3.9's str(PurePosixPath(s)).
+        let cases = [
+            ("//x/m.json", "//x/m.json"),
+            ("///x", "/x"),
+            ("////x", "/x"),
+            ("/x", "/x"),
+            ("a//b", "a/b"),
+            ("./logs//extract.txt", "logs/extract.txt"),
+            ("a/", "a"),
+            ("", "."),
+            (".", "."),
+            ("/", "/"),
+            ("a/..", "a/.."),
+        ];
+        for (given, shown) in cases {
+            assert_eq!(pathlib_str(given), shown, "{given:?}");
+        }
+        assert_eq!(pathlib_str_beside("//x/m.json", "rip.txt"), "//x/rip.txt");
+        assert_eq!(pathlib_str_beside("a/", "rip.txt"), "rip.txt");
+        assert_eq!(pathlib_str_beside("", "rip.txt"), "rip.txt");
     }
 
     #[test]

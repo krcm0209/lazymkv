@@ -85,6 +85,11 @@ pub fn py_splitlines(text: &str) -> Vec<&str> {
     })
 }
 
+/// Python's text-mode read (universal newlines): "\r\n" and a lone "\r" become "\n", as `Path.read_text` gives them.
+pub fn text_mode(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Lines as Python's text-mode file iteration gives them (universal newlines: \n, \r, \r\n only), without
 /// terminators. Py: `for line in open(path)`.
 pub fn universal_lines(text: &str) -> Vec<&str> {
@@ -206,6 +211,11 @@ mod tests {
         assert_eq!(py_splitlines("a\r\r\nb"), vec!["a", "", "b"]);
         assert_eq!(py_splitlines("a\n\n"), vec!["a", ""]);
         assert_eq!(py_splitlines("a\x1fb\tc"), vec!["a\x1fb\tc"]);
+    }
+
+    #[test]
+    fn text_mode_turns_crlf_and_lone_cr_into_lf() {
+        assert_eq!(text_mode("a\r\nb\rc\nd\r\r\n"), "a\nb\nc\nd\n\n");
     }
 
     #[test]
