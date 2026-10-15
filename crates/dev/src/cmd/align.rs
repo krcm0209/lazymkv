@@ -202,7 +202,7 @@ mod tests {
     use super::*;
     use crate::evidence::{repo_root, skip, DiskTree, EVIDENCE_SHOWN};
     use crate::pyjson::{dumps, Style};
-    use crate::testutil::{call, printed, sha1_hex, Scratch as TempDir};
+    use crate::testutil::{call, evidence_inputs, printed, sha1_hex, Scratch as TempDir, ScratchExt};
 
     /// The byte-order mark probe-title.ps1 writes before index.json.
     const BOM: &str = "\u{feff}";
@@ -323,22 +323,6 @@ mod tests {
         },
     ];
 
-    /// The brief's `write_bytes` and `write` on the shared scratch folder (names relative to it).
-    trait ScratchExt {
-        fn write_bytes(&self, name: &str, bytes: &[u8]);
-        fn write(&self, name: &str, text: &str);
-    }
-
-    impl ScratchExt for TempDir {
-        fn write_bytes(&self, name: &str, bytes: &[u8]) {
-            crate::testutil::write(&self.0.join(name), bytes);
-        }
-
-        fn write(&self, name: &str, text: &str) {
-            crate::testutil::write(&self.0.join(name), text);
-        }
-    }
-
     /// The command run with `cwd` as the current directory: (exit code, stdout, stderr).
     fn run_in(cwd: &Path, args: &[&str]) -> (i32, String, String) {
         call(run, &Ctx::for_test(cwd), args)
@@ -347,25 +331,10 @@ mod tests {
     /// index.json as probe-title.ps1 writes it (UTF-8 with a byte-order mark), and one packets file per stream.
     /// Py: SubsDir.write_subs, whose json.dumps is pyjson::dumps in Python's default style.
     fn write_subs(dir: &TempDir, index: &Value, packets: &[(i64, Vec<Value>)]) {
-        dir.write_bytes("index.json", format!("{BOM}{}", dumps(index, Style::PY_DEFAULT)).as_bytes());
+        dir.write("index.json", format!("{BOM}{}", dumps(index, Style::PY_DEFAULT)).as_bytes());
         for (n, items) in packets {
             dir.write(&format!("sub-{n}.packets.json"), &dumps(&json!({ "packets": items }), Style::PY_DEFAULT));
         }
-    }
-
-    /// The bytes `Recorded::inputs` hashes: index.json, then every `sub-<n>.packets.json` in name order.
-    fn evidence_inputs(folder: &Path) -> Vec<u8> {
-        let mut bytes = std::fs::read(folder.join("index.json")).unwrap();
-        let mut names: Vec<String> = std::fs::read_dir(folder)
-            .unwrap()
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-            .filter(|name| name.starts_with("sub-") && name.ends_with(".packets.json"))
-            .collect();
-        names.sort();
-        for name in names {
-            bytes.extend(std::fs::read(folder.join(name)).unwrap());
-        }
-        bytes
     }
 
     // Ported from test_analysis, class SubsDir (the two tests that run main()).
@@ -422,7 +391,7 @@ mod tests {
     #[test]
     fn name_path_inputs_print_what_the_python_printed() {
         let dir = TempDir::new("named");
-        dir.write_bytes("one.json", format!("{BOM}{ONE}").as_bytes());
+        dir.write("one.json", format!("{BOM}{ONE}").as_bytes());
         dir.write("dir/x=y.json", TWO);
         let (code, out, err) = run_in(&dir.0, &["a=one.json", "bee=dir/x=y.json"]);
         assert_eq!(out, printed(&OUTPUT_D));
@@ -435,7 +404,7 @@ mod tests {
     #[test]
     fn argument_errors_exit_2_with_argparses_messages() {
         let dir = TempDir::new("arguments");
-        dir.write_bytes("noeng/index.json", format!("{BOM}{FRENCH_INDEX}").as_bytes());
+        dir.write("noeng/index.json", format!("{BOM}{FRENCH_INDEX}").as_bytes());
         let cases: [(&[&str], &str); 9] = [
             (&["--clear-max-bytes", "x", "a=b"], "argument --clear-max-bytes: invalid int value: 'x'"),
             (&["--tolerance-ms", "1.5", "a=b"], "argument --tolerance-ms: invalid int value: '1.5'"),
@@ -471,7 +440,7 @@ mod tests {
         dir.write("badsize.json", r#"{"packets": [{"pts_time": "1.000000", "size": "abc"}]}"#);
         dir.write("badpts.json", r#"{"packets": [{"pts_time": "x", "size": "900"}]}"#);
         dir.write("list.json", r#"[{"pts_time": "1.0", "size": "900"}]"#);
-        dir.write_bytes("crash/index.json", format!("{BOM}{CRASH_INDEX}").as_bytes());
+        dir.write("crash/index.json", format!("{BOM}{CRASH_INDEX}").as_bytes());
         dir.write("crash/sub-0.packets.json", CRASH_SUB_0);
         let a_line = "a: packets=1 sized<=32/64/128/256: [0, 0, 0, 0]\n".to_string();
         let cases: [(&[&str], String, &str); 6] = [

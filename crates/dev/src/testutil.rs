@@ -51,3 +51,29 @@ pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
     use sha1::{Digest, Sha1};
     Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+/// A file written under a scratch folder by a path relative to it, its folders made first.
+pub(crate) trait ScratchExt {
+    fn write(&self, rel: &str, data: impl AsRef<[u8]>);
+}
+
+impl ScratchExt for Scratch {
+    fn write(&self, rel: &str, data: impl AsRef<[u8]>) {
+        write(&self.0.join(rel), data);
+    }
+}
+
+/// The bytes the evidence tests hash for a subs folder: index.json, then every `sub-<n>.packets.json` in name order.
+pub(crate) fn evidence_inputs(folder: &Path) -> Vec<u8> {
+    let mut bytes = fs::read(folder.join("index.json")).unwrap();
+    let mut names: Vec<String> = fs::read_dir(folder)
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("sub-") && name.ends_with(".packets.json"))
+        .collect();
+    names.sort();
+    for name in names {
+        bytes.extend(fs::read(folder.join(name)).unwrap());
+    }
+    bytes
+}
