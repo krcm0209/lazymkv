@@ -365,6 +365,12 @@ pub fn disc_d_files() -> Vec<(String, Vec<u8>)> {
     files
 }
 
+/// The SHA-1 of `bytes` as lowercase hex: the digest the evidence tests compare recorded outputs by.
+pub fn sha1_hex(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod generator_tests {
     //! The Task 4 generators against values Python 3.9.6 printed for the same calls of test_audio_similarity.py's

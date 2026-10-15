@@ -31,6 +31,12 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("subs", cmd::subs::run as Command, cmd::subs::SYNOPSIS),
     ("align", cmd::align::run as Command, "[name=path ...] [--subs-dir DIR] [--clear-max-bytes N] [--tolerance-ms N]"),
     ("levels-from-proxy", cmd::levels_from_proxy::run as Command, "<audio-proxy.mka> <out> --main N [--cand N,...]"),
+    ("exp02", cmd::exp02::run as Command, "<dir>"),
+    ("encoding", cmd::encoding::run as Command, "<file>"),
+    ("hit-rate", cmd::hit_rate::run as Command, "<dir>"),
+    ("exp11", cmd::exp11::run as Command, "coverage <where>... | match <folder> <title> <label>"),
+    ("compare-scans", cmd::compare_scans::run as Command, "<A> <B>"),
+    ("ocr-compare", cmd::ocr_compare::run as Command, "<tess> <ocrs> [--rec DIR] [--tag CODE]"),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";

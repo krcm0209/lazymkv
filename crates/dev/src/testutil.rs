@@ -46,20 +46,24 @@ pub(crate) fn printed(lines: &[&str]) -> String {
     lines.iter().map(|line| format!("{line}\n")).collect()
 }
 
-/// The SHA-1 of `bytes` as lowercase hex.
-pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
-    use sha1::{Digest, Sha1};
-    Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
-}
+pub(crate) use lazymkv_core::testsupport::sha1_hex;
 
 /// A file written under a scratch folder by a path relative to it, its folders made first.
 pub(crate) trait ScratchExt {
     fn write(&self, rel: &str, data: impl AsRef<[u8]>);
+    /// Like `write`, and returns the full path of the file.
+    fn write_path(&self, rel: &str, data: impl AsRef<[u8]>) -> PathBuf;
 }
 
 impl ScratchExt for Scratch {
     fn write(&self, rel: &str, data: impl AsRef<[u8]>) {
         write(&self.0.join(rel), data);
+    }
+
+    fn write_path(&self, rel: &str, data: impl AsRef<[u8]>) -> PathBuf {
+        let path = self.0.join(rel);
+        write(&path, data);
+        path
     }
 }
 
