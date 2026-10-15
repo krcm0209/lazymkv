@@ -171,3 +171,147 @@ mod tests {
         assert_eq!(random, floats(&fixture, "big_seed_random"));
     }
 }
+
+// ------------------------------------------------------------------------------------------------------------------
+// Added by Task 4: the synthetic level series of test_audio_similarity.py and test_audio_dataset.py (both files define
+// them identically). Each draws from PyRandom in the Python's order, so the ported tests measure the Python's numbers.
+// ------------------------------------------------------------------------------------------------------------------
+
+/// 20 ms frames per second. Py: FPS.
+pub const FPS: usize = 50;
+
+/// C pow() as CPython's `10 ** x` calls it. black_box keeps LLVM from rewriting pow(10, x) as exp10(x), which is not
+/// always bit-identical to the C library's pow.
+fn generator_pow(base: f64, exponent: f64) -> f64 {
+    std::hint::black_box(base).powf(std::hint::black_box(exponent))
+}
+
+/// Syllables: `loud + uniform(-1, 1)` for randint(4, 7) frames, then `quiet + uniform(-1, 1)` for randint(4, 8)
+/// frames, until `frames` levels are made; cut to `frames`. Py: speech(rnd, frames, loud, quiet).
+pub fn speech(rnd: &mut PyRandom, frames: usize, loud: f64, quiet: f64) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    while out.len() < frames {
+        // `[loud + rnd.uniform(-1, 1)] * rnd.randint(4, 7)`: Python evaluates the list before the count.
+        let level = loud + rnd.uniform(-1.0, 1.0);
+        let count = rnd.randint(4, 7) as usize;
+        out.extend(std::iter::repeat(level).take(count));
+        let level = quiet + rnd.uniform(-1.0, 1.0);
+        let count = rnd.randint(4, 8) as usize;
+        out.extend(std::iter::repeat(level).take(count));
+    }
+    out.truncate(frames);
+    out
+}
+
+/// A dialogue-driven programme: lines of randint(100, 200) frames of speech(-20, -30), the centre 1 dB below the mix,
+/// then randint(75, 150) frames of room tone (the mix at -60 + uniform(-1, 1) for every frame, then the centre at
+/// -75 + uniform(-1, 1) for every frame). Returns (mix, centre), each cut to seconds * FPS.
+/// Py: programme(seconds=420, seed=1).
+pub fn programme(seconds: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
+    let mut rnd = PyRandom::new(seed);
+    let total = seconds * FPS;
+    let mut mix: Vec<f64> = Vec::new();
+    let mut centre: Vec<f64> = Vec::new();
+    while mix.len() < total {
+        let n = rnd.randint(2 * FPS as i64, 4 * FPS as i64) as usize;
+        let line = speech(&mut rnd, n, -20.0, -30.0);
+        centre.extend(line.iter().map(|v| v - 1.0));
+        mix.extend(line);
+        // int(1.5 * FPS) is 75
+        let n = rnd.randint((1.5 * FPS as f64) as i64, 3 * FPS as i64) as usize;
+        for _ in 0..n {
+            mix.push(-60.0 + rnd.uniform(-1.0, 1.0));
+        }
+        for _ in 0..n {
+            centre.push(-75.0 + rnd.uniform(-1.0, 1.0));
+        }
+    }
+    mix.truncate(total);
+    centre.truncate(total);
+    (mix, centre)
+}
+
+/// 10 * log10(10 ** (a / 10) + 10 ** (b / 10)). Py: power_sum.
+pub fn power_sum(a: f64, b: f64) -> f64 {
+    10.0 * (generator_pow(10.0, a / 10.0) + generator_pow(10.0, b / 10.0)).log10()
+}
+
+/// Two people talking all the way through: speech(-18, -27) for randint(150, 300) frames (the count drawn before the
+/// speech), then randint(15, 30) frames at -100 dB, over `mix` ducked by 30 dB: power_sum(voice, mix - 30) per frame,
+/// as long as `mix`. Py: commentary(mix, seed=7).
+pub fn commentary(mix: &[f64], seed: u64) -> Vec<f64> {
+    let mut rnd = PyRandom::new(seed);
+    let mut voice: Vec<f64> = Vec::new();
+    while voice.len() < mix.len() {
+        let frames = rnd.randint(3 * FPS as i64, 6 * FPS as i64) as usize;
+        let talk = speech(&mut rnd, frames, -18.0, -27.0);
+        voice.extend(talk);
+        let pause = rnd.randint(15, 30) as usize;
+        voice.extend(std::iter::repeat(-100.0).take(pause));
+    }
+    voice.iter().zip(mix).map(|(&v, &m)| power_sum(v, m - 30.0)).collect()
+}
+
+/// A compact level file as audio-levels.ps1 writes it: the header line, then `'%.1f' % v` per line, "\n" ends.
+/// Py: level_file (its write_text body).
+pub fn level_file_text(values: &[f64]) -> String {
+    let lines: Vec<String> = values.iter().map(|&v| crate::recording::py_fixed(v, 1)).collect();
+    format!(
+        "# lazymkv audio levels v2: frame_ms=20 band_hz=300-3400 unit=dB floor=-100 series=x file=x.mkv\n{}\n",
+        lines.join("\n")
+    )
+}
+
+/// ffmpeg's ametadata output, one frame every `step_s` seconds: "frame:k    pts:k    pts_time:<k * step_s :g>" and
+/// "lavfi.astats.Overall.RMS_level=<v :.6f>" per value. Py: test_audio_similarity.raw_file (its write_text body).
+pub fn raw_file_text(values: &[f64], step_s: f64) -> String {
+    let mut out = String::new();
+    for (k, &v) in values.iter().enumerate() {
+        out.push_str(&format!(
+            "frame:{k}    pts:{k}    pts_time:{}\nlavfi.astats.Overall.RMS_level={}\n",
+            crate::recording::py_g(k as f64 * step_s),
+            crate::recording::py_fixed(v, 6)
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod generator_tests {
+    //! The Task 4 generators against values Python 3.9.6 printed for the same calls of test_audio_similarity.py's
+    //! programme(), commentary(), speech(), power_sum(), level_file() and raw_file().
+    use super::*;
+
+    #[test]
+    fn the_generators_give_the_pythons_series() {
+        let (mix, centre) = programme(420, 1);
+        assert_eq!((mix.len(), centre.len()), (21000, 21000));
+        assert_eq!((mix[0], mix[20999]), (-19.861592250355574, -60.76686815012025));
+        assert_eq!((centre[0], centre[20999]), (-20.861592250355574, -74.49592297734323));
+        let voice = commentary(&mix, 7);
+        assert_eq!(voice.len(), 21000);
+        for (k, want) in [(0usize, -17.101968171039434), (12345, -89.31715843496981), (20999, -27.86279645475714)] {
+            assert!((voice[k] - want).abs() <= 1e-12, "commentary[{k}] = {}, python {want}", voice[k]);
+        }
+        let s = speech(&mut PyRandom::new(3), 30, -18.0, -27.0);
+        assert_eq!(s.len(), 30);
+        assert_eq!(&s[..5], &[-18.524070745816218; 5]);
+        assert_eq!(&s[5..12], &[-27.26008966690384; 7]);
+        assert!((power_sum(-20.0, -50.0) - (-19.995659225206815)).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn level_and_raw_file_texts_are_the_pythons() {
+        assert_eq!(
+            level_file_text(&[-45.25, -100.0, 0.05, -0.04]),
+            "# lazymkv audio levels v2: frame_ms=20 band_hz=300-3400 unit=dB floor=-100 series=x file=x.mkv\n\
+             -45.2\n-100.0\n0.1\n-0.0\n"
+        );
+        assert_eq!(
+            raw_file_text(&[-20.5, -100.0, -3.25], 0.1),
+            "frame:0    pts:0    pts_time:0\nlavfi.astats.Overall.RMS_level=-20.500000\n\
+             frame:1    pts:1    pts_time:0.1\nlavfi.astats.Overall.RMS_level=-100.000000\n\
+             frame:2    pts:2    pts_time:0.2\nlavfi.astats.Overall.RMS_level=-3.250000\n"
+        );
+    }
+}

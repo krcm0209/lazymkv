@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod fingerprint;
 pub mod lang;
 pub mod profile;
