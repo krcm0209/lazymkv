@@ -288,7 +288,7 @@ fn walk(dir: &Path, prefix: &str, tree: &mut MemTree) -> std::io::Result<()> {
 }
 
 /// Python's OSError text: "[Errno <n>] <strerror>: '<path>'" (Rust's message without its " (os error n)").
-fn os_error_text(error: &std::io::Error, shown: &str) -> String {
+pub(crate) fn os_error_text(error: &std::io::Error, shown: &str) -> String {
     match error.raw_os_error() {
         Some(code) => {
             let text = error.to_string();
@@ -420,6 +420,16 @@ mod tests {
     use super::*;
     use crate::runner::Output;
     use std::fs;
+
+    #[test]
+    fn os_error_text_is_pythons_errno_line_without_rusts_suffix() {
+        let os = std::io::Error::from_raw_os_error(2);
+        let text = os_error_text(&os, "a/b");
+        assert!(text.starts_with("[Errno 2] ") && text.ends_with(": 'a/b'"), "{text}");
+        assert!(!text.contains("(os error"), "{text}");
+        let other = std::io::Error::new(std::io::ErrorKind::Other, "odd (os error 5) text");
+        assert_eq!(os_error_text(&other, "x"), "odd (os error 5) text");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lazymkv-dev-{}-{}", std::process::id(), name));

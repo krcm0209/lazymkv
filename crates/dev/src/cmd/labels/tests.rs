@@ -7,31 +7,18 @@
 
 use super::*;
 use crate::evidence::{repo_root, skip};
+use crate::testutil::{self, Scratch};
 use lazymkv_core::audio::labels::{
     exp13_requirements, load_fitted, not_counted_because, problems, LabelEntry, COUNTING_HOW, FORMAT, OBSERVATION_HOW,
 };
+use lazymkv_core::testsupport::{disc_d_files, entry, with, ROW13_SPEC};
 use serde_json::json;
-use crate::testutil::{self, Scratch};
 use std::fs;
-
-/// The test spec: section 17's table head and row 13 with test_audio_dataset.SPEC's numbers. Py: SPEC.
-const SPEC: &str = concat!(
-    "# spec\n\n## 17. Experiments (phase 0)\n\n| # | Question | If no |\n|---|---|---|\n",
-    "| 13 | Measured over whole titles on the owner's own discs, does the content rule give its commentary verdict to ",
-    "**no** programme track, and to at least one commentary on each of at least 3 different discs? Before ",
-    "the answer may be yes, the labelled tracks must include: at least 8 commentaries from at least 4 discs, ",
-    "at least 2 of them on feature films and at least 1 with the film clearly audible under the voices; at ",
-    "least 1 audio-description track if the owner has a disc with one (all that the owner has, up to 3); at least ",
-    "20 programme tracks other than the reference, at least 6 of them separately encoded lossy companions or ",
-    "alternate mixes; at least 1 title whose reference has no centre channel (mono or 2.0) and at least ",
-    "1 dialogue-heavy or speech-only title, each with an extra track. Every threshold was fitted on two tracks of ",
-    "one disc (`fit-disc`: the S03E16 commentary), so no track of that disc counts. | fallback |\n",
-);
 
 /// A fresh scratch folder holding spec.md (testutil's, removed when dropped).
 fn scratch(tag: &str) -> Scratch {
     let tmp = Scratch::new(tag);
-    fs::write(tmp.0.join("spec.md"), SPEC).unwrap();
+    fs::write(tmp.0.join("spec.md"), ROW13_SPEC).unwrap();
     tmp
 }
 
@@ -51,18 +38,6 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
-/// A track label: how "listened", sure, the verdict not seen, dated 2026-10-05. Py: test_audio_dataset.entry.
-fn entry(label: &str, stream: i64, kind: &str) -> Value {
-    json!({"label": label, "stream": stream, "kind": kind, "how": "listened", "sure": true, "date": "2026-10-05",
-           "saw_verdict": false, "note": ""})
-}
-
-/// `dict(value, key=v)`.
-fn with(mut value: Value, key: &str, v: Value) -> Value {
-    value.as_object_mut().expect("an object").insert(key.to_string(), v);
-    value
-}
-
 /// A labels file as test_audio_dataset.write_labels writes it (one line, the folder's name as slug).
 fn write_labels_file(slug_dir: &Path, tracks: Vec<Value>, titles: Value) {
     fs::create_dir_all(slug_dir).unwrap();
@@ -71,45 +46,14 @@ fn write_labels_file(slug_dir: &Path, tracks: Vec<Value>, titles: Value) {
     fs::write(slug_dir.join("audio-labels.json"), serde_json::to_string(&data).unwrap()).unwrap();
 }
 
-/// disc-d of the Python's Routine auto test on disk, without level series (auto reads none): t0 measured with streams
-/// 1 to 7 (2 and 5 the same packets, 3 and 7 the main's, 6 flagged 2304), t1 with streams 1 and 2 while the scan's
-/// title 1 has three audio streams; the owner labelled t0 stream 3.
+/// disc-d of the Python's Routine auto test on disk (testsupport::disc_d_files: no level series, auto reads none),
+/// with the owner's labels file: the owner labelled t0 stream 3.
 fn write_disc_d(slug_dir: &Path) {
-    let recordings: [(&str, &str, i64, &[(i64, &str)]); 2] = [
-        ("t0", "aa", 0, &[(2, "bb"), (3, "aa"), (4, "cc"), (5, "bb"), (6, "dd"), (7, "aa")]),
-        ("t1", "ee", 1, &[(2, "ff")]),
-    ];
-    for (label, main_md5, title, cands) in recordings {
-        let numbers: Vec<String> = std::iter::once(1).chain(cands.iter().map(|(n, _)| *n)).map(|n| n.to_string()).collect();
-        let dir = slug_dir.join(label).join(format!("audio-levels-20ms-{}", numbers.join("-")));
-        fs::create_dir_all(&dir).unwrap();
-        let mut lines = vec![
-            "# lazymkv audio-levels v2 (experiment 13)".to_string(),
-            "file=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400".to_string(),
-            format!("main=1 codec=dts profile=- channels=6 layout=5.1(side) language=eng fc=yes frames=100 md5={main_md5}"),
-        ];
-        for (n, md5) in cands {
-            lines.push(format!("cand={n} codec=ac3 profile=- channels=2 layout=stereo language=eng frames=100 md5={md5}"));
-        }
-        fs::write(dir.join("manifest.txt"), lines.join("\n") + "\n").unwrap();
-        let top = cands.iter().map(|(n, _)| *n).max().unwrap_or(1);
-        let mut streams = vec![json!({"index": 0, "codec_type": "video"})];
-        for k in 1..=top {
-            let (codec, channels) = if k == 1 { ("dts", 6) } else { ("ac3", 2) };
-            let name = format!("t{k}");
-            streams.push(json!({"index": k, "codec_type": "audio", "codec_name": codec, "channels": channels,
-                                "tags": {"language": "eng", "title": name}}));
-        }
-        fs::write(dir.join("streams.json"), serde_json::to_string(&json!({"streams": streams})).unwrap()).unwrap();
-        fs::write(slug_dir.join(label).join("rip-summary.json"), format!("{{\"ok\": true, \"title\": {title}}}")).unwrap();
+    for (path, bytes) in disc_d_files() {
+        let file = slug_dir.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
     }
-    let flags = [(1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 2304), (7, 0)];
-    let mut scan = vec!["TINFO:0,9,0,\"0:07:00\"".to_string(), "SINFO:0,0,1,0,\"Video\"".to_string()];
-    scan.extend(flags.iter().map(|(s, _)| format!("SINFO:0,{s},1,0,\"Audio\"")));
-    scan.extend(flags.iter().map(|(s, f)| format!("SINFO:0,{s},22,0,\"{f}\"")));
-    scan.push("SINFO:1,0,1,0,\"Video\"".to_string());
-    scan.extend((1..=3).map(|s| format!("SINFO:1,{s},1,0,\"Audio\"")));
-    fs::write(slug_dir.join("scan.txt"), scan.join("\n") + "\n").unwrap();
     write_labels_file(slug_dir, vec![with(entry("t0", 3, "duplicate"), "note", json!("the owner's"))], json!({}));
 }
 

@@ -20,7 +20,7 @@ use lazymkv_core::recording::{
 };
 use serde_json::Value;
 
-use crate::evidence::{default_spec, pathlib_str, Ctx, DiskTree};
+use crate::evidence::{default_spec, os_error_text, pathlib_str, Ctx, DiskTree};
 use crate::pyjson::write_labels;
 use crate::{usage_error, Args};
 
@@ -491,20 +491,6 @@ fn set_line(outcome: &SetOutcome) -> Result<String, String> {
         }
     }
     Ok(line)
-}
-
-/// str(OSError) as Python prints it: "[Errno 2] No such file or directory: 'x'" (the strerror text without Rust's
-/// " (os error N)"); the plain text when the error has no OS code.
-fn os_error_text(e: &std::io::Error, shown: &str) -> String {
-    match e.raw_os_error() {
-        Some(code) => {
-            let text = e.to_string();
-            let suffix = format!(" (os error {code})");
-            let reason = text.strip_suffix(&suffix).unwrap_or(&text);
-            format!("[Errno {code}] {reason}: {}", py_repr_str(shown))
-        }
-        None => e.to_string(),
-    }
 }
 
 /// argparse's list of choices: each repr'd, joined by ", ".

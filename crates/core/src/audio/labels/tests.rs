@@ -7,56 +7,12 @@
 
 use super::*;
 use crate::recording::MemTree;
+use crate::testsupport::{entry, with, ROW13_SPEC};
 use serde_json::{json, Value};
 
-/// The numbers row 13 of the test spec states. Py: the keyword arguments of test_audio_dataset.spec.
-#[derive(Clone, Copy)]
-struct Numbers {
-    verdict_discs: i64,
-    comm: i64,
-    discs: i64,
-    features: i64,
-    prog: i64,
-    sep: i64,
-    centre: i64,
-    heavy: i64,
-}
-
-impl Default for Numbers {
-    fn default() -> Numbers {
-        Numbers { verdict_discs: 3, comm: 8, discs: 4, features: 2, prog: 20, sep: 6, centre: 1, heavy: 1 }
-    }
-}
-
-/// A spec holding only section 17's table head and row 13. Py: test_audio_dataset.spec (ROW13).
-fn spec_text(n: Numbers) -> String {
-    format!(
-        concat!(
-            "# spec\n\n## 17. Experiments (phase 0)\n\n| # | Question | If no |\n|---|---|---|\n",
-            "| 13 | Measured over whole titles on the owner's own discs, does the content rule give its commentary verdict to ",
-            "**no** programme track, and to at least one commentary on each of at least {verdict_discs} different discs? Before ",
-            "the answer may be yes, the labelled tracks must include: at least {comm} commentaries from at least {discs} discs, ",
-            "at least {features} of them on feature films and at least 1 with the film clearly audible under the voices; at ",
-            "least 1 audio-description track if the owner has a disc with one (all that the owner has, up to 3); at least ",
-            "{prog} programme tracks other than the reference, at least {sep} of them separately encoded lossy companions or ",
-            "alternate mixes; at least {centre} title whose reference has no centre channel (mono or 2.0) and at least ",
-            "{heavy} dialogue-heavy or speech-only title, each with an extra track. Every threshold was fitted on two tracks of ",
-            "one disc (`fit-disc`: the S03E16 commentary), so no track of that disc counts. | fallback |\n",
-        ),
-        verdict_discs = n.verdict_discs,
-        comm = n.comm,
-        discs = n.discs,
-        features = n.features,
-        prog = n.prog,
-        sep = n.sep,
-        centre = n.centre,
-        heavy = n.heavy,
-    )
-}
-
-/// Py: SPEC.
+/// The test spec (section 17's table head and row 13). Py: SPEC.
 fn spec_default() -> String {
-    spec_text(Numbers::default())
+    ROW13_SPEC.to_string()
 }
 
 /// Row 13 with the optional dubs phrase. Py: DUB_SPEC.
@@ -65,18 +21,6 @@ fn dub_spec() -> String {
         "each with an extra track.",
         "each with an extra track; at least 3 dubs in a wanted language from at least 2 discs, at least 1 of them on a dialogue-heavy title.",
     )
-}
-
-/// A track label: how "listened", sure, the verdict not seen, dated 2026-10-05. Py: test_audio_dataset.entry.
-fn entry(label: &str, stream: i64, kind: &str) -> Value {
-    json!({"label": label, "stream": stream, "kind": kind, "how": "listened", "sure": true, "date": "2026-10-05",
-           "saw_verdict": false, "note": ""})
-}
-
-/// `dict(value, key=v)`: the key's value replaced in place, or the key added at the end.
-fn with(mut value: Value, key: &str, v: Value) -> Value {
-    value.as_object_mut().expect("an object").insert(key.to_string(), v);
-    value
 }
 
 /// The object without `key`, the order of the other keys kept.
@@ -699,47 +643,12 @@ mod edits {
 mod walkers {
     use super::*;
 
-    /// A level folder's manifest.txt and streams.json as audio-levels.ps1 writes them, main stream 1 with six
-    /// channels and streams.json listing every stream up to the highest measured one. Py: test_audio_dataset.folder,
-    /// without the level series (`auto` reads none).
-    fn level_folder(t: &mut MemTree, label_dir: &str, main_md5: &str, cands: &[(i64, &str)]) {
-        let numbers: Vec<String> = std::iter::once(1).chain(cands.iter().map(|(n, _)| *n)).map(|n| n.to_string()).collect();
-        let dir = format!("{label_dir}/audio-levels-20ms-{}", numbers.join("-"));
-        let mut lines = vec![
-            "# lazymkv audio-levels v2 (experiment 13)".to_string(),
-            "file=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400".to_string(),
-            format!("main=1 codec=dts profile=- channels=6 layout=5.1(side) language=eng fc=yes frames=100 md5={main_md5}"),
-        ];
-        for (n, md5) in cands {
-            lines.push(format!("cand={n} codec=ac3 profile=- channels=2 layout=stereo language=eng frames=100 md5={md5}"));
-        }
-        t.insert_file(&format!("{dir}/manifest.txt"), lines.join("\n") + "\n");
-        let top = cands.iter().map(|(n, _)| *n).max().unwrap_or(1).max(1);
-        let mut streams = vec![json!({"index": 0, "codec_type": "video"})];
-        for k in 1..=top {
-            let (codec, channels) = if k == 1 { ("dts", 6) } else { ("ac3", 2) };
-            let name = format!("t{k}");
-            streams.push(json!({"index": k, "codec_type": "audio", "codec_name": codec, "channels": channels,
-                                "tags": {"language": "eng", "title": name}}));
-        }
-        put(t, &format!("{dir}/streams.json"), &json!({"streams": streams}));
-    }
-
-    /// The recording of the Python's Routine auto test: t0 measured with streams 1 to 7 (2 and 5 the same packets,
-    /// 3 and 7 the main's, 6 flagged 2304 by the scan), t1 with streams 1 and 2 while the scan's title 1 has three
-    /// audio streams; `labels` is its audio-labels.json.
+    /// The recording of the Python's Routine auto test (testsupport::disc_d_files) as folder disc-d of `t`, with
+    /// `labels` as its audio-labels.json.
     fn disc_d(t: &mut MemTree, labels: &Value) {
-        level_folder(t, "disc-d/t0", "aa", &[(2, "bb"), (3, "aa"), (4, "cc"), (5, "bb"), (6, "dd"), (7, "aa")]);
-        t.insert_file("disc-d/t0/rip-summary.json", r#"{"ok": true, "title": 0}"#);
-        level_folder(t, "disc-d/t1", "ee", &[(2, "ff")]);
-        t.insert_file("disc-d/t1/rip-summary.json", r#"{"ok": true, "title": 1}"#);
-        let flags = [(1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 2304), (7, 0)];
-        let mut scan = vec!["TINFO:0,9,0,\"0:07:00\"".to_string(), "SINFO:0,0,1,0,\"Video\"".to_string()];
-        scan.extend(flags.iter().map(|(s, _)| format!("SINFO:0,{s},1,0,\"Audio\"")));
-        scan.extend(flags.iter().map(|(s, f)| format!("SINFO:0,{s},22,0,\"{f}\"")));
-        scan.push("SINFO:1,0,1,0,\"Video\"".to_string());
-        scan.extend((1..=3).map(|s| format!("SINFO:1,{s},1,0,\"Audio\"")));
-        t.insert_file("disc-d/scan.txt", scan.join("\n") + "\n");
+        for (path, bytes) in crate::testsupport::disc_d_files() {
+            t.insert_file(&format!("disc-d/{path}"), bytes);
+        }
         put(t, "disc-d/audio-labels.json", labels);
     }
 

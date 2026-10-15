@@ -278,6 +278,81 @@ pub fn raw_file_text(values: &[f64], step_s: f64) -> String {
     out
 }
 
+/// A spec holding only section 17's table head and row 13 with test_audio_dataset.SPEC's numbers (3 verdict discs,
+/// 8 commentaries from 4 discs, 2 on feature films, 20 programme tracks of which 6 separately encoded, one title of
+/// each kind, the fitting disc `fit-disc`). Py: test_audio_dataset.SPEC.
+pub const ROW13_SPEC: &str = concat!(
+    "# spec\n\n## 17. Experiments (phase 0)\n\n| # | Question | If no |\n|---|---|---|\n",
+    "| 13 | Measured over whole titles on the owner's own discs, does the content rule give its commentary verdict to ",
+    "**no** programme track, and to at least one commentary on each of at least 3 different discs? Before ",
+    "the answer may be yes, the labelled tracks must include: at least 8 commentaries from at least 4 discs, ",
+    "at least 2 of them on feature films and at least 1 with the film clearly audible under the voices; at ",
+    "least 1 audio-description track if the owner has a disc with one (all that the owner has, up to 3); at least ",
+    "20 programme tracks other than the reference, at least 6 of them separately encoded lossy companions or ",
+    "alternate mixes; at least 1 title whose reference has no centre channel (mono or 2.0) and at least ",
+    "1 dialogue-heavy or speech-only title, each with an extra track. Every threshold was fitted on two tracks of ",
+    "one disc (`fit-disc`: the S03E16 commentary), so no track of that disc counts. | fallback |\n",
+);
+
+/// A track label: how "listened", sure, the verdict not seen, dated 2026-10-05, no note. Py: test_audio_dataset.entry.
+pub fn entry(label: &str, stream: i64, kind: &str) -> serde_json::Value {
+    serde_json::json!({"label": label, "stream": stream, "kind": kind, "how": "listened", "sure": true,
+                       "date": "2026-10-05", "saw_verdict": false, "note": ""})
+}
+
+/// `dict(value, key=v)`: `value` (an object) with `key` set to `v`, in place when it is there, else added at the end.
+pub fn with(mut value: serde_json::Value, key: &str, v: serde_json::Value) -> serde_json::Value {
+    value.as_object_mut().expect("an object").insert(key.to_string(), v);
+    value
+}
+
+/// One level folder's manifest.txt and streams.json as audio-levels.ps1 writes them (main stream 1 with six
+/// channels, streams.json listing every stream up to the highest measured one), as (path under the label folder,
+/// bytes). Py: test_audio_dataset.folder, without the level series (`labels auto` reads none).
+fn level_folder(label: &str, main_md5: &str, cands: &[(i64, &str)]) -> Vec<(String, Vec<u8>)> {
+    let numbers: Vec<String> = std::iter::once(1).chain(cands.iter().map(|(n, _)| *n)).map(|n| n.to_string()).collect();
+    let dir = format!("{label}/audio-levels-20ms-{}", numbers.join("-"));
+    let mut lines = vec![
+        "# lazymkv audio-levels v2 (experiment 13)".to_string(),
+        "file=x.mkv bytes=1 seconds=1 frame_ms=20 band_hz=300-3400".to_string(),
+        format!("main=1 codec=dts profile=- channels=6 layout=5.1(side) language=eng fc=yes frames=100 md5={main_md5}"),
+    ];
+    for (n, md5) in cands {
+        lines.push(format!("cand={n} codec=ac3 profile=- channels=2 layout=stereo language=eng frames=100 md5={md5}"));
+    }
+    let top = cands.iter().map(|(n, _)| *n).max().unwrap_or(1).max(1);
+    let mut streams = vec![serde_json::json!({"index": 0, "codec_type": "video"})];
+    for k in 1..=top {
+        let (codec, channels) = if k == 1 { ("dts", 6) } else { ("ac3", 2) };
+        streams.push(serde_json::json!({"index": k, "codec_type": "audio", "codec_name": codec, "channels": channels,
+                                        "tags": {"language": "eng", "title": format!("t{k}")}}));
+    }
+    vec![
+        (format!("{dir}/manifest.txt"), (lines.join("\n") + "\n").into_bytes()),
+        (format!("{dir}/streams.json"), serde_json::to_vec(&serde_json::json!({"streams": streams})).expect("serialisable")),
+    ]
+}
+
+/// The recording of the Python's Routine auto test, "disc-d", without its audio-labels.json: the files under the
+/// recording folder as (relative path, bytes). t0 measured with streams 1 to 7 (2 and 5 the same packets, 3 and 7
+/// the main's, 6 flagged 2304 by the scan), t1 with streams 1 and 2 while the scan's title 1 has three audio
+/// streams; each label folder has its rip-summary.json, and the folder has scan.txt. Callers put the files in a
+/// `MemTree` or on disk, and add the labels file themselves. Py: test_audio_dataset.Routine (its auto test).
+pub fn disc_d_files() -> Vec<(String, Vec<u8>)> {
+    let mut files = level_folder("t0", "aa", &[(2, "bb"), (3, "aa"), (4, "cc"), (5, "bb"), (6, "dd"), (7, "aa")]);
+    files.push(("t0/rip-summary.json".to_string(), br#"{"ok": true, "title": 0}"#.to_vec()));
+    files.extend(level_folder("t1", "ee", &[(2, "ff")]));
+    files.push(("t1/rip-summary.json".to_string(), br#"{"ok": true, "title": 1}"#.to_vec()));
+    let flags = [(1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 2304), (7, 0)];
+    let mut scan = vec!["TINFO:0,9,0,\"0:07:00\"".to_string(), "SINFO:0,0,1,0,\"Video\"".to_string()];
+    scan.extend(flags.iter().map(|(s, _)| format!("SINFO:0,{s},1,0,\"Audio\"")));
+    scan.extend(flags.iter().map(|(s, f)| format!("SINFO:0,{s},22,0,\"{f}\"")));
+    scan.push("SINFO:1,0,1,0,\"Video\"".to_string());
+    scan.extend((1..=3).map(|s| format!("SINFO:1,{s},1,0,\"Audio\"")));
+    files.push(("scan.txt".to_string(), (scan.join("\n") + "\n").into_bytes()));
+    files
+}
+
 #[cfg(test)]
 mod generator_tests {
     //! The Task 4 generators against values Python 3.9.6 printed for the same calls of test_audio_similarity.py's
