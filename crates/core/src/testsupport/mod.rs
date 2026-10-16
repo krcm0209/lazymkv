@@ -1,6 +1,7 @@
 //! Test support (port spec section 5, "Ported tests"): Python's random.Random, so that the ported tests draw the same
 //! synthetic signals as the Python tests. Compiled for this crate's tests and, through the `testsupport` feature,
-//! for lazymkv-dev's integration tests. Task 4 adds the synthetic level series here.
+//! for lazymkv-dev's integration tests. Task 4 adds the synthetic level series here; phase 1's Task 2 adds the robot
+//! log builders (spec 9.4) and the TMDb answer builders (spec 8.1, in TMDb's documented shapes).
 
 const N: usize = 624;
 const M: usize = 397;
@@ -451,5 +452,274 @@ mod generator_tests {
              frame:1    pts:1    pts_time:0.1\nlavfi.astats.Overall.RMS_level=-100.000000\n\
              frame:2    pts:2    pts_time:0.2\nlavfi.astats.Overall.RMS_level=-3.250000\n"
         );
+    }
+}
+
+/// A robot-mode value in quotes, with `"` and `\` backslash-escaped, as spec 9.4 says MakeMKV writes them.
+fn robot_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// A robot log from a compact description: the CINFO lines, then per title (number, attrs) its TINFO lines and per stream
+/// (number, attrs) its SINFO lines; `attrs` are (attribute id, value) pairs written as `CINFO:id,0,"value"`,
+/// `TINFO:title,id,0,"value"` and `SINFO:title,stream,id,0,"value"`, in the order given, each line ending in "\n". A
+/// title with no attrs writes no TINFO line (its SINFO lines are still written). Tests of Tasks 3 to 16 build scans with
+/// it instead of long literals. Spec 9.4.
+pub fn scan_text(disc: &[(u32, &str)], titles: &[(u32, &[(u32, &str)], &[(u32, &[(u32, &str)])])]) -> String {
+    let mut out = String::new();
+    for (id, value) in disc {
+        out.push_str(&format!("CINFO:{},0,{}\n", id, robot_quoted(value)));
+    }
+    for (title, attrs, streams) in titles {
+        for (id, value) in attrs.iter() {
+            out.push_str(&format!("TINFO:{},{},0,{}\n", title, id, robot_quoted(value)));
+        }
+        for (stream, stream_attrs) in streams.iter() {
+            for (id, value) in stream_attrs.iter() {
+                out.push_str(&format!("SINFO:{},{},{},0,{}\n", title, stream, id, robot_quoted(value)));
+            }
+        }
+    }
+    out
+}
+
+/// The same text with the MSG:1005 banner for version `version` (`MakeMKV v<version> win(x64-release)`) and, when `java`
+/// is true, an MSG:3344 line naming `C:\Program Files\Java\bin\java.exe`, both before the CINFO lines as in the recorded
+/// scans. Spec 9.4, 6.1 step 4.
+pub fn scan_text_with_messages(
+    version: &str,
+    java: bool,
+    disc: &[(u32, &str)],
+    titles: &[(u32, &[(u32, &str)], &[(u32, &[(u32, &str)])])],
+) -> String {
+    let banner = format!("MakeMKV v{version} win(x64-release)");
+    let mut out = format!(
+        "MSG:1005,0,1,{},\"%1 started\",{}\n",
+        robot_quoted(&format!("{banner} started")),
+        robot_quoted(&banner)
+    );
+    if java {
+        let java_path = r"C:\Program Files\Java\bin\java.exe";
+        out.push_str(&format!(
+            "MSG:3344,0,1,{},\"Using Java runtime from %1\",{}\n",
+            robot_quoted(&format!("Using Java runtime from {java_path}")),
+            robot_quoted(java_path)
+        ));
+    }
+    out.push_str(&scan_text(disc, titles));
+    out
+}
+
+/// A `/movie/{id}` answer as TMDb documents it: id, title, original_title, release_date, original_language, runtime
+/// (None writes null), external_ids {imdb_id}. The IMDb ID is synthetic: `tt` and the TMDb ID in seven digits. Spec 8.1.
+pub fn tmdb_movie_json(
+    id: i64,
+    title: &str,
+    original_title: &str,
+    release_date: &str,
+    original_language: &str,
+    runtime: Option<u32>,
+) -> String {
+    serde_json::json!({
+        "id": id,
+        "title": title,
+        "original_title": original_title,
+        "release_date": release_date,
+        "original_language": original_language,
+        "runtime": runtime,
+        "external_ids": {"imdb_id": format!("tt{id:07}")},
+    })
+    .to_string()
+}
+
+/// A `/tv/{id}` answer with its seasons expanded as `/tv/{id}/season/{n}` gives them: id, name, original_name (the name
+/// again), first_air_date, original_language, external_ids {imdb_id, tvdb_id}, seasons[] {season_number, episode_count
+/// (the episodes given), episodes[] {episode_number, name, runtime}}. The IDs are synthetic: `tt` and the TMDb ID in seven
+/// digits, and 100000 plus the TMDb ID. Spec 8.1, 8.5.
+pub fn tmdb_tv_json(
+    id: i64,
+    name: &str,
+    first_air_date: &str,
+    original_language: &str,
+    seasons: &[(u32, &[(u32, &str, Option<u32>)])],
+) -> String {
+    let seasons: Vec<serde_json::Value> = seasons
+        .iter()
+        .map(|(season_number, episodes)| {
+            let episodes: Vec<serde_json::Value> = episodes
+                .iter()
+                .map(|(episode_number, episode_name, runtime)| {
+                    serde_json::json!({"episode_number": episode_number, "name": episode_name, "runtime": runtime})
+                })
+                .collect();
+            serde_json::json!({"season_number": season_number, "episode_count": episodes.len(), "episodes": episodes})
+        })
+        .collect();
+    serde_json::json!({
+        "id": id,
+        "name": name,
+        "original_name": name,
+        "first_air_date": first_air_date,
+        "original_language": original_language,
+        "external_ids": {"imdb_id": format!("tt{id:07}"), "tvdb_id": id + 100_000},
+        "seasons": seasons,
+    })
+    .to_string()
+}
+
+/// A `/search/multi` answer: results[] {media_type, id, title|name, original_title|original_name,
+/// release_date|first_air_date} from (media_type, id, title, original title, date), the movie fields for "movie" and the
+/// TV fields for any other media type, wrapped as TMDb pages it (page 1, total_pages 1, total_results). Spec 8.1.
+pub fn search_json(results: &[(&str, i64, &str, &str, &str)]) -> String {
+    let rows: Vec<serde_json::Value> = results
+        .iter()
+        .map(|&(media_type, id, title, original, date)| {
+            if media_type == "movie" {
+                serde_json::json!({"media_type": media_type, "id": id, "title": title, "original_title": original, "release_date": date})
+            } else {
+                serde_json::json!({"media_type": media_type, "id": id, "name": title, "original_name": original, "first_air_date": date})
+            }
+        })
+        .collect();
+    serde_json::json!({"page": 1, "results": rows, "total_pages": 1, "total_results": results.len()}).to_string()
+}
+
+#[cfg(test)]
+mod builder_tests {
+    //! The scan and TMDb fixture builders of phase 1 Task 2: the exact text each writes, and that the parser reads a
+    //! built scan back.
+    use super::*;
+    use crate::robot::parse;
+
+    #[test]
+    fn scan_text_writes_the_cinfo_lines_then_each_titles_tinfo_and_sinfo_lines() {
+        let text = scan_text(
+            &[(1, "Blu-ray disc"), (2, "Test Disc")],
+            &[
+                (0, &[(9, "0:10:00"), (16, "00001.mpls")], &[(0, &[(1, "Video")]), (1, &[(1, "Audio"), (3, "eng")])]),
+                (3, &[(9, "0:01:00")], &[]),
+            ],
+        );
+        assert_eq!(
+            text,
+            concat!(
+                "CINFO:1,0,\"Blu-ray disc\"\n",
+                "CINFO:2,0,\"Test Disc\"\n",
+                "TINFO:0,9,0,\"0:10:00\"\n",
+                "TINFO:0,16,0,\"00001.mpls\"\n",
+                "SINFO:0,0,1,0,\"Video\"\n",
+                "SINFO:0,1,1,0,\"Audio\"\n",
+                "SINFO:0,1,3,0,\"eng\"\n",
+                "TINFO:3,9,0,\"0:01:00\"\n",
+            )
+        );
+        let scan = parse(&text);
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+        assert_eq!(scan.disc[&2], "Test Disc");
+        assert_eq!(scan.titles[&3][&9], "0:01:00");
+        assert_eq!(scan.streams[&(0, 1)][&3], "eng");
+    }
+
+    #[test]
+    fn scan_text_escapes_quotes_and_backslashes_as_makemkv_does() {
+        let text = scan_text(&[(2, r#"Say "Hi" \ Bye"#)], &[]);
+        assert_eq!(text, "CINFO:2,0,\"Say \\\"Hi\\\" \\\\ Bye\"\n");
+        assert_eq!(parse(&text).disc[&2], r#"Say "Hi" \ Bye"#);
+    }
+
+    #[test]
+    fn scan_text_with_messages_puts_the_banner_and_the_java_line_first() {
+        let text = scan_text_with_messages("2.0.0", true, &[(1, "Blu-ray disc")], &[]);
+        assert_eq!(
+            text,
+            concat!(
+                r#"MSG:1005,0,1,"MakeMKV v2.0.0 win(x64-release) started","%1 started","MakeMKV v2.0.0 win(x64-release)""#,
+                "\n",
+                r#"MSG:3344,0,1,"Using Java runtime from C:\\Program Files\\Java\\bin\\java.exe","Using Java runtime from %1","C:\\Program Files\\Java\\bin\\java.exe""#,
+                "\n",
+                "CINFO:1,0,\"Blu-ray disc\"\n",
+            )
+        );
+        let scan = parse(&text);
+        assert_eq!(scan.messages[0].code, 1005);
+        assert_eq!(scan.messages[0].params, ["MakeMKV v2.0.0 win(x64-release)"]);
+        assert_eq!(scan.messages[1].code, 3344);
+        assert_eq!(scan.messages[1].params, [r"C:\Program Files\Java\bin\java.exe"]);
+        assert_eq!(
+            scan_text_with_messages("1.18.4", false, &[], &[]),
+            concat!(
+                r#"MSG:1005,0,1,"MakeMKV v1.18.4 win(x64-release) started","%1 started","MakeMKV v1.18.4 win(x64-release)""#,
+                "\n",
+            )
+        );
+    }
+
+    #[test]
+    fn tmdb_movie_json_has_the_documented_movie_fields() {
+        assert_eq!(
+            tmdb_movie_json(1417, "Pan's Labyrinth", "El laberinto del fauno", "2006-10-11", "es", Some(119)),
+            concat!(
+                r#"{"id":1417,"title":"Pan's Labyrinth","original_title":"El laberinto del fauno","#,
+                r#""release_date":"2006-10-11","original_language":"es","runtime":119,"#,
+                r#""external_ids":{"imdb_id":"tt0001417"}}"#,
+            )
+        );
+        assert_eq!(
+            tmdb_movie_json(7, "A", "A", "", "en", None),
+            concat!(
+                r#"{"id":7,"title":"A","original_title":"A","release_date":"","original_language":"en","runtime":null,"#,
+                r#""external_ids":{"imdb_id":"tt0000007"}}"#,
+            )
+        );
+    }
+
+    #[test]
+    fn tmdb_tv_json_has_the_documented_tv_fields_with_its_seasons_expanded() {
+        let text = tmdb_tv_json(
+            2316,
+            "The Office",
+            "2005-03-24",
+            "en",
+            &[(3, &[(15, "Phyllis' Wedding", Some(22)), (16, "Business School", None)]), (0, &[])],
+        );
+        assert_eq!(
+            text,
+            concat!(
+                r#"{"id":2316,"name":"The Office","original_name":"The Office","first_air_date":"2005-03-24","#,
+                r#""original_language":"en","external_ids":{"imdb_id":"tt0002316","tvdb_id":102316},"#,
+                r#""seasons":[{"season_number":3,"episode_count":2,"episodes":["#,
+                r#"{"episode_number":15,"name":"Phyllis' Wedding","runtime":22},"#,
+                r#"{"episode_number":16,"name":"Business School","runtime":null}]},"#,
+                r#"{"season_number":0,"episode_count":0,"episodes":[]}]}"#,
+            )
+        );
+    }
+
+    #[test]
+    fn search_json_writes_movie_and_tv_results_in_their_own_fields() {
+        assert_eq!(
+            search_json(&[
+                ("movie", 1417, "Pan's Labyrinth", "El laberinto del fauno", "2006-10-11"),
+                ("tv", 2316, "The Office", "The Office", "2005-03-24"),
+            ]),
+            concat!(
+                r#"{"page":1,"results":["#,
+                r#"{"media_type":"movie","id":1417,"title":"Pan's Labyrinth","#,
+                r#""original_title":"El laberinto del fauno","release_date":"2006-10-11"},"#,
+                r#"{"media_type":"tv","id":2316,"name":"The Office","original_name":"The Office","#,
+                r#""first_air_date":"2005-03-24"}"#,
+                r#"],"total_pages":1,"total_results":2}"#,
+            )
+        );
+        assert_eq!(search_json(&[]), r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#);
     }
 }

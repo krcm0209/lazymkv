@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod codec;
+pub mod disc;
 pub mod fingerprint;
 pub mod lang;
 pub mod profile;

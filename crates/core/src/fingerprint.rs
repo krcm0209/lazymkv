@@ -1,4 +1,5 @@
-//! Disc fingerprints computed from a file listing and file bytes handed in.
+//! Disc fingerprints computed from a file listing and file bytes handed in (spec 5), and the listing a TheDiscDB scan
+//! log carries in its `HSH:` lines (`hashed_files`), so a pinned log is fingerprinted the way a disc is.
 
 use md5::{Digest, Md5};
 use sha1::Sha1;
@@ -80,6 +81,29 @@ pub fn aacs_disc_id(unit_key_ro: &[u8]) -> String {
     hex_upper(Sha1::digest(unit_key_ro).as_slice())
 }
 
+/// The files of a TheDiscDB scan log's `HSH:index,name,time,size` lines, in log order: a name ending in `.m2ts` (any
+/// case) under `BDMV/STREAM`, any other under `VIDEO_TS`, so `content_hash` of them is the log's fingerprint. A line
+/// with fewer than four fields, an empty name or a size that is not a number is skipped; CRLF line ends and a leading
+/// byte-order mark are accepted. Spec 5.
+pub fn hashed_files(log: &str) -> Vec<DiscFile> {
+    log.lines()
+        .filter_map(|line| line.trim_start_matches('\u{feff}').strip_prefix("HSH:"))
+        .filter_map(|rest| {
+            let fields: Vec<&str> = rest.split(',').collect();
+            if fields.len() < 4 {
+                return None;
+            }
+            let name = fields[1].trim();
+            if name.is_empty() {
+                return None;
+            }
+            let size: u64 = fields[fields.len() - 1].trim().parse().ok()?;
+            let folder = if name.to_ascii_lowercase().ends_with(".m2ts") { "BDMV/STREAM" } else { "VIDEO_TS" };
+            Some(DiscFile { path: format!("{folder}/{name}"), size })
+        })
+        .collect()
+}
+
 fn hex_upper(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
@@ -157,5 +181,49 @@ mod tests {
     #[test]
     fn aacs_disc_id_is_the_uppercase_sha1_of_the_file() {
         assert_eq!(aacs_disc_id(b"abc"), "A9993E364706816ABA3E25717850C26C9CD0D89D");
+    }
+
+    /// TheDiscDB's John Wick UHD log and Knowing DVD log (`corpus/thediscdb`), compiled into the test binary.
+    const JOHN_WICK_LOG: &str =
+        include_str!("../../../corpus/thediscdb/movie/John Wick (2014)/4k-ultra-hd--blu-ray/disc01.txt");
+    const KNOWING_LOG: &str = include_str!("../../../corpus/thediscdb/movie/Knowing (2009)/2010-dvd/disc01.txt");
+
+    #[test]
+    fn hashed_files_reads_every_hsh_line_of_a_pinned_uhd_log_in_log_order() {
+        let files = hashed_files(JOHN_WICK_LOG);
+        assert_eq!(files, john_wick());
+        assert_eq!(content_hash(&files).as_deref(), Some("76E63EBB5B66F73B0C37BFAB59B8ABA5"));
+    }
+
+    #[test]
+    fn hashed_files_puts_a_dvds_files_under_video_ts() {
+        let files = hashed_files(KNOWING_LOG);
+        assert_eq!(files.len(), 33);
+        assert_eq!(files[0], DiscFile { path: "VIDEO_TS/VIDEO_TS.BUP".to_string(), size: 18_432 });
+        assert_eq!(files[32], DiscFile { path: "VIDEO_TS/VTS_06_1.VOB".to_string(), size: 13_287_424 });
+        assert_eq!(disc_format(&files), Some(DiscFormat::Dvd));
+        assert_eq!(content_hash(&files).as_deref(), Some("631BD77872C157D7C436E6F48F06A478"));
+    }
+
+    #[test]
+    fn hashed_files_skips_lines_it_cannot_read_and_reads_crlf_logs() {
+        let log = concat!(
+            "\u{feff}MSG:1005,0,1,\"MakeMKV v1.18.4 win(x64-release) started\",\"%1 started\",\"MakeMKV v1.18.4 win(x64-release)\"\r\n",
+            "HSH:0,00001.M2TS,1/7/2026 9:49:51 AM,1000\r\n",
+            "HSH:1,00002.m2ts,1/7/2026 9:49:51 AM,many\r\n",
+            "HSH:2,00003.m2ts\r\n",
+            "HSH:3,,1/7/2026 9:49:51 AM,7\r\n",
+            "HSH:4,VIDEO_TS.IFO,4/27/2009 11:11:53 PM, 2048 \r\n",
+            "TINFO:0,9,0,\"0:10:00\"\r\n",
+        );
+        assert_eq!(
+            hashed_files(log),
+            [
+                DiscFile { path: "BDMV/STREAM/00001.M2TS".to_string(), size: 1000 },
+                DiscFile { path: "VIDEO_TS/VIDEO_TS.IFO".to_string(), size: 2048 },
+            ]
+        );
+        assert!(hashed_files("").is_empty());
+        assert_eq!(hashed_files("\u{feff}HSH:0,00009.m2ts,1/7/2026 1:51:43 PM,2979840\n").len(), 1);
     }
 }
