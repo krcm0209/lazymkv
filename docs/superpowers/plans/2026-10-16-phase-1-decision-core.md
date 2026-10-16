@@ -25,7 +25,7 @@
 - The fixed values of spec 14 are named constants, never settings: the 3% and 15% runtime checks, the 2 s duration match (`disc::DURATION_MATCH_S`, pinned equal to `reconcile::DURATION_TOLERANCE_S`), the 10% full-track share and the 150-event forced limit, the 256 kb/s guard G1, the 768 kb/s and 1.5 Mb/s tier thresholds, the 10% rival band and 0.25 segment difference of 8.3, the 45-minute `feature_min_minutes` default, the 15 to 120 minute episode band and 15% spread of 8.2, the 1% DVD duration band of 6.2, the 255-byte, 90-character and 32-character caps of 8.9 and 8.4, the 64-byte `sub_clear_max_bytes` default, the 5% and 2% space margins of section 7, the 10-minute and hourly retry waits of 10.1.
 - Settings (spec 14) are one `core::settings::Settings` struct with the spec's defaults; every pure rule takes `&Settings` by reference and reads only the keys it needs.
 - Every public item has a `///` doc saying what it is and the spec section it implements; every file starts with a `//!` paragraph naming its spec sections. Prose: plain sentences, no em-dashes, acronyms expanded at first use.
-- Tests: unit tests in `#[cfg(test)] mod tests` at the bottom of the file, or a sibling `tests.rs` for a module above about 900 lines; test names in snake_case that read as sentences. Tests that read the evidence clone (`corpus/owner`) live in `crates/dev/tests/` (Task 2's `disc_model.rs`, Task 3's `lookup_answers.rs`, Task 12's `verify.rs`, Task 15's `plan.rs`, Task 16's `decide.rs`, Task 18's `retune_subtitles.rs`) and print `skipped: <reason>` through `lazymkv_dev::evidence::skip` and pass when it is absent, never silently and never failing for a missing input (core cannot call the dev crate: dev depends on core). `core`'s unit tests read only `corpus/thediscdb`, `corpus/thediscdb-api` and synthetic inputs; those always run.
+- Tests: unit tests in `#[cfg(test)] mod tests` at the bottom of the file, or a sibling `tests.rs` for a module above about 900 lines (counting the module's code; Task 3's `lookup/discdb.rs` and Task 5's `plan/movie.rs` keep their tests in-file by design); test names in snake_case that read as sentences. Tests that read the evidence clone (`corpus/owner`) live in `crates/dev/tests/` (Task 2's `disc_model.rs`, Task 3's `lookup_answers.rs`, Task 12's `verify.rs`, Task 15's `plan.rs`, Task 16's `decide.rs`, Task 17's `labels_subtitles.rs`, Task 18's `retune_subtitles.rs`) and print `skipped: <reason>` through `lazymkv_dev::evidence::skip` and pass when it is absent, never silently and never failing for a missing input (core cannot call the dev crate: dev depends on core). `core`'s unit tests read only `corpus/thediscdb`, `corpus/thediscdb-api` and synthetic inputs; those always run.
 - Synthetic TMDb fixtures follow TMDb's documented shapes (`/search/multi`, `/movie/{id}`, `/tv/{id}`, `/tv/{id}/season/{n}`) since no search answer or full record is recorded; the plan says so where they are used, and phase 2's client verifies the shape live.
 - One commit per task; the message only, no attribution line; the executor commits with the owner's signing configuration and checks `git log -1 --format='%G? %an <%ae> %cn <%ce>%n%B'` for `G` and `krcm0209 <17315774+krcm0209@users.noreply.github.com>`.
 - Nothing under `corpus/owner/` is ever written by a test or a command of this plan (the evidence clone is read-only here); nothing under the repository is written by the plan's authoring.
@@ -100,7 +100,7 @@ The rulings RP10 to RP20 were made with the plan's brief (RP15 is written here a
 | `crates/core/src/verify.rs` | Spec 6.2 step 7 and 6.4 step 14, RP11: `selected_streams`, `expected_tracks`, `caption_first`, `verify_rip`, `verify_final`, `VerifyReport`, `duration_ok`, `ReadError`, `read_errors`, `stream_of_track`, `subs_streams`, `subtitle_events`, `by_scan_stream`, `failure_reviews`. |
 | `crates/core/src/decision.rs` | Spec 6.4 step 11, 8.8 and 11 "Remember": `decide`, `DecisionInputs`, `FileDecision`, `Confidences`, `Disposition`, `disposition`, `track_confidence`, `remember`. |
 | `crates/core/src/job.rs` and `job/tests.rs` | Spec 5 (job ID), 6.1 step 2 (job lookup), 10.1, 10.2, 12 (notification events), RP12: `State`, `Held`, `Event`, `Action`, `NotifyEvent`, `WaitReason`, `Tool`, `FailureClass`, `OutputCause`, `Failure`, `reduce`, `new_job`, `resume`, `failure_outcome`, `classify_title_failure`, `job_id`, `job_lookup`. |
-| `crates/core/src/subtitle/labels.rs` (new), `crates/core/src/subtitle/mod.rs` (modify) and `crates/core/src/audio/labels.rs` (modify, Task 17: `read_value`, `get`, `repr_of`, `sorted_list`, `is_stream_number`, `track_sort_key` become `pub(crate)`) | Task 17, RP15: the subtitle labels file (`lazymkv subtitle labels v1`), its kinds and sources, validation and edits reusing `audio::labels` where shared. Task 18: row 14's requirements, the costly verdicts and the subtitle harness. |
+| `crates/core/src/subtitle/labels.rs` (new), `crates/core/src/subtitle/mod.rs` (modify) and `crates/core/src/audio/labels.rs` (modify, Task 17: `read_value`, `get`, `repr_of`, `track_sort_key` become `pub(crate)`; the validation blocks shared with the subtitle labels move into `pub(crate)` helpers (`head_problems`, `removed_problems`, `base_entry_problems`, `history_problems`, `names`) and the public `labels_check_lines`, with the audio output unchanged) | Task 17, RP15: the subtitle labels file (`lazymkv subtitle labels v1`), its kinds and sources, validation and edits reusing `audio::labels` where shared. Task 18: row 14's requirements, the costly verdicts and the subtitle harness, in `subtitle/labels/row14.rs` with its tests in `subtitle/labels/row14/tests.rs`. |
 | `crates/core/src/testsupport/mod.rs` (modify) | Adds the scan builders and TMDb fixture builders the tests of Tasks 3 to 16 share (`scan_text`, `scan_text_with_messages`, `tmdb_movie_json`, `tmdb_tv_json`, `search_json`). |
 | `crates/dev/src/cmd/plan.rs` | RP14: `lazymkv-dev plan <slug|recording dir|scan file> [--evidence DIR] [--settings FILE] [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE]`: reads the recording's or the pinned log's inputs, calls `plan::plan`, prints `PlanDoc`. |
 | `crates/dev/src/cmd/decide.rs` (modify) | RP14: `DecideDoc` gains `plan: PlanEntry` and `decision: DecisionEntry` after `reviews`; `decision_doc` maps the rip's files onto the scan's streams through `verify` and calls `decision::decide`; `decide` takes `--settings FILE` (spec 14) for both sections (Task 16 also adds `RecordedAnswers` and `recorded_answers` to `cmd/plan.rs` and the flag to the `decide` row of `COMMANDS`). |
@@ -111,7 +111,7 @@ The rulings RP10 to RP20 were made with the plan's brief (RP15 is written here a
 | `crates/dev/tests/verify.rs` | Task 12: `verify_rip`, `read_errors` and the subtitle-stream mapping over the recordings' `mkvmerge.json`, `rip.txt` and `subs/index.json` (skips without the clone). |
 | `crates/dev/tests/plan.rs` | Task 15: the command over the nine pinned logs (always run) and the four recordings (skip without the clone), with the expectations of "Expected plans" below. |
 | `crates/dev/tests/decide.rs` (modify) | Task 16: adds the `plan` and `decision` section checks per recording (including the Office's twin tracks dropped as duplicates by MD5) and keeps the four golden comparisons unchanged. |
-| `crates/dev/tests/labels_subtitles.rs` | Task 17: `labels --subtitles` over a synthetic recording. |
+| `crates/dev/tests/labels_subtitles.rs` | Task 17: `labels --subtitles` over a synthetic recording, and `check` over the evidence clone (skips without it). |
 | `crates/dev/tests/retune_subtitles.rs` | Task 18: the subtitle harness over the evidence clone (skips without it) and over a synthetic recording (always runs). |
 | `README.md`, `docs/superpowers/specs/2026-10-04-lazymkv-design.md` (section 16 row 1 and section 15's `retune` sentence), `docs/superpowers/specs/2026-10-13-rust-port-design.md` (section 3.4: the `plan` row after `decide`), `docs/phase1/decision-core.md` (new) | Task 19: status, how to run `plan`, `decide`, `labels --subtitles`, `retune --subtitles`, the test count. |
 
@@ -121,10 +121,10 @@ The rulings RP10 to RP20 were made with the plan's brief (RP15 is written here a
 |---|---|---|---|---|
 | 1 | Settings, review sets, codec table, wanted languages | `settings.rs`, `review.rs`, `codec.rs`, `tracks/mod.rs`, `lang.rs`, `lib.rs` | 14, 7, 8.8, 8.6 "Languages" and "Codecs", 8.7 and 8.10 (roles), 9.4 | every default and its validation (`Settings::default().validate()` is exactly the `tuning_root` problem); a settings file naming one key keeps every other default; an unknown key is refused naming it; `from_json` returns `validate`'s problems beside the settings (RP22); `text_rule` of the defaults equals `text::Rule::default()`; `path_inside` cases; every codec row (VC-1 by attribute 5 alone, RP26), tier and bitrate parse; `mkvmerge_names`; `wanted_languages` for en, es, cn, xx, None; every review reason and note spelling round-trips |
 | 2 | Disc model, title matching and bdmt reader | `disc.rs`, `fingerprint.rs`, `testsupport/mod.rs`, `lib.rs`, `crates/core/tests/thediscdb_corpus.rs`, `crates/dev/tests/disc_model.rs` | 9.4, 9.5, 5, 6.1 step 2, 6.3 step 8, 8.3 first paragraph | typed attributes over the nine pinned logs in core (counts, durations, sizes, flags, DVD detection, Java, version) and over every evidence `scan.txt` in `disc_model.rs`; `Flags` bit tests including unknown bits and `Flags::DERIVED as i64 == audio::labels::DERIVED`; `DURATION_MATCH_S as i64 == reconcile::DURATION_TOLERANCE_S`; `segment_maps_agree` with truncation; `same_source` on a Blu-ray and a DVD (`"01"` equals `"1"`); `same_scan_title`; `hashed_files` keeps `content_hash_matches_every_pinned_thediscdb_log` passing; `bdmt_name` on a synthetic bdmt file of the recorded form (byte-order mark, CRLF, made-up `Example Film`; RP21) in core and on the recorded `bdmt_eng.xml` in `disc_model.rs`, and on a DVD (none); `bdmt_candidates` |
-| 3 | Lookup answers: TheDiscDB and TMDb | `lookup/{mod,discdb,tmdb}.rs`, `lookup/tests.rs`, `recording/files.rs`, `lib.rs`, `crates/dev/tests/lookup_answers.rs` | 8.1 (answer shapes, last bullet), 8.3 first paragraph | the 18 API answers and the 2 recorded ones parse; the six pinned `disc01.json`/`disc02.json` parse through the same types, with their disc number from the top-level `Index`; an unknown `item.type` reads as `Unknown`; `parse_dischash` returns None for an empty body and a non-hit; `same_title` and `match_titles` with truncation, and `a_dvd_title_matches_thediscdb_by_its_attribute_24` (Knowing: database index 0 matches scan title 0); the TMDb parsers over the synthetic `/movie`, `/tv`, `/tv/{id}/season/{n}` and `/search/multi` fixtures and over the slim `tmdb.json` |
+| 3 | Lookup answers: TheDiscDB and TMDb | `lookup/{mod,discdb,tmdb}.rs`, `lookup/tests.rs`, `recording/files.rs`, `lib.rs`, `crates/dev/tests/lookup_answers.rs` | 8.1 (answer shapes, last bullet), 8.3 first paragraph | the 18 API answers and the 2 recorded ones parse; the nine pinned `discNN.json` files parse through the same types, with their disc number from the top-level `Index`; an unknown `item.type` reads as `Unknown`; `parse_dischash` returns None for an empty body and a non-hit; `same_title` and `match_titles` with truncation, and `a_dvd_title_matches_thediscdb_by_its_attribute_24` (Knowing: database index 0 matches scan title 0); the TMDb parsers over the synthetic `/movie`, `/tv`, `/tv/{id}/season/{n}` and `/search/multi` fixtures and over the slim `tmdb.json` |
 | 4 | Disc names and identification | `lookup/{mod,name}.rs` | 8.1 (every step and bullet) | name cleaning on the thirteen recorded and pinned names (`JOHN_WICK_UHD`, `JOHN_WICK`, `KNOWING`, `SMILE`, `EXPENDABLES_3`, `CHERNOBYL_D1`, `CHERNOBYL_D2`, `FIREFLY_D1`, `FIREFLY_D2`, `PANS_LABYRINTH`, `THE OFFICE S3D3`, `SHORT_CIRCUIT`, `DVD_VIDEO`; `DVD_VIDEO` generic; `CHERNOBYL_D1` gives disc 1 and no season); plausibility; both runtime checks at their 3% and 15% edges; the runtime check of the result's own kind; the confidence table including the 0.84 cap; every description kind including `Dialogue`; Review Focus 2 |
 | 5 | Disc kind and movie titles | `plan/{mod,kind,movie}.rs`, `lib.rs` | 8.2, 8.3 rules 1 to 4, 8.4 | candidate filter on each pinned log; grouping including Review Focus 1; TV detection by structure and by season marker; the label table (every suffix row); rule 1 needing every MainMovie to reconcile; `expendables_main_movie_takes_its_edition_from_the_label_table`; structure rules 3.1 to 3.7 with their confidences and review reasons; rule 4; the three edition-naming rules |
-| 6 | TV titles, season sessions, remembered and review decisions | `plan/tv.rs`, `plan/mod.rs` (`pub mod tv;`), `remembered.rs`, `lib.rs` | 8.5, 5, 11 | TheDiscDB-mapped episodes on Chernobyl d1 and d2, Firefly d1 and d2 (DVD, matched by attribute 24; `firefly_disc_2_maps_title_5_to_episode_7`) and the Office (E12-13 as one multi-episode title, E14 to E18; its answer is in the evidence clone, so core tests a synthetic record of its shape and Task 15's `tests/plan.rs` the recorded one); play-all dropped; an Episode item that matches no scan title leaves the disc unmapped; `tv_unmapped` with suggestions by runtime (a double-length title takes two episodes) and one each without runtimes; an unknown season stays None; `find`, `suggest`, `assign` (episode, title pairs), `close`; title match within 2 s and Review Focus 1's DVD case; overrides keyed by signature; `a_remembered_file_round_trips_through_json`; `Overrides` (lists of entries sorted by title, or by title then stream, and their lookups) round-trips |
+| 6 | TV titles, season sessions, remembered and review decisions | `plan/tv.rs`, `plan/mod.rs` (`pub mod tv;`), `remembered.rs`, `lib.rs` | 8.5, 5, 11 | TheDiscDB-mapped episodes on Chernobyl d1 and d2, Firefly d1 and d2 (DVD, matched by attribute 24; `firefly_disc_2_maps_title_5_to_episode_7`) and the Office's shape (one two-episode title, and a deleted-scenes item carrying the same two episodes; its answer is in the evidence clone, so core tests a made-up disc of that shape (RP21) and Task 15's `tests/plan.rs` the recorded one); play-all dropped; an Episode item that matches no scan title leaves the disc unmapped; `tv_unmapped` with suggestions by runtime (a double-length title takes two episodes) and one each without runtimes; an unknown season stays None; `find`, `suggest`, `assign` (episode, title pairs), `close`; title match within 2 s and Review Focus 1's DVD case; overrides keyed by signature; `a_remembered_file_round_trips_through_json`; `Overrides` (lists of entries sorted by title, or by title then stream, and their lookups) round-trips |
 | 7 | The planner | `plan/mod.rs` (fills `plan`; `lib.rs` unchanged) | 6.1 step 5, 5 (title keys), 7 (space), 8.8 planning-time rules, 11 (overrides) | one expectation test per pinned log (nine, from "Expected plans"): identity step, kind, titles and their order, mode, confidences, reviews; Review Focus 6; a remembered decision and a review override set the confidences they cover to 1.00; `title_key` on Blu-ray and DVD; `staging_bytes_needed` for both modes |
 | 8 | Audio tracks | `tracks/audio.rs`, `tracks/audio/tests.rs`, `tracks/mod.rs` (`pub mod audio;`) | 8.6 steps 1 to 6, "Content", D13, D15, D21, RP7 | every drop bullet; keep; every rank criterion and the `prefer_most_channels` swap; G1 and G2; order and flags under both `original_language_first` values; every note and gap; description alignment (full, without derived, both, neither) over Knowing's and Smile's pinned `disc01.json` against their logs; duplicate by MD5 on a synthetic copy of the Office's twin tracks; verdict mapping per RP7; a verdict reference other than the decision's reference raises `audio_reference_unclear`; 0.95, and 1.00 when every stream is overridden |
 | 9 | Subtitle evidence and the dialogue group | `tracks/subtitle.rs`, `tracks/subtitle/tests.rs`, `tracks/mod.rs` (`pub mod subtitle;`) | 8.7 "Set aside first", "Events", "Alignment", "Dialogue group", D20 | every set-aside bullet; events and the 10% full rule; the three alignment bands; each dialogue-group pick in order (one full, forced parent, described, largest, none); Review Focus 4 |
@@ -135,8 +135,8 @@ The rulings RP10 to RP20 were made with the plan's brief (RP15 is written here a
 | 14 | Job reducer | `job.rs`, `job/tests.rs`, `lib.rs` | 5 (job ID), 6.1 step 2, 10.1, 10.2, 12 | one test per row of the reducer table (main line, transitions, waiting states and their returns, failures); per resume rule; per failure class outcome; `retry_is_rejected_for_a_drive_incapable_failure`; `reinserting_the_disc_resumes_only_a_media_read_error`; each tool's ToolMissing; `classify_title_failure`; `the_first_job_of_a_fingerprint_is_numbered_1`; `a_discarded_job_starts_a_new_one`; every `job_lookup` case |
 | 15 | `lazymkv-dev plan` | `cmd/plan.rs`, `cmd/mod.rs`, `cmd/hit_rate.rs` (its four answer words made `pub(crate)`), `lib.rs`, `tests/plan.rs` | RP14, port spec 3.4 | the command over a slug, a recording directory and a bare pinned scan file; exit codes; `PlanDoc` key order; the per-pinned-log and per-recording expectations of "Expected plans"; an absent lookup file is not an error |
 | 16 | The `decide` extension | `cmd/decide.rs`, `cmd/plan.rs` (`recorded_answers`), `lib.rs` (the `decide` row), `tests/decide.rs` | RP14, 6.4 step 11 | `decide`'s goldens unchanged with the two new sections present; `plan` and `decision` per recording and label; a skipped section; the Office's twin tracks dropped as duplicates by MD5 |
-| 17 | Subtitle labels and `labels --subtitles` | `subtitle/labels.rs`, `subtitle/mod.rs`, `audio/labels.rs` (visibility of six helpers only), `cmd/labels.rs`, `lib.rs`, `tests/labels_subtitles.rs` | RP15, 15 | the labels file's validation sentences; `set`, `unset`, `check` |
-| 18 | `retune --subtitles` | `subtitle/labels.rs`, `cmd/retune.rs`, `lib.rs`, `tests/retune_subtitles.rs` | RP15, 17 row 14, 8.7 "Text" | row 14 read from the spec text; each costly verdict; exit 1 on one; the count-per-kind report; the harness over a synthetic recording and over the clone |
+| 17 | Subtitle labels and `labels --subtitles` | `subtitle/labels.rs`, `subtitle/mod.rs`, `audio/labels.rs` (four helpers made `pub(crate)`; the blocks shared with the subtitle labels moved into helpers, output unchanged), `cmd/labels.rs`, `lib.rs`, `tests/labels_subtitles.rs` | RP15, 15 | the labels file's validation sentences; `set`, `unset`, `check` |
+| 18 | `retune --subtitles` | `subtitle/labels.rs`, `subtitle/labels/row14.rs`, `subtitle/labels/row14/tests.rs`, `cmd/retune.rs`, `lib.rs`, `tests/retune_subtitles.rs` | RP15, 17 row 14, 8.7 "Text" | row 14 read from the spec text; each costly verdict; exit 1 on one; the count-per-kind report; the harness over a synthetic recording and over the clone |
 | 19 | Documents | `README.md`, the design spec (section 16 row 1, section 15), the port spec (section 3.4), `docs/phase1/decision-core.md` | 16, 15, port spec 3.4 | none (the test count is read from `cargo test --workspace -- --list` and written into the document) |
 
 ---
@@ -443,7 +443,7 @@ impl Wanted {
     /// A stream's code is one of the original language's codes. Def: T1. Use: T8.
     pub fn is_original(&self, code: &str) -> bool;
 }
-/// "eng" or "en". Def: T1. Use: T8, T9, T10, T11.
+/// "eng" or "en". Def: T1. Use: T8, T9, T11 (T10 reaches it through T9's english_or_none).
 pub fn is_english(code: &str) -> bool;
 /// `NO_LANGUAGE.contains(code)` after lower-casing; None counts as no language. Def: T1. Use: T8, T9.
 pub fn is_no_language(code: Option<&str>) -> bool;
@@ -452,13 +452,13 @@ pub fn is_no_language(code: Option<&str>) -> bool;
 ### `core::disc` (Task 2)
 
 ```rust
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
 impl StreamKind { pub fn as_str(self) -> &'static str; pub fn from_attr(text: &str) -> Option<StreamKind>; }
 
-/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T12.
+/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T10, T12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Flags(pub u32);
 impl Flags {
@@ -572,7 +572,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -1138,7 +1138,9 @@ pub struct Group {
 /// The groups of `candidates`, in order of first title. Def: T5. Use: T5, T6, T7.
 pub fn groups(disc: &Disc, candidates: &[u32]) -> Vec<Group>;
 
+/// Spec 8.2: the shortest episode length, 15 minutes, included.
 pub const EPISODE_MIN_S: u32 = 15 * 60;
+/// Spec 8.2: the longest episode length, 120 minutes, included.
 pub const EPISODE_MAX_S: u32 = 120 * 60;
 pub const TV_SPREAD: f64 = 0.15;
 /// The groups lasting between 15 and 120 minutes inclusive, in group order. Def: T5. Use: T5, T6, T7 (fills RuntimeFacts.episode_group_seconds).
@@ -1176,9 +1178,13 @@ pub fn parse_label(title: u32, comment: &str) -> Option<Label>;
 /// None (ignored or a variant), Other gives None (an unnamed cut). Def: T5. Use: T5.
 pub fn edition_of(suffix: &Suffix) -> Option<&'static str>;
 
+/// Spec 8.3 rule 1: the disc database names the title, 0.98.
 pub const DATABASE_TITLE_CONFIDENCE: f64 = 0.98;
+/// Spec 8.3 rule 2: exactly one cut, or two or more cuts with different recognised suffixes, 0.90.
 pub const LABELS_TITLE_CONFIDENCE: f64 = 0.90;
+/// Spec 8.3 rule 3.5: one rival, which is the feature, 0.85.
 pub const STRUCTURE_TITLE_CONFIDENCE: f64 = 0.85;
+/// Spec 8.3: every ambiguous outcome (an unnamed cut, an ambiguous group, several rivals), 0.60.
 pub const AMBIGUOUS_TITLE_CONFIDENCE: f64 = 0.60;
 pub const RIVAL_BAND: f64 = 0.10;
 pub const SEGMENT_DIFFERENCE_MAX: f64 = 0.25;
@@ -1271,7 +1277,7 @@ pub fn edition_names(features: &[Feature], facts: &LibraryFacts) -> Vec<Option<S
 pub const THEATRICAL_CUT: &str = "Theatrical Cut";
 /// An edition name that names the theatrical or main cut (8.4): none at all, or a name containing the word Theatrical
 /// (ignoring ASCII case), such as TheDiscDB's "Theatrical Version". The one test of "theatrical" for every rule and caller.
-/// Def: T5. Use: T5, T7, T13.
+/// Def: T5. Use: T5, T13.
 pub fn is_theatrical(edition: Option<&str>) -> bool;
 ```
 
@@ -1311,6 +1317,9 @@ pub struct TvPlan {
 /// matches no scan title (as Open point 4 for MainMovies), or when a reconciled Episode item on a title that is not
 /// play-all names no episode number (D1); plan::plan then plans the disc as unmapped. Def: T6. Use: T7.
 pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[Group], dvd: bool) -> Option<TvPlan>;
+/// 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1, `kind::play_all`, found again until none is;
+/// never on a DVD) is removed. Returns the remaining groups and the dropped titles, sorted. Def: T6. Use: T6, T7.
+pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>);
 /// Spec 8.5 "pre-assigned to episodes by runtime as a suggestion": the groups' representatives in title order, assigned
 /// from episode `start`: each takes the next episode, or the next two when its duration is within TV_RUNTIME_TOLERANCE of
 /// the sum of the next two episodes' runtimes and not within it of the next one's; an episode without a runtime takes one
@@ -1490,7 +1499,7 @@ pub fn title_key(order: usize, title: &Title, dvd: bool) -> String;
 /// Spec 11's Assign titles as a feature for 8.4's `edition_names`: `Feature` is the theatrical or main cut (no edition),
 /// `Cut { edition }` a feature with the owner's name, theatrical when `movie::is_theatrical` says so; None for episodes and
 /// Ignored. The one copy of this mapping (Task 13 moves it out of Task 7's `assigned_entries`, which then calls it).
-/// Def: T13. Use: T7 (`assigned_entries`), T13.
+/// Def: T13. Use: T13 (`decision::decide`, `job_features`, and Task 7's `assigned_entries` as Task 13 rewrites it).
 pub(crate) fn assigned_feature(number: u32, role: &TitleRole) -> Option<Feature>;
 
 /// A planned title's role (the planner's view; remembered::TitleRole is the stored one). Def: T7. Use: T11, T13, T15.
@@ -1592,10 +1601,11 @@ pub struct PlanInputs<'a> {
 /// the disc has no title at all. Def: T7. Use: T15.
 pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String>;
 
-/// Spec 7 "Space checks": the planned titles' sizes plus 5% before a Direct rip, the disc size plus 2% before a copy, the
-/// files to be written plus 5% before extraction or remux. Def: T7. Use: phase 2.
+/// Spec 7 "Space checks": 5% over the planned titles' sizes before a Direct rip. Def: T7. Use: phase 2.
 pub const DIRECT_SPACE_MARGIN: f64 = 0.05;
+/// Spec 7 "Space checks": 2% over the disc size before a whole-disc copy. Def: T7. Use: phase 2.
 pub const COPY_SPACE_MARGIN: f64 = 0.02;
+/// Spec 7 "Space checks": 5% over the files to be written before extraction or remux. Def: T7. Use: phase 2.
 pub const WRITE_SPACE_MARGIN: f64 = 0.05;
 /// Bytes needed on staging for the plan's mode: Direct, the sum of `PlannedTitle.size` (a title without a size counts 0)
 /// times 1.05; Copy, `disc_size` times 1.02; rounded up. Def: T7. Use: phase 2.
@@ -1666,7 +1676,7 @@ pub struct AudioTrack {
 pub const AUDIO_CONFIDENCE: f64 = 0.95;
 pub const G1_MAX_KBPS: u32 = 256;
 
-/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T9.
+/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T10, T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment { Full, WithoutDerived }
@@ -1722,7 +1732,7 @@ pub fn guards(ranked: Vec<AudioTrack>, settings: &Settings) -> Vec<AudioTrack>;
 /// (`DiscDbTrack::channels` against attribute 14, audio only); tried on all streams and on the streams without flag 2048;
 /// Some only when exactly one of the two aligns completely (equal lengths, every pair equal). A title without derived
 /// streams has one list, tried once (Full when it aligns); an empty TheDiscDB track list never aligns. The map is scan
-/// stream number to TheDiscDB track index. Def: T8. Use: T8, T9.
+/// stream number to TheDiscDB track index. Def: T8. Use: T8.
 pub fn align_descriptions(title: &Title, discdb: &DiscDbTitle) -> Option<(Alignment, BTreeMap<u32, u32>)>;
 /// Every scan stream (any kind) whose aligned TheDiscDB track has a description, to `lookup::description_kinds(description,
 /// track.language)`; with the alignment used. Empty and None without a record or without a unique alignment. Def: T8. Use: T8, T9, T10.
@@ -1897,7 +1907,9 @@ pub fn decide_subtitles(title: &Title, facts: &SubtitleFacts<'_>, settings: &Set
 /// 8.7 "Text": the streams where a text decision differs from the counts, for any English or no-language stream: its
 /// role (Regular, Sdh, Forced, Drop) differs from the kept role (or kept against a Drop, or dropped against a kept
 /// role). SetAside never disagrees; Keep, and any verdict carrying the text rule's review, always disagree
-/// (text::before_yes's reading: text::decide writes Keep only with its own review). Def: T10. Use: T10, T18.
+/// (text::before_yes's reading: text::decide writes Keep only with its own review).
+/// The public form of the rule's text check, which decide_subtitles reaches through the private `disagreements`; kept
+/// for phase 2's review view. Def: T10. Use: T10.
 pub fn text_disagreements(decision: &SubtitleDecision, text: &BTreeMap<u32, crate::subtitle::text::Decision>) -> Vec<u32>;
 ```
 
@@ -2047,6 +2059,10 @@ pub fn removed_scan_streams(rip_log: Option<&str>, selection: &[u32]) -> BTreeSe
 /// subs/index.json's `n` to the scan stream, through each entry's `track_id` and `stream_of_track`; entries without a
 /// track_id or a pair are left out. Def: T12. Use: T16, T18.
 pub fn subs_streams(index: &[SubsIndexEntry], report: &VerifyReport) -> BTreeMap<i64, u32>;
+/// subs_dir/index.json as `align::index_streams` reads it (UTF-8 with a byte-order mark allowed, invalid bytes
+/// replaced); Err is the read error's text or "<path>: <serde error>". The one reading `subtitle_events` and decide's
+/// text decisions share. Def: T12. Use: T12, T16.
+pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEntry>, String>;
 /// `align::events` of every subs/index.json entry under `subs_dir` (packets through `align::load_packets`), keyed by scan
 /// stream (`subs_streams`): `clear_max_bytes` for image codecs, 0 where `align::is_text`. Def: T12. Use: T16, T18.
 pub fn subtitle_events(tree: &dyn Tree, subs_dir: &PathKey, report: &VerifyReport, clear_max_bytes: i64) -> Result<BTreeMap<u32, Vec<f64>>, String>;
@@ -2072,6 +2088,8 @@ pub enum Disposition { AutoFile, NeedsReview }
 /// Everything 6.4 step 11 decides from. Def: T13. Use: T16.
 pub struct DecisionInputs<'a> {
     pub plan: &'a Plan,
+    /// The scan the plan was made from: the owner's Assign titles leaves out a title it lacks, as a re-plan does (Open point 32).
+    pub disc: &'a Disc,
     pub planned: &'a PlannedTitle,
     pub title: &'a Title,
     pub audio: AudioFacts<'a>,
@@ -2132,7 +2150,7 @@ pub fn disposition(confidences: &Confidences, reviews: &[ReviewReason], settings
 pub fn track_confidence(audio: &AudioDecision, subtitles: &SubtitleDecision) -> f64;
 /// Spec 11 "Remember": the decisions of a reviewed job as a remembered-decisions file: the identity
 /// (overrides.identity, else plan.identity.tmdb; Err without one), the titles as RememberedTitles (source file, attribute
-/// 24, segment map, seconds and role): the owner's Assign titles whole, in title order (Ignored included), when it names
+/// 24, segment map, seconds and role): the owner's Assign titles whole, in title order (Ignored included, a title the scan lacks left out), when it names
 /// any title, else every planned title under its planned role (Err for an episode without a season or episode numbers,
 /// and for a feature without an edition in a plan of two or more features: an unnamed cut or structural rival the owner
 /// must name first, 8.4), every kept and dropped audio and subtitle stream of `decisions` as an override entry keyed by
@@ -2173,16 +2191,17 @@ impl Tool { pub fn as_str(self) -> &'static str; pub const ALL: [Tool; 5]; }
 #[serde(rename_all = "snake_case")]
 pub enum Held { AfterCopy, DispositionGate }
 
-/// 10.1's states. `Planned` carries the mode the plan chose; `Ejected` whether it follows a whole-disc copy (then the job is
-/// held next, 6.3 step 7) or a Direct rip (then it waits for the file-phase slot, spec 6); waiting states carry the state they
-/// return to; Failed carries its class and the state that failed. Disc-phase states: Detected, Fingerprinted, Scanned,
-/// Planned, Ripping, Copying, RipVerified. File-phase states: Ejected, Extracting, Inspecting, Decided, Remuxing, Verified.
+/// 10.1's states. `Planned` carries the mode the plan chose; `RipVerified` and `Ejected` whether they follow a whole-disc
+/// copy (then the job is held next, 6.3 step 7) or a Direct rip (then it waits for the file-phase slot, spec 6); waiting
+/// states carry the state they return to; `Decided` whether the owner approved the job (8.8); Failed carries its class
+/// and the state that failed. Disc-phase states: Detected, Fingerprinted, Scanned, Planned, Ripping, Copying,
+/// RipVerified. File-phase states: Ejected, Extracting, Inspecting, Decided, Remuxing, Verified.
 /// Def: T14. Use: T14, phase 2.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state")]
 pub enum State {
-    Detected, Fingerprinted, Scanned, Planned { mode: Mode }, Ripping, Copying, RipVerified, Ejected { after_copy: bool },
-    Inspecting, Decided, Remuxing, Verified, Filed,
+    Detected, Fingerprinted, Scanned, Planned { mode: Mode }, Ripping, Copying, RipVerified { after_copy: bool }, Ejected { after_copy: bool },
+    Inspecting, Decided { approved: bool }, Remuxing, Verified, Filed,
     NeedsReview { held: Held }, Extracting,
     AwaitingShare { return_to: Box<State> }, AwaitingSpace { return_to: Box<State> }, AwaitingMakeMkv { return_to: Box<State> },
     AwaitingNetwork { return_to: Box<State> }, AwaitingLookup { return_to: Box<State> }, AwaitingTool { return_to: Box<State> },
@@ -2275,9 +2294,10 @@ pub fn new_job() -> (State, Vec<Action>);
 /// (new state, actions) for every row of the reducer table below; every other pair is Rejected. Def: T14. Use: phase 2.
 pub fn reduce(state: &State, event: &Event) -> Result<(State, Vec<Action>), Rejected>;
 /// "Resuming after a restart" (and the actions of a waiting state's return): Detected [Fingerprint]; Fingerprinted
-/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided [Decide] (Decided may be entered with Decide pending, after
-/// approval or re-finalise); Ripping [EmptyTitleDirectory, RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle];
-/// Copying [EmptyCopyDirectory, CopyDisc]; RipVerified [Eject]; Inspecting [Probe]; Remuxing [DeletePartialFile, Remux];
+/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided { .. } [Decide] (Decided { approved: true } may be entered
+/// with Decide pending, after approval or re-finalise; Decided { approved: false } decides again too, and is gated
+/// again on NeedsReview); Ripping [EmptyTitleDirectory, RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle];
+/// Copying [EmptyCopyDirectory, CopyDisc]; RipVerified (either after_copy) [Eject]; Inspecting [Probe]; Remuxing [DeletePartialFile, Remux];
 /// Verified [File]; Ejected nothing (it waits for FilePhaseSlot or HoldForReview); a disc-phase state with `disc_present`
 /// false [WaitForDisc]; waiting, held, failed, filed and discarded states nothing, except AwaitingNetwork
 /// [StartTimer { minutes: NETWORK_RETRY_MIN }] and AwaitingLookup [StartTimer { minutes: LOOKUP_RETRY_MIN }]. The state is
@@ -2322,20 +2342,20 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `Ripping` | `TitleRipped` | `Ripping` | `[VerifyFile]` |
 | `Ripping` | `TitleVerified { last: false }`, or `TitleVerifyFailed { second: true, last: false }` | `Ripping` | `[RipTitle]` (the next title) |
 | `Ripping` | `TitleVerifyFailed { second: false, .. }` | `Ripping` | `[RipTitle]` (the same title again, 6.2 step 7) |
-| `Ripping` | `TitleVerified { last: true }`, or `TitleVerifyFailed { second: true, last: true }` | `RipVerified` | `[Eject]` |
-| `RipVerified` | `Ejected` | `Ejected { after_copy: false }` | `[Notify { DiscDone }]` |
-| `RipVerified` | `EjectFailed` | `Ejected { after_copy: false }` | `[Notify { EjectFailed }]` (the disc phase is over; the disc is removed by hand, 10.3, 12) |
+| `Ripping` | `TitleVerified { last: true }`, or `TitleVerifyFailed { second: true, last: true }` | `RipVerified { after_copy: false }` | `[Eject]` |
+| `RipVerified { after_copy: false }` | `Ejected` | `Ejected { after_copy: false }` | `[Notify { DiscDone }]` |
+| `RipVerified { after_copy: false }` | `EjectFailed` | `Ejected { after_copy: false }` | `[Notify { EjectFailed }]` (the disc phase is over; the disc is removed by hand, 10.3, 12) |
 | `Ejected { after_copy: false }` | `FilePhaseSlot` | `Inspecting` | `[Probe]` |
 | `Inspecting` | `ProbeDone` | `Inspecting` | `[ExtractSubtitleEvidence, Decide]` (performed in order) |
-| `Inspecting` | `DecisionDone { AutoFile, .. }` | `Decided` | `[CheckSpace]` |
+| `Inspecting` | `DecisionDone { AutoFile, .. }` | `Decided { approved: false }` | `[CheckSpace]` |
 | `Inspecting` | `DecisionDone { NeedsReview, reasons }` (10.1 "Decided, review reason or low confidence") | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
-| `Decided` | `SpaceOk` | `Remuxing` | `[Remux]` |
+| `Decided { .. }` | `SpaceOk` | `Remuxing` | `[Remux]` |
 | `Remuxing` | `RemuxDone` | `Remuxing` | `[VerifyFile]` |
 | `Remuxing` | `FileVerified` | `Verified` | `[File]` |
 | `Verified` | `FileDone` | `Filed` | `[Notify { Filed }]` |
-| `Copying` | `CopyDone { scan_listed_titles: true, .. }` | `Copying` | `[Eject]` |
-| `Copying` | `Ejected` | `Ejected { after_copy: true }` | `[Notify { DiscDone }]` |
-| `Copying` | `EjectFailed` | `Ejected { after_copy: true }` | `[Notify { EjectFailed }]` |
+| `Copying` | `CopyDone { scan_listed_titles: true, .. }` (10.1's main line "Ripping (or Copying) → RipVerified → Ejected": a restart or a Return before the eject ejects and never empties the finished copy to copy again) | `RipVerified { after_copy: true }` | `[Eject]` |
+| `RipVerified { after_copy: true }` | `Ejected` | `Ejected { after_copy: true }` | `[Notify { DiscDone }]` |
+| `RipVerified { after_copy: true }` | `EjectFailed` | `Ejected { after_copy: true }` | `[Notify { EjectFailed }]` |
 | `Ejected { after_copy: true }` | `HoldForReview { reasons }` (10.1 "Ejected, then NeedsReview") | `NeedsReview { AfterCopy }` | `[Notify { NeedsReview { reasons } }]` |
 | `Copying` | `CopyDone { scan_listed_titles: false, .. }` (D18) | `Planned { Direct }` | `[RecordNote { DirectModeFallback }, CheckSpace]` (the copy is kept; 6.3 step 6a's "waiting in AwaitingSpace if they do not fit") |
 | `Copying` | `CopyFailed { failure, second: false }` | Outcome (a read failure: `Failed { MediaReadError, from: Copying }`) | as Outcome |
@@ -2347,11 +2367,13 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `Extracting` | `TitleVerified { last: true }` | `Inspecting` | `[Probe]` |
 | `Extracting` | `TitleVerifyFailed { second: false, .. }`, or `TitleVerifyFailed { second: true, last: false }` | `Extracting` | `[ExtractTitle]` (the same title again after a first failure, the next after a second: 6.3 step 8 "verified as in 6.2 step 7") |
 | `Extracting` | `TitleVerifyFailed { second: true, last: true }` | `Inspecting` | `[Probe]` |
-| `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided` | `[Decide]` (with the owner's overrides) |
-| `Decided` | `DecisionDone { .. }` (any disposition: the owner approved, 8.8) | `Decided` | `[CheckSpace]` |
+| `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided { approved: true }` | `[Decide]` (with the owner's overrides) |
+| `Decided { approved: true }` | `DecisionDone { .. }` (any disposition: the owner approved, 8.8) | unchanged | `[CheckSpace]` |
+| `Decided { approved: false }` | `DecisionDone { AutoFile, .. }` (the decision made again after a restart, a Return or a Retry of an auto-filed job) | unchanged | `[CheckSpace]` |
+| `Decided { approved: false }` | `DecisionDone { NeedsReview, reasons }` (6.4 step 12: an auto-filed job whose decision, made again, now needs review is gated again) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
 | `NeedsReview { .. }` | `ReviewDiscarded` | `Discarded` | `[DeleteJobData]` |
-| `Filed` | `ReFinalise` | `Decided` | `[Decide]` |
-| `Filed`, `NeedsReview { .. }`, any file-phase state, `Failed { from, .. }` with `from` a file-phase state | `RipAgain` | unchanged | `[ArmRipAgain]` |
+| `Filed` | `ReFinalise` | `Decided { approved: true }` | `[Decide]` |
+| `Filed`, `NeedsReview { .. }`, any file-phase state, `Failed { from, .. }` with `from` a file-phase state, any waiting state whose `return_to` is a file-phase state | `RipAgain` | unchanged | `[ArmRipAgain]` |
 | any disc- or file-phase state | `ShareLost` | `AwaitingShare { return_to: state }` | `[Notify { Waiting { Share } }]` |
 | any disc- or file-phase state | `SpaceShort` | `AwaitingSpace { return_to: state }` | `[Notify { Waiting { Space } }]` |
 | `AwaitingShare` / `AwaitingSpace` | `ShareBack` / `SpaceFreed` | Return | as Return |
@@ -2368,7 +2390,7 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | any disc-phase state | `ToolMissing { Ffprobe }`, `ToolMissing { Ffmpeg }` | unchanged (the disc phase runs; the job waits when it would enter Inspecting) | `[]` |
 | any state | `ToolMissing { Java }` | unchanged | `[RecordNote { LabelRuleUnavailable }]` |
 | `AwaitingTool` | `ToolFound { .. }` | Return | as Return |
-| the state whose step failed, in the order of the events: `Detected`, `Fingerprinted`, `Scanned`, `Ripping`, `Extracting`, `Inspecting`, `Inspecting` or `Decided`, `Remuxing`, `Remuxing`, `Verified` | `FingerprintFailed`, `ScanFailed`, `PlanFailed`, `TitleRipFailed`, `ExtractFailed`, `ProbeFailed`, `DecisionFailed`, `RemuxFailed`, `FileVerifyFailed`, `FileFailed` | Outcome | as Outcome |
+| the state whose step failed, in the order of the events: `Detected`, `Fingerprinted`, `Scanned`, `Ripping`, `Extracting`, `Inspecting`, `Inspecting` or `Decided { .. }`, `Remuxing`, `Remuxing`, `Verified` | `FingerprintFailed`, `ScanFailed`, `PlanFailed`, `TitleRipFailed`, `ExtractFailed`, `ProbeFailed`, `DecisionFailed`, `RemuxFailed`, `FileVerifyFailed`, `FileFailed` | Outcome | as Outcome |
 | `Failed { class, from }`, class not DriveIncapable | `Retry` | `from` | `resume(from, true)`'s actions (phase 2 performs a disc-phase action only with the job's disc in a drive; when the disc is gone it performs none and feeds `MediaRemoved`, which gives `[WaitForDisc]`) |
 | `Failed { DriveIncapable, .. }` | `Retry` | Rejected (10.2 "no retry") | |
 | `Failed { MediaReadError, from }` | `MediaArrived` (the disc inserted again, either drive) | `from` | `resume(from, true)`'s actions, then `[Notify { Resumed }]` |
@@ -2427,10 +2449,9 @@ pub fn exp14_requirements(spec_text: &str) -> Result<Row14, String>;
 #[serde(rename_all = "snake_case")]
 pub enum Costly { DialogueDropped, SdhAsRegular, RegularAsSdh, ForcedWrongly, ForcedAsDialogue, UnwantedKept }
 /// What the rules gave a labelled track: the role the judged rule places it in (row 14 (a) judges the text rule; for a
-/// stream the text rule sets aside, 8.7's), None = dropped; whether that rule raised a review; and the text rule's role
-/// (for the report). Def: T18. Use: T18.
+/// stream the text rule sets aside, 8.7's), None = dropped; and whether that rule raised a review. Def: T18. Use: T18.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outcome { pub role: Option<SubtitleRole>, pub review: bool, pub text_role: Option<crate::subtitle::text::Role> }
+pub struct Outcome { pub role: Option<SubtitleRole>, pub review: bool }
 /// The costly verdict, if any, of one labelled track's outcome: a dialogue kind (regular, sdh, translation, dub-transcript,
 /// closed-captions) dropped; sdh as Regular or regular as Sdh without review; Forced without review on a non-forced kind, or a
 /// forced kind as Regular or Sdh without review; commentary, trivia or lyrics kept without review. Def: T18. Use: T18.
@@ -2555,8 +2576,8 @@ And in `crates/dev/src/cmd/plan.rs` (beside Task 15's private `recording_inputs`
 
 ```rust
 /// A recording's parsed lookup answers exactly as `plan_doc` reads them (`recording_inputs`: an answer file whose
-/// lookup-status.txt line is not 200 is left unparsed), so decide's decision section never reads them a second time or
-/// differently (one copy). Def: T16. Use: T16.
+/// lookup-status.txt line is not 200 is left unparsed), so decide's decision section reads them through the same code as
+/// plan_doc and never differently (one copy). Def: T16. Use: T16.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedAnswers { pub by_fingerprint: Option<DiscDbRecord>, pub by_disc_id: Vec<DiscDbRecord>, pub recorded: Option<TmdbRecord> }
 /// The three answers of `recording_inputs(rec)?`, its refusal unchanged. Def: T16. Use: T16.
@@ -2585,7 +2606,7 @@ into the port spec's section 3.4 `decide` row.
 10. `channel_layout` names counts the spec does not list as "<n>.0" (3.0, 4.0, 5.0); 0 gives "0.0".
 11. A derived forced-only stream whose parent cannot be found is set aside with no parent and can never become the forced track (Review Focus 4).
 12. A title with exactly one English subtitle stream and no events (step 10 skipped) keeps it as Regular "English" at 0.90 (row 14 (b)).
-13. The text rule's disagreement (8.7 "Text") compares roles only: Regular, Sdh, Forced and Drop against the kept role; `Keep` and `SetAside` never disagree; the review names each disagreeing stream in one note.
+13. The text rule's disagreement (8.7 "Text") compares the text's role (Regular, Sdh, Forced, Drop) against the kept role or the drop; `SetAside` never disagrees; `Keep` always disagrees (`text::decide` writes Keep only with its own review), and so does any verdict other than `SetAside` that carries the text rule's review, whatever its role (`text::before_yes`'s reading); streams dropped as another language and streams with an override are not compared; the text never changes a role, a drop or a flag; each disagreeing stream raises subtitle_ambiguous with one subtitle_text_disagrees note, in stream order.
 14. 8.9 paths use the root's own separator ('\\' when the root holds one or is UNC, else '/'); `core` never consults the host OS.
 15. The 255-byte cap cuts on a character boundary after NFC; the 32- and 90-character caps count Unicode scalar values.
 16. The reserved-name rule applies to the component's stem before any extension, case-insensitively (`con.mkv` becomes `con_.mkv`).
@@ -2596,7 +2617,7 @@ into the port spec's section 3.4 `decide` row.
 21. `Settings::validate` also refuses `auto_threshold` outside 0..=1, `subs_diff_max > subs_same_min`, and zero for `minlength_s`, `feature_min_minutes`, `file_phase_concurrency`, since the rules divide by or compare against them; the defaults raise exactly the `tuning_root` problem.
 22. `verify_rip`'s track match requires every expected track to pair in order (as 6.2 step 7's "ordered match") and tolerates no extra file track; `unknown_removed` lists MSG:4047 indices beyond the selection, as `reconcile` does.
 23. `read_errors` keys by offset text, keeping the first message per offset and counting the lines (the DVD rip has 3 at offset 1048576); it keeps the `%1` error text only, never the drive's name or serial.
-24. The job reducer models "a job in a waiting state stores the state it will return to" as `return_to: Box<State>` inside each waiting variant; `Failed` carries `from` for Retry; `RipAgain` is accepted on Filed, NeedsReview, the file-phase states and a Failed job whose `from` is a file-phase state (which `job_lookup` counts as past the disc phase, Task 14's settled choice 15) and produces `ArmRipAgain` (the engine marks the job so the next insertion of its fingerprint starts a new job, 6.1 step 2) without changing the state.
+24. The job reducer models "a job in a waiting state stores the state it will return to" as `return_to: Box<State>` inside each waiting variant; `Failed` carries `from` for Retry; `RipAgain` is accepted on Filed, NeedsReview, the file-phase states, a Failed job whose `from` is a file-phase state and a waiting state returning to a file-phase state (which `job_lookup` counts as past the disc phase, Task 14's settled choice 15) and produces `ArmRipAgain` (the engine marks the job so the next insertion of its fingerprint starts a new job, 6.1 step 2) without changing the state.
 25. The subtitle labels harness counts a label only when `how` is `read` or `watched` (D23), the owner is sure and `saw_verdict` is false (RP25), and counts row 14's UK-style SDH track from `style` "uk" on such an `sdh` label, never as a missing kind; labels on the two fitting discs named in row 14 are reported but never counted, as the audio harness treats row 13's disc.
 26. `lazymkv-dev plan <dir>/discNN.txt` (a pinned log, `PlanSource::ScanFile`) takes its fingerprint from the log's HSH lines, its TheDiscDB answer from `corpus/thediscdb-api/dischash-<fingerprint>.json` when present, else from `discNN.json` with the same stem beside it, and takes no TMDb answer (identity then stops at step 3 with TheDiscDB's TMDb ID, or at step 6 when only the pinned form, without media, is found); a directory argument is always a recording (scan.txt).
 27. `Wanted.original_is_english` is true when TMDb's code is absent, "en", "xx" or not in the ISO639 table; `wanted_languages(None)` therefore yields English only and `original_language_missing` is never raised without a known original language.
@@ -2604,8 +2625,8 @@ into the port spec's section 3.4 `decide` row.
 29. A plain subtitle description is the `Dialogue` kind: one containing "subtitle", or one equal after trimming and case-folding to the track's own language name ("English", "ENglish"); provisional, since 8.1's last bullet names no such word. 8.7's "the one TheDiscDB describes as subtitles or SDH" is the group holding a track whose aligned description is Dialogue or Sdh.
 30. Verification lowers no confidence. A failed or read-error rip holds the job through its review reason (verify_failed, read_errors), which has the same effect on the disposition as a confidence below auto_threshold (8.8).
 31. 8.3 rule 2 runs before identification with English only and again with the identity's original language when it is not English (Review Focus 6); only the variant within a cut can change between the passes.
-32. The owner's review decisions are `remembered::Overrides`; each covers one confidence (Set identity the identity, Assign titles the title, Override tracks every stream it names) and sets it to 1.00; a later re-plan (`PlanInputs.overrides`) and the decision (`DecisionInputs.overrides`) both apply them, so a job approved at the disposition gate (`[Decide]` in the reducer) needs no re-plan.
-33. 10.1's two transitions to `Ripping` from `Copying` (a copy whose scan failed, a second read failure) pass through `Planned { Direct }` and its space check, as 6.3 step 6a's "waiting in AwaitingSpace if they do not fit" requires; `EjectFailed` ends the disc phase like `Ejected` and notifies `eject_failed` instead of `disc_done`.
+32. The owner's review decisions are `remembered::Overrides`; each covers one confidence (Set identity the identity, Assign titles the title, Override tracks every stream it names) and sets it to 1.00; a later re-plan (`PlanInputs.overrides`) and the decision (`DecisionInputs.overrides`) both apply them, so a job approved at the disposition gate (`[Decide]` in the reducer) needs no re-plan. An assigned episode carries no name of its own in both the decision and the re-plan, so both file it under TMDb's episode name.
+33. 10.1's two transitions to `Ripping` from `Copying` (a copy whose scan failed, a second read failure) pass through `Planned { Direct }` and its space check, as 6.3 step 6a's "waiting in AwaitingSpace if they do not fit" requires; `EjectFailed` ends the disc phase like `Ejected` and notifies `eject_failed` instead of `disc_done`. A copy whose scan lists titles leaves `Copying` for `RipVerified { after_copy: true }` before its eject (10.1's main line "Ripping (or Copying) → RipVerified → Ejected"), so a restart or a Return in that window ejects and never empties the finished copy to copy again (`resuming_rip_verified_ejects_after_a_rip_or_a_copy`).
 34. VC-1 video (attribute 5 `V_MS/VFW/WVC1`, common on older Blu-rays; no recording or pinned log holds one) is the codec family `Family::Vc1` (ruling RP26): display name "VC-1", mkvmerge name "VC-1" (mkvmerge's documented spelling, not yet seen), video, no tier. Its attributes 6 and 7 are not yet seen in a recording, so the row matches attribute 5 alone (pinned by Task 1's `vc_1_video_reads_as_vc_1_by_attribute_5_alone`, with made-up attributes 6 and 7, and by the `Vc1` line of `mkvmerge_names_are_the_ones_6_2_step_7_records_for_every_family`). A VC-1 title therefore verifies against mkvmerge's "VC-1" like any other known codec (Task 12's `a_codec_the_table_does_not_know_never_verifies_and_fails_twice_into_review` pins the contrast: a DTS Express stream, still `Family::Unknown`, never verifies; a VC-1 stream does). Open: the first VC-1 recording confirms the attribute 6 and 7 spellings and mkvmerge's name; if mkvmerge writes another name, the `Vc1` entry of `mkvmerge_names` changes with it.
 35. 8.3 rule 4 lowers a rule 3 plan only when every feature is more than 10% from TMDb's runtime (the interfaces wording of `runtime_sanity`); the spec's "a feature chosen by rule 3" is read as such for a one-feature plan, the only rule 3 plan at 0.85. The readings differ only for a several-feature plan already at 0.60, where "every" adds no `title_ambiguous` while one feature is close. Pinned by Task 5's `runtime_sanity_holds_while_any_feature_is_close`; if the owner prefers the spec text, `all` becomes `any` in `runtime_sanity` and that test's `one_close` case drops to 0.60 with `title_ambiguous`.
 36. TheDiscDB maps a TV disc (8.5 first bullet, 0.98) only when every Episode item of the record matches a scan title through `match_titles`, as Open point 4 requires of every MainMovie; if any Episode item matches none, `tv::by_discdb` returns None and the disc is planned as unmapped (0.60, `tv_unmapped`, whole-disc copy), because a Direct job holds only its planned titles (8.8 "Limits of D1") and would leave that episode off without the owner knowing (D1, R1). Pinned by Task 6's `an_episode_item_that_matches_no_scan_title_leaves_the_disc_unmapped`; every Episode item of the four pinned TV records and of the Office's record reconciles, so no expected plan changes.
@@ -2950,7 +2971,7 @@ impl Wanted {
     /// A stream's code is one of the original language's codes. Def: T1. Use: T8.
     pub fn is_original(&self, code: &str) -> bool;
 }
-/// "eng" or "en". Def: T1. Use: T8, T9, T10, T11.
+/// "eng" or "en". Def: T1. Use: T8, T9, T11 (T10 reaches it through T9's english_or_none).
 pub fn is_english(code: &str) -> bool;
 /// `NO_LANGUAGE.contains(code)` after lower-casing; None counts as no language. Def: T1. Use: T8, T9.
 pub fn is_no_language(code: Option<&str>) -> bool;
@@ -2977,13 +2998,14 @@ Run from the repository root:
 git branch --show-current
 git status --short
 git log -1 --format=%h
+git merge-base --is-ancestor 666fc16 HEAD && echo ok
 ls crates/core/src/settings.rs crates/core/src/review.rs crates/core/src/codec.rs crates/core/src/tracks
 grep -c 'pub fn wanted_languages' crates/core/src/lang.rs
 grep -n 'pub mod' crates/core/src/lib.rs
 grep -c 'pub CLEAR_MAX_BYTES: i64' crates/core/src/subtitle/text.rs
 ```
 
-Expected: `phase-1-decision-core` (if it prints `main`, create the plan's branch first with `git switch -c phase-1-decision-core` and run the commands again); no output from `git status --short`; `666fc16`; four `No such file or directory` lines from `ls` (none of the new files exists); `0`; the nine lines `1:pub mod audio;`, `2:pub mod fingerprint;`, `3:pub mod lang;`, `4:pub mod profile;`, `5:pub mod recording;`, `6:pub mod robot;`, `7:pub mod reconcile;`, `8:pub mod subtitle;`, `10:pub mod testsupport;`; `1` (the text rule's `Rule` is in).
+Expected: `phase-1-decision-core` (if it prints `main`, create the plan's branch first with `git switch -c phase-1-decision-core` and run the commands again); no output from `git status --short`; the hash of the plan's latest commit (`b4193c4`, or a later commit that changes only plan documents; its ancestor is the merge `666fc16`, so the code is as at `666fc16`); `ok`; four `No such file or directory` lines from `ls` (none of the new files exists); `0`; the nine lines `1:pub mod audio;`, `2:pub mod fingerprint;`, `3:pub mod lang;`, `4:pub mod profile;`, `5:pub mod recording;`, `6:pub mod robot;`, `7:pub mod reconcile;`, `8:pub mod subtitle;`, `10:pub mod testsupport;`; `1` (the text rule's `Rule` is in).
 
 - [ ] **Step 2: Write the failing tests of `core::review`**
 
@@ -3251,7 +3273,7 @@ pub enum ReviewReason {
 
 impl ReviewReason {
     /// Every review reason: spec 8.8's table in its order, with commentary_detected (8.6 "Content") after
-    /// audio_reference_unclear.
+    /// audio_reference_unclear. Spec 8.8.
     pub const ALL: [ReviewReason; 15] = [
         ReviewReason::IdentityUnknown,
         ReviewReason::IdentityAmbiguous,
@@ -3270,7 +3292,7 @@ impl ReviewReason {
         ReviewReason::ReadErrors,
     ];
 
-    /// The spec's snake_case spelling, the same string serde writes.
+    /// The spec's snake_case spelling, the same string serde writes. Spec 8.8.
     pub fn as_str(self) -> &'static str {
         match self {
             ReviewReason::IdentityUnknown => "identity_unknown",
@@ -3339,7 +3361,7 @@ pub enum Note {
 }
 
 impl Note {
-    /// Every note, in the order of the enum.
+    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7.
     pub const ALL: [Note; 12] = [
         Note::PossibleCommentary,
         Note::PossibleAudioDescription,
@@ -3355,7 +3377,7 @@ impl Note {
         Note::LabelRuleUnavailable,
     ];
 
-    /// The snake_case spelling, the same string serde writes.
+    /// The snake_case spelling, the same string serde writes. Spec 8.6, 8.7, 8.9, 7.
     pub fn as_str(self) -> &'static str {
         match self {
             Note::PossibleCommentary => "possible_commentary",
@@ -3511,7 +3533,7 @@ impl SubtitleRole {
     /// Every role, in 8.10's output order.
     pub const ALL: [SubtitleRole; 3] = [SubtitleRole::Forced, SubtitleRole::Regular, SubtitleRole::Sdh];
 
-    /// The snake_case spelling, the same string serde writes.
+    /// The snake_case spelling, the same string serde writes. Spec 8.7, 8.10.
     pub fn as_str(self) -> &'static str {
         match self {
             SubtitleRole::Forced => "forced",
@@ -3781,6 +3803,7 @@ impl Wanted {
     }
 
     /// A stream's code is one of the original language's codes, ignoring ASCII case (never, for an English work).
+    /// Spec 8.6 "Languages".
     pub fn is_original(&self, code: &str) -> bool {
         self.original.iter().any(|original| original.eq_ignore_ascii_case(code))
     }
@@ -4158,7 +4181,7 @@ pub enum Family {
 }
 
 impl Family {
-    /// Every family, in the order of the enum.
+    /// Every family, in the order of the enum. Spec 8.6 "Codecs".
     pub const ALL: [Family; 18] = [
         Family::Hevc,
         Family::Avc,
@@ -4180,7 +4203,7 @@ impl Family {
         Family::Unknown,
     ];
 
-    /// The kebab-case spelling, the same string serde writes.
+    /// The kebab-case spelling, the same string serde writes. Spec 8.6 "Codecs".
     pub fn as_str(self) -> &'static str {
         match self {
             Family::Hevc => "hevc",
@@ -4217,7 +4240,7 @@ pub enum ObjectAudio {
 }
 
 impl ObjectAudio {
-    /// "Atmos" or "DTS:X", the same string serde writes.
+    /// "Atmos" or "DTS:X", the same string serde writes. Spec 8.6 step 3.3.
     pub fn as_str(self) -> &'static str {
         match self {
             ObjectAudio::Atmos => "Atmos",
@@ -4574,7 +4597,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// The snake_case spelling, the same string serde writes.
+    /// The snake_case spelling, the same string serde writes. Spec 8.6 step 3.2.
     pub fn as_str(self) -> &'static str {
         match self {
             Tier::Lossless => "lossless",
@@ -4592,26 +4615,22 @@ pub const EAC3_HIGH_RATE_KBPS: u32 = 768;
 /// spec 14).
 pub const DTS_HIGH_RATE_KBPS: u32 = 1500;
 
-/// Spec 8.6 step 3.2: (a) Lossless for the lossless families; (b) HighRateLossy for DtsHdHr, Eac3 at
-/// EAC3_HIGH_RATE_KBPS or more, Dts at DTS_HIGH_RATE_KBPS or more; (c) OtherLossy for Ac3, lower-rate or
-/// unknown-rate Eac3 and Dts; (d) Low for MpegAudio and Aac; None for Unknown and for video and subtitle families.
+/// Spec 8.6 step 3.2: (a) Lossless for the lossless families (`is_lossless`'s set, not repeated here); (b)
+/// HighRateLossy for DtsHdHr, Eac3 at EAC3_HIGH_RATE_KBPS or more, Dts at DTS_HIGH_RATE_KBPS or more; (c) OtherLossy
+/// for Ac3, lower-rate or unknown-rate Eac3 and Dts; (d) Low for MpegAudio and Aac; None for Unknown and for video and
+/// subtitle families.
 pub fn tier(family: Family, bitrate_kbps: Option<u32>) -> Option<Tier> {
     let at_least = |line: u32| bitrate_kbps.is_some_and(|rate| rate >= line);
     match family {
-        Family::TrueHd | Family::DtsHdMa | Family::Lpcm | Family::Flac => Some(Tier::Lossless),
+        family if is_lossless(family) => Some(Tier::Lossless),
         Family::DtsHdHr => Some(Tier::HighRateLossy),
         Family::Eac3 if at_least(EAC3_HIGH_RATE_KBPS) => Some(Tier::HighRateLossy),
         Family::Dts if at_least(DTS_HIGH_RATE_KBPS) => Some(Tier::HighRateLossy),
         Family::Ac3 | Family::Eac3 | Family::Dts => Some(Tier::OtherLossy),
         Family::MpegAudio | Family::Aac => Some(Tier::Low),
-        Family::Hevc
-        | Family::Avc
-        | Family::Mpeg2
-        | Family::Vc1
-        | Family::Pgs
-        | Family::VobSub
-        | Family::ClosedCaptions
-        | Family::Unknown => None,
+        // Video, subtitle and Unknown families have no tier. The guard arm above took the lossless families (the one
+        // copy of the set is `is_lossless`); a guard does not count toward exhaustiveness, so a wildcard ends it.
+        _ => None,
     }
 }
 ```
@@ -4975,7 +4994,7 @@ impl EditionStyle {
     /// Every style, in spec 8.9's table order.
     pub const ALL: [EditionStyle; 3] = [EditionStyle::Combined, EditionStyle::Plex, EditionStyle::Jellyfin];
 
-    /// "combined", "plex" or "jellyfin", the same string serde writes.
+    /// "combined", "plex" or "jellyfin", the same string serde writes. Spec 8.9.
     pub fn as_str(self) -> &'static str {
         match self {
             EditionStyle::Combined => "combined",
@@ -5595,8 +5614,8 @@ Expected: the build fails with errors such as ``error[E0412]: cannot find type `
 Insert into `crates/core/src/settings.rs`, after `version_part` (the last function Step 32 wrote) and above `#[cfg(test)]`:
 
 ```rust
-/// One refused setting (spec 7, 14): the key it concerns, as spec 14 spells it ("" when the problem concerns the
-/// whole settings text), and one plain sentence naming the value and the rule it breaks.
+/// One refused setting (spec 7, 14): the key it concerns, as spec 14 spells it, and one plain sentence naming the value
+/// and the rule it breaks.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SettingsProblem {
     /// The settings key.
@@ -6154,13 +6173,13 @@ pub fn skip(reason: &str);
 Produces (exactly the `core::disc (Task 2)`, `core::testsupport additions (Task 2)` and `fingerprint::hashed_files` entries of the Shared interfaces section; Tasks 3 to 16 rely on them):
 
 ```rust
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
 impl StreamKind { pub fn as_str(self) -> &'static str; pub fn from_attr(text: &str) -> Option<StreamKind>; }
 
-/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T12.
+/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T10, T12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Flags(pub u32);
 impl Flags {
@@ -6274,7 +6293,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -7074,7 +7093,7 @@ Expected: PASS, `test result: ok. 1 passed; 0 failed`: `content_hash_matches_eve
 
 - [ ] **Step 14: Confirm one copy of the reader**
 
-Run: `grep -rn 'fn hashed_files' crates/`
+Run: `grep -rn 'fn hashed_files(' crates/`
 
 Expected: exactly one line, `crates/core/src/fingerprint.rs:<n>:pub fn hashed_files(log: &str) -> Vec<DiscFile> {`.
 
@@ -8987,7 +9006,7 @@ Expected: PASS, `test result: ok. 46 passed; 0 failed` for the library's test bi
 
 - [ ] **Step 32: Write the evidence tests**
 
-Ruling RP21 decides which values are written here: a test in `crates/` never holds a value copied from the private evidence clone that a reader could not derive from the public spec or the pinned MIT fixtures. Written as literals: the title numbers; every value of `pans-labyrinth-2006-uhd`'s scan, because the tracked public fixture `corpus/scenarios/disc-a-scan/scan.txt` is that disc's scan (CINFO 2 `Pan's Labyrinth`, title 0 `00800.mpls` with 22 chapters, 1:59:10 and 55,613,952,000 bytes, title 1 `00055.mpls` with 0:05:40, 34 chapters, 34 segments and the map 27 to 60, which `docs/phase0/experiments/EXP-03-whole-disc-copy.md` also states, and the streams typed below); the playlist `00004.mpls` of the Office's title 1; the durations 5904 s and 6606 s (spec 6.2 step 7) and short-circuit-2-1988-dvd's 28 chapters (EXP-11); its titles by attribute 24 (`#1` and `#3` to `#8`, spec 6.2 step 6), its streams 5 and 12 (EXP-11) and its three MSG:2003 lines (spec 6.2 step 7); the names `THE OFFICE S3D3`, `Short Circuit 2` and `DVD_VIDEO` (the interfaces' "Expected plans" table); the Office's 11 titles (`docs/phase0/REPORT.md`); and the stream kinds, codec families, channels, languages and flags the model types. Compared with the raw attribute of the same parsed scan (`title_attr`, `title_number`, `title_seconds`, `stream_kbps`, `disc_attr`) or with relations, and never written: the Office's durations (each title's against its attribute 9; titles 1, 2 and 6 equally long; title 3, which holds S03E12-E13, about twice title 1), title 1's chapters and segment map, title 3's segment map, title 4's two segments (through `audio::titles::segments` of attribute 26) and title 7's clip file; short-circuit-1986-dvd's name, volume label and metadata language (CINFO 2, 30, 32, 28), title 0's chapters, size, segment map, comment and the bitrates of its three streams; short-circuit-2-1988-dvd's per-title durations, title 0's comment and segment map, and the one segment map titles 1 to 6 share, whatever its text. Spec 9.4 says every MakeMKV output recorded prints `MakeMKV v2.0.0 win(x64-release)`; `short-circuit-2-1988-dvd`'s scan logged MSG:2003 three times (spec 6.2 step 7 names its read errors at offset 1,048,576); its closed-caption stream carries attribute 41 `Text`, 42 `( Lossy conversion )` and the arrow U+2192 in its tree info (spec 9.4). These tests exercise code already in place (Steps 4 to 30), so they pass as soon as they compile; a failure here is a defect of the model against real scans.
+Ruling RP21 decides which values are written here: a test in `crates/` never holds a value copied from the private evidence clone that a reader could not derive from the public spec or the pinned MIT fixtures. Written as literals: the title numbers; every value of `pans-labyrinth-2006-uhd`'s scan, because the tracked public fixture `corpus/scenarios/disc-a-scan/scan.txt` is that disc's scan (CINFO 2 `Pan's Labyrinth`, title 0 `00800.mpls` with 22 chapters, 1:59:10 and 55,613,952,000 bytes, title 1 `00055.mpls` with 0:05:40, 34 chapters, 34 segments and the map 27 to 60, which `docs/phase0/experiments/EXP-03-whole-disc-copy.md` also states, and the streams typed below); the durations 5904 s and 6606 s (spec 6.2 step 7) and short-circuit-2-1988-dvd's 28 chapters (EXP-11); its titles by attribute 24 (`#1` and `#3` to `#8`, spec 6.2 step 6), its streams 5 and 12 (EXP-11) and its three MSG:2003 lines (spec 6.2 step 7); the names `THE OFFICE S3D3`, `Short Circuit 2` and `DVD_VIDEO` (the interfaces' "Expected plans" table); the Office's 11 titles (`docs/phase0/REPORT.md`); and the stream kinds, codec families, channels, languages and flags the model types. Compared with the raw attribute of the same parsed scan (`title_attr`, `title_number`, `title_seconds`, `stream_kbps`, `disc_attr`) or with relations, and never written: the Office's durations (each title's against its attribute 9; titles 1, 2 and 6 equally long; title 3, which holds S03E12-E13, about twice title 1), title 1's playlist (`source()` against attribute 16, so which title is which playlist is read from the recording when the test runs), chapters and segment map, title 3's segment map, title 4's two segments (through `audio::titles::segments` of attribute 26) and title 7's clip file; short-circuit-1986-dvd's name, volume label and metadata language (CINFO 2, 30, 32, 28), title 0's chapters, size, segment map, comment and the bitrates of its three streams; short-circuit-2-1988-dvd's per-title durations, title 0's comment and segment map, and the one segment map titles 1 to 6 share, whatever its text. Spec 9.4 says every MakeMKV output recorded prints `MakeMKV v2.0.0 win(x64-release)`; `short-circuit-2-1988-dvd`'s scan logged MSG:2003 three times (spec 6.2 step 7 names its read errors at offset 1,048,576); its closed-caption stream carries attribute 41 `Text`, 42 `( Lossy conversion )` and the arrow U+2192 in its tree info (spec 9.4). These tests exercise code already in place (Steps 4 to 30), so they pass as soon as they compile; a failure here is a defect of the model against real scans.
 
 Create `crates/dev/tests/disc_model.rs` with exactly this content:
 
@@ -9284,7 +9303,9 @@ fn the_office_2005_s3d3_bluray() {
     }
 
     let episode = office.title(1).unwrap();
-    assert_eq!(episode.source(), TitleSource::File { name: "00004.mpls".to_string() });
+    // Which playlist title 1 is stays in the clone (RP21): the source is attribute 16 of the same scan.
+    let playlist = title_attr(&scan, 1, 16).expect("title 1 has attribute 16");
+    assert_eq!(episode.source(), TitleSource::File { name: playlist.to_string() });
     assert_eq!(
         (Some(u64::from(episode.chapters)), Some(episode.segment_map.as_str())),
         (title_number(&scan, 1, 8), title_attr(&scan, 1, 26))
@@ -9396,7 +9417,7 @@ Consumes (from the plan's Shared interfaces; every name and signature as given t
 
 ```rust
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
@@ -9444,7 +9465,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -9630,7 +9651,7 @@ pub struct DiscDbTitle {
     #[serde(default, alias = "Item")] pub item: Option<DiscDbItem>,
 }
 impl DiscDbTitle {
-    /// `robot::duration_seconds(duration)`. Def: T3. Use: T5, T6.
+    /// `robot::duration_seconds(duration)`. Def: T3. Use: T3 (`same_title`).
     pub fn seconds(&self) -> Option<u32>;
     /// The tracks of one kind, in index order. Def: T3. Use: T8.
     pub fn tracks_of(&self, kind: StreamKind) -> Vec<&DiscDbTrack>;
@@ -9651,7 +9672,7 @@ pub struct DiscDbExternalIds { pub tmdb: Option<String>, pub imdb: Option<String
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiscDbRelease { pub title: Option<String>, pub year: Option<i32>, pub slug: Option<String>, pub locale: Option<String>, pub region_code: Option<String>, pub upc: Option<String> }
 /// The API's `disc` object: index, name ("Season Three Disc Three"), slug (the pinned form has none: its disc facts are
-/// DiscDbRecord's `pinned_index` and `pinned_name`). Def: T3. Use: T6 (disc number evidence).
+/// DiscDbRecord's `pinned_index` and `pinned_name`). Def: T3. Use: T3 (`DiscDbRecord::disc_number`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiscDbDisc { pub index: Option<i64>, pub name: Option<String>, pub slug: Option<String> }
 
@@ -9682,7 +9703,7 @@ impl DiscDbRecord {
     pub fn episodes(&self) -> Vec<&DiscDbTitle>;
     /// `media.title` and `media.year` for the TMDb search of 8.1 ("TMDb is searched with the entry's title and year"). Def: T3. Use: T4.
     pub fn title_and_year(&self) -> Option<(String, Option<i32>)>;
-    /// The disc's number on its release: `disc.index`, else `pinned_index`. Def: T3. Use: T6.
+    /// The disc's number on its release: `disc.index`, else `pinned_index`. Def: T3. Use: phase 2.
     pub fn disc_number(&self) -> Option<i64>;
 }
 
@@ -9822,7 +9843,7 @@ Also defined here, beyond the entries above, because the conventions require the
 
 Where this task settles what the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **The sibling test file.** The conventions give `lookup/mod.rs` a sibling `tests.rs`; this task creates `crates/core/src/lookup/tests.rs` with the two `Kind` tests and `#[cfg(test)] mod tests;` in `mod.rs`, so Task 4 appends its identification tests there. `discdb.rs` and `tmdb.rs` keep their tests in `mod tests` at the bottom (each stays under about 900 lines of code).
+1. **The sibling test file.** The conventions give `lookup/mod.rs` a sibling `tests.rs`; this task creates `crates/core/src/lookup/tests.rs` with the two `Kind` tests and `#[cfg(test)] mod tests;` in `mod.rs`, so Task 4 appends its identification tests there. `tmdb.rs` keeps its tests in `mod tests` at the bottom (about 920 lines in all, at the "about 900" limit). `discdb.rs` also keeps its tests inline although the module comes to about 1,300 lines (about 400 of code and about 900 of tests): this is a deliberate exception to the Global Constraints' sibling-`tests.rs` rule, taken so that every later "In `discdb.rs`'s test module, find" anchor stays valid, and a reviewer should not flag it. Moving it to `lookup/discdb/tests.rs` is a pure follow-up refactor.
 2. **Pinned files through `parse_dischash`.** `recording::files::thediscdb_answer` (the Python's `hit_rate.lookup`, used by `hit-rate`) looks only at a lowercase `titles` key, so a pinned `discNN.json` (`Titles`) is not a hit by it. `parse_dischash` counts an object with a non-empty `Titles` array as a hit too, so Task 15's pinned-log form of `lazymkv-dev plan` reads `<dir>/discNN.json` through the same function; `thediscdb_answer` itself is unchanged. A non-empty array in a dischash file is refused with `<shown>: a dischash answer is one object, not an array` (an empty array is a miss, as `thediscdb_answer` says).
 3. **Byte-order marks and errors.** Every parser drops one leading byte-order mark (the recorder's PowerShell jobs write one, as `read_json` already allows for). An error is `<shown>: <serde_json's message>`, or one of the sentences the tests pin (`the movie record <id> has no title`, `the TV record <id> has no name`, `the record has no id`, `the record has neither a title (a movie) nor a name (a TV show)`, `a season answer belongs to a TV record, not to movie <id>`).
 4. **`same_title`'s order of tests.** Source first: a scan title with a non-empty attribute 16 needs TheDiscDB's `source_file` to be the same text; a scan title without one compares through `disc::title_source(None, db.source_file)` and `disc::same_source` (numbers on a DVD; a playlist name never equals a DVD title number; Unknown never matches). Then `disc::segment_maps_agree` (a database title without a segment map compares as `""`), the exact size when both sides carry one, and the duration within `disc::DURATION_MATCH_S` when both sides carry one (a side without a duration never matches, as `disc::same_scan_title` requires).
@@ -10653,7 +10674,7 @@ pub struct DiscDbTitle {
 
 impl DiscDbTitle {
     /// `robot::duration_seconds(duration)`; None without a duration or for one that is not "H:MM:SS". Spec 8.1.
-    /// Def: T3. Use: T5, T6.
+    /// Def: T3. Use: T3 (`same_title`).
     pub fn seconds(&self) -> Option<u32> {
         self.duration.as_deref().and_then(duration_seconds)
     }
@@ -10698,7 +10719,7 @@ pub struct DiscDbRelease {
 }
 
 /// The API's `disc` object: index, name ("Season Three Disc Three"), slug (the pinned form has none: its disc facts are
-/// DiscDbRecord's `pinned_index` and `pinned_name`). Spec 8.1. Def: T3. Use: T6 (disc number evidence).
+/// DiscDbRecord's `pinned_index` and `pinned_name`). Spec 8.1. Def: T3. Use: T3 (`DiscDbRecord::disc_number`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiscDbDisc {
     pub index: Option<i64>,
@@ -10770,7 +10791,7 @@ impl DiscDbRecord {
         Some((title.to_string(), media.year))
     }
 
-    /// The disc's number on its release: `disc.index`, else `pinned_index`. Spec 8.1. Def: T3. Use: T6.
+    /// The disc's number on its release: `disc.index`, else `pinned_index`. Spec 8.1. Def: T3. Use: phase 2.
     pub fn disc_number(&self) -> Option<i64> {
         self.disc.as_ref().and_then(|disc| disc.index).or(self.pinned_index)
     }
@@ -12528,7 +12549,7 @@ In `crates/core/src/recording/files.rs`, replace the file's `//!` paragraph
 ```rust
 //! The recorder's files as the PowerShell jobs and crates/capture write them (port spec 3.3, `core::recording`), and
 //! what makes a folder a rip label. Unknown keys are ignored; every field the Python reads with .get() is an Option.
-//! A file whose field has another type fails to parse, and its reader reports it unreadable (02-the Shared interfaces section, open
+//! A file whose field has another type fails to parse, and its reader reports it unreadable (02-interfaces.md, open
 //! point 10: every recorded rip-summary.json has `ok` a bool, `title` and `bytes` ints).
 ```
 
@@ -12537,7 +12558,7 @@ with
 ```rust
 //! The recorder's files as the PowerShell jobs and crates/capture write them (port spec 3.3, `core::recording`), and
 //! what makes a folder a rip label. Unknown keys are ignored; every field the Python reads with .get() is an Option.
-//! A file whose field has another type fails to parse, and its reader reports it unreadable (02-the Shared interfaces section, open
+//! A file whose field has another type fails to parse, and its reader reports it unreadable (02-interfaces.md, open
 //! point 10: every recorded rip-summary.json has `ok` a bool, `title` and `bytes` ints); the one exception is `Tmdb`'s
 //! record fields (Task 3, spec 8.1), which read a value of another type as None.
 ```
@@ -12676,7 +12697,7 @@ Expected: PASS, every test binary `test result: ok.` with 0 failed; the library'
 
 - [ ] **Step 26: Write the integration test over the recorded answers**
 
-The two recorded hits are the evidence clone's `thediscdb-hash.json` files of `pans-labyrinth-2006-uhd` (UHD, `discid` answered 404) and `the-office-2005-s3d3-bluray` (Blu-ray, `discid` 404); both Short Circuit recordings hold an empty `thediscdb-hash.json` (TheDiscDB answered 404) and no `discid` file (a DVD has no disc ID yet, spec 5). The expected values were read from those files and the recordings' `scan.txt`: on the Office disc the database index and the scan title number part from index 4 on (index 4, `00000.mpls(1)` of 23 seconds, is not in the scan, which lists no title shorter than MakeMKV's minimum length; nor are indices 12 and 13), so the matching cannot lean on the numbers.
+The two recorded hits are the evidence clone's `thediscdb-hash.json` files of `pans-labyrinth-2006-uhd` (UHD, `discid` answered 404) and `the-office-2005-s3d3-bluray` (Blu-ray, `discid` 404); both Short Circuit recordings hold an empty `thediscdb-hash.json` (TheDiscDB answered 404) and no `discid` file (a DVD has no disc ID yet, spec 5). The test reads the answers' format, disc number, titles and item names from those files at run time (RP21) and asserts as literals only what the Expected plans table publishes: on the Office disc the database index and the scan title number part from index 4 on (index 4, `00000.mpls(1)` of 23 seconds, is not in the scan, which lists no title shorter than MakeMKV's minimum length; nor are indices 12 and 13), so the matching cannot lean on the numbers.
 
 Create `crates/dev/tests/lookup_answers.rs` with exactly this content:
 
@@ -12687,7 +12708,7 @@ Create `crates/dev/tests/lookup_answers.rs` with exactly this content:
 //! records, and the 18 API answers with the 2 recorded ones hold the track counts spec 8.1 states. Every test skips with
 //! its reason when the clone is absent (it is git-ignored and not on CI), never failing for the missing input.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lazymkv_core::disc::{disc, StreamKind};
@@ -12732,29 +12753,45 @@ fn the_two_recorded_dischash_answers_parse_and_match_their_scans() {
     assert_eq!(pans.kind(), Some(Kind::Movie));
     assert_eq!(pans.tmdb_identity(), Some(TmdbIdentity { kind: TmdbKind::Movie, id: 1417 }));
     assert_eq!(pans.title_and_year(), Some(("Pan's Labyrinth".to_string(), Some(2006))));
-    assert_eq!((pans.format.as_deref(), pans.disc_number(), pans.titles.len()), (Some("UHD"), Some(1), 18));
+    // The format, disc number, title count and title items are read from the recorded file at run time (RP21).
+    let pans_raw = raw_json(&root.join("pans-labyrinth-2006-uhd/thediscdb-hash.json"));
+    assert_eq!((pans.format.clone(), pans.disc_number(), pans.titles.len()), raw_head(&pans_raw));
     assert_eq!(indices(pans.main_movies()), vec![0]);
     let pans_scan = disc(&parse(&text(&root.join("pans-labyrinth-2006-uhd/scan.txt")))).unwrap();
-    assert_eq!(match_titles(&pans, &pans_scan), BTreeMap::from([(0, 0), (2, 1)]));
+    // The Expected plans table publishes database title 0 as scan title 0; every MainMovie or Episode title matches.
+    let pans_matched = match_titles(&pans, &pans_scan);
+    assert_eq!(pans_matched.get(&0), Some(&0), "{pans_matched:?}");
+    for index in raw_indices_of(&pans_raw, "MainMovie").into_iter().chain(raw_indices_of(&pans_raw, "Episode")) {
+        assert!(pans_matched.contains_key(&index), "database title {index} matches no scan title: {pans_matched:?}");
+    }
 
     let office = recorded_hit(&root, "the-office-2005-s3d3-bluray");
     assert_eq!(office.kind(), Some(Kind::Tv));
     assert_eq!(office.tmdb_identity(), Some(TmdbIdentity { kind: TmdbKind::Tv, id: 2316 }));
     assert_eq!(office.title_and_year(), Some(("The Office".to_string(), Some(2005))));
-    assert_eq!((office.format.as_deref(), office.disc_number(), office.titles.len()), (Some("Blu-Ray"), Some(8), 14));
-    assert_eq!(indices(office.episodes()), vec![0, 1, 2, 3, 6, 7]);
+    let office_raw = raw_json(&root.join("the-office-2005-s3d3-bluray/thediscdb-hash.json"));
+    assert_eq!((office.format.clone(), office.disc_number(), office.titles.len()), raw_head(&office_raw));
+    let episodes = raw_indices_of(&office_raw, "Episode");
+    assert_eq!(indices(office.episodes()), episodes);
+    // The Expected plans table maps six episode titles.
+    assert_eq!(episodes.len(), 6);
     assert!(office.main_movies().is_empty());
     let double = office.titles.iter().find(|title| title.index == 3).and_then(|title| title.item.as_ref()).unwrap();
-    assert_eq!(
-        (double.title.as_str(), double.season.as_deref(), double.episode.as_deref()),
-        ("Traveling Salesmen/The Return", Some("3"), Some("12-13"))
-    );
+    // Season 3 and episodes 12-13 are published by the Expected plans table; the item's name is the file's.
+    assert_eq!((double.season.as_deref(), double.episode.as_deref()), (Some("3"), Some("12-13")));
+    let double_raw = raw_titles(&office_raw).iter().find(|title| raw_index(title) == Some(3)).unwrap();
+    assert_eq!(Some(double.title.clone()), string_at(double_raw, "/item/title"));
     let office_scan = disc(&parse(&text(&root.join("the-office-2005-s3d3-bluray/scan.txt")))).unwrap();
-    // MakeMKV title numbers are never used for matching (spec 8.3): from database index 5 on, index n is scan title n - 1.
-    assert_eq!(
-        match_titles(&office, &office_scan),
-        BTreeMap::from([(0, 0), (1, 1), (2, 2), (3, 3), (5, 4), (6, 5), (7, 6), (8, 7), (9, 8), (10, 9), (11, 10)])
-    );
+    // Values are read from the recorded file at run time (RP21). MakeMKV title numbers are never used for matching
+    // (spec 8.3); the Expected plans table publishes the scan titles of the six episodes.
+    let matched = match_titles(&office, &office_scan);
+    let in_file: BTreeSet<u32> = raw_titles(&office_raw).iter().filter_map(raw_index).collect();
+    assert!(matched.keys().all(|index| in_file.contains(index)), "{matched:?}");
+    assert!(episodes.iter().all(|index| matched.contains_key(index)), "{matched:?}");
+    let episode_scans: BTreeSet<u32> = episodes.iter().map(|index| matched[index]).collect();
+    assert_eq!(episode_scans, BTreeSet::from([0, 1, 2, 3, 5, 6]));
+    let scans: BTreeSet<&u32> = matched.values().collect();
+    assert_eq!(scans.len(), matched.len(), "a scan title is matched twice: {matched:?}");
 }
 
 #[test]
@@ -12770,12 +12807,40 @@ fn the_recorded_empty_answers_read_as_misses() {
     }
 }
 
-/// A recorded tmdb.json as raw JSON (a leading byte-order mark dropped), so the fields no public source gives (the
-/// original title, the IMDb and TVDB IDs) are compared with the file itself when the test runs, never written here as
-/// values copied from the private clone (ruling RP21).
+/// A recorded tmdb.json or thediscdb-hash.json as raw JSON (a leading byte-order mark dropped), so the fields no public
+/// source gives (the original title, the IMDb and TVDB IDs, TheDiscDB's format, disc number, titles and item names) are
+/// compared with the file itself when the test runs, never written here as values copied from the private clone
+/// (ruling RP21).
 fn raw_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(text(path).trim_start_matches('\u{feff}'))
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// The `titles` array of a recorded thediscdb-hash.json, read raw.
+fn raw_titles(value: &serde_json::Value) -> &Vec<serde_json::Value> {
+    value.pointer("/titles").and_then(serde_json::Value::as_array).expect("a dischash answer has a titles array")
+}
+
+/// A raw title's `index`.
+fn raw_index(title: &serde_json::Value) -> Option<u32> {
+    title.pointer("/index").and_then(serde_json::Value::as_u64).and_then(|index| u32::try_from(index).ok())
+}
+
+/// The indices of a recorded answer's titles whose item type is `item_type`, read raw, in index order.
+fn raw_indices_of(value: &serde_json::Value, item_type: &str) -> Vec<u32> {
+    let mut found: Vec<u32> = raw_titles(value)
+        .iter()
+        .filter(|title| string_at(title, "/item/type").as_deref() == Some(item_type))
+        .filter_map(raw_index)
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+/// A recorded answer's format, disc number (`disc.index`) and title count, read raw.
+fn raw_head(value: &serde_json::Value) -> (Option<String>, Option<i64>, usize) {
+    let disc_number = value.pointer("/disc/index").and_then(serde_json::Value::as_i64);
+    (string_at(value, "/format"), disc_number, raw_titles(value).len())
 }
 
 /// The string at `pointer` in `value`, or None.
@@ -12905,8 +12970,8 @@ Expected: the first line of the log output is `G krcm0209 <17315774+krcm0209@use
 **Files:**
 - Create: `crates/core/src/lookup/name.rs` (spec 8.1's disc name: `NameSource`, `DiscName`, `disc_name`, `parse_season`, `parse_disc_number`, `has_season_marker`, `clean`, `is_generic`, `GENERIC_NAMES`, `fold_name`, `plausible`, with the private token and piece readers; its 33 unit tests in `mod tests` at the bottom)
 - Modify: `crates/core/src/lookup/mod.rs` (Task 3 created it: one line `pub mod name;` after `pub mod tmdb;`; then spec 8.1's identification inserted below Task 3's items and directly above Task 3's `#[cfg(test)]` / `mod tests;`: `IdentityStep`, the seven confidence constants, `identity_confidence`, `RuntimeFacts`, the two tolerances, `movie_runtime_ok`, `tv_runtime_ok`, `within`, `DescriptionKind`, `description_kinds`, `LookupInputs`, `Identity`, `identify` and their private helpers)
-- Modify: `crates/core/src/lookup/tests.rs` (Task 3 created it, the sibling test file the conventions give `lookup/mod.rs`, with 2 tests of `Kind`: its `//!` line and its two `use` lines are replaced by this task's header and imports, and the 57 tests of the identification items are appended; see "Where this task settles" item 1)
-- Test: `crates/core/src/lookup/name.rs` `mod tests` (33 new), `crates/core/src/lookup/tests.rs` (57 new, beside Task 3's 2)
+- Modify: `crates/core/src/lookup/tests.rs` (Task 3 created it, the sibling test file the conventions give `lookup/mod.rs`, with 2 tests of `Kind`: its `//!` line and its two `use` lines are replaced by this task's header and imports, and the 58 tests of the identification items are appended; see "Where this task settles" item 1)
+- Test: `crates/core/src/lookup/name.rs` `mod tests` (33 new), `crates/core/src/lookup/tests.rs` (58 new, beside Task 3's 2)
 
 **Interfaces:**
 
@@ -14688,7 +14753,7 @@ Expected: `test result: ok. 16 passed; 0 failed`.
 
 - [ ] **Step 30: Write the failing description tests**
 
-The recorded descriptions: Knowing's pinned `disc01.json`, title 0 (`SourceFile` `"01"`), describes audio track 1 as `ENglish` (language `English`), track 2 as `Spanish` (language `Spanish`) and track 3 as `Director Commentary`. Across the 18 answers of `corpus/thediscdb-api` (two Expendables 3 records in one `discid` file) there are 88 described tracks, spec 8.1's "58 of 877 audio and 30 of 2018 subtitle tracks": 12 commentary texts (`Director Commentary`, `Commentary by Director Parker Finn`, `Commentary - Whedon & Fillian`, `Commentary - Whedon & Minear`, `Commentary - Espenson, Baccarin, and Trpcic`) and 76 bare language names that equal the track's own `language`. Append to `crates/core/src/lookup/tests.rs`:
+The recorded descriptions: Knowing's pinned `disc01.json`, title 0 (`SourceFile` `"01"`), describes audio track 1 as `ENglish` (language `English`), track 2 as `Spanish` (language `Spanish`) and track 3 as `Director Commentary`. Across the 18 answers of `corpus/thediscdb-api` (two Expendables 3 records in one `discid` file) there are 88 described tracks (58 of 837 audio and 30 of 2002 subtitle tracks; spec 8.1's 877 and 2018 also count the owner's 2 recorded answers, which carry no description): 12 commentary texts (`Director Commentary`, `Commentary by Director Parker Finn`, `Commentary - Whedon & Fillian`, `Commentary - Whedon & Minear`, `Commentary - Espenson, Baccarin, and Trpcic`) and 76 bare language names that equal the track's own `language`. Append to `crates/core/src/lookup/tests.rs`:
 
 ```rust
 /// A file under `corpus/`, as text.
@@ -15328,6 +15393,36 @@ fn an_entry_without_a_tmdb_id_and_several_results_is_ambiguous() {
 }
 
 #[test]
+fn an_entry_that_states_no_kind_is_never_narrowed_by_the_structural_kind() {
+    // TheDiscDB's media has a title and a year but no type: the structural kind may only pick the result shown
+    // (settled items 5 and 6), so two same-year results of different kinds stay ambiguous.
+    let fingerprint: DiscDbRecord = serde_json::from_str(
+        r#"{"media": {"title": "Short Circuit", "full_title": "Short Circuit", "year": 1986, "external_ids": {}}, "titles": []}"#,
+    )
+    .unwrap();
+    assert_eq!(fingerprint.kind(), None);
+    let results = search(&[
+        ("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09"),
+        ("tv", 1003, "Short Circuit", "Short Circuit", "1986-01-24"),
+    ]);
+    let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &RuntimeFacts::default(), &Settings::default());
+    assert_eq!(
+        (identity.step, identity.confidence, identity.tmdb, identity.review),
+        (IdentityStep::TmdbSeveral, 0.50, None, Some(ReviewReason::IdentityAmbiguous))
+    );
+    assert_eq!(identity.plausible, vec![movie(1001), tv(1003)]);
+    assert_eq!(
+        identity.evidence,
+        sentences(&[
+            "TheDiscDB knows the fingerprint",
+            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Short Circuit' and year 1986",
+            "2 of 2 search results are plausible: movie 1001, tv 1003",
+        ])
+    );
+}
+
+#[test]
 fn an_entry_without_a_tmdb_id_and_no_plausible_result_is_unknown() {
     let fingerprint = without_tmdb_id("Short Circuit", 1986);
     let results = search(&[("movie", 1002, "Short Circuit 2", "Short Circuit 2", "1988-07-06")]);
@@ -15927,7 +16022,7 @@ fn find_identity<'a>(
         if let Some((title, year)) = record.title_and_year() {
             let with_year = year.map(|year| format!(" and year {year}")).unwrap_or_default();
             evidence.push(format!("TheDiscDB gives no TMDb ID: TMDb is searched with its title '{title}'{with_year}"));
-            return search_by_entry(inputs, step, record, &title, year, kind, evidence);
+            return search_by_entry(inputs, step, record, &title, year, evidence);
         }
         evidence.push("TheDiscDB gives neither a TMDb ID nor a title".to_string());
     }
@@ -16005,16 +16100,17 @@ fn plausible_results<'a>(
 }
 
 /// Several plausible results narrowed to those of `kind`, then to those of `year`, each only when some but not all
-/// match (see `identify`). The disc name's search uses the result only to pick the identity shown; the entry's search
-/// takes it as its answer.
+/// match (see `identify`); the kind narrowing is skipped when `kind` is None (a TheDiscDB entry that states no kind,
+/// whose search the structural kind never narrows). The disc name's search uses the result only to pick the identity
+/// shown; the entry's search takes it as its answer.
 fn prefer_results<'a>(
     found: Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)>,
-    kind: Kind,
+    kind: Option<Kind>,
     year: Option<i32>,
     evidence: &mut Vec<String>,
 ) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
     let mut picked = found;
-    if picked.len() > 1 {
+    if let (true, Some(kind)) = (picked.len() > 1, kind) {
         let wanted = tmdb::TmdbKind::from(kind);
         let of_kind: Vec<(tmdb::TmdbIdentity, &tmdb::TmdbSearchResult)> =
             picked.iter().copied().filter(|(identity, _)| identity.kind == wanted).collect();
@@ -16044,7 +16140,6 @@ fn search_by_entry<'a>(
     record: &'a discdb::DiscDbRecord,
     title: &str,
     year: Option<i32>,
-    kind: Kind,
     evidence: &mut Vec<String>,
 ) -> IdentityFound<'a> {
     let Some(search) = inputs.search else {
@@ -16052,7 +16147,7 @@ fn search_by_entry<'a>(
         return IdentityFound::at(IdentityStep::Nothing);
     };
     let found = plausible_results(search, title, evidence);
-    let picked = prefer_results(found, record.kind().unwrap_or(kind), year, evidence);
+    let picked = prefer_results(found, record.kind(), year, evidence);
     match picked.as_slice() {
         [] => IdentityFound::at(IdentityStep::Nothing),
         [(identity, result)] => {
@@ -16106,7 +16201,7 @@ fn search_by_name<'a>(
     let found = plausible_results(search, &disc_name.cleaned, evidence);
     let several = found.len() > 1;
     let every_plausible: Vec<tmdb::TmdbIdentity> = found.iter().map(|(identity, _)| *identity).collect();
-    let picked = prefer_results(found, kind, None, evidence);
+    let picked = prefer_results(found, Some(kind), None, evidence);
     match picked.as_slice() {
         [] => IdentityFound::at(IdentityStep::Nothing),
         [(identity, result)] => {
@@ -16201,7 +16296,7 @@ fn describe_identity(
 
 Run: `scripts/box.sh cargo test -p lazymkv-core lookup::tests::`
 
-Expected: `test result: ok. 59 passed; 0 failed` (Task 3's 2 and this task's 57), and no warning from `lookup/mod.rs` or `lookup/tests.rs`.
+Expected: `test result: ok. 60 passed; 0 failed` (Task 3's 2 and this task's 58), and no warning from `lookup/mod.rs` or `lookup/tests.rs`.
 
 - [ ] **Step 38: Run the lookup module, the core crate and the workspace**
 
@@ -16213,7 +16308,7 @@ scripts/box.sh cargo test -p lazymkv-core
 scripts/box.sh cargo test --workspace
 ```
 
-Expected: the first passes every test of `lookup` (Task 3's and this task's 90: 33 under `lookup::name::tests::` and 57 under `lookup::tests::`, beside Task 3's 2 there); the second and third end in `test result: ok` for every test binary, with no failure (the evidence tests print their `skipped: <reason>` line when the clone is absent on the mini PC). `scripts/box.sh cargo test --workspace -- --list | grep -c ': test$'` (the pipe runs on the Mac, over the listing the mini PC prints) counts 90 more tests than it did at Task 3's commit.
+Expected: the first passes every test of `lookup` (Task 3's and this task's 91: 33 under `lookup::name::tests::` and 58 under `lookup::tests::`, beside Task 3's 2 there); the second and third end in `test result: ok` for every test binary, with no failure (the evidence tests print their `skipped: <reason>` line when the clone is absent on the mini PC). `scripts/box.sh cargo test --workspace -- --list | grep -c ': test$'` (the pipe runs on the Mac, over the listing the mini PC prints) counts 91 more tests than it did at Task 3's commit.
 
 - [ ] **Step 39: Commit**
 
@@ -16378,7 +16473,9 @@ pub struct Group {
 /// The groups of `candidates`, in order of first title. Def: T5. Use: T5, T6, T7.
 pub fn groups(disc: &Disc, candidates: &[u32]) -> Vec<Group>;
 
+/// Spec 8.2: the shortest episode length, 15 minutes, included.
 pub const EPISODE_MIN_S: u32 = 15 * 60;
+/// Spec 8.2: the longest episode length, 120 minutes, included.
 pub const EPISODE_MAX_S: u32 = 120 * 60;
 pub const TV_SPREAD: f64 = 0.15;
 /// The groups lasting between 15 and 120 minutes inclusive, in group order. Def: T5. Use: T5, T6, T7 (fills RuntimeFacts.episode_group_seconds).
@@ -16416,9 +16513,13 @@ pub fn parse_label(title: u32, comment: &str) -> Option<Label>;
 /// None (ignored or a variant), Other gives None (an unnamed cut). Def: T5. Use: T5.
 pub fn edition_of(suffix: &Suffix) -> Option<&'static str>;
 
+/// Spec 8.3 rule 1: the disc database names the title, 0.98.
 pub const DATABASE_TITLE_CONFIDENCE: f64 = 0.98;
+/// Spec 8.3 rule 2: exactly one cut, or two or more cuts with different recognised suffixes, 0.90.
 pub const LABELS_TITLE_CONFIDENCE: f64 = 0.90;
+/// Spec 8.3 rule 3.5: one rival, which is the feature, 0.85.
 pub const STRUCTURE_TITLE_CONFIDENCE: f64 = 0.85;
+/// Spec 8.3: every ambiguous outcome (an unnamed cut, an ambiguous group, several rivals), 0.60.
 pub const AMBIGUOUS_TITLE_CONFIDENCE: f64 = 0.60;
 pub const RIVAL_BAND: f64 = 0.10;
 pub const SEGMENT_DIFFERENCE_MAX: f64 = 0.25;
@@ -16498,7 +16599,9 @@ pub struct LibraryFacts {
     /// Earlier filed copies of this film: cut key ("theatrical", or the lower-cased edition name) to the edition name used
     /// ("" when that copy was filed without an edition name; this cut then gets None).
     pub earlier_edition_names: BTreeMap<String, String>,
-    /// Spec 7: the final path already exists and is not this job's file.
+    /// Spec 7: the final path already exists and is not this job's file. Phase 2 checks the plain path (no copy label);
+    /// under the owner's Resolve collision "keep both" it must also check the copy-labelled path (`- 2160p 2`) before
+    /// filing and hold the job with path_collision when that one is taken too (Open point 39).
     pub path_collision: bool,
 }
 /// 8.4's three rules, per feature in order: a non-theatrical cut always carries its name, even when it is the only cut; the
@@ -16509,7 +16612,7 @@ pub fn edition_names(features: &[Feature], facts: &LibraryFacts) -> Vec<Option<S
 pub const THEATRICAL_CUT: &str = "Theatrical Cut";
 /// An edition name that names the theatrical or main cut (8.4): none at all, or a name containing the word Theatrical
 /// (ignoring ASCII case), such as TheDiscDB's "Theatrical Version". The one test of "theatrical" for every rule and caller.
-/// Def: T5. Use: T5, T7, T13.
+/// Def: T5. Use: T5, T13.
 pub fn is_theatrical(edition: Option<&str>) -> bool;
 ```
 
@@ -16536,7 +16639,7 @@ Where this task settles what the spec and the interfaces leave open (each choice
 
 1. **`MoviePlan` carries each feature's duration.** Rule 4 (`runtime_sanity(plan, runtime_min)`) compares "a feature's duration" with TMDb's runtime, but `Feature` holds no duration and `runtime_sanity` takes no `Disc`, so `MoviePlan` has the field `feature_seconds: Vec<Option<u32>>` (each feature's `Title::seconds`, in feature order), placed after `features` exactly as the interfaces file gives it; every function of this task fills it, and Task 7 may fill `RuntimeFacts.feature_seconds` from it. `Feature` keeps exactly its four fields, so code that builds a `Feature` (Task 13's call of `edition_names`) is unaffected.
 2. **Rule 4 drops the plan only when every feature is off.** The interfaces say "every feature's duration is more than 10%"; the spec says "a feature chosen by rule 3". Rule 3 gives 0.85 only to a single feature, so the two readings differ only for a plan already at 0.60 with several features, where "every" avoids a second review on a disc of several films. A feature without a duration is never off; a runtime of 0 minutes is treated as unknown. The interfaces file records this reading as Open point 35 for the owner, and `runtime_sanity_holds_while_any_feature_is_close` pins it (with the spec's "any" reading its `one_close` case would drop to 0.60 with `title_ambiguous`).
-3. **An unnamed cut is not theatrical; a cut named theatrical is.** `Feature.theatrical` is "true when `edition` is None or names the theatrical cut", which `is_theatrical` decides as a name containing the word Theatrical, ignoring ASCII case: 8.4 says only a cut the evidence names "as anything other than theatrical" always carries its name, so TheDiscDB's `Theatrical Version`, `Theatrical Edition` or `Theatrical` is the theatrical cut (filed without a name when alone, and keyed `theatrical` for earlier copies), pinned by `an_edition_naming_the_theatrical_cut_is_theatrical`. `is_theatrical` is public so Tasks 7 and 13 use this one test rather than comparing with `THEATRICAL_CUT`. The exception is an unnamed cut (a label with an unrecognised suffix, or a second TheDiscDB main movie without an edition name), whose edition is None and `theatrical` false: otherwise `edition_names` would file it as a second "Theatrical Cut". Its filed name stays None until the owner names it in review (8.4 "else from the owner in review").
+3. **An unnamed cut is not theatrical; a cut named theatrical is.** `Feature.theatrical` is "true when `edition` is None or names the theatrical cut", which `is_theatrical` decides as a name containing the word Theatrical, ignoring ASCII case: 8.4 says only a cut the evidence names "as anything other than theatrical" always carries its name, so TheDiscDB's `Theatrical Version`, `Theatrical Edition` or `Theatrical` is the theatrical cut (filed without a name when alone, and keyed `theatrical` for earlier copies), pinned by `an_edition_naming_the_theatrical_cut_is_theatrical`. `is_theatrical` is public so Task 13 uses this one test rather than comparing with `THEATRICAL_CUT`; Task 7's `assigned_entries` still compares with the constant (an owner Cut named `Theatrical Version` is not theatrical there), and Task 13 Step 2 swaps that comparison for `is_theatrical`. The exception is an unnamed cut (a label with an unrecognised suffix, or a second TheDiscDB main movie without an edition name), whose edition is None and `theatrical` false: otherwise `edition_names` would file it as a second "Theatrical Cut". Its filed name stays None until the owner names it in review (8.4 "else from the owner in review").
 4. **The edition a TheDiscDB item names.** The item title with the media title removed (the first occurrence that stands as whole words, compared ignoring ASCII case), then brackets, dashes, colons, commas and spaces trimmed from both ends; an item title that does not contain the media title is the edition whole; a record without a media title (the pinned form) names no edition from its items, since the film's own title cannot be told from an edition there.
 5. **Label suffixes.** After `FPL_MainFeature` (optionally after `SEG_` or `SEG `) one `_` is dropped; a trailing `_XXX`, or a whole suffix `XXX`, of three ASCII letters that is a three-letter code of `lang::ISO639` (case-insensitive) is the language (`_EXT` is not one: `ext` is no code); the rest is compared case-insensitively with `R`, `UR`, `EXT`, `Narrative`; anything else is `Other` as written. A suffix that is only a language code is `Suffix::Language` and belongs to the cut without a suffix. The cuts `none` and `_R` stay two cuts, as the table's rows are read literally; since the table names both "Theatrical Cut", a disc carrying both labels is planned at 0.60 with `title_ambiguous` and the evidence sentence `two cuts are both named Theatrical Cut` rather than at 0.90, because two features of one edition name would file to colliding paths. The interfaces file asks the owner about it (Review Focus 8); `two_cuts_with_the_same_edition_name_are_ambiguous` pins it. Rule 1 has the same guard, through the same helper (`same_edition_name`, which compares the names `edition_names` would file: "Theatrical Cut" for every theatrical cut, else the edition, unnamed cuts skipped): TheDiscDB main movies `Film` and `Film (Theatrical Cut)` are both the theatrical cut, so `by_database` plans them at 0.60 with `title_ambiguous` and the same evidence sentence rather than at 0.98, pinned by `two_main_movies_with_the_same_edition_name_are_ambiguous`.
 6. **Coverage of the wanted languages.** A variant covers English when one of its audio streams carries `eng`, and the original language when `Wanted.original_is_english` is false and one of its audio streams carries one of the original's codes; its coverage is the number of those two it covers.
@@ -17313,8 +17416,9 @@ Expected: the build fails with ``error[E0425]: cannot find function `episode_len
 In `crates/core/src/plan/kind.rs`, insert before the line `#[cfg(test)]`:
 
 ```rust
-/// Spec 8.2's episode length: 15 minutes and 120 minutes, both included.
+/// Spec 8.2: the shortest episode length, 15 minutes, included.
 pub const EPISODE_MIN_S: u32 = 15 * 60;
+/// Spec 8.2: the longest episode length, 120 minutes, included.
 pub const EPISODE_MAX_S: u32 = 120 * 60;
 /// Spec 8.2: the longest episode-length group is at most 15% longer than the shortest.
 pub const TV_SPREAD: f64 = 0.15;
@@ -17453,7 +17557,7 @@ pub mod kind;
 pub mod movie;
 ```
 
-Create `crates/core/src/plan/movie.rs` with exactly this content (later steps insert code before `#[cfg(test)]` and tests at the end of `mod tests`). The pinned labels: the Expendables log has `FPL_MainFeature_UR` on title 41 (00756.mpls) and `FPL_MainFeature_R` on title 54 (00820.mpls), and its segment playlists carry `SEG FPL_02` and the like, which are not labels; Smile has `FPL_MainFeature` on title 14 (00040.mpls).
+Create `crates/core/src/plan/movie.rs` with exactly this content (later steps insert code before `#[cfg(test)]` and tests at the end of `mod tests`). The in-file `mod tests` is intended even though the finished file passes about 900 lines: the code is only about 640 lines, the 64 tests are one unit with it, and Steps 15 to 23 all insert into this one block. This is a deliberate exception to the Global Constraints sibling-`tests.rs` rule, and a reviewer should not flag it. The pinned labels: the Expendables log has `FPL_MainFeature_UR` on title 41 (00756.mpls) and `FPL_MainFeature_R` on title 54 (00820.mpls), and its segment playlists carry `SEG FPL_02` and the like, which are not labels; Smile has `FPL_MainFeature` on title 14 (00040.mpls).
 
 ```rust
 //! Spec 8.3 rules 1 to 4, the movie titles, and 8.4, the cuts. Rule 1 takes TheDiscDB's main movies when every one
@@ -17926,10 +18030,13 @@ impl std::str::FromStr for TitleRule {
     }
 }
 
-/// Spec 8.3's title confidences: rule 1, rule 2, rule 3 with one clear rival, and every ambiguous outcome.
+/// Spec 8.3 rule 1: the disc database names the title, 0.98.
 pub const DATABASE_TITLE_CONFIDENCE: f64 = 0.98;
+/// Spec 8.3 rule 2: exactly one cut, or two or more cuts with different recognised suffixes, 0.90.
 pub const LABELS_TITLE_CONFIDENCE: f64 = 0.90;
+/// Spec 8.3 rule 3.5: one rival, which is the feature, 0.85.
 pub const STRUCTURE_TITLE_CONFIDENCE: f64 = 0.85;
+/// Spec 8.3: every ambiguous outcome (an unnamed cut, an ambiguous group, several rivals), 0.60.
 pub const AMBIGUOUS_TITLE_CONFIDENCE: f64 = 0.60;
 /// Spec 8.3 rule 3.3: a kept group within 10% of the longest kept group's duration is a rival.
 pub const RIVAL_BAND: f64 = 0.10;
@@ -18041,7 +18148,7 @@ pub fn by_database(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, disc: &D
 
 /// An edition name that names the theatrical or main cut (8.4): none at all, or a name containing the word Theatrical
 /// (ignoring ASCII case), such as TheDiscDB's "Theatrical Version". The one test of "theatrical" for every rule and caller.
-/// Def: T5. Use: T5, T7, T13.
+/// Def: T5. Use: T5, T13.
 pub fn is_theatrical(edition: Option<&str>) -> bool {
     edition.map_or(true, |name| find_word_ignoring_ascii_case(name, "theatrical").is_some())
 }
@@ -18105,31 +18212,18 @@ Expected: `test result: ok. 24 passed; 0 failed`.
 In `crates/core/src/plan/movie.rs`, insert at the end of `mod tests`. On the Expendables log the two labelled titles are 41 (`_UR`, 7891 seconds) and 54 (`_R`, 7587 seconds), each the only title of its cut; Smile has one label. The synthetic Java discs below carry their labels as attribute 49 and their audio as the fixtures' streams; dub variants are tested both for the cut without a suffix (`_SPA`, `_JPN`) and for a named cut (`_UR_JPN` beside `_UR`); the last one carries both `FPL_MainFeature` and `FPL_MainFeature_R`, two cuts the table names "Theatrical Cut" (Review Focus 8).
 
 ```rust
-    /// A Blu-ray scan with Java in use (`MSG:3344`) whose titles are (number, comment, audio streams), each 100 minutes
-    /// long with 16 chapters, playlist `0000<number>.mpls` and segment map `<number>`.
-    fn java_disc(titles: &[(u32, &str, &[&[(u32, &str)]])]) -> Disc {
-        let attrs: Vec<(u32, Vec<(u32, String)>)> = titles
+    /// A Blu-ray scan whose titles are (number, attributes, streams after the video); `java` adds the `MSG:1005` banner
+    /// for 1.18.2 and an `MSG:3344` line.
+    fn blu_ray(java: bool, titles: &[(u32, Vec<(u32, String)>, &[&[(u32, &str)]])]) -> Disc {
+        let borrowed_attrs: Vec<Vec<(u32, &str)>> = titles
             .iter()
-            .map(|(number, comment, _)| {
-                (
-                    *number,
-                    vec![
-                        (9, "1:40:00".to_string()),
-                        (8, "16".to_string()),
-                        (16, format!("{number:05}.mpls")),
-                        (26, number.to_string()),
-                        (49, comment.to_string()),
-                    ],
-                )
-            })
+            .map(|(_, list, _)| list.iter().map(|(id, value)| (*id, value.as_str())).collect())
             .collect();
-        let borrowed_attrs: Vec<Vec<(u32, &str)>> =
-            attrs.iter().map(|(_, list)| list.iter().map(|(id, value)| (*id, value.as_str())).collect()).collect();
         let streams: Vec<Vec<(u32, &[(u32, &str)])>> = titles
             .iter()
-            .map(|(_, _, audio)| {
+            .map(|(_, _, others)| {
                 let mut list: Vec<(u32, &[(u32, &str)])> = vec![(0, VIDEO)];
-                for (index, stream) in audio.iter().enumerate() {
+                for (index, stream) in others.iter().enumerate() {
                     list.push((index as u32 + 1, *stream));
                 }
                 list
@@ -18140,7 +18234,30 @@ In `crates/core/src/plan/movie.rs`, insert at the end of `mod tests`. On the Exp
             .enumerate()
             .map(|(index, (number, _, _))| (*number, borrowed_attrs[index].as_slice(), streams[index].as_slice()))
             .collect();
-        disc_of(&scan_text_with_messages("1.18.2", true, BLURAY, &rows))
+        if java {
+            disc_of(&scan_text_with_messages("1.18.2", true, BLURAY, &rows))
+        } else {
+            disc_of(&scan_text(BLURAY, &rows))
+        }
+    }
+
+    /// A Blu-ray scan with Java in use (`MSG:3344`) whose titles are (number, comment, audio streams), each 100 minutes
+    /// long with 16 chapters, playlist `0000<number>.mpls` and segment map `<number>`.
+    fn java_disc(titles: &[(u32, &str, &[&[(u32, &str)]])]) -> Disc {
+        let titles: Vec<(u32, Vec<(u32, String)>, &[&[(u32, &str)]])> = titles
+            .iter()
+            .map(|(number, comment, audio)| {
+                let attrs = vec![
+                    (9, "1:40:00".to_string()),
+                    (8, "16".to_string()),
+                    (16, format!("{number:05}.mpls")),
+                    (26, number.to_string()),
+                    (49, comment.to_string()),
+                ];
+                (*number, attrs, *audio)
+            })
+            .collect();
+        blu_ray(true, &titles)
     }
 
     #[test]
@@ -18418,34 +18535,17 @@ In `crates/core/src/plan/movie.rs`, insert at the end of `mod tests`. The pinned
     /// A Blu-ray scan whose titles are (number, duration, chapters, segment map, streams after the video), each with
     /// playlist `0000<number>.mpls`.
     fn structure_disc(titles: &[(u32, &str, &str, &str, &[&[(u32, &str)]])]) -> Disc {
-        let attrs: Vec<Vec<(u32, String)>> = titles
+        let titles: Vec<(u32, Vec<(u32, String)>, &[&[(u32, &str)]])> = titles
             .iter()
-            .map(|(number, duration, chapters, map, _)| {
+            .map(|(number, duration, chapters, map, others)| {
                 let mut list = vec![(9, duration.to_string()), (16, format!("{number:05}.mpls")), (26, map.to_string())];
                 if !chapters.is_empty() {
                     list.push((8, chapters.to_string()));
                 }
-                list
+                (*number, list, *others)
             })
             .collect();
-        let borrowed_attrs: Vec<Vec<(u32, &str)>> =
-            attrs.iter().map(|list| list.iter().map(|(id, value)| (*id, value.as_str())).collect()).collect();
-        let streams: Vec<Vec<(u32, &[(u32, &str)])>> = titles
-            .iter()
-            .map(|(_, _, _, _, others)| {
-                let mut list: Vec<(u32, &[(u32, &str)])> = vec![(0, VIDEO)];
-                for (index, stream) in others.iter().enumerate() {
-                    list.push((index as u32 + 1, *stream));
-                }
-                list
-            })
-            .collect();
-        let rows: Vec<(u32, &[(u32, &str)], &[(u32, &[(u32, &str)])])> = titles
-            .iter()
-            .enumerate()
-            .map(|(index, (number, _, _, _, _))| (*number, borrowed_attrs[index].as_slice(), streams[index].as_slice()))
-            .collect();
-        disc_of(&scan_text(BLURAY, &rows))
+        blu_ray(false, &titles)
     }
 
     #[test]
@@ -19130,7 +19230,9 @@ pub struct LibraryFacts {
     /// Earlier filed copies of this film: cut key ("theatrical", or the lower-cased edition name) to the edition name used
     /// ("" when that copy was filed without an edition name; this cut then gets None).
     pub earlier_edition_names: BTreeMap<String, String>,
-    /// Spec 7: the final path already exists and is not this job's file.
+    /// Spec 7: the final path already exists and is not this job's file. Phase 2 checks the plain path (no copy label);
+    /// under the owner's Resolve collision "keep both" it must also check the copy-labelled path (`- 2160p 2`) before
+    /// filing and hold the job with path_collision when that one is taken too (Open point 39).
     pub path_collision: bool,
 }
 
@@ -19323,7 +19425,7 @@ Expected: the first line is `G krcm0209 <17315774+krcm0209@users.noreply.github.
 ### Task 6: TV titles, season sessions, remembered and review decisions
 
 **Files:**
-- Create: `crates/core/src/plan/tv.rs` (spec 8.5 and spec 5's season sessions, RP17: `Episode`, `parse_episode_numbers`, `EpisodeTitle`, `MAPPED_TV_CONFIDENCE`, `UNMAPPED_TV_CONFIDENCE`, `TvPlan`, `by_discdb`, `suggest_by_runtime`, `unmapped`, `AssignedEpisode`, `SeasonSession`, `Found`, `find`, `suggest`, `assign`, `close`, and the private helpers `whole_number`, `describe`, `MAX_EPISODE_SPAN`; its 42 unit tests in `mod tests`)
+- Create: `crates/core/src/plan/tv.rs` (spec 8.5 and spec 5's season sessions, RP17: `Episode`, `parse_episode_numbers`, `EpisodeTitle`, `MAPPED_TV_CONFIDENCE`, `UNMAPPED_TV_CONFIDENCE`, `TvPlan`, `by_discdb`, `without_play_all`, `suggest_by_runtime`, `unmapped`, `AssignedEpisode`, `SeasonSession`, `Found`, `find`, `suggest`, `assign`, `close`, and the private helpers `whole_number`, `describe`, `MAX_EPISODE_SPAN`; its 42 unit tests in `mod tests`)
 - Create: `crates/core/src/remembered.rs` (spec 5, 11 and RP16: `TitleRole`, `RememberedTitle`, `StreamSignature`, `signature`, `AudioOverride`, `SubtitleOverride`, `AudioOverrideEntry`, `SubtitleOverrideEntry`, `Remembered`, `match_title`, `apply_titles`, `apply_audio`, `apply_subtitles`, `Collision`, `TitleOverrideEntry`, `AudioTrackOverride`, `SubtitleTrackOverride`, `Overrides`, and the private helper `by_signature`; its 18 unit tests in `mod tests`)
 - Modify: `crates/core/src/plan/mod.rs` (one line, `pub mod tv;`, after Task 5's `pub mod movie;`; the shared interfaces say "Task 6 adds `pub mod tv;`")
 - Modify: `crates/core/src/lib.rs` (one line, `pub mod remembered;`, after `pub mod reconcile;`)
@@ -19439,7 +19541,7 @@ impl SubtitleRole {
 }
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
@@ -19525,7 +19627,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -19750,7 +19852,7 @@ pub fn episode_length_groups(groups: &[Group]) -> Vec<&Group>;
 pub fn play_all(groups: &[Group], dvd: bool) -> Option<usize>;
 ```
 
-Also used, in test builds only: Task 5's `crate::plan::fixtures` (`pub(crate)`, the plan module's shared test inputs; one copy): `pinned`, `api_record`, the log paths `CHERNOBYL_1`, `CHERNOBYL_2`, `FIREFLY_1`, `FIREFLY_2`, the answer hashes `CHERNOBYL_1_API`, `CHERNOBYL_2_API`, `FIREFLY_1_API`, and the stream rows `VIDEO` and `ENG_PGS`. Firefly disc 2's answer hash is not among them until Task 7 adds it, so `plan/tv.rs`'s tests hold it as one local constant.
+Also used, in test builds only: Task 5's `crate::plan::fixtures` (`pub(crate)`, the plan module's shared test inputs; one copy): `pinned`, `api_record`, the log paths `CHERNOBYL_1`, `CHERNOBYL_2`, `FIREFLY_1`, `FIREFLY_2`, the answer hashes `CHERNOBYL_1_API`, `CHERNOBYL_2_API`, `FIREFLY_1_API`, and the stream rows `VIDEO` and `ENG_PGS`. Firefly disc 2's answer hash is not among them until Task 7 adds it, so `plan/tv.rs`'s tests hold it as one local constant until Task 7 Step 6 replaces it with the fixtures import.
 
 Produces (exactly the `core::plan::tv (Task 6)` and `core::remembered (Task 6)` entries of the Shared interfaces; Tasks 7, 8, 10, 11, 13, 14 and 15 rely on them):
 
@@ -19789,6 +19891,9 @@ pub struct TvPlan {
 /// matches no scan title (as Open point 4 for MainMovies), or when a reconciled Episode item on a title that is not
 /// play-all names no episode number (D1); plan::plan then plans the disc as unmapped. Def: T6. Use: T7.
 pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[Group], dvd: bool) -> Option<TvPlan>;
+/// 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1, `kind::play_all`, found again until none is;
+/// never on a DVD) is removed. Returns the remaining groups and the dropped titles, sorted. Def: T6. Use: T6, T7.
+pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>);
 /// Spec 8.5 "pre-assigned to episodes by runtime as a suggestion": the groups' representatives in title order, assigned
 /// from episode `start`: each takes the next episode, or the next two when its duration is within TV_RUNTIME_TOLERANCE of
 /// the sum of the next two episodes' runtimes and not within it of the next one's; an episode without a runtime takes one
@@ -19948,7 +20053,7 @@ impl Overrides {
 
 Where this task settles what the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **Play-all titles.** In `by_discdb` every play-all group's titles are dropped (`kind::play_all` applied again until it finds none, as Task 7's `plan` does; never on a DVD, where `play_all` is not applied), even when TheDiscDB labels such a title an Episode item: 8.5 says "play all titles are dropped" in the plural and without exception. `dropped_play_all` lists them in title order. A disc with an extras play-all that comes first in group order beside an episodes play-all drops both (`every_play_all_title_is_dropped`), so the mapped and the unmapped paths of one plan treat play-alls alike. On the pinned Chernobyl logs this is title 6 of disc 1 (`4,11,12`, made of the groups of titles 29, 28 and 27, which the group list holds after it and in reverse order) and title 7 of disc 2 (`11,12`); neither disc has a second one. `unmapped` takes no DVD flag, so it cannot find a play-all itself: the caller passes the groups it wants suggested (Task 7's `plan` leaves out every group rule 3.1 names play-all).
+1. **Play-all titles.** In `by_discdb` every play-all group's titles are dropped (`tv::without_play_all`, which applies `kind::play_all` again until it finds none and which Task 7's `plan` also calls; never on a DVD, where `play_all` is not applied), even when TheDiscDB labels such a title an Episode item: 8.5 says "play all titles are dropped" in the plural and without exception. `dropped_play_all` lists them in title order. A disc with an extras play-all that comes first in group order beside an episodes play-all drops both (`every_play_all_title_is_dropped`), so the mapped and the unmapped paths of one plan treat play-alls alike. On the pinned Chernobyl logs this is title 6 of disc 1 (`4,11,12`, made of the groups of titles 29, 28 and 27, which the group list holds after it and in reverse order) and title 7 of disc 2 (`11,12`); neither disc has a second one. `unmapped` takes no DVD flag, so it cannot find a play-all itself: the caller passes the groups it wants suggested (Task 7's `plan` leaves out every group rule 3.1 names play-all).
 2. **Episode numbers.** `parse_episode_numbers` reads a whole number (surrounding whitespace ignored, leading zeros allowed) or a range `a-b` with `a <= b` as every number from `a` to `b`, at most 100 of them (`MAX_EPISODE_SPAN`); TheDiscDB's answers are network data and a wider range is not a title's episodes. Anything else (`E4`, `13-12`, `12-`, an empty text) gives no number, and a reconciled Episode item with no number (on a title that is not play-all) makes `by_discdb` return None (D1), as an unmatched one does (point 9): mapping that title to no episode, or leaving it off a Direct job while the other episodes file at 0.98, would both lose the episode TheDiscDB placed there.
 3. **Order and names.** `by_discdb` keeps database index order (the order of `match_titles`' keys); `unmapped` keeps title order; `plan::plan` orders the planned titles. TheDiscDB's item title is trimmed; a suggestion's name is TMDb's episode name, the names of a two-episode suggestion joined with `" / "`, and None without TMDb episodes. A season is read from `item.season` as a whole number (`"01"` is 1, `"0"` is the specials season), None when absent or not a number.
 4. **The runtime suggestion.** An episode's runtime is looked up in the season's TMDb episodes by `episode_number`; an episode TMDb does not list counts as one without a runtime. A title takes the next two episodes only when both have runtimes, its duration is within 15% of their sum and not within 15% of the first one's (`lookup::within`, `TV_RUNTIME_TOLERANCE`).
@@ -19959,7 +20064,7 @@ Where this task settles what the spec and the interfaces leave open (each choice
 9. **An Episode item the scan does not show.** `by_discdb` returns None when any Episode item of the record (`DiscDbRecord::episodes`) matches no scan title, so `plan::plan` plans the disc as unmapped (0.60, `tv_unmapped`, whole-disc copy) instead of filing the other episodes at 0.98 in Direct mode, which would leave that episode off the job (8.8 "Limits of D1", D1, R1). This is Open point 4's rule for MainMovies applied to episodes, pinned by `an_episode_item_that_matches_no_scan_title_leaves_the_disc_unmapped`. An Episode item that matches a play-all title is reconciled (the title is then dropped by 8.5), and one that matches a title but names no episode number makes `by_discdb` return None (D1), as an unmatched one does (point 2), pinned by `an_episode_item_without_an_episode_number_leaves_the_disc_unmapped`; the play-all check comes first, so an Episode item on a dropped play-all title needs no number.
 10. **Review overrides per title.** `Overrides.audio` and `Overrides.subtitles` are keyed by scan title number, then scan stream number, because one `Overrides` covers a whole job (`DecisionInputs.overrides`, `Event::ReviewApproved`) and stream numbers restart in every title (`Stream.number` is 0-based within the title): spec 11's Override tracks is a choice about one title's tracks. They are lists of entries (`AudioTrackOverride`, `SubtitleTrackOverride`, and `TitleOverrideEntry` for Assign titles), sorted by their keys, not integer-keyed maps, because `Overrides` travels inside Task 14's internally tagged `Event`, where serde cannot read an integer map key back (the interfaces' "Keyed collections"). Tasks 8 and 10 take one title's map (`AudioFacts.reviewed`, `SubtitleFacts.reviewed`), which Task 13 builds with `overrides.audio_of(title.number)` and `overrides.subtitles_of(title.number)`; `title_role` finds one title's Assign titles entry.
 
-All tests read only synthetic inputs and the public fixtures `corpus/thediscdb/series/**/discNN.txt` and `corpus/thediscdb-api/dischash-*.json`, so they run on every OS and in CI. The Office's TheDiscDB answer is in the private evidence clone, so its test uses a synthetic scan and record of the same shape (the playlists, segment maps, durations and items as TheDiscDB publishes them; the sizes made up); Task 15's `tests/plan.rs` checks the recorded answer.
+All tests read only synthetic inputs and the public fixtures `corpus/thediscdb/series/**/discNN.txt` and `corpus/thediscdb-api/dischash-*.json`, so they run on every OS and in CI. The Office's TheDiscDB answer is in the private evidence clone, so (RP21) its unit test uses a made-up disc of the same shape: one two-episode title, a deleted-scenes item that carries the same two episodes, an unlisted database index between matched ones, two unlisted trailing indices, and a database order that differs from scan order. Every playlist, segment map, duration, size, name and ID in it is made up. Task 15's `tests/plan.rs` checks the recorded answer.
 
 - [ ] **Step 1: Confirm the starting point**
 
@@ -19999,7 +20104,7 @@ pub mod movie;
 pub mod tv;
 ```
 
-Create `crates/core/src/plan/tv.rs` with exactly this content (the module header, the `use` lines and the first tests; Steps 4, 8 and 12 insert code before `#[cfg(test)]`; Steps 6 and 10 insert tests before the file's last line, the `}` that closes `mod tests`). The `use` lines are those of the finished file, so the compiler warns about unused imports until Step 12.
+Create `crates/core/src/plan/tv.rs` with exactly this content (the module header, the `use` lines and the first tests; Steps 4, 8 and 12 insert code before `#[cfg(test)]`; Steps 6 and 10 insert tests before the file's last line, the `}` that closes `mod tests`). The `use` lines are those of the finished file, so the compiler warns about unused imports until Step 8.
 
 ```rust
 //! Spec 8.5 (TV) and spec 5's season sessions (`<tmdb show id>-s<NN>.json`), RP17: the episode titles TheDiscDB maps
@@ -20035,8 +20140,8 @@ mod tests {
     use crate::settings::Settings;
     use crate::testsupport::{scan_text, tmdb_tv_json};
 
-    /// Firefly disc 2's `dischash` answer (its `ContentHash`), which Task 5's `plan::fixtures` does not hold; the pinned
-    /// logs, the other answer hashes, `pinned` and `api_record` are the fixtures' (one copy).
+    /// Firefly disc 2's `dischash` answer (its `ContentHash`), which Task 5's `plan::fixtures` does not hold until Task 7
+    /// moves it there; the pinned logs, the other answer hashes, `pinned` and `api_record` are the fixtures' (one copy).
     const FIREFLY_2_API: &str = "294A3E64C457A1BC9A0833335C090568";
 
     /// The groups the planner builds: 8.2's candidate filter at the default settings, then grouping.
@@ -20077,70 +20182,69 @@ mod tests {
     /// English stereo Dolby Digital: one audio stream, so the candidate filter keeps the title.
     const ENGLISH_STEREO: &[(u32, &str)] = &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
 
-    /// The Office season 3 disc 3 (`the-office-2005-s3d3-bluray`): number, playlist (attribute 16), segment map
-    /// (26), duration (9), size (11, made up: the recorded answer is in the private evidence clone) and chapters (8),
-    /// with the playlists, maps and durations TheDiscDB publishes for the disc.
-    const OFFICE_TITLES: [(u32, &str, &str, &str, u64, &str); 11] = [
-        (0, "00005.mpls", "7", "0:21:49", 4_100_000_000, "5"),
-        (1, "00004.mpls", "6", "0:21:18", 4_200_000_000, "5"),
-        (2, "00003.mpls", "5", "0:21:18", 4_300_000_000, "5"),
-        (3, "00002.mpls", "4", "0:42:44", 8_400_000_000, "5"),
-        (4, "00008.mpls", "10,11", "0:26:49", 4_500_000_000, "2"),
-        (5, "00007.mpls", "9", "0:29:35", 6_600_000_000, "5"),
-        (6, "00006.mpls", "8", "0:21:18", 4_700_000_000, "5"),
-        (7, "00015.m2ts", "15", "0:04:28", 800_000_000, "0"),
-        (8, "00014.m2ts", "14", "0:05:52", 1_000_000_000, "0"),
-        (9, "00013.m2ts", "13", "0:10:37", 1_900_000_000, "0"),
-        (10, "00012.m2ts", "12", "0:07:38", 1_400_000_000, "0"),
+    /// A made-up season 2 disc 3 shaped like the-office-2005-s3d3-bluray (RP21: no value is copied from the clone):
+    /// number, playlist (attribute 16), segment map (26), duration (9), size (11) and chapters (8).
+    const SHOW_TITLES: [(u32, &str, &str, &str, u64, &str); 11] = [
+        (0, "00021.mpls", "31", "0:22:10", 4_100_000_000, "5"),
+        (1, "00022.mpls", "32", "0:22:40", 4_200_000_000, "5"),
+        (2, "00023.mpls", "33", "0:21:55", 4_300_000_000, "5"),
+        (3, "00024.mpls", "34", "0:43:20", 8_400_000_000, "5"),
+        (4, "00027.mpls", "37,38", "0:25:10", 4_500_000_000, "2"),
+        (5, "00026.mpls", "36", "0:28:05", 6_600_000_000, "5"),
+        (6, "00025.mpls", "35", "0:22:25", 4_700_000_000, "5"),
+        (7, "00031.m2ts", "41", "0:04:10", 800_000_000, "0"),
+        (8, "00032.m2ts", "42", "0:05:40", 1_000_000_000, "0"),
+        (9, "00033.m2ts", "43", "0:10:15", 1_900_000_000, "0"),
+        (10, "00034.m2ts", "44", "0:07:20", 1_400_000_000, "0"),
     ];
 
-    /// TheDiscDB's answer for that disc in the API's shape, its fourteen titles in TheDiscDB's index order (index 4 and
-    /// the last two are titles the scan does not list), with the sizes of OFFICE_TITLES.
-    const OFFICE_RECORD: &str = r#"{
+    /// TheDiscDB's answer for that made-up disc in the API's shape: fourteen titles in database order (index 4 and the
+    /// last two are titles the scan does not list), with the sizes of SHOW_TITLES.
+    const SHOW_RECORD: &str = r#"{
   "format": "Blu-Ray",
-  "media": {"title": "The Office", "year": 2005, "type": "Series", "external_ids": {"tmdb": "2316", "imdb": "tt0002316"}},
-  "disc": {"index": 8, "name": "Season Three Disc Three", "slug": "season-3-disc-3"},
+  "media": {"title": "Example Show", "year": 2001, "type": "Series", "external_ids": {"tmdb": "9001", "imdb": "tt0009001"}},
+  "disc": {"index": 8, "name": "Season Two Disc Three", "slug": "season-2-disc-3"},
   "titles": [
-    {"index": 0, "source_file": "00005.mpls", "segment_map": "7", "duration": "0:21:49", "size": 4100000000,
-     "item": {"title": "Business School", "type": "Episode", "season": "3", "episode": "16"}},
-    {"index": 1, "source_file": "00004.mpls", "segment_map": "6", "duration": "0:21:18", "size": 4200000000,
-     "item": {"title": "Phyllis' Wedding", "type": "Episode", "season": "3", "episode": "15"}},
-    {"index": 2, "source_file": "00003.mpls", "segment_map": "5", "duration": "0:21:18", "size": 4300000000,
-     "item": {"title": "Ben Franklin", "type": "Episode", "season": "3", "episode": "14"}},
-    {"index": 3, "source_file": "00002.mpls", "segment_map": "4", "duration": "0:42:44", "size": 8400000000,
-     "item": {"title": "Traveling Salesmen/The Return", "type": "Episode", "season": "3", "episode": "12-13"}},
-    {"index": 4, "source_file": "00000.mpls(1)", "segment_map": "1,2", "duration": "0:00:23", "size": 43000000, "item": null},
-    {"index": 5, "source_file": "00008.mpls", "segment_map": "10,11", "duration": "0:26:49", "size": 4500000000,
-     "item": {"title": "Traveling Salesmen/The Return Deleted Scenes", "type": "DeletedScene", "season": "3", "episode": "12-13"}},
-    {"index": 6, "source_file": "00007.mpls", "segment_map": "9", "duration": "0:29:35", "size": 6600000000,
-     "item": {"title": "The Negotiation", "type": "Episode", "season": "3", "episode": "18"}},
-    {"index": 7, "source_file": "00006.mpls", "segment_map": "8", "duration": "0:21:18", "size": 4700000000,
-     "item": {"title": "Cocktails", "type": "Episode", "season": "3", "episode": "17"}},
-    {"index": 8, "source_file": "00015.m2ts", "segment_map": "15", "duration": "0:04:28", "size": 800000000,
-     "item": {"title": "Cocktails Deleted Scenes", "type": "DeletedScene", "season": "3", "episode": "17"}},
-    {"index": 9, "source_file": "00014.m2ts", "segment_map": "14", "duration": "0:05:52", "size": 1000000000,
-     "item": {"title": "Business School Deleted Scenes", "type": "DeletedScene", "season": "3", "episode": "16"}},
-    {"index": 10, "source_file": "00013.m2ts", "segment_map": "13", "duration": "0:10:37", "size": 1900000000,
-     "item": {"title": "Phyllis' Wedding Deleted Scenes", "type": "DeletedScene", "season": "3", "episode": "15"}},
-    {"index": 11, "source_file": "00012.m2ts", "segment_map": "12", "duration": "0:07:38", "size": 1400000000,
-     "item": {"title": "Ben Franklin Deleted Scenes", "type": "DeletedScene", "season": "3", "episode": "14"}},
-    {"index": 12, "source_file": "00003.m2ts", "segment_map": "3", "duration": "0:01:00", "size": 300000000, "item": null},
-    {"index": 13, "source_file": "00000.m2ts", "segment_map": "0", "duration": "0:00:27", "size": 120000000, "item": null}
+    {"index": 0, "source_file": "00021.mpls", "segment_map": "31", "duration": "0:22:10", "size": 4100000000,
+     "item": {"title": "Pilot Light", "type": "Episode", "season": "2", "episode": "6"}},
+    {"index": 1, "source_file": "00022.mpls", "segment_map": "32", "duration": "0:22:40", "size": 4200000000,
+     "item": {"title": "Second Wind", "type": "Episode", "season": "2", "episode": "5"}},
+    {"index": 2, "source_file": "00023.mpls", "segment_map": "33", "duration": "0:21:55", "size": 4300000000,
+     "item": {"title": "Third Rail", "type": "Episode", "season": "2", "episode": "4"}},
+    {"index": 3, "source_file": "00024.mpls", "segment_map": "34", "duration": "0:43:20", "size": 8400000000,
+     "item": {"title": "Double Shift", "type": "Episode", "season": "2", "episode": "2-3"}},
+    {"index": 4, "source_file": "00020.mpls(1)", "segment_map": "30,39", "duration": "0:00:20", "size": 40000000, "item": null},
+    {"index": 5, "source_file": "00027.mpls", "segment_map": "37,38", "duration": "0:25:10", "size": 4500000000,
+     "item": {"title": "Double Shift Deleted Scenes", "type": "DeletedScene", "season": "2", "episode": "2-3"}},
+    {"index": 6, "source_file": "00026.mpls", "segment_map": "36", "duration": "0:28:05", "size": 6600000000,
+     "item": {"title": "Night Watch", "type": "Episode", "season": "2", "episode": "8"}},
+    {"index": 7, "source_file": "00025.mpls", "segment_map": "35", "duration": "0:22:25", "size": 4700000000,
+     "item": {"title": "Open House", "type": "Episode", "season": "2", "episode": "7"}},
+    {"index": 8, "source_file": "00031.m2ts", "segment_map": "41", "duration": "0:04:10", "size": 800000000,
+     "item": {"title": "Open House Deleted Scenes", "type": "DeletedScene", "season": "2", "episode": "7"}},
+    {"index": 9, "source_file": "00032.m2ts", "segment_map": "42", "duration": "0:05:40", "size": 1000000000,
+     "item": {"title": "Pilot Light Deleted Scenes", "type": "DeletedScene", "season": "2", "episode": "6"}},
+    {"index": 10, "source_file": "00033.m2ts", "segment_map": "43", "duration": "0:10:15", "size": 1900000000,
+     "item": {"title": "Second Wind Deleted Scenes", "type": "DeletedScene", "season": "2", "episode": "5"}},
+    {"index": 11, "source_file": "00034.m2ts", "segment_map": "44", "duration": "0:07:20", "size": 1400000000,
+     "item": {"title": "Third Rail Deleted Scenes", "type": "DeletedScene", "season": "2", "episode": "4"}},
+    {"index": 12, "source_file": "00040.m2ts", "segment_map": "40", "duration": "0:00:50", "size": 250000000, "item": null},
+    {"index": 13, "source_file": "00030.m2ts", "segment_map": "29", "duration": "0:00:25", "size": 110000000, "item": null}
   ]
 }"#;
 
-    /// The Office disc's scan: OFFICE_TITLES, each with one English stereo audio stream.
-    fn office_disc() -> Disc {
-        let sizes: Vec<String> = OFFICE_TITLES.iter().map(|row| row.4.to_string()).collect();
-        let attrs: Vec<Vec<(u32, &str)>> = OFFICE_TITLES
+    /// The made-up disc's scan: SHOW_TITLES, each with one English stereo audio stream.
+    fn show_disc() -> Disc {
+        let sizes: Vec<String> = SHOW_TITLES.iter().map(|row| row.4.to_string()).collect();
+        let attrs: Vec<Vec<(u32, &str)>> = SHOW_TITLES
             .iter()
             .zip(&sizes)
             .map(|(row, size)| vec![(8, row.5), (9, row.3), (11, size.as_str()), (16, row.1), (26, row.2)])
             .collect();
         let streams: &[(u32, &[(u32, &str)])] = &[(0, ENGLISH_STEREO)];
         let titles: Vec<(u32, &[(u32, &str)], &[(u32, &[(u32, &str)])])> =
-            OFFICE_TITLES.iter().zip(&attrs).map(|(row, attrs)| (row.0, attrs.as_slice(), streams)).collect();
-        let text = scan_text(&[(1, "Blu-ray disc"), (2, "THE OFFICE S3D3"), (32, "THE OFFICE S3D3")], &titles);
+            SHOW_TITLES.iter().zip(&attrs).map(|(row, attrs)| (row.0, attrs.as_slice(), streams)).collect();
+        let text = scan_text(&[(1, "Blu-ray disc"), (2, "EXAMPLE SHOW S2D3"), (32, "EXAMPLE SHOW S2D3")], &titles);
         disc(&parse(&text)).unwrap()
     }
 
@@ -20263,9 +20367,9 @@ mod tests {
     }
 
     #[test]
-    fn the_office_shape_maps_e12_13_as_one_multi_episode_title_and_e14_to_e18() {
-        let scanned = office_disc();
-        let record = parse_dischash(OFFICE_RECORD, "office.json").unwrap().unwrap();
+    fn a_multi_episode_title_and_deleted_scenes_map_as_thediscdb_describes_them() {
+        let scanned = show_disc();
+        let record = parse_dischash(SHOW_RECORD, "show.json").unwrap().unwrap();
         let matches = match_titles(&record, &scanned);
         assert_eq!(
             matches,
@@ -20275,18 +20379,18 @@ mod tests {
         assert_eq!(
             plan.episodes,
             vec![
-                episode_title(0, Some(3), &[16], Some("Business School"), false),
-                episode_title(1, Some(3), &[15], Some("Phyllis' Wedding"), false),
-                episode_title(2, Some(3), &[14], Some("Ben Franklin"), false),
-                episode_title(3, Some(3), &[12, 13], Some("Traveling Salesmen/The Return"), false),
-                episode_title(5, Some(3), &[18], Some("The Negotiation"), false),
-                episode_title(6, Some(3), &[17], Some("Cocktails"), false),
+                episode_title(0, Some(2), &[6], Some("Pilot Light"), false),
+                episode_title(1, Some(2), &[5], Some("Second Wind"), false),
+                episode_title(2, Some(2), &[4], Some("Third Rail"), false),
+                episode_title(3, Some(2), &[2, 3], Some("Double Shift"), false),
+                episode_title(5, Some(2), &[8], Some("Night Watch"), false),
+                episode_title(6, Some(2), &[7], Some("Open House"), false),
             ]
         );
         assert_eq!(plan.confidence, MAPPED_TV_CONFIDENCE);
         assert!(plan.reviews.is_empty());
         assert_eq!(plan.dropped_play_all, Vec::<u32>::new());
-        assert_eq!(plan.evidence[3], "TheDiscDB maps title 3 to S03E12-E13 \"Traveling Salesmen/The Return\"");
+        assert_eq!(plan.evidence[3], "TheDiscDB maps title 3 to S02E02-E03 \"Double Shift\"");
     }
 
     #[test]
@@ -20540,12 +20644,7 @@ pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[
         return None;
     }
     // 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1), found again until none is, as plan::plan does.
-    let mut rest: Vec<Group> = groups.to_vec();
-    let mut dropped_play_all: Vec<u32> = Vec::new();
-    while let Some(index) = play_all(&rest, dvd) {
-        dropped_play_all.extend(rest.remove(index).titles);
-    }
-    dropped_play_all.sort_unstable();
+    let (_, dropped_play_all) = without_play_all(groups, dvd);
     let mut episodes = Vec::new();
     let mut evidence = Vec::new();
     for (&index, &title) in matches {
@@ -20579,13 +20678,25 @@ pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[
     }
     Some(TvPlan { mapped: true, episodes, confidence: MAPPED_TV_CONFIDENCE, reviews: Vec::new(), dropped_play_all, evidence })
 }
+
+/// 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1, `kind::play_all`, found again until none is;
+/// never on a DVD) is removed. Returns the remaining groups and the dropped titles, sorted. Def: T6. Use: T6, T7.
+pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>) {
+    let mut rest: Vec<Group> = groups.to_vec();
+    let mut dropped: Vec<u32> = Vec::new();
+    while let Some(index) = play_all(&rest, dvd) {
+        dropped.extend(rest.remove(index).titles);
+    }
+    dropped.sort_unstable();
+    (rest, dropped)
+}
 ```
 
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `scripts/box.sh cargo test -p lazymkv-core plan::tv::`
 
-Expected: PASS, `test result: ok. 15 passed; 0 failed` (warnings about the imports Steps 8 and 12 use: `TmdbEpisode`, `TmdbSeason`, `within`, `TV_RUNTIME_TOLERANCE`, `episode_length_groups`, `sorted_unique`, `parse_tv`, `tmdb_tv_json`). If `chernobyl_disc_1_maps_three_episodes_and_drops_its_play_all_title` fails only on `dropped_play_all` (`[]` instead of `[6]`), Task 5's `play_all` requires the parts of a play-all to come in group order; 8.3 rule 3.1 does not (title 6's `4,11,12` is made of the groups of titles 29, 28 and 27, listed after it in reverse order): that is a defect of Task 5's `play_all` (it must find the concatenation in any order of the other groups' lists), to be fixed there and reported to the plan's owner; never bend this test to fit.
+Expected: PASS, `test result: ok. 15 passed; 0 failed` (warnings about the imports Steps 6 and 8 use: `TmdbEpisode`, `TmdbSeason`, `within`, `TV_RUNTIME_TOLERANCE`, `episode_length_groups`, `sorted_unique`, `parse_tv`, `tmdb_tv_json`). If `chernobyl_disc_1_maps_three_episodes_and_drops_its_play_all_title` fails only on `dropped_play_all` (`[]` instead of `[6]`), Task 5's `play_all` requires the parts of a play-all to come in group order; 8.3 rule 3.1 does not (title 6's `4,11,12` is made of the groups of titles 29, 28 and 27, listed after it in reverse order): that is a defect of Task 5's `play_all` (it must find the concatenation in any order of the other groups' lists), to be fixed there and reported to the plan's owner; never bend this test to fit.
 
 - [ ] **Step 6: Add the tests of the runtime suggestions and the unmapped plan**
 
@@ -21785,7 +21896,7 @@ Expected: FAIL to compile: `error[E0425]: cannot find function `signature` in th
 
 - [ ] **Step 20: Implement signatures and the override lookups (spec 5 "keyed by the stream's signature", spec 11 "Override tracks")**
 
-Insert into `crates/core/src/remembered.rs`, after the end of `impl FromStr for Collision` and before the doc comment of `Overrides` (`/// The owner's review decisions on one job`):
+Insert into `crates/core/src/remembered.rs`, immediately after the closing `}` of `impl FromStr for Collision` (so before `/// One title of the owner's Assign titles`):
 
 ```rust
 
@@ -21993,7 +22104,7 @@ Expected: FAIL to compile: `error[E0425]: cannot find function `match_title` in 
 
 - [ ] **Step 24: Implement the title match (spec 5 "Titles are matched by source file, segment map and duration within 2 s, never by title key")**
 
-Insert into `crates/core/src/remembered.rs`, after the end of `apply_subtitles` (its closing `}`) and before the doc comment of `Overrides`:
+Insert into `crates/core/src/remembered.rs`, immediately after the closing `}` of `apply_subtitles`:
 
 ```rust
 
@@ -22059,6 +22170,7 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 
 **Files:**
 - Modify: `crates/core/src/plan/mod.rs` (fills the module Task 5 created and Task 6 extended: the planner `plan` with `PlannedRole`, `PlannedTitle`, `DiscDbMatch`, `PlanEvidence`, `Plan`, `PlanInputs`; spec 5's `title_key`; section 7's `DIRECT_SPACE_MARGIN`, `COPY_SPACE_MARGIN`, `WRITE_SPACE_MARGIN`, `staging_bytes_needed`, `write_bytes_needed`; the private helpers `file_stem`, `Planned`, `Entry`, `movie_entries`, `tv_entries`, `episode_order`, `planned_titles`, `join_session`, `assigned_roles`, `assigned_entries`, `label_evidence`, `input_sentences`, `discdb_sentence`, `kind_words`, `kind_source_words`, `kind_disagreement`, `mode_sentence`, `with_margin`, `NO_TITLE`, `LABEL_RULE_UNAVAILABLE`; two fixture constants in Task 5's test-only `fixtures`; 59 unit tests appended to Task 5's `mod tests`)
+- Modify: `crates/core/src/plan/tv.rs` (test module only: Task 6's local `FIREFLY_2_API` gives way to the fixtures' one, Step 6)
 - Unchanged: `crates/core/src/lib.rs` (Task 5 already declares `pub mod plan;` and this task adds no module; Step 1 checks the line is there)
 - Test: `crates/core/src/plan/mod.rs` `mod tests` (59 new beside Task 5's 4: 3 for the title key, 41 for the planner over the nine pinned logs and synthetic discs, 10 for remembered and review decisions, 5 for the space needs). None reads the evidence clone; every test reads `corpus/thediscdb`, `corpus/thediscdb-api` or synthetic scans and synthetic TMDb answers, so all of them run on every OS and in CI.
 
@@ -22224,7 +22336,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -22335,7 +22447,7 @@ impl DiscDbRecord {
     pub fn episodes(&self) -> Vec<&DiscDbTitle>;
     /// `media.title` and `media.year` for the TMDb search of 8.1 ("TMDb is searched with the entry's title and year"). Def: T3. Use: T4.
     pub fn title_and_year(&self) -> Option<(String, Option<i32>)>;
-    /// The disc's number on its release: `disc.index`, else `pinned_index`. Def: T3. Use: T6.
+    /// The disc's number on its release: `disc.index`, else `pinned_index`. Def: T3. Use: phase 2.
     pub fn disc_number(&self) -> Option<i64>;
 }
 
@@ -22570,7 +22682,9 @@ pub struct Group {
 /// The groups of `candidates`, in order of first title. Def: T5. Use: T5, T6, T7.
 pub fn groups(disc: &Disc, candidates: &[u32]) -> Vec<Group>;
 
+/// Spec 8.2: the shortest episode length, 15 minutes, included.
 pub const EPISODE_MIN_S: u32 = 15 * 60;
+/// Spec 8.2: the longest episode length, 120 minutes, included.
 pub const EPISODE_MAX_S: u32 = 120 * 60;
 pub const TV_SPREAD: f64 = 0.15;
 /// The groups lasting between 15 and 120 minutes inclusive, in group order. Def: T5. Use: T5, T6, T7 (fills RuntimeFacts.episode_group_seconds).
@@ -22605,9 +22719,13 @@ pub fn parse_label(title: u32, comment: &str) -> Option<Label>;
 /// None (ignored or a variant), Other gives None (an unnamed cut). Def: T5. Use: T5.
 pub fn edition_of(suffix: &Suffix) -> Option<&'static str>;
 
+/// Spec 8.3 rule 1: the disc database names the title, 0.98.
 pub const DATABASE_TITLE_CONFIDENCE: f64 = 0.98;
+/// Spec 8.3 rule 2: exactly one cut, or two or more cuts with different recognised suffixes, 0.90.
 pub const LABELS_TITLE_CONFIDENCE: f64 = 0.90;
+/// Spec 8.3 rule 3.5: one rival, which is the feature, 0.85.
 pub const STRUCTURE_TITLE_CONFIDENCE: f64 = 0.85;
+/// Spec 8.3: every ambiguous outcome (an unnamed cut, an ambiguous group, several rivals), 0.60.
 pub const AMBIGUOUS_TITLE_CONFIDENCE: f64 = 0.60;
 pub const RIVAL_BAND: f64 = 0.10;
 pub const SEGMENT_DIFFERENCE_MAX: f64 = 0.25;
@@ -22620,8 +22738,9 @@ pub struct Feature {
     /// The edition name as the evidence gives it (TheDiscDB's item title beyond the media title, else the label table, or
     /// None for the theatrical or only cut); `edition_names` turns it into the filed name.
     pub edition: Option<String>,
-    /// True when `edition` is None or "Theatrical Cut", except an unnamed cut (an Other label suffix, or a later TheDiscDB
-    /// MainMovie with no edition), which has edition None and theatrical false.
+    /// True when `edition` is None or names the theatrical cut (contains the word Theatrical; `is_theatrical`), except an
+    /// unnamed cut (an Other label suffix, or a later TheDiscDB MainMovie with no edition), which has edition None and
+    /// theatrical false.
     pub theatrical: bool,
     /// The titles of its group (rule 3) or cut (rule 2) that were not chosen.
     pub siblings: Vec<u32>,
@@ -22648,8 +22767,9 @@ pub struct MoviePlan {
 /// media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and the scan
 /// title's comment (attribute 49) parses as a label, `edition_of(label.suffix)` (8.4 "else from the label table":
 /// Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); `theatrical` as Feature's doc says. Two or more
-/// MainMovies of which a later one still has no edition: 0.60 with unnamed_cut. None when TheDiscDB marks no main movie or
-/// any MainMovie title does not reconcile. Def: T5. Use: T5, T7.
+/// MainMovies of which a later one still has no edition: 0.60 with unnamed_cut; two features given the same edition name
+/// make it 0.60 with title_ambiguous (Review Focus 8). None when TheDiscDB marks no main movie or any MainMovie title does
+/// not reconcile. Def: T5. Use: T5, T7.
 pub fn by_database(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, disc: &Disc) -> Option<MoviePlan>;
 /// Rule 2: only when `disc.java_in_use`; labels grouped by suffix without the language code, one cut per group, in order of
 /// each cut's lowest title number; within a cut the variant whose audio covers the most of `wanted`'s languages, then the
@@ -22685,7 +22805,9 @@ pub struct LibraryFacts {
     /// Earlier filed copies of this film: cut key ("theatrical", or the lower-cased edition name) to the edition name used
     /// ("" when that copy was filed without an edition name; this cut then gets None).
     pub earlier_edition_names: BTreeMap<String, String>,
-    /// Spec 7: the final path already exists and is not this job's file.
+    /// Spec 7: the final path already exists and is not this job's file. Phase 2 checks the plain path (no copy label);
+    /// under the owner's Resolve collision "keep both" it must also check the copy-labelled path (`- 2160p 2`) before
+    /// filing and hold the job with path_collision when that one is taken too (Open point 39).
     pub path_collision: bool,
 }
 /// 8.4's three rules, per feature in order: a non-theatrical cut always carries its name, even when it is the only cut; the
@@ -22694,6 +22816,10 @@ pub struct LibraryFacts {
 /// and caps them. Def: T5. Use: T7, T13.
 pub fn edition_names(features: &[Feature], facts: &LibraryFacts) -> Vec<Option<String>>;
 pub const THEATRICAL_CUT: &str = "Theatrical Cut";
+/// An edition name that names the theatrical or main cut (8.4): none at all, or a name containing the word Theatrical
+/// (ignoring ASCII case), such as TheDiscDB's "Theatrical Version". The one test of "theatrical" for every rule and caller.
+/// Def: T5. Use: T5, T13.
+pub fn is_theatrical(edition: Option<&str>) -> bool;
 
 // lazymkv_core::plan::tv (T6)
 /// An episode assignment: season and one or more episode numbers (multi-episode titles, 8.5). `season` None means not
@@ -22729,6 +22855,9 @@ pub struct TvPlan {
 /// matches no scan title (as Open point 4 for MainMovies), or when a reconciled Episode item on a title that is not
 /// play-all names no episode number (D1); plan::plan then plans the disc as unmapped. Def: T6. Use: T7.
 pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[Group], dvd: bool) -> Option<TvPlan>;
+/// 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1, `kind::play_all`, found again until none is;
+/// never on a DVD) is removed. Returns the remaining groups and the dropped titles, sorted. Def: T6. Use: T6, T7.
+pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>);
 /// Spec 8.5 "pre-assigned to episodes by runtime as a suggestion": the groups' representatives in title order, assigned
 /// from episode `start`: each takes the next episode, or the next two when its duration is within TV_RUNTIME_TOLERANCE of
 /// the sum of the next two episodes' runtimes and not within it of the next one's; an episode without a runtime takes one
@@ -22969,10 +23098,11 @@ pub struct PlanInputs<'a> {
 /// the disc has no title at all. Def: T7. Use: T15.
 pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String>;
 
-/// Spec 7 "Space checks": the planned titles' sizes plus 5% before a Direct rip, the disc size plus 2% before a copy, the
-/// files to be written plus 5% before extraction or remux. Def: T7. Use: phase 2.
+/// Spec 7 "Space checks": 5% over the planned titles' sizes before a Direct rip. Def: T7. Use: phase 2.
 pub const DIRECT_SPACE_MARGIN: f64 = 0.05;
+/// Spec 7 "Space checks": 2% over the disc size before a whole-disc copy. Def: T7. Use: phase 2.
 pub const COPY_SPACE_MARGIN: f64 = 0.02;
+/// Spec 7 "Space checks": 5% over the files to be written before extraction or remux. Def: T7. Use: phase 2.
 pub const WRITE_SPACE_MARGIN: f64 = 0.05;
 /// Bytes needed on staging for the plan's mode: Direct, the sum of `PlannedTitle.size` (a title without a size counts 0)
 /// times 1.05; Copy, `disc_size` times 1.02; rounded up. Def: T7. Use: phase 2.
@@ -22987,9 +23117,9 @@ Where this task settles what the spec and the interfaces leave open (each choice
 2. **`Plan.wanted`.** `wanted_languages(identity.original_language)` for every title rule, not only when rule 2 ran twice: the audio and subtitle rules (Tasks 8, 13) read it, and a database-planned Spanish film (`pans-labyrinth-2006-uhd` in "Expected plans": "wanted eng and spa") needs Spanish there. The interfaces file's `plan` doc says the same (an earlier "the first's when there is no second" would have left such a film English-only). Pinned by `a_database_identity_takes_its_original_language_from_the_tmdb_record`; for an English original `Plan.wanted` is English only (`original_is_english`, `original` empty), whatever `original_two_letter` holds (`the_label_variant_is_rechosen_once_the_original_language_is_known`).
 3. **Edition names in the plan.** `PlannedRole::Feature.edition` is the filed name of 8.4 (`movie::edition_names` over `PlanInputs.library`), so a lone theatrical cut has None (Smile) and Expendables' main movie has `Unrated Cut`. Two or more structural rivals (rule 3) carry no edition name: rule 3 names no cut and such a plan is held for review, where the owner names cuts (8.4 "else from the owner in review"); without this, `edition_names` would call both rivals "Theatrical Cut". An unnamed cut (rule 1 or 2, `unnamed_cut`) also has edition None and is not theatrical; a consumer that runs `edition_names` again must keep the plan's editions for it, as for structural rivals (Task 13's `filed_edition` does both).
 4. **The LabelRuleUnavailable note** (10.2 ToolMissing: "when MakeMKV did not report using it, label rule 8.3.2 does not apply and a note records why") is raised when rule 2 was reached (rule 1 gave no plan, or rule 3 found a play-all title) on a Blu-ray scan without `MSG:3344`. A DVD has no Java menus and never gets it; a disc that rule 1 planned does not need it; a disc made TV by TheDiscDB, its structure or its season marker never reaches rule 2 and does not get it either (`an_unmapped_tv_disc_is_suggested_by_runtime_at_0_60_with_tv_unmapped` pins that absence on a Blu-ray without Java).
-5. **Every play-all group** (8.3 rule 3.1, `kind::play_all`, applied again until it finds none, since 8.5 says "play all titles are dropped" in the plural) is left out of the episode-length groups that `RuntimeFacts.episode_group_seconds` and `tv::unmapped` read; they stay in `PlanEvidence.groups`. A disc with an extras play-all beside an episodes play-all suggests neither (`every_play_all_title_is_dropped_from_the_suggestions`), and a play-all title on a disc rule 3 finds is never suggested (`a_play_all_title_makes_a_movie_disc_tv_and_is_never_suggested`).
+5. **Every play-all group** (8.3 rule 3.1, `tv::without_play_all`, which applies `kind::play_all` again until it finds none, since 8.5 says "play all titles are dropped" in the plural) is left out of the episode-length groups that `RuntimeFacts.episode_group_seconds` and `tv::unmapped` read; they stay in `PlanEvidence.groups`. A disc with an extras play-all beside an episodes play-all suggests neither (`every_play_all_title_is_dropped_from_the_suggestions`), and a play-all title on a disc rule 3 finds is never suggested (`a_play_all_title_makes_a_movie_disc_tv_and_is_never_suggested`).
 6. **Seasons.** A planned episode without a season takes `overrides.season`, else the disc name's season. For an unmapped disc the session `tv::find` returns gives the suggestions' start and, when it was found without a parsed season (the show's single open session, 8.5), the season too; with several open sessions and no parsed season the suggestions start at episode 1 with no season, and review asks for it (8.5 "failing that"; `with_several_open_sessions_and_no_parsed_season_review_asks_for_the_season`). An unmapped disc's suggested episodes are never assigned in a session. Spec 11 says Set identity "For TV this also attaches the disc to a season session", and 8.5 that "A disc joins a session when its identity is confirmed (by TheDiscDB or in review)": so an unmapped TV disc whose identity is confirmed (step Reviewed, Remembered, DiscdbBoth or DiscdbOne; a remembered decision is an earlier review's) and whose season is known gets `Plan.session`, the found session or a new one, with the disc recorded and no episode assigned (`tv::assign(.., fingerprint, &[])`); a search identity (TmdbOne, TmdbSeveral) is not confirmed and attaches nothing (`set_identity_attaches_an_unmapped_disc_to_its_season_session_without_episodes`, `an_unmapped_disc_continues_its_season_session_from_the_next_unassigned_episode`). The same rule holds for a mapped disc: TheDiscDB's map joins the season session only when the identity is confirmed. A TheDiscDB entry without a TMDb ID whose one plausible search result has another year is step 5 (Task 4: 0.50, `identity_ambiguous`, with that result's show identity); its mapped episodes are planned at 0.98 but recorded in no session (`a_mapped_disc_whose_identity_is_not_confirmed_joins_no_session`).
-7. **Assigned titles** (a remembered decision's matched titles, or the owner's Assign titles when it names any title, which then wins whole) replace the planned titles at 1.00 and take the title rule's review reasons with them; an Ignored title and a title number the scan lacks are left out with a sentence; a Cut keeps its name and a Feature is the theatrical or main cut, both through `edition_names`; only episodes make the disc TV and only features a movie (`kind_source` is not changed: it records how the scan looked; when the assigned titles change the kind, the sentence `the assigned titles make the disc TV`, or `... a movie`, records it, pinned by `assigned_episodes_make_a_tv_plan_that_joins_the_season_session`). Assigned episodes with a TMDb show identity join the season session as a mapped disc's do (8.5 "when its identity is confirmed (by TheDiscDB or in review)"). A remembered decision applies only when every one of its titles that is not Ignored matches a scan title: spec 5 says it "sets the confidence it covers to 1.00", and one that matches only some of its titles does not cover this scan (taken at 1.00 it would make a Direct job that silently leaves the other titles out, 8.8 "Limits of D1"). The titles are then planned, with the sentence `the remembered decision matches only <n> of its <m> titles: the titles are planned` (`a_remembered_decision_that_matches_only_some_of_its_titles_leaves_the_planned_titles`); the remembered identity still applies.
+7. **Assigned titles** (a remembered decision's matched titles, or the owner's Assign titles when it names any title, which then wins whole) replace the planned titles at 1.00 and take the title rule's review reasons with them; an Ignored title and a title number the scan lacks are left out with a sentence; a Cut keeps its name and a Feature is the theatrical or main cut, both through `edition_names`; only episodes make the disc TV and only features a movie (`kind_source` is not changed: it records how the scan looked; when the assigned titles change the kind, the sentence `the assigned titles make the disc TV`, or `... a movie`, records it, pinned by `assigned_episodes_make_a_tv_plan_that_joins_the_season_session`). Assigned episodes with a TMDb show identity join the season session as a mapped disc's do (8.5 "when its identity is confirmed (by TheDiscDB or in review)"). A remembered decision applies only when every one of its titles that is not Ignored matches a scan title: spec 5 says it "sets the confidence it covers to 1.00", and one that matches only some of its titles does not cover this scan (taken at 1.00 it would make a Direct job that silently leaves the other titles out, 8.8 "Limits of D1"). The titles are then planned, with the sentence `the remembered decision matches only <n> of its <m> titles: the titles are planned` (`a_remembered_decision_that_matches_only_some_of_its_titles_leaves_the_planned_titles`); the remembered identity still applies. `assigned_entries` decides whether an assigned Cut is theatrical with `edition.as_str() == THEATRICAL_CUT`, which is provisional: Task 5's `movie::is_theatrical` is the one test (so a Cut named "Theatrical Version" is theatrical), and Task 13's Step 2 swaps the comparison for it; no Task 7 test depends on the difference.
 8. **`title_key` when the source is missing.** A Blu-ray title without attribute 16, or a DVD title without attribute 24, is keyed `title<scan title number>` with two digits (`t02-title07`); no recorded or pinned scan has such a title.
 9. **Space needs** are computed in integer arithmetic (`bytes * (100 + percent)`, divided by 100 rounding up, at most `u64::MAX`), so a 67,757,930,496-byte title needs exactly 71,145,827,021 bytes.
 10. **Synthetic TMDb answers.** No TMDb search answer or full record is recorded anywhere; the tests build them with Task 2's `search_json`, `tmdb_movie_json` and `tmdb_tv_json`, which follow TMDb's documented `/search/multi`, `/movie/{id}` and `/tv/{id}` shapes. Phase 2's client verifies the shapes live.
@@ -23196,6 +23326,31 @@ and replace it with
 
 (`fingerprint::content_hash` of each log's HSH lines is the `ContentHash` of its `discNN.json` and the name of one `corpus/thediscdb-api/dischash-*.json`; every test below asserts it before reading the answer.)
 
+Then give the value one copy: in `crates/core/src/plan/tv.rs`'s `mod tests`, delete Task 6's local constant and its two-line doc comment, these lines and the blank line after them:
+
+```rust
+    /// Firefly disc 2's `dischash` answer (its `ContentHash`), which Task 5's `plan::fixtures` does not hold until Task 7
+    /// moves it there; the pinned logs, the other answer hashes, `pinned` and `api_record` are the fixtures' (one copy).
+    const FIREFLY_2_API: &str = "294A3E64C457A1BC9A0833335C090568";
+```
+
+and in the same module find
+
+```rust
+    use crate::plan::fixtures::{
+        api_record, pinned, CHERNOBYL_1, CHERNOBYL_1_API, CHERNOBYL_2, CHERNOBYL_2_API, FIREFLY_1, FIREFLY_1_API, FIREFLY_2,
+    };
+```
+
+and replace it with
+
+```rust
+    use crate::plan::fixtures::{
+        api_record, pinned, CHERNOBYL_1, CHERNOBYL_1_API, CHERNOBYL_2, CHERNOBYL_2_API, FIREFLY_1, FIREFLY_1_API, FIREFLY_2,
+        FIREFLY_2_API,
+    };
+```
+
 Then find the end of Step 2's last test, the lines
 
 ```rust
@@ -23216,6 +23371,7 @@ and replace them with the block below, which repeats those two lines, adds the h
     use crate::lookup::IdentityStep;
     use crate::testsupport::{scan_text_with_messages, search_json, tmdb_movie_json, tmdb_tv_json};
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     /// Plan inputs with no fingerprint, no disc ID, nothing remembered or reviewed and no season session.
     fn inputs<'a>(
@@ -24384,8 +24540,6 @@ use crate::settings::Settings;
 and replace them with
 
 ```rust
-use std::collections::BTreeMap;
-
 use crate::disc::{Disc, Title};
 use crate::lang::{wanted_languages, Wanted};
 use crate::lookup::discdb::{match_titles, DiscDbRecord};
@@ -24556,10 +24710,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let (mut planned_kind, mut kind_source) = kind::disc_kind(discdb, &groups, name);
     sentences.push(format!("the disc is {}: {}", kind_words(planned_kind), kind_source_words(kind_source)));
     // 8.5 "play all titles are dropped": no play-all group (8.3 rule 3.1) is an episode, so each is left out until none is.
-    let mut episode_groups: Vec<Group> = groups.clone();
-    while let Some(index) = kind::play_all(&episode_groups, disc.is_dvd) {
-        episode_groups.remove(index);
-    }
+    let (episode_groups, _) = tv::without_play_all(&groups, disc.is_dvd);
 
     // 8.3 rules 1 to 3 with English only (the original language comes with the identity), or 8.5's map.
     let english = wanted_languages(None);
@@ -24966,7 +25117,7 @@ fn mode_sentence(title_confidence: f64, planned: Mode) -> String {
 
 Run: `scripts/box.sh cargo test -p lazymkv-core plan::tests::`
 
-Expected: `test result: ok. 48 passed; 0 failed` (4, 3 and these 41), and no warning from `plan/mod.rs`.
+Expected: `test result: ok. 48 passed; 0 failed` (4, 3 and these 41), and no warning from `plan/mod.rs`. Step 8 imports nothing it does not use; `BTreeMap` is imported by Step 6's tests and, from Step 12, by the library.
 
 - [ ] **Step 10: Write the failing tests of remembered and review decisions (spec 5, 11, 8.8)**
 
@@ -25304,8 +25455,6 @@ Expected: the build succeeds and 10 tests fail on their first assertion, since S
 In `crates/core/src/plan/mod.rs`, find the `use` block Step 8 wrote
 
 ```rust
-use std::collections::BTreeMap;
-
 use crate::disc::{Disc, Title};
 use crate::lang::{wanted_languages, Wanted};
 use crate::lookup::discdb::{match_titles, DiscDbRecord};
@@ -25396,10 +25545,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let (mut planned_kind, mut kind_source) = kind::disc_kind(discdb, &groups, name);
     sentences.push(format!("the disc is {}: {}", kind_words(planned_kind), kind_source_words(kind_source)));
     // 8.5 "play all titles are dropped": no play-all group (8.3 rule 3.1) is an episode, so each is left out until none is.
-    let mut episode_groups: Vec<Group> = groups.clone();
-    while let Some(index) = kind::play_all(&episode_groups, disc.is_dvd) {
-        episode_groups.remove(index);
-    }
+    let (episode_groups, _) = tv::without_play_all(&groups, disc.is_dvd);
 
     // 8.3 rules 1 to 3 with English only (the original language comes with the identity), or 8.5's map.
     let english = wanted_languages(None);
@@ -25803,10 +25949,11 @@ and replace it with the block below, which repeats those two lines and adds the 
     format!("title confidence {title_confidence:.2}: {mode}")
 }
 
-/// Spec 7 "Space checks": the planned titles' sizes plus 5% before a Direct rip, the disc size plus 2% before a copy, the
-/// files to be written plus 5% before extraction or remux. Def: T7. Use: phase 2.
+/// Spec 7 "Space checks": 5% over the planned titles' sizes before a Direct rip. Def: T7. Use: phase 2.
 pub const DIRECT_SPACE_MARGIN: f64 = 0.05;
+/// Spec 7 "Space checks": 2% over the disc size before a whole-disc copy. Def: T7. Use: phase 2.
 pub const COPY_SPACE_MARGIN: f64 = 0.02;
+/// Spec 7 "Space checks": 5% over the files to be written before extraction or remux. Def: T7. Use: phase 2.
 pub const WRITE_SPACE_MARGIN: f64 = 0.05;
 
 /// Bytes needed on staging for the plan's mode: Direct, the sum of `PlannedTitle.size` (a title without a size counts 0)
@@ -25859,7 +26006,7 @@ Expected: `Finished`, with no warning from `crates/core/src/plan/mod.rs`.
 - [ ] **Step 19: Commit**
 
 ```bash
-git add crates/core/src/plan/mod.rs
+git add crates/core/src/plan/mod.rs crates/core/src/plan/tv.rs
 git commit -m "core: plan::plan assembles the disc phase's plan" -m "Spec 6.1 step 5: the kind, the titles in plan order with spec 5's title keys, the identity and title confidences, the mode, review reasons and notes; 8.3 rule 2 rerun once the original language is known; remembered decisions and the owner's review decisions at 1.00 (spec 5, 11, 8.8); season sessions (8.5); section 7's space needs."
 git log -1 --format='%G? %an <%ae> %cn <%ce>%n%B'
 ```
@@ -25874,7 +26021,7 @@ Expected: the first line is `G krcm0209 <17315774+krcm0209@users.noreply.github.
 - Create: `crates/core/src/tracks/audio.rs` (spec 8.6 steps 1 to 6 and "Content", D9, D13, D15, D21, RP7: `AudioFacts`, `AudioDrop`, `LangGroup`, `AudioTrack`, `AUDIO_CONFIDENCE`, `G1_MAX_KBPS`, `Alignment`, `AudioDecision`, `decide_audio`, `rank_key`, `guards`, `align_descriptions`, `descriptions`, and the private helpers `COMMENTARY_FLAGS`, `DROPPED_DESCRIPTIONS`, `same_track`, `aligns`, `pairs`, `Criteria`, `criteria`, `tier_rank`, `g1_weak`, `g1`, `g2`, `rule_drop`, `group_of`, `track_of`, `group_order`, `rank_and_order`, `reference_of`, `track_name`, `finish`, `language_word`, `group_members`, `notes_of`, `gaps`, `push_note`, `apply_verdicts`, `Source`, `overrides_of`, `settle`, `keep_orders`, `override_defaults`, `confidence_of`; it ends with `#[cfg(test)] mod tests;`)
 - Create: `crates/core/src/tracks/audio/tests.rs` (the module's 67 unit tests, a sibling `tests.rs` as the conventions ask for `tracks/audio.rs`)
 - Modify: `crates/core/src/tracks/mod.rs` (one line, `pub mod audio;`, before Task 1's `SubtitleRole`; the shared interfaces say "Tasks 8, 9 and 11 add `pub mod audio;`, `pub mod subtitle;`, `pub mod layout;`")
-- Not modified: `crates/core/src/lib.rs`. The task index lists it, but Task 1 already declares `pub mod tracks;` there and `tracks::audio` is declared in `tracks/mod.rs`; Step 1 checks the line is present.
+- Not modified: `crates/core/src/lib.rs` (Task 1 already declares `pub mod tracks;` there and `tracks::audio` is declared in `tracks/mod.rs`); Step 1 checks the line is present.
 - Test: `crates/core/src/tracks/audio/tests.rs` (67 new)
 
 **Interfaces:**
@@ -26081,19 +26228,19 @@ impl Wanted {
     /// A stream's code is one of the original language's codes. Def: T1. Use: T8.
     pub fn is_original(&self, code: &str) -> bool;
 }
-/// "eng" or "en". Def: T1. Use: T8, T9, T10, T11.
+/// "eng" or "en". Def: T1. Use: T8, T9, T11 (T10 reaches it through T9's english_or_none).
 pub fn is_english(code: &str) -> bool;
 /// `NO_LANGUAGE.contains(code)` after lower-casing; None counts as no language. Def: T1. Use: T8, T9.
 pub fn is_no_language(code: Option<&str>) -> bool;
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
 impl StreamKind { pub fn as_str(self) -> &'static str; pub fn from_attr(text: &str) -> Option<StreamKind>; }
 
-/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T12.
+/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T10, T12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Flags(pub u32);
 impl Flags {
@@ -26192,7 +26339,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -26260,7 +26407,7 @@ pub struct DiscDbTitle {
     #[serde(default, alias = "Item")] pub item: Option<DiscDbItem>,
 }
 impl DiscDbTitle {
-    /// `robot::duration_seconds(duration)`. Def: T3. Use: T5, T6.
+    /// `robot::duration_seconds(duration)`. Def: T3. Use: T3 (`same_title`).
     pub fn seconds(&self) -> Option<u32>;
     /// The tracks of one kind, in index order. Def: T3. Use: T8.
     pub fn tracks_of(&self, kind: StreamKind) -> Vec<&DiscDbTrack>;
@@ -26387,7 +26534,7 @@ pub struct AudioTrack {
 pub const AUDIO_CONFIDENCE: f64 = 0.95;
 pub const G1_MAX_KBPS: u32 = 256;
 
-/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T9.
+/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T10, T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment { Full, WithoutDerived }
@@ -26443,7 +26590,7 @@ pub fn guards(ranked: Vec<AudioTrack>, settings: &Settings) -> Vec<AudioTrack>;
 /// (`DiscDbTrack::channels` against attribute 14, audio only); tried on all streams and on the streams without flag 2048;
 /// Some only when exactly one of the two aligns completely (equal lengths, every pair equal). A title without derived
 /// streams has one list, tried once (Full when it aligns); an empty TheDiscDB track list never aligns. The map is scan
-/// stream number to TheDiscDB track index. Def: T8. Use: T8, T9.
+/// stream number to TheDiscDB track index. Def: T8. Use: T8.
 pub fn align_descriptions(title: &Title, discdb: &DiscDbTitle) -> Option<(Alignment, BTreeMap<u32, u32>)>;
 /// Every scan stream (any kind) whose aligned TheDiscDB track has a description, to `lookup::description_kinds(description,
 /// track.language)`; with the alignment used. Empty and None without a record or without a unique alignment. Def: T8. Use: T8, T9, T10.
@@ -26954,7 +27101,7 @@ pub const AUDIO_CONFIDENCE: f64 = 0.95;
 /// spec 14). Def: T8. Use: T8.
 pub const G1_MAX_KBPS: u32 = 256;
 
-/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T9.
+/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T10, T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment {
@@ -26965,7 +27112,7 @@ pub enum Alignment {
 }
 
 impl Alignment {
-    /// Both alignments, in the order step 1 tries them.
+    /// Both alignments, in the order step 1 tries them. Spec 8.6 step 1.
     pub const ALL: [Alignment; 2] = [Alignment::Full, Alignment::WithoutDerived];
 
     /// "full" or "without_derived", the string serde writes. Spec 8.6 step 1.
@@ -27046,7 +27193,7 @@ fn pairs(tracks: &[&DiscDbTrack], streams: &[&Stream]) -> BTreeMap<u32, u32> {
 /// channels (`DiscDbTrack::channels` against attribute 14, audio only); tried on all streams and on the streams without
 /// flag 2048; Some only when exactly one of the two aligns completely. A title without derived streams has one list,
 /// tried once (`Full` when it aligns); an empty track list never aligns. The map is scan stream number to TheDiscDB
-/// track index. Def: T8. Use: T8, T9.
+/// track index. Def: T8. Use: T8.
 pub fn align_descriptions(title: &Title, discdb: &DiscDbTitle) -> Option<(Alignment, BTreeMap<u32, u32>)> {
     let mut tracks: Vec<&DiscDbTrack> = discdb.tracks.iter().collect();
     tracks.sort_by_key(|track| track.index);
@@ -29141,7 +29288,7 @@ impl SubtitleRole {
 }
 
 // lazymkv_core::lang (Task 1 additions, and the existing norm_lang)
-/// "eng" or "en". Def: T1. Use: T8, T9, T10, T11.
+/// "eng" or "en". Def: T1. Use: T8, T9, T11 (T10 reaches it through T9's english_or_none).
 pub fn is_english(code: &str) -> bool;
 /// `NO_LANGUAGE.contains(code)` after lower-casing; None counts as no language. Def: T1. Use: T8, T9.
 pub fn is_no_language(code: Option<&str>) -> bool;
@@ -29162,7 +29309,7 @@ impl Flags {
 pub struct Stream { pub number: u32, pub kind: StreamKind, pub language: Option<String>, pub codec: Codec, pub flags: Flags, /* the other attributes */ }
 pub struct Title { pub number: u32, pub dvd_title: Option<String>, pub streams: Vec<Stream>, /* the other attributes */ }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
 }
 impl Disc { pub fn title(&self, number: u32) -> Result<&Title, String>; }
@@ -30720,7 +30867,7 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 ### Task 10: Subtitle roles, forced tracks and confidence
 
 **Files:**
-- Modify: `crates/core/src/tracks/subtitle.rs` (Task 9's file. Inserted before its last two lines, `#[cfg(test)]` and `mod tests;`: the re-export `pub use roles::{...}` and the private module `roles`, which holds spec 8.7 from "Regular and SDH" to the confidence table and 8.7 "Text": `SUBTITLE_FLAGS_CONFIDENCE`, `SUBTITLE_ONE_FULL_CONFIDENCE`, `SUBTITLE_ALIGNMENT_CONFIDENCE`, `SUBTITLE_AMBIGUOUS_CONFIDENCE`, `SubtitleCase`, `confidence`, `SubtitleTrack`, `SubtitleDecision`, `text_disagreements`, `decide_subtitles`, and the private helpers `disagreements`, the `BY_*` constants, `DIRECTORS_COMMENTS_LINE`, `CLOSED_CAPTIONS_LINE`, `forced_only_line`, `partial_line`, `text_line`, `events_of`, `flags_of`, `track` and `overrides_of`)
+- Modify: `crates/core/src/tracks/subtitle.rs` (Task 9's file. Inserted before its last two lines, `#[cfg(test)]` and `mod tests;`: the re-export `pub use roles::{...}` and the private module `roles`, which holds spec 8.7 from "Regular and SDH" to the confidence table and 8.7 "Text": `SUBTITLE_FLAGS_CONFIDENCE`, `SUBTITLE_ONE_FULL_CONFIDENCE`, `SUBTITLE_ALIGNMENT_CONFIDENCE`, `SUBTITLE_AMBIGUOUS_CONFIDENCE`, `SubtitleCase`, `confidence`, `SubtitleTrack`, `SubtitleDecision`, `text_disagreements`, `decide_subtitles`, and the private helpers `disagreements`, the `BY_*` constants, `DIRECTORS_COMMENTS_LINE`, `CLOSED_CAPTIONS_LINE`, `DESCRIBED_COMMENTARY_LINE`, `forced_only_line`, `partial_line`, `text_line`, `events_of`, `flags_of`, `track` and `overrides_of`)
 - Modify: `crates/core/src/tracks/subtitle/tests.rs` (Task 9's file: appends the module `roles` with this task's 50 tests)
 - Test: `crates/core/src/tracks/subtitle/tests.rs` `mod roles` (50 new tests in `lazymkv-core`, all run on any OS without the evidence clone: made-up scans built with Task 9's `title_of`, and the pinned logs of Smile, Knowing and Firefly disc 1 under `corpus/thediscdb` through Task 9's `pinned_title`)
 
@@ -30845,19 +30992,19 @@ impl SubtitleRole {
 }
 
 // lazymkv_core::lang (T1)
-/// "eng" or "en". Def: T1. Use: T8, T9, T10, T11.
+/// "eng" or "en". Def: T1. Use: T8, T9, T11 (T10 reaches it through T9's english_or_none).
 pub fn is_english(code: &str) -> bool;
 /// `NO_LANGUAGE.contains(code)` after lower-casing; None counts as no language. Def: T1. Use: T8, T9.
 pub fn is_no_language(code: Option<&str>) -> bool;
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
 impl StreamKind { pub fn as_str(self) -> &'static str; pub fn from_attr(text: &str) -> Option<StreamKind>; }
 
-/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T12.
+/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T10, T12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Flags(pub u32);
 impl Flags {
@@ -30966,7 +31113,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -31032,7 +31179,7 @@ pub struct DiscDbTitle {
     #[serde(default, alias = "Item")] pub item: Option<DiscDbItem>,
 }
 impl DiscDbTitle {
-    /// `robot::duration_seconds(duration)`. Def: T3. Use: T5, T6.
+    /// `robot::duration_seconds(duration)`. Def: T3. Use: T3 (`same_title`).
     pub fn seconds(&self) -> Option<u32>;
     /// The tracks of one kind, in index order. Def: T3. Use: T8.
     pub fn tracks_of(&self, kind: StreamKind) -> Vec<&DiscDbTrack>;
@@ -31072,7 +31219,7 @@ pub struct SubtitleOverrideEntry { pub signature: StreamSignature, #[serde(flatt
 pub fn apply_subtitles<'a>(overrides: &'a [SubtitleOverrideEntry], streams: &[Stream]) -> BTreeMap<u32, &'a SubtitleOverride>;
 
 // lazymkv_core::tracks::audio (T8)
-/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T9.
+/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T10, T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment { Full, WithoutDerived }
@@ -31279,7 +31426,9 @@ pub fn decide_subtitles(title: &Title, facts: &SubtitleFacts<'_>, settings: &Set
 /// 8.7 "Text": the streams where a text decision differs from the counts, for any English or no-language stream: its
 /// role (Regular, Sdh, Forced, Drop) differs from the kept role (or kept against a Drop, or dropped against a kept
 /// role). SetAside never disagrees; Keep, and any verdict carrying the text rule's review, always disagree
-/// (text::before_yes's reading: text::decide writes Keep only with its own review). Def: T10. Use: T10, T18.
+/// (text::before_yes's reading: text::decide writes Keep only with its own review).
+/// The public form of the rule's text check, which decide_subtitles reaches through the private `disagreements`; kept
+/// for phase 2's review view. Def: T10. Use: T10.
 pub fn text_disagreements(decision: &SubtitleDecision, text: &BTreeMap<u32, crate::subtitle::text::Decision>) -> Vec<u32>;
 ```
 
@@ -31765,7 +31914,8 @@ and insert this code, preceded by one blank line, before the first of them (the 
     /// its role (Regular, Sdh, Forced, Drop) differs from the kept role (or kept against a Drop, or dropped against a
     /// kept role). SetAside never disagrees; Keep, and any verdict carrying the text rule's review, always disagree
     /// (text::before_yes's reading: text::decide writes Keep only with its own review). Streams dropped as another
-    /// language's, and streams the decision does not list, are not compared. In stream order. Def: T10. Use: T10, T18.
+    /// language's, and streams the decision does not list, are not compared. In stream order. The public form of the
+    /// rule's text check, kept for phase 2's review view. Def: T10. Use: T10.
     pub fn text_disagreements(decision: &SubtitleDecision, text: &BTreeMap<u32, Decision>) -> Vec<u32> {
         let dropped: BTreeMap<u32, SubtitleDrop> = decision.dropped.iter().cloned().collect();
         disagreements(&decision.kept, &dropped, text).into_iter().map(|(stream, _, _)| stream).collect()
@@ -33953,16 +34103,16 @@ impl SubtitleRole {
 }
 
 // lazymkv_core::lang (T1)
-/// "eng" or "en". Def: T1. Use: T8, T9, T10, T11.
+/// "eng" or "en". Def: T1. Use: T8, T9, T11 (T10 reaches it through T9's english_or_none).
 pub fn is_english(code: &str) -> bool;
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
 impl StreamKind { pub fn as_str(self) -> &'static str; pub fn from_attr(text: &str) -> Option<StreamKind>; }
-/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T12.
+/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T10, T12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Flags(pub u32);
 impl Flags {
@@ -34062,7 +34212,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -36242,7 +36392,7 @@ mod tests {
 scripts/box.sh cargo test -p lazymkv-core tracks::layout::
 ```
 
-Expected: the build fails with ``error[E0425]: cannot find function `default_subtitle` in this scope``, ``error[E0425]: cannot find function `layout` in this scope``, ``error[E0412]: cannot find type `Layout` in this scope`` and ``error[E0422]: cannot find struct, variant or union type `OutputTrack` in this scope``, and ends with ``error: could not compile `lazymkv-core` (lib test)``.
+Expected: the build fails with errors naming `default_subtitle`, `layout`, `Layout` and `OutputTrack`, among them ``error[E0425]: cannot find function `default_subtitle` in this scope``, ``error[E0425]: cannot find function `layout` in this scope`` (repeated once per call) and ``error[E0422]: cannot find struct, variant or union type `OutputTrack` in this scope``, and ends with ``error: could not compile `lazymkv-core` (lib test)``.
 
 - [ ] **Step 24: Write the layout**
 
@@ -36407,7 +36557,7 @@ Expected: the first line of the log output is `G krcm0209 <17315774+krcm0209@use
 ### Task 12: Verification
 
 **Files:**
-- Create: `crates/core/src/verify.rs` (spec 6.2 step 7, 6.4 step 14, 9.4 messages 2003 and 4047, RP11: `selected_streams`, `ExpectedTrack`, `expected_tracks`, `caption_first`, `ReadError`, `read_errors`, `DVD_LONGER_MAX`, `duration_ok`, `VerifyReport`, `verify_rip`, `verify_final`, `stream_of_track`, `removed_scan_streams`, `subs_streams`, `subtitle_events`, `by_scan_stream`, `failure_reviews`, and the private helpers `TEXT_OUTPUT`, `TEXT_CODEC`, `READ_ERROR`, `NO_DURATION`, `NOTHING_EXPECTED`, `NOTHING_KEPT`, `expected_track`, `Matched`, `match_tracks`, `rip_differences`, `final_differences`, `file_language`, `file_flag`, `codec_list`, `file_duration`, `chapter_entries`, `duration_sentence`; its 66 unit tests in `mod tests`)
+- Create: `crates/core/src/verify.rs` (spec 6.2 step 7, 6.4 step 14, 9.4 messages 2003 and 4047, RP11: `selected_streams`, `ExpectedTrack`, `expected_tracks`, `caption_first`, `ReadError`, `read_errors`, `DVD_LONGER_MAX`, `duration_ok`, `VerifyReport`, `verify_rip`, `verify_final`, `stream_of_track`, `removed_scan_streams`, `subs_streams`, `subs_index`, `subtitle_events`, `by_scan_stream`, `failure_reviews`, and the private helpers `TEXT_OUTPUT`, `TEXT_CODEC`, `READ_ERROR`, `NO_DURATION`, `NOTHING_EXPECTED`, `NOTHING_KEPT`, `expected_track`, `Matched`, `match_tracks`, `rip_differences`, `final_differences`, `file_language`, `file_flag`, `codec_list`, `file_duration`, `chapter_entries`, `duration_sentence`; its 66 unit tests in `mod tests`)
 - Create: `crates/dev/tests/verify.rs` (`verify_rip`, `read_errors`, `selected_streams`, `subs_streams` and `subtitle_events` over every rip label of the evidence clone, skipping with a reason without it: 7 tests)
 - Modify: `crates/core/src/lib.rs` (one line, `pub mod verify;`, after Task 1's `pub mod tracks;`)
 - Test: `crates/core/src/verify.rs` `mod tests` (66 new), `crates/dev/tests/verify.rs` (7 new): 73 new tests
@@ -36540,13 +36690,13 @@ pub fn codec(id: &str, short: &str, long: &str) -> Codec;
 pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str];
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
 impl StreamKind { pub fn as_str(self) -> &'static str; pub fn from_attr(text: &str) -> Option<StreamKind>; }
 
-/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T12.
+/// Attribute 22 as a bitmask (spec 9.5). Unknown bits are kept in the value and ignored by every query. Def: T2. Use: T6 (signature), T8, T9, T10, T12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Flags(pub u32);
 impl Flags {
@@ -36646,7 +36796,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -36842,6 +36992,10 @@ pub fn removed_scan_streams(rip_log: Option<&str>, selection: &[u32]) -> BTreeSe
 /// subs/index.json's `n` to the scan stream, through each entry's `track_id` and `stream_of_track`; entries without a
 /// track_id or a pair are left out. Def: T12. Use: T16, T18.
 pub fn subs_streams(index: &[SubsIndexEntry], report: &VerifyReport) -> BTreeMap<i64, u32>;
+/// subs_dir/index.json as `align::index_streams` reads it (UTF-8 with a byte-order mark allowed, invalid bytes
+/// replaced); Err is the read error's text or "<path>: <serde error>". The one reading `subtitle_events` and decide's
+/// text decisions share. Def: T12. Use: T12, T16.
+pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEntry>, String>;
 /// `align::events` of every subs/index.json entry under `subs_dir` (packets through `align::load_packets`), keyed by scan
 /// stream (`subs_streams`): `clear_max_bytes` for image codecs, 0 where `align::is_text`. Def: T12. Use: T16, T18.
 pub fn subtitle_events(tree: &dyn Tree, subs_dir: &PathKey, report: &VerifyReport, clear_max_bytes: i64) -> Result<BTreeMap<u32, Vec<f64>>, String>;
@@ -36904,7 +37058,7 @@ pub mod tracks;
 pub mod verify;
 ```
 
-Create `crates/core/src/verify.rs` with exactly this content (the module header and the test module; Step 4 inserts the `use` lines and the code between the header and `#[cfg(test)]`). The test module imports every name from outside `verify` that the tests of Steps 2 to 30 use, so until Step 30 adds the last of those tests `cargo` warns `unused import` for some of them (and later steps' helpers are defined with their tests, so none is unused); the warnings are expected and end with Step 30.
+Create `crates/core/src/verify.rs` with exactly this content (the module header and the test module; Step 4 inserts the `use` lines and the code between the header and `#[cfg(test)]`). The test module imports every name from outside `verify` that the tests of Steps 2 to 30 use, so until Step 30 adds the last of those tests `cargo` warns `unused import` for some of them (and later steps' helpers are defined with their tests); the helpers `truehd_scan` and `title_of` are defined here but first called in Step 6, so `cargo` also warns ``function `truehd_scan` is never used`` and ``function `title_of` is never used`` (dead_code) in Steps 3 and 5. These warnings are expected too; the dead_code ones end with Step 6 and the unused-import ones with Step 30.
 
 ```rust
 //! Verification of a ripped title against the scan and of a remuxed final file against the decision's layout (design
@@ -37086,7 +37240,7 @@ mod tests {
 
 Run: `scripts/box.sh cargo test -p lazymkv-core verify::tests`
 
-Expected: the build fails with `error[E0425]: cannot find function `selected_streams` in this scope` (one per call), besides `unused import` warnings for the test module's later names.
+Expected: the build fails with `error[E0425]: cannot find function `selected_streams` in this scope` (one per call), besides `unused import` warnings for the test module's later names (and, if the build gets that far, dead_code warnings for `truehd_scan` and `title_of`).
 
 - [ ] **Step 4: Implement `selected_streams`**
 
@@ -38844,7 +38998,7 @@ Run: `scripts/box.sh cargo test -p lazymkv-core verify::tests`
 
 Expected: the build fails with `error[E0425]: cannot find function `stream_of_track` in this scope`, and the same error for `subs_streams`, `by_scan_stream` and `subtitle_events`.
 
-- [ ] **Step 32: Implement `stream_of_track`, `subs_streams`, `subtitle_events` and `by_scan_stream`**
+- [ ] **Step 32: Implement `stream_of_track`, `subs_streams`, `subs_index`, `subtitle_events` and `by_scan_stream`**
 
 In `crates/core/src/verify.rs`, find the `use` block as Step 28 left it:
 
@@ -38907,6 +39061,15 @@ pub fn subs_streams(index: &[SubsIndexEntry], report: &VerifyReport) -> BTreeMap
         .collect()
 }
 
+/// subs_dir/index.json as `align::index_streams` reads it: UTF-8 with a byte-order mark allowed, invalid bytes
+/// replaced. Err is the read error's text (it names the path) or "<path>: <serde error>". The one reading
+/// `subtitle_events` and decide's text decisions share. Spec 6.4 step 10, 8.7.
+pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEntry>, String> {
+    let path = subs_dir.join("index.json");
+    let text = read_text(tree, &path, Encoding::Utf8Sig, Errors::Replace)?;
+    serde_json::from_str(&text).map_err(|error| format!("{}: {error}", tree.display(&path)))
+}
+
 /// `align::events` of every subs/index.json entry under `subs_dir` (packets through `align::load_packets`), keyed by
 /// scan stream (`subs_streams`): `clear_max_bytes` (spec 14 `sub_clear_max_bytes`) for image codecs, 0 where
 /// `align::is_text`. index.json is read as `align::index_streams` reads it (a byte-order mark allowed, invalid bytes
@@ -38919,10 +39082,7 @@ pub fn subtitle_events(
     report: &VerifyReport,
     clear_max_bytes: i64,
 ) -> Result<BTreeMap<u32, Vec<f64>>, String> {
-    let index_path = subs_dir.join("index.json");
-    let text = read_text(tree, &index_path, Encoding::Utf8Sig, Errors::Replace)?;
-    let index: Vec<SubsIndexEntry> =
-        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", tree.display(&index_path)))?;
+    let index = subs_index(tree, subs_dir)?;
     let streams = subs_streams(&index, report);
     let mut by_stream = BTreeMap::new();
     for entry in &index {
@@ -38933,7 +39093,10 @@ pub fn subtitle_events(
         let shown = tree.display(&path);
         let text = read_text(tree, &path, Encoding::Utf8Sig, Errors::Strict)
             .map_err(|error| if tree.is_file(&path) { format!("{shown}: {error}") } else { error })?;
-        let packets = load_packets(&text, &shown)?;
+        // load_packets prefixes its syntax and serde errors with `shown` but returns the AttributeError text of a
+        // top level that is not an object bare, so that one gets the path here.
+        let packets = load_packets(&text, &shown)
+            .map_err(|error| if error.starts_with(&shown) { error } else { format!("{shown}: {error}") })?;
         let limit = if is_text(entry.codec.as_deref()) { 0 } else { clear_max_bytes };
         let starts = events(&packets, limit).map_err(|error| format!("{shown}: {error}"))?;
         by_stream.insert(stream, starts);
@@ -39015,7 +39178,7 @@ Expected: PASS, `test result: ok. 66 passed; 0 failed`, with no warning from `cr
 
 - [ ] **Step 38: Write the evidence tests**
 
-RP11 asks for `core::verify`'s "own tests over the recordings' `mkvmerge.json` files". Every value below was read from the clone's files on 2026-10-16: each rip label's `rip-summary.json` (title and profile), `scan.txt` (the title's streams, attributes 8 and 9), `mkvmerge.json` (tracks, one chapter edition, the duration), `rip.txt` (MSG:4047 and MSG:2003 lines) and `subs/index.json` with its packets files. The nine rip labels are pans-labyrinth-2006-uhd's `all-tracks` (title 0, MakeMKV removed `#5` and `#7`), `eng-only` (title 0, removed `#3`) and `rehearsal` (title 1, video only); short-circuit-1986-dvd's `all-tracks` (title 0, a DVD file 15.9 s longer than the scan); short-circuit-2-1988-dvd's `all-tracks-2` (title 0, the captions after the audio, three MSG:2003 lines at offset 1048576) and `eng-only` (title 0, no read error); the-office-2005-s3d3-bluray's `e16-stereo` (title 0, removed `#5`), `rehearsal` (title 1, removed `#6`) and `t3-all-tracks` (title 3, removed `#5`). short-circuit-2-1988-dvd's `all-tracks` failed (its summary is not ok) and is not a rip label. The tests never print a drive field. Under RP21 the file holds no value from the clone that the public docs do not publish: a file's duration is asserted to one decimal where spec 6.2 step 7 or EXP-01 gives it (7150.1 s, 6623.6 s, 5919.9 s) and otherwise only through `report.ok` (the 2 s band), and each subtitle stream's event starts are checked against `align::events` of its packets file, computed in the test, instead of a hard-coded first start; the event counts asserted are the ones phase 0's docs publish (`docs/phase0/REPORT.md`, `EXP-11-language-selection.md`, the port plan's tables).
+RP11 asks for `core::verify`'s "own tests over the recordings' `mkvmerge.json` files". Every value below was read from the clone's files on 2026-10-16: each rip label's `rip-summary.json` (title and profile), `scan.txt` (the title's streams, attributes 8 and 9), `mkvmerge.json` (tracks, one chapter edition, the duration), `rip.txt` (MSG:4047 and MSG:2003 lines) and `subs/index.json` with its packets files. The nine rip labels are pans-labyrinth-2006-uhd's `all-tracks` (title 0, MakeMKV removed `#5` and `#7`), `eng-only` (title 0, removed `#3`) and `rehearsal` (title 1, video only); short-circuit-1986-dvd's `all-tracks` (title 0, a DVD file 15.9 s longer than the scan); short-circuit-2-1988-dvd's `all-tracks-2` (title 0, the captions after the audio, three MSG:2003 lines at offset 1048576) and `eng-only` (title 0, no read error); the-office-2005-s3d3-bluray's `e16-stereo` (title 0, removed `#5`), `rehearsal` (title 1, removed `#6`) and `t3-all-tracks` (title 3, removed `#5`). short-circuit-2-1988-dvd's `all-tracks` failed (its summary is not ok) and is not a rip label. The tests never print a drive field. Under RP21 the file holds no value from the clone that the public docs do not publish: a file's duration is asserted to one decimal where spec 6.2 step 7 or EXP-01 gives it (7150.1 s, 6623.6 s, 5919.9 s) and otherwise only through `report.ok` (the 2 s band), and each subtitle stream's event starts are checked against `align::events` of its packets file, computed in the test, instead of a hard-coded first start; the event counts, chapter counts and scan durations asserted as numbers are the ones phase 0's docs publish (`docs/phase0/REPORT.md`, `EXP-11-language-selection.md`, `EXP-13-design.md`, the port plan's tables); where the docs publish none (Pan's Spanish PGS count at limit 0, the Office e16-stereo chapter count, the Office rehearsal's duration), the test derives the value from the scan or from `align::events` instead.
 
 Create `crates/dev/tests/verify.rs` with exactly this content:
 
@@ -39212,7 +39375,12 @@ fn pans_labyrinth_2006_uhd() {
     assert_eq!(all.report.read_errors, Vec::<ReadError>::new());
     assert_eq!(subs_map(&rec, "all-tracks", &all.report), BTreeMap::from([(0, 4), (1, 6)]));
     assert_eq!(event_counts(&rec, "all-tracks", &all.report, default), BTreeMap::from([(4, 887), (6, 884)]));
-    assert_eq!(event_counts(&rec, "all-tracks", &all.report, 0), BTreeMap::from([(4, 1774), (6, 1768)]));
+    // The docs publish stream 4's count at limit 0 (REPORT.md: 1774 = 2 x 887), not stream 6's. event_counts checks
+    // stream 6 against align::events of its packets file, and at limit 0 it counts more events than at the default.
+    let at_zero = event_counts(&rec, "all-tracks", &all.report, 0);
+    assert_eq!(at_zero.keys().copied().collect::<Vec<u32>>(), [4, 6]);
+    assert_eq!(at_zero.get(&4), Some(&1774));
+    assert!(at_zero[&6] > 884);
 
     let eng = verified(&rec, "eng-only");
     assert_eq!(eng.selection, [0, 3, 4, 5]);
@@ -39321,7 +39489,8 @@ fn the_office_2005_s3d3_bluray() {
     assert_eq!(e16.report.pairs, pairs(&[0, 1, 2, 3, 4]));
     // File durations of the Office are checked only through report.ok (the 2 s band): the docs publish none.
     assert_eq!(e16.report.expected_seconds, 1309.0);
-    assert_eq!((e16.report.scan_chapters, e16.report.file_chapters), (5, 5));
+    // The docs publish no chapter count for this title: the report carries the scan's count and the file matches it.
+    assert_eq!((e16.report.scan_chapters, e16.report.file_chapters), (e16.title.chapters, e16.title.chapters));
     assert_eq!(subs_map(&rec, "e16-stereo", &e16.report), BTreeMap::from([(0, 4)]));
     assert_eq!(event_counts(&rec, "e16-stereo", &e16.report, default), BTreeMap::from([(4, 345)]));
     assert_eq!(event_counts(&rec, "e16-stereo", &e16.report, 0), BTreeMap::from([(4, 690)]));
@@ -39330,7 +39499,8 @@ fn the_office_2005_s3d3_bluray() {
     assert_eq!((rehearsal.title.number, rehearsal.selection.clone()), (1, vec![0, 1, 2, 3, 4, 5, 6]));
     assert_verified("rehearsal", &rehearsal.report);
     assert_eq!(rehearsal.report.pairs, pairs(&[0, 1, 2, 3, 4, 5]));
-    assert_eq!(rehearsal.report.expected_seconds, 1278.0);
+    // The docs publish no duration for this title: the expected duration is the scan's.
+    assert_eq!(rehearsal.report.expected_seconds, f64::from(rehearsal.title.seconds.unwrap()));
     assert_eq!(subs_map(&rec, "rehearsal", &rehearsal.report), BTreeMap::from([(0, 5)]));
     assert_eq!(event_counts(&rec, "rehearsal", &rehearsal.report, default), BTreeMap::from([(5, 363)]));
     assert_eq!(event_counts(&rec, "rehearsal", &rehearsal.report, 0), BTreeMap::from([(5, 726)]));
@@ -39417,10 +39587,10 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 ### Task 13: The decision document
 
 **Files:**
-- Create: `crates/core/src/decision.rs` (spec 6.4 step 11, 8.8, 7 (`path_collision`) and 11 (Set identity, Assign titles, Override tracks, Resolve collision, Remember): `Confidences`, `Disposition` with `as_str`, `ALL` and `FromStr`, `DecisionInputs`, `FileDecision`, `decide`, `disposition`, `track_confidence`, `remember`, and the private helpers `KEEP_BOTH_COPY`, `Filing`, `filed_role`, `assigned_role`, `naming_record`, `filed_edition`, `job_features`, `filing`, `episode_name`, `stored_role`, `remembered_title`, `stream_signature`, `push_audio`, `push_subtitle`; its 78 unit tests in `mod tests`)
+- Create: `crates/core/src/decision.rs` (spec 6.4 step 11, 8.8, 7 (`path_collision`) and 11 (Set identity, Assign titles, Override tracks, Resolve collision, Remember): `Confidences`, `Disposition` with `as_str`, `ALL` and `FromStr`, `DecisionInputs`, `FileDecision`, `decide`, `disposition`, `track_confidence`, `remember`, and the private helpers `KEEP_BOTH_COPY`, `Filing`, `filed_role`, `assigned_role`, `naming_record`, `filed_edition`, `job_features`, `filing`, `episode_name`, `stored_role`, `remembered_title`, `stream_signature`, `push_audio`, `push_subtitle`; its 80 unit tests in `mod tests`)
 - Modify: `crates/core/src/lib.rs` (one line, `pub mod decision;`, between Task 1's `pub mod codec;` and Task 2's `pub mod disc;`)
 - Modify: `crates/core/src/plan/mod.rs` (spec 11 Assign titles, the one-copy rule: Task 7's `assigned_entries` maps a `TitleRole` to an 8.4 `Feature` inline; Step 2 moves that mapping into `pub(crate) fn assigned_feature`, which `assigned_entries` and this task's `decide` and `job_features` both call, and swaps the `THEATRICAL_CUT` comparison for Task 5's `is_theatrical`; no test is added or changed there)
-- Test: `crates/core/src/decision.rs` `mod tests` (78 new)
+- Test: `crates/core/src/decision.rs` `mod tests` (80 new)
 
 **Interfaces:**
 
@@ -39571,7 +39741,7 @@ pub struct Wanted {
 pub fn wanted_languages(original_language: Option<&str>) -> Wanted;
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
@@ -39608,7 +39778,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -39802,7 +39972,7 @@ pub struct LibraryFacts {
 pub fn edition_names(features: &[Feature], facts: &LibraryFacts) -> Vec<Option<String>>;
 /// An edition name that names the theatrical or main cut (8.4): none at all, or a name containing the word Theatrical
 /// (ignoring ASCII case), such as TheDiscDB's "Theatrical Version". The one test of "theatrical" for every rule and caller.
-/// Def: T5. Use: T5, T7, T13.
+/// Def: T5. Use: T5, T13.
 pub fn is_theatrical(edition: Option<&str>) -> bool;
 
 // lazymkv_core::plan::tv (T6)
@@ -40038,7 +40208,7 @@ pub struct AudioTrack {
 pub const AUDIO_CONFIDENCE: f64 = 0.95;
 pub const G1_MAX_KBPS: u32 = 256;
 
-/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T9.
+/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T10, T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment { Full, WithoutDerived }
@@ -40226,7 +40396,7 @@ Produces (exactly the `core::decision` (Task 13) entry of the Shared interfaces,
 /// Spec 11's Assign titles as a feature for 8.4's `edition_names`: `Feature` is the theatrical or main cut (no edition),
 /// `Cut { edition }` a feature with the owner's name, theatrical when `movie::is_theatrical` says so; None for episodes and
 /// Ignored. The one copy of this mapping (Task 13 moves it out of Task 7's `assigned_entries`, which then calls it).
-/// Def: T13. Use: T7 (`assigned_entries`), T13.
+/// Def: T13. Use: T13 (`decision::decide`, `job_features`, and Task 7's `assigned_entries` as Task 13 rewrites it).
 pub(crate) fn assigned_feature(number: u32, role: &TitleRole) -> Option<Feature>;
 
 // crates/core/src/decision.rs (Task 13)
@@ -40242,6 +40412,8 @@ pub enum Disposition { AutoFile, NeedsReview }
 /// Everything 6.4 step 11 decides from. Def: T13. Use: T16.
 pub struct DecisionInputs<'a> {
     pub plan: &'a Plan,
+    /// The scan the plan was made from: the owner's Assign titles leaves out a title it lacks, as a re-plan does (Open point 32).
+    pub disc: &'a Disc,
     pub planned: &'a PlannedTitle,
     pub title: &'a Title,
     pub audio: AudioFacts<'a>,
@@ -40302,7 +40474,7 @@ pub fn disposition(confidences: &Confidences, reviews: &[ReviewReason], settings
 pub fn track_confidence(audio: &AudioDecision, subtitles: &SubtitleDecision) -> f64;
 /// Spec 11 "Remember": the decisions of a reviewed job as a remembered-decisions file: the identity
 /// (overrides.identity, else plan.identity.tmdb; Err without one), the titles as RememberedTitles (source file, attribute
-/// 24, segment map, seconds and role): the owner's Assign titles whole, in title order (Ignored included), when it names
+/// 24, segment map, seconds and role): the owner's Assign titles whole, in title order (Ignored included, a title the scan lacks left out), when it names
 /// any title, else every planned title under its planned role (Err for an episode without a season or episode numbers,
 /// and for a feature without an edition in a plan of two or more features: an unnamed cut or structural rival the owner
 /// must name first, 8.4), every kept and dropped audio and subtitle stream of `decisions` as an override entry keyed by
@@ -40314,15 +40486,15 @@ And, not a cross-task item: `Disposition` also gets the closed-set methods every
 
 Where this task settles what the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **The role a title is filed under.** The owner's Assign titles (`overrides.titles`), when it names any title, wins whole, as in Task 7's re-plan (`assigned_roles` and `assigned_entries`, its settled point 7) and the interfaces' `plan` doc: Open point 32 requires the decision and a re-plan to apply the owner's review decisions the same way, so a job approved at the disposition gate files exactly the titles a re-plan would. `Feature` is a feature without an edition and `Cut { edition }` a feature with that edition (both through `plan::assigned_feature`, the one copy of the mapping, which Step 2 moves out of Task 7's `assigned_entries` so both call it), `Episodes { season, episodes }` an episode (keeping the planned episode's name when its episode numbers are the same), and `Ignored` is refused (`decide` returns Err: nothing is filed for an ignored title). A planned title the assignment does not name is refused too (Err: nothing is filed for it), never filed under its planned role beside the owner's titles (`a_planned_title_the_owners_assign_titles_leaves_out_is_not_filed`). Without an Assign titles, the planned role stands. A planned episode without a season takes `overrides.season` (8.5 "review asks for it"). The path follows that role (a feature through `movie_path` under `movies_root`, an episode through `tv_path` under `tv_root`), so an owner who turns a planned movie title into episodes and sets the show's identity gets a TV path (`the_owners_episode_assignment_on_a_movie_plan_files_under_tv_root_with_a_show_identity`); `plan.kind` is not consulted a second time. The record's kind must match the role (8.1 "the two kinds number their records separately"; 8.9 takes title and year from the identity's record): a feature needs a movie record and an episode a show record, else no path is built (choice 3), so a movie's ID never names a show folder and a show's ID never a movie folder (`a_role_whose_kind_differs_from_the_records_builds_no_path`).
-2. **The edition name.** `edition_names` (8.4) runs at decide time over the job's features (the owner's Assign titles, when it names any title, whole and in title order through `plan::assigned_feature`, as Task 7's `assigned_entries` builds them; else the plan's features in plan order), with the `LibraryFacts` of decide time, so a library folder that gained an edition-named file since planning, or an earlier filed copy of the cut (8.4's third bullet, `earlier_edition_names`), is honoured (`an_earlier_filed_copy_name_is_used_at_decide_time`). The plan holds Task 7's filed names, not the evidence's raw ones (Task 7's settled point 3: `PlannedRole::Feature.edition` is `edition_names` over the planning-time library facts), so `job_features` rebuilds each planned feature's `theatrical` flag from what the plan holds: a feature whose name names the theatrical cut (`is_theatrical`, Task 5's one test of "theatrical") is theatrical, any other name is a cut that `edition_names` gives back unchanged, and a feature with no edition is theatrical only in a plan of one feature. In a plan of two or more features Task 7 names the theatrical cut "Theatrical Cut", so a feature left without a name there is an unnamed cut (Task 5's settled point 3, `unnamed_cut`, 8.3 rule 1 or 2), a structural rival (rule 3 names no cut) or a cut whose earlier filed copy had no edition (`earlier_edition_names` maps it to ""); it is not theatrical, so it keeps no edition until the owner names it (8.4 "else from the owner in review") and is never filed as a second "Theatrical Cut" on the theatrical cut's path (`an_unnamed_cut_keeps_no_edition_name_beside_the_theatrical_cut`, `two_structural_rivals_get_no_edition_name_until_the_owner_names_them`). An assigned title is built from the assignment alone: `Feature` is the main cut, theatrical, and `Cut { edition }` is theatrical only when `is_theatrical` says its name names the theatrical cut. The second pass therefore changes only what the library facts of decide time change. The name then goes through `edition_label` (sanitised, 32 characters); a label that sanitises to nothing is no edition.
+1. **The role a title is filed under.** The owner's Assign titles (`overrides.titles`), when it names any title, wins whole, as in Task 7's re-plan (`assigned_roles` and `assigned_entries`, its settled point 7) and the interfaces' `plan` doc: Open point 32 requires the decision and a re-plan to apply the owner's review decisions the same way, so a job approved at the disposition gate files exactly the titles a re-plan would. `Feature` is a feature without an edition and `Cut { edition }` a feature with that edition (both through `plan::assigned_feature`, the one copy of the mapping, which Step 2 moves out of Task 7's `assigned_entries` so both call it), `Episodes { season, episodes }` an episode with no name of its own (as Task 7's `assigned_entries` builds it, so `episode_name` takes TMDb's name, exactly as a re-plan files it), and `Ignored` is refused (`decide` returns Err: nothing is filed for an ignored title). A planned title the assignment does not name is refused too (Err: nothing is filed for it), never filed under its planned role beside the owner's titles (`a_planned_title_the_owners_assign_titles_leaves_out_is_not_filed`). An assigned title the scan lacks is left out, as in Task 7's `assigned_entries`, so it is no feature of the job and changes no edition name (`an_assigned_title_the_scan_lacks_is_left_out_of_the_editions`); `DecisionInputs.disc` is the scan that check reads. Without an Assign titles, the planned role stands. A planned episode without a season takes `overrides.season` (8.5 "review asks for it"). The path follows that role (a feature through `movie_path` under `movies_root`, an episode through `tv_path` under `tv_root`), so an owner who turns a planned movie title into episodes and sets the show's identity gets a TV path (`the_owners_episode_assignment_on_a_movie_plan_files_under_tv_root_with_a_show_identity`); `plan.kind` is not consulted a second time. The record's kind must match the role (8.1 "the two kinds number their records separately"; 8.9 takes title and year from the identity's record): a feature needs a movie record and an episode a show record, else no path is built (choice 3), so a movie's ID never names a show folder and a show's ID never a movie folder (`a_role_whose_kind_differs_from_the_records_builds_no_path`).
+2. **The edition name.** `edition_names` (8.4) runs at decide time over the job's features (the owner's Assign titles, when it names any title, whole and in title order through `plan::assigned_feature`, as Task 7's `assigned_entries` builds them, a title the scan lacks left out; else the plan's features in plan order), with the `LibraryFacts` of decide time, so a library folder that gained an edition-named file since planning, or an earlier filed copy of the cut (8.4's third bullet, `earlier_edition_names`), is honoured (`an_earlier_filed_copy_name_is_used_at_decide_time`). The plan holds Task 7's filed names, not the evidence's raw ones (Task 7's settled point 3: `PlannedRole::Feature.edition` is `edition_names` over the planning-time library facts), so `job_features` rebuilds each planned feature's `theatrical` flag from what the plan holds: a feature whose name names the theatrical cut (`is_theatrical`, Task 5's one test of "theatrical") is theatrical, any other name is a cut that `edition_names` gives back unchanged, and a feature with no edition is theatrical only in a plan of one feature. In a plan of two or more features Task 7 names the theatrical cut "Theatrical Cut", so a feature left without a name there is an unnamed cut (Task 5's settled point 3, `unnamed_cut`, 8.3 rule 1 or 2), a structural rival (rule 3 names no cut) or a cut whose earlier filed copy had no edition (`earlier_edition_names` maps it to ""); it is not theatrical, so it keeps no edition until the owner names it (8.4 "else from the owner in review") and is never filed as a second "Theatrical Cut" on the theatrical cut's path (`an_unnamed_cut_keeps_no_edition_name_beside_the_theatrical_cut`, `two_structural_rivals_get_no_edition_name_until_the_owner_names_them`). An assigned title is built from the assignment alone: `Feature` is the main cut, theatrical, and `Cut { edition }` is theatrical only when `is_theatrical` says its name names the theatrical cut. The second pass therefore changes only what the library facts of decide time change. The name then goes through `edition_label` (sanitised, 32 characters); a label that sanitises to nothing is no edition.
 3. **When no path is built.** Without a TMDb record, without a TMDb identity, without the root for the role (`settings.movies_root`, `settings.tv_root`; both are None in spec 14's defaults), without a video height (a feature's `<Res>`), when the record's kind does not match the role (choice 1: a feature with a show record, an episode with a movie record), and for an episode without a season or without an episode number (which also raises `tv_unmapped`, 8.5). A decision without a path is `NeedsReview` even when it has no review reason and every confidence passes: 8.8's "files automatically only if" is a necessary condition, and a job with no final path cannot be filed. No review reason of 8.8's closed set names this case, so none is invented: the interfaces file records it as Open point 38 for the plan's owner (Task 14's NeedsReview notification may then carry an empty list until the owner adds a reason).
 4. **The record must be the identity's own.** The identity is `overrides.identity`, else `plan.identity.tmdb`. A record of another identity is refused with a sentence (8.9 "Title and year always come from the same TMDb record as the ID"); a record with no identity in hand is not used (no path).
 5. **Resolve collision (spec 11).** `KeepBoth` passes `copy: Some(2)` while `library.path_collision` holds (the file name gains ` 2` after the resolution label, `- 2160p 2`, or after the episode code, `S03E15 2`; `keep_both_on_an_episode_puts_the_copy_label_after_the_episode_code`); when the colliding file is gone by decide time (removed before approval), the new file takes the plain path, since a ` 2` label would distinguish it from nothing. `Replace` keeps the path. After either, `library.path_collision` raises no `path_collision` (the owner resolved it). `Discard` is refused: the engine discards the job and never asks for a decision. Without a resolution, `library.path_collision` raises `path_collision` (spec 7 "A path collision with any other file adds the review reason `path_collision`"). `LibraryFacts.path_collision` is one fact about one path, the plain one (no copy label), which is the path phase 2 checks before calling `decide`; the label is always 2, so a third copy (a `- 2160p 2` file already there) is not seen by `decide`. Phase 2 therefore also checks the copy-labelled path under `KeepBoth` before filing and, when that one is taken too, does not file and holds the job with `path_collision` (spec 7: lazymkv never overwrites a file it did not create). The `LibraryFacts.path_collision` doc and Open point 39 of the interfaces file say so; a second library fact for the labelled path is left to the plan's owner rather than added here, since `LibraryFacts` is Task 5's type.
 6. **`read_errors` exactly when the rip logged read errors.** The reason is removed from whatever was carried in (`rip_reviews`, the plan) and added only when `inputs.read_errors` is not empty; the offsets are carried unchanged. Verification lowers no confidence (Open point 30): `verify_failed`, `read_errors` and `copy_hash_errors` hold the job through the review reason alone.
 7. **The episode title.** The plan's (TheDiscDB's item title), else TMDb's name of the episode when the title holds exactly one episode, else none (`tv_path` then omits it with its ` - `). A multi-episode title without a name of its own gets none: joining TMDb's names would invent a title.
 8. **Confidences.** Identity is 1.00 (`lookup::REMEMBERED_CONFIDENCE`) when `overrides.identity` is Some, title 1.00 when `overrides.titles` is not empty (8.8 "A review decision sets the confidences it covers to 1.00"), track is `track_confidence` of the two decisions, which already carry 1.00 where the remembered and review overrides cover every stream (Tasks 8 and 10). The same two review decisions answer the plan's review reasons they cover, which `decide` leaves out: Set identity answers `identity_unknown` and `identity_ambiguous`, Assign titles answers `title_ambiguous`, `multiple_features`, `unnamed_cut` and `tv_unmapped`. Other tasks treat a review decision the same way (Task 7's assigned titles take the title rule's review reasons with them; Task 10 clears `subtitle_ambiguous` when overrides cover every stream), and without it a Copy-mode job held for one of these reasons and approved with the answer would be held a second time at the disposition gate (Task 14's `DecisionDone { NeedsReview }`) for a reason the owner already answered. The `tv_unmapped` that `decide` raises itself for a filed episode that still lacks its season or episode numbers stays, and the owner's season alone is no assignment, so it answers nothing (`the_owners_season_fills_a_planned_episode_without_one`).
-9. **`remember` (spec 11 Remember, spec 5's file).** When the owner's Assign titles names any title, it is stored whole, exactly its entries in title order (`Ignored` included), instead of the planned titles: the decision and a re-plan apply it that way (choice 1), so a planned title it leaves out is not remembered. Otherwise planned roles are stored as `Feature` (a feature without an edition in a plan of one feature), `Cut { edition }` (any edition, "Theatrical Cut" included), and `Episodes` (the episode's season, else `overrides.season`; Err without a season or without an episode number). A feature without an edition in a plan of two or more features is an unnamed cut or a structural rival (choice 2), which spec 5's roles cannot express: `TitleRole::Feature` means the theatrical or main cut, and Task 7's `assigned_entries` would read it back as such and name it "Theatrical Cut" beside the real one, two features on one path at title confidence 1.00. `remember` refuses it with Err until the owner names it (`an_unnamed_cut_cannot_be_remembered_until_the_owner_names_it`). Every kept audio track is `Keep { order, default }` with `order` its 0-based position in the decision's final order (Task 8's target positions, 0 first); every dropped audio stream is `Drop`, or `Commentary` when the owner marked it so; every kept subtitle track is `Keep { role }` and every dropped one `Drop`. A signature already stored (a second title with the same streams) is not stored again: the first decision wins. Err for a job without any identity, a title without a duration (spec 5 stores the duration), a decision whose key is not in the plan, or a stream the scan title lacks.
+9. **`remember` (spec 11 Remember, spec 5's file).** When the owner's Assign titles names any title, it is stored whole, exactly its entries in title order (`Ignored` included), instead of the planned titles: the decision and a re-plan apply it that way (choice 1), so a planned title it leaves out is not remembered, and a title it names that the scan lacks is left out, as in Task 7's `assigned_entries` (`remember_leaves_out_an_assigned_title_the_scan_lacks`). Otherwise planned roles are stored as `Feature` (a feature without an edition in a plan of one feature), `Cut { edition }` (any edition, "Theatrical Cut" included), and `Episodes` (the episode's season, else `overrides.season`; Err without a season or without an episode number). A feature without an edition in a plan of two or more features is an unnamed cut or a structural rival (choice 2), which spec 5's roles cannot express: `TitleRole::Feature` means the theatrical or main cut, and Task 7's `assigned_entries` would read it back as such and name it "Theatrical Cut" beside the real one, two features on one path at title confidence 1.00. `remember` refuses it with Err until the owner names it (`an_unnamed_cut_cannot_be_remembered_until_the_owner_names_it`). Every kept audio track is `Keep { order, default }` with `order` its 0-based position in the decision's final order (Task 8's target positions, 0 first); every dropped audio stream is `Drop`, or `Commentary` when the owner marked it so; every kept subtitle track is `Keep { role }` and every dropped one `Drop`. A signature already stored (a second title with the same streams) is not stored again: the first decision wins. Err for a job without any identity, a title without a duration (spec 5 stores the duration), a decision whose key is not in the plan, or a stream the scan title lacks.
 10. **Settings read.** `decide` reads `auto_threshold` (through `disposition`), `movies_root` and `tv_root` itself, and hands the settings to the rules it calls (`edition_style` and `jellyfin10_compat` reach `movie_path` and `tv_path`; `original_language_first` and `prefer_most_channels` reach `decide_audio`). The tests exercise `auto_threshold` at 0.85 and 0.95, both roots unset and set, `edition_style` at `combined`, `plex` and `jellyfin`, `jellyfin10_compat` off and on.
 11. **The wanted languages (R4, 8.6 "Languages").** The audio rule takes the wanted languages of the identity the job is filed under. They are the plan's (`Plan.wanted`, computed at planning from the planning identity's original language, which Task 7 takes from the record when fetched, else from TheDiscDB's media), except when the owner's Set identity names another work than the plan's and its record is given: then `wanted_languages(record.original_language)`. Without this, a disc planned with `identity_unknown` (English only, `wanted_languages(None)`) and given a Spanish film's identity at the disposition gate would drop the Spanish original track as an unwanted language, raise no `original_language_missing` (`original_is_english` holds for None) and file automatically without it (`the_owners_set_identity_brings_the_original_language_into_the_audio_rule`). For the plan's own identity the plan's set stands, since it may hold TheDiscDB's original language where the record has none; a re-plan with the same overrides gives the same set (Open point 32).
 
@@ -40330,7 +40502,7 @@ All tests read synthetic scans built with `testsupport::scan_text` and synthetic
 
 - [ ] **Step 1: Confirm the starting point and the test count**
 
-This task ports no Python test (6.4 step 11's decision document and spec 11's Remember are new code, RP20). It adds 78 tests, all in `crates/core/src/decision.rs`: 15 of the disposition and the track confidence (Step 2), 48 of `decide` (Step 6), 15 of `remember` (Step 10), each listed in its step. Step 2's move of Task 7's assignment mapping into `plan::assigned_feature` adds no test: Task 7's tests of assigned titles keep covering `assigned_entries`, and this task's tests cover `decide`'s use of it.
+This task ports no Python test (6.4 step 11's decision document and spec 11's Remember are new code, RP20). It adds 80 tests, all in `crates/core/src/decision.rs`: 15 of the disposition and the track confidence (Step 2), 49 of `decide` (Step 6), 16 of `remember` (Step 10), each listed in its step. Step 2's move of Task 7's assignment mapping into `plan::assigned_feature` adds no test: Task 7's tests of assigned titles keep covering `assigned_entries`, and this task's tests cover `decide`'s use of it.
 
 Run from the repository root:
 
@@ -40404,7 +40576,7 @@ and insert this function directly before it:
 /// theatrical cut (Task 5's one test of "theatrical"); None for episodes and Ignored. The one copy of this mapping: the
 /// re-plan's `assigned_entries` and the decision (`decision::decide` and its `job_features`) both call it, so a job
 /// approved at the disposition gate is filed as a re-plan would plan it (Open point 32). Spec 11, 8.4. Def: T13.
-/// Use: T7 (`assigned_entries`), T13.
+/// Use: T13 (`decision::decide`, `job_features`, and Task 7's `assigned_entries` as Task 13 rewrites it).
 pub(crate) fn assigned_feature(number: u32, role: &TitleRole) -> Option<Feature> {
     match role {
         TitleRole::Feature => Some(Feature { title: number, edition: None, theatrical: true, siblings: Vec::new() }),
@@ -40922,6 +41094,7 @@ Insert into `crates/core/src/decision.rs`, before the file's last line (the `}` 
     ) -> DecisionInputs<'a> {
         DecisionInputs {
             plan,
+            disc,
             planned: plan.titles.iter().find(|planned| planned.title == number).unwrap(),
             title: disc.title(number).unwrap(),
             audio: AudioFacts::default(),
@@ -41829,6 +42002,38 @@ Insert into `crates/core/src/decision.rs`, before the file's last line (the `}` 
     }
 
     #[test]
+    fn an_assigned_title_the_scan_lacks_is_left_out_of_the_editions() {
+        // Task 7's `ignored_and_unknown_assigned_titles_are_left_out`, decided: the owner ignores title 0, assigns title 1
+        // as the feature and names title 9, which the scan lacks. The re-plan leaves title 9 out and plans title 1 alone
+        // with no edition; the decision files the same (Open point 32), never title 1 as a "Theatrical Cut" beside title 9.
+        let disc = film_disc();
+        assert!(disc.title(9).is_err());
+        let mut plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None)), (1, feature_role(None))]);
+        plan.evidence.title_rule = Some(TitleRule::Structure);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let overrides = Overrides {
+            titles: vec![
+                TitleOverrideEntry { title: 0, role: TitleRole::Ignored },
+                TitleOverrideEntry { title: 1, role: TitleRole::Feature },
+                TitleOverrideEntry { title: 9, role: TitleRole::Feature },
+            ],
+            ..Overrides::default()
+        };
+        let mut input = inputs(&plan, &disc, 1, Some(&record), &library, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(decision.edition, None);
+        assert_eq!(
+            path_of(&decision),
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p.mkv"
+        );
+        assert_eq!(decision.confidences, Confidences { identity: 0.95, title: 1.00, track: 0.90 });
+        assert_eq!(decision.disposition, Disposition::AutoFile);
+    }
+
+    #[test]
     fn a_role_whose_kind_differs_from_the_records_builds_no_path() {
         let library = LibraryFacts::default();
         let settings = settings();
@@ -41940,9 +42145,9 @@ Insert into `crates/core/src/decision.rs`, before the file's last line (the `}` 
     }
 ```
 
-The 48 tests: `a_movie_title_gets_its_tracks_layout_path_and_confidences_and_files_automatically`, `a_second_cut_is_filed_under_its_edition_name_in_the_combined_style`, `the_plex_edition_style_files_a_cut_in_a_folder_of_its_own`, `a_lone_theatrical_cut_is_named_when_the_library_folder_already_holds_an_edition_named_file`, `two_structural_rivals_get_no_edition_name_until_the_owner_names_them`, `an_unnamed_cut_keeps_no_edition_name_beside_the_theatrical_cut`, `an_edition_name_is_cut_to_32_characters`, `the_owners_cut_name_replaces_the_planned_edition_and_sets_the_title_confidence_to_100`, `jellyfin10_compat_adds_the_tmdbid_tag_to_the_folder_and_the_file`, `a_year_like_tmdb_id_without_an_imdb_id_leaves_the_compat_tag_out_with_its_note_and_still_files`, `without_a_movies_root_no_path_is_built_and_the_job_is_held_without_a_review_reason`, `without_a_tmdb_record_no_path_is_built_and_the_job_is_held`, `a_tmdb_record_of_another_identity_is_refused`, `the_owners_set_identity_names_the_file_and_sets_the_identity_confidence_to_100`, `a_file_already_at_the_final_path_raises_path_collision`, `keep_both_files_the_new_copy_under_the_distinguishing_label_2`, `replace_files_at_the_same_path_without_path_collision`, `a_discarded_job_is_never_decided`, `read_errors_are_carried_with_their_offsets_and_raise_read_errors`, `read_errors_is_raised_exactly_when_the_rip_logged_read_errors`, `verify_failed_and_copy_hash_errors_from_the_rip_hold_the_job_and_lower_no_confidence`, `the_plans_review_reasons_and_notes_are_carried_into_the_decision`, `the_owners_assign_titles_answers_the_plans_title_review_reasons`, `the_owners_set_identity_answers_the_plans_identity_review_reasons`, `no_wanted_audio_from_the_audio_rule_holds_the_job`, `a_plan_title_confidence_of_085_files_automatically`, `a_plan_title_confidence_of_060_holds_the_job_without_a_review_reason_of_its_own`, `an_auto_threshold_of_095_holds_the_090_track_until_the_owner_overrides_every_track`, `the_owners_audio_overrides_set_audio_to_100_and_the_track_stays_at_the_subtitles_090`, `the_owners_audio_and_subtitle_overrides_together_set_the_track_confidence_to_100`, `a_title_the_owner_ignored_is_refused`, `a_planned_title_that_is_not_in_the_plan_is_refused`, `a_planned_title_decided_from_another_scan_title_is_refused`, `a_mapped_episode_is_filed_in_its_season_folder_under_its_title`, `a_multi_episode_title_is_filed_under_its_episode_range_without_the_slash_of_its_name`, `an_episode_without_a_name_of_its_own_takes_tmdbs_episode_name`, `an_episode_without_a_season_builds_no_path_and_raises_tv_unmapped`, `the_owners_season_fills_a_planned_episode_without_one`, `the_owners_episode_assignment_names_the_file_and_sets_the_title_confidence_to_100`, `without_a_tv_root_no_episode_path_is_built`, `a_file_decision_writes_its_fields_in_order_and_round_trips_through_json`, `the_owners_set_identity_brings_the_original_language_into_the_audio_rule`, `a_planned_title_the_owners_assign_titles_leaves_out_is_not_filed`, `a_role_whose_kind_differs_from_the_records_builds_no_path`, `the_owners_episode_assignment_on_a_movie_plan_files_under_tv_root_with_a_show_identity`, `an_earlier_filed_copy_name_is_used_at_decide_time`, `the_jellyfin_edition_style_writes_the_edition_after_the_resolution`, `keep_both_on_an_episode_puts_the_copy_label_after_the_episode_code`.
+The 49 tests: `a_movie_title_gets_its_tracks_layout_path_and_confidences_and_files_automatically`, `a_second_cut_is_filed_under_its_edition_name_in_the_combined_style`, `the_plex_edition_style_files_a_cut_in_a_folder_of_its_own`, `a_lone_theatrical_cut_is_named_when_the_library_folder_already_holds_an_edition_named_file`, `two_structural_rivals_get_no_edition_name_until_the_owner_names_them`, `an_unnamed_cut_keeps_no_edition_name_beside_the_theatrical_cut`, `an_edition_name_is_cut_to_32_characters`, `the_owners_cut_name_replaces_the_planned_edition_and_sets_the_title_confidence_to_100`, `jellyfin10_compat_adds_the_tmdbid_tag_to_the_folder_and_the_file`, `a_year_like_tmdb_id_without_an_imdb_id_leaves_the_compat_tag_out_with_its_note_and_still_files`, `without_a_movies_root_no_path_is_built_and_the_job_is_held_without_a_review_reason`, `without_a_tmdb_record_no_path_is_built_and_the_job_is_held`, `a_tmdb_record_of_another_identity_is_refused`, `the_owners_set_identity_names_the_file_and_sets_the_identity_confidence_to_100`, `a_file_already_at_the_final_path_raises_path_collision`, `keep_both_files_the_new_copy_under_the_distinguishing_label_2`, `replace_files_at_the_same_path_without_path_collision`, `a_discarded_job_is_never_decided`, `read_errors_are_carried_with_their_offsets_and_raise_read_errors`, `read_errors_is_raised_exactly_when_the_rip_logged_read_errors`, `verify_failed_and_copy_hash_errors_from_the_rip_hold_the_job_and_lower_no_confidence`, `the_plans_review_reasons_and_notes_are_carried_into_the_decision`, `the_owners_assign_titles_answers_the_plans_title_review_reasons`, `the_owners_set_identity_answers_the_plans_identity_review_reasons`, `no_wanted_audio_from_the_audio_rule_holds_the_job`, `a_plan_title_confidence_of_085_files_automatically`, `a_plan_title_confidence_of_060_holds_the_job_without_a_review_reason_of_its_own`, `an_auto_threshold_of_095_holds_the_090_track_until_the_owner_overrides_every_track`, `the_owners_audio_overrides_set_audio_to_100_and_the_track_stays_at_the_subtitles_090`, `the_owners_audio_and_subtitle_overrides_together_set_the_track_confidence_to_100`, `a_title_the_owner_ignored_is_refused`, `a_planned_title_that_is_not_in_the_plan_is_refused`, `a_planned_title_decided_from_another_scan_title_is_refused`, `a_mapped_episode_is_filed_in_its_season_folder_under_its_title`, `a_multi_episode_title_is_filed_under_its_episode_range_without_the_slash_of_its_name`, `an_episode_without_a_name_of_its_own_takes_tmdbs_episode_name`, `an_episode_without_a_season_builds_no_path_and_raises_tv_unmapped`, `the_owners_season_fills_a_planned_episode_without_one`, `the_owners_episode_assignment_names_the_file_and_sets_the_title_confidence_to_100`, `without_a_tv_root_no_episode_path_is_built`, `a_file_decision_writes_its_fields_in_order_and_round_trips_through_json`, `the_owners_set_identity_brings_the_original_language_into_the_audio_rule`, `a_planned_title_the_owners_assign_titles_leaves_out_is_not_filed`, `an_assigned_title_the_scan_lacks_is_left_out_of_the_editions`, `a_role_whose_kind_differs_from_the_records_builds_no_path`, `the_owners_episode_assignment_on_a_movie_plan_files_under_tv_root_with_a_show_identity`, `an_earlier_filed_copy_name_is_used_at_decide_time`, `the_jellyfin_edition_style_writes_the_edition_after_the_resolution`, `keep_both_on_an_episode_puts_the_copy_label_after_the_episode_code`.
 
-Where the expected values come from: the film's tracks are one English lossless 5.1 stream (8.6: kept, default, no note, 0.95) and one English PGS stream with no events, which 8.7's row 14 (b) fallback keeps as Regular "English" at 0.90 (Open point 12), so the track confidence is 0.90 (8.7's last sentence); identity 0.95 and title 0.98 are the plan's (TheDiscDB by fingerprint, rule 1). The paths are 8.9's patterns: `<movies_root>\Title (Year) {tmdb-ID}\Title (Year) {tmdb-ID} - <Res>.mkv` with 3840x2160 giving `2160p` and 1920x1080 `1080p`; `combined` adds ` <Ed> {edition-<Ed>}` after the resolution, `plex` puts ` {edition-<Ed>}` in both names before ` - <Res>`; `jellyfin10_compat` inserts ` [tmdbid-ID]` after `{tmdb-ID}` in both names (8.9's own example), and for an ID between 1900 and 2099 without an IMDb ID leaves it out with `compat_tag_omitted`; TV is `<tv_root>\Show (Year) {tmdb-ID}\Season NN\Show (Year) - SNNENN[-ENN] - Episode Title.mkv`, `/` removed from the episode title; spec 11's keep both is `- 2160p 2`. The roots are UNC paths, so every separator is `\` (Open point 14). Title 3's only audio stream is Spanish on an English work, so 8.6 keeps nothing and raises `no_wanted_audio`. Title 1 beside a "Theatrical Cut" with no edition of its own is an unnamed cut (Task 5's settled point 3), so it keeps no edition and the plain path, which is not the theatrical cut's. The owner's Set identity and Assign titles set their confidences to 1.00 and answer the plan's reasons they cover (choice 8), so with track 0.90 such a job files automatically. Title 2 with the owner's Set identity of a Spanish film (choice 11) keeps its Spanish stereo track as the original language, ordered first with `original_language_first` on (8.6 step 5), and its default and original flags; English follows. A planned title the owner's Assign titles does not name is refused (choice 1), and the one assigned cut, alone in the job, carries its name as a non-theatrical cut (8.4's first bullet). A role whose kind is not the record's builds no path (choice 1, choice 3). An earlier filed copy named "Original" names the lone theatrical cut (8.4's third bullet, key `theatrical`). `jellyfin` puts ` <Ed>` after the resolution label with no `{edition-...}` tag (8.9). Keep both on an episode puts ` 2` after the episode code (Task 11's settled point 5).
+Where the expected values come from: the film's tracks are one English lossless 5.1 stream (8.6: kept, default, no note, 0.95) and one English PGS stream with no events, which 8.7's row 14 (b) fallback keeps as Regular "English" at 0.90 (Open point 12), so the track confidence is 0.90 (8.7's last sentence); identity 0.95 and title 0.98 are the plan's (TheDiscDB by fingerprint, rule 1). The paths are 8.9's patterns: `<movies_root>\Title (Year) {tmdb-ID}\Title (Year) {tmdb-ID} - <Res>.mkv` with 3840x2160 giving `2160p` and 1920x1080 `1080p`; `combined` adds ` <Ed> {edition-<Ed>}` after the resolution, `plex` puts ` {edition-<Ed>}` in both names before ` - <Res>`; `jellyfin10_compat` inserts ` [tmdbid-ID]` after `{tmdb-ID}` in both names (8.9's own example), and for an ID between 1900 and 2099 without an IMDb ID leaves it out with `compat_tag_omitted`; TV is `<tv_root>\Show (Year) {tmdb-ID}\Season NN\Show (Year) - SNNENN[-ENN] - Episode Title.mkv`, `/` removed from the episode title; spec 11's keep both is `- 2160p 2`. The roots are UNC paths, so every separator is `\` (Open point 14). Title 3's only audio stream is Spanish on an English work, so 8.6 keeps nothing and raises `no_wanted_audio`. Title 1 beside a "Theatrical Cut" with no edition of its own is an unnamed cut (Task 5's settled point 3), so it keeps no edition and the plain path, which is not the theatrical cut's. The owner's Set identity and Assign titles set their confidences to 1.00 and answer the plan's reasons they cover (choice 8), so with track 0.90 such a job files automatically. Title 2 with the owner's Set identity of a Spanish film (choice 11) keeps its Spanish stereo track as the original language, ordered first with `original_language_first` on (8.6 step 5), and its default and original flags; English follows. A planned title the owner's Assign titles does not name is refused (choice 1), and the one assigned cut, alone in the job, carries its name as a non-theatrical cut (8.4's first bullet). A role whose kind is not the record's builds no path (choice 1, choice 3). An earlier filed copy named "Original" names the lone theatrical cut (8.4's third bullet, key `theatrical`). `jellyfin` puts ` <Ed>` after the resolution label with no `{edition-...}` tag (8.9). Keep both on an episode puts ` 2` after the episode code (Task 11's settled point 5). An assigned title the scan lacks (title 9 of the film's disc, which has titles 0 to 4) is left out of the job's features as Task 7's re-plan leaves it out, so the owner's one Feature is a lone theatrical cut with no edition and the plain path (choice 1, 8.4).
 
 - [ ] **Step 7: Run the tests to see them fail**
 
@@ -41963,6 +42168,9 @@ Insert this block into `crates/core/src/decision.rs` directly after the closing 
 pub struct DecisionInputs<'a> {
     /// The job's plan: its identity and title confidences, reviews, notes, wanted languages and titles.
     pub plan: &'a Plan,
+    /// The scan the plan was made from: the owner's Assign titles leaves out a title it lacks, as Task 7's re-plan
+    /// (`assigned_entries`) does (Open point 32).
+    pub disc: &'a Disc,
     /// The title being decided; one of `plan.titles`.
     pub planned: &'a PlannedTitle,
     /// The scan title of `planned` (`planned.title == title.number`).
@@ -42097,7 +42305,7 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
     // collision exists (with the colliding file gone, the plain path is free).
     let resolution = title.video_height().map(|height| resolution_label(height).to_string());
     let edition = match &role {
-        PlannedRole::Feature { .. } => filed_edition(plan, planned.title, overrides, inputs.library),
+        PlannedRole::Feature { .. } => filed_edition(plan, inputs.disc, planned.title, overrides, inputs.library),
         PlannedRole::Episode(_) => None,
     };
     let copy = (collision == Some(Collision::KeepBoth) && inputs.library.path_collision).then_some(KEEP_BOTH_COPY);
@@ -42192,7 +42400,7 @@ fn filed_role(planned: &PlannedTitle, overrides: Option<&Overrides>) -> Result<P
                     planned.title, planned.key
                 )
             })?;
-            assigned_role(planned.title, given, &planned.role).ok_or_else(|| {
+            assigned_role(planned.title, given).ok_or_else(|| {
                 format!(
                     "the owner's Assign titles ignores title {} ({}), so nothing is filed for it",
                     planned.title, planned.key
@@ -42209,19 +42417,15 @@ fn filed_role(planned: &PlannedTitle, overrides: Option<&Overrides>) -> Result<P
 }
 
 /// Spec 11's Assign titles as a planned role: a feature or named cut through `plan::assigned_feature` (the one mapping,
-/// which Task 7's re-plan also calls), or episodes (keeping the planned episode's name when the episode numbers are the
-/// same); None for Ignored.
-fn assigned_role(number: u32, role: &TitleRole, planned: &PlannedRole) -> Option<PlannedRole> {
+/// which Task 7's re-plan also calls), or episodes (with no name of their own, as Task 7's `assigned_entries` builds
+/// them; `episode_name` then takes TMDb's); None for Ignored.
+fn assigned_role(number: u32, role: &TitleRole) -> Option<PlannedRole> {
     if let Some(feature) = assigned_feature(number, role) {
         return Some(PlannedRole::Feature { edition: feature.edition });
     }
     match role {
         TitleRole::Episodes { season, episodes } => {
-            let name = match planned {
-                PlannedRole::Episode(episode) if episode.episodes == *episodes => episode.name.clone(),
-                _ => None,
-            };
-            Some(PlannedRole::Episode(Episode { season: Some(*season), episodes: episodes.clone(), name }))
+            Some(PlannedRole::Episode(Episode { season: Some(*season), episodes: episodes.clone(), name: None }))
         }
         TitleRole::Feature | TitleRole::Cut { .. } | TitleRole::Ignored => None,
     }
@@ -42249,8 +42453,14 @@ fn naming_record<'r>(
 
 /// 8.4's edition name of feature `number` as filed: `edition_names` over the job's features with the library facts of
 /// decide time, then `edition_label` (sanitised, 32 characters; an empty label is no edition).
-fn filed_edition(plan: &Plan, number: u32, overrides: Option<&Overrides>, library: &LibraryFacts) -> Option<String> {
-    let features = job_features(plan, overrides);
+fn filed_edition(
+    plan: &Plan,
+    disc: &Disc,
+    number: u32,
+    overrides: Option<&Overrides>,
+    library: &LibraryFacts,
+) -> Option<String> {
+    let features = job_features(plan, disc, overrides);
     let index = features.iter().position(|feature| feature.title == number)?;
     let name = edition_names(&features, library).into_iter().nth(index).flatten()?;
     let label = edition_label(&name);
@@ -42266,10 +42476,16 @@ fn filed_edition(plan: &Plan, number: u32, overrides: Option<&Overrides>, librar
 /// plan's features in plan order. A planned feature holds Task 7's filed name, so it is theatrical when that name names
 /// the theatrical cut (`is_theatrical`), and when it has no name only in a plan of one feature: in a plan of two or more,
 /// Task 7 names the theatrical cut, and a feature left without a name is an unnamed cut, a structural rival or a cut
-/// whose earlier filed copy had no edition, which keeps no edition until the owner names it (8.4).
-fn job_features(plan: &Plan, overrides: Option<&Overrides>) -> Vec<Feature> {
+/// whose earlier filed copy had no edition, which keeps no edition until the owner names it (8.4). An assigned title the
+/// scan lacks is left out, as Task 7's `assigned_entries` leaves it out (Open point 32).
+fn job_features(plan: &Plan, disc: &Disc, overrides: Option<&Overrides>) -> Vec<Feature> {
     if let Some(titles) = overrides.map(|given| &given.titles).filter(|titles| !titles.is_empty()) {
-        return titles.iter().filter_map(|entry| assigned_feature(entry.title, &entry.role)).collect();
+        // A title the scan lacks is left out, as Task 7's assigned_entries leaves it out (Open point 32).
+        return titles
+            .iter()
+            .filter(|entry| disc.titles.contains_key(&entry.title))
+            .filter_map(|entry| assigned_feature(entry.title, &entry.role))
+            .collect();
     }
     let planned_features =
         plan.titles.iter().filter(|entry| matches!(entry.role, PlannedRole::Feature { .. })).count();
@@ -42346,7 +42562,7 @@ fn episode_name(episode: &Episode, season: u32, record: &TmdbRecord) -> Option<S
 
 Run: `scripts/box.sh cargo test -p lazymkv-core decision::tests::`
 
-Expected: PASS, `test result: ok. 63 passed; 0 failed` (the 15 of Step 5 and these 48; the compiler may still warn about unused imports that Step 12 uses, such as `Disc`, `signature`, `AudioOverrideEntry`, `Remembered`, `RememberedTitle`, `StreamSignature`, `SubtitleOverrideEntry`, and the test imports `Family`, `apply_audio`, `apply_subtitles`, `apply_titles`, `AudioDrop`). If `a_planned_title_the_owners_assign_titles_leaves_out_is_not_filed` or `the_owners_episode_assignment_on_a_movie_plan_files_under_tv_root_with_a_show_identity` fails, compare with Task 7's `assigned_entries`, which now calls the same `assigned_feature` (Step 2): the decision must file what a re-plan with the same overrides would plan (Open point 32). If a test fails only on a path string, compare it with 8.9's pattern quoted in Step 6: a difference there is a defect of Task 11's `movie_path` or `tv_path`, to be fixed in Task 11 and reported to the plan's owner, never a test bent to fit. If `a_movie_title_gets_its_tracks_layout_path_and_confidences_and_files_automatically` fails on the subtitle confidence, Task 10's single-English-stream fallback (Open point 12, 0.90) is not in; that is a defect of Task 10.
+Expected: PASS, `test result: ok. 64 passed; 0 failed` (the 15 of Step 5 and these 49; the compiler may still warn about unused imports that Step 12 uses, such as `signature`, `AudioOverrideEntry`, `Remembered`, `RememberedTitle`, `StreamSignature`, `SubtitleOverrideEntry`, and the test imports `Family`, `apply_audio`, `apply_subtitles`, `apply_titles`, `AudioDrop`). If `a_planned_title_the_owners_assign_titles_leaves_out_is_not_filed` or `the_owners_episode_assignment_on_a_movie_plan_files_under_tv_root_with_a_show_identity` fails, compare with Task 7's `assigned_entries`, which now calls the same `assigned_feature` (Step 2): the decision must file what a re-plan with the same overrides would plan (Open point 32). If a test fails only on a path string, compare it with 8.9's pattern quoted in Step 6: a difference there is a defect of Task 11's `movie_path` or `tv_path`, to be fixed in Task 11 and reported to the plan's owner, never a test bent to fit. If `a_movie_title_gets_its_tracks_layout_path_and_confidences_and_files_automatically` fails on the subtitle confidence, Task 10's single-English-stream fallback (Open point 12, 0.90) is not in; that is a defect of Task 10.
 
 - [ ] **Step 10: Add the tests of `remember` (spec 11 Remember, spec 5's remembered decisions, Review Focus 1)**
 
@@ -42574,6 +42790,42 @@ Insert into `crates/core/src/decision.rs`, before the file's last line (the `}` 
     }
 
     #[test]
+    fn remember_leaves_out_an_assigned_title_the_scan_lacks() {
+        // The overrides of Task 7's `ignored_and_unknown_assigned_titles_are_left_out`: title 9 is not in the scan, so it
+        // is left out as the decision and the re-plan leave it out (choice 9), and the call succeeds.
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None)), (1, feature_role(None))]);
+        let overrides = Overrides {
+            titles: vec![
+                TitleOverrideEntry { title: 0, role: TitleRole::Ignored },
+                TitleOverrideEntry { title: 1, role: TitleRole::Feature },
+                TitleOverrideEntry { title: 9, role: TitleRole::Feature },
+            ],
+            ..Overrides::default()
+        };
+        let remembered = remember(FINGERPRINT, &disc, &plan, &[], &overrides).unwrap();
+        assert_eq!(
+            remembered.titles,
+            vec![
+                RememberedTitle {
+                    source_file: Some("00800.mpls".to_string()),
+                    dvd_title: None,
+                    segment_map: "1,2,3".to_string(),
+                    seconds: 7122,
+                    role: TitleRole::Ignored,
+                },
+                RememberedTitle {
+                    source_file: Some("00801.mpls".to_string()),
+                    dvd_title: None,
+                    segment_map: "1,2,4".to_string(),
+                    seconds: 7570,
+                    role: TitleRole::Feature,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn planned_episodes_are_remembered_with_their_season_the_owners_season_filling_a_missing_one() {
         let disc = office_disc();
         let plan = plan_of(
@@ -42712,9 +42964,9 @@ Insert into `crates/core/src/decision.rs`, before the file's last line (the `}` 
     }
 ```
 
-The 15 tests: `remember_stores_the_identity_every_planned_title_and_every_track_of_the_job`, `a_remembered_file_round_trips_and_matches_its_title_and_streams_back`, `a_remembered_decision_applied_to_the_next_job_sets_the_track_confidence_to_100`, `a_dropped_track_is_remembered_as_a_drop`, `a_track_the_owner_marked_as_commentary_is_remembered_as_commentary`, `on_a_dvd_a_remembered_title_is_matched_back_by_its_dvd_title_number`, `the_owners_assign_titles_is_remembered_whole_in_title_order`, `planned_episodes_are_remembered_with_their_season_the_owners_season_filling_a_missing_one`, `an_episode_without_a_season_cannot_be_remembered`, `a_job_without_any_identity_cannot_be_remembered`, `the_owners_set_identity_is_the_identity_remembered`, `a_stream_signature_seen_in_two_titles_is_remembered_once`, `a_decision_that_is_not_a_title_of_the_plan_cannot_be_remembered`, `a_title_without_a_duration_cannot_be_remembered`, `an_unnamed_cut_cannot_be_remembered_until_the_owner_names_it`.
+The 16 tests: `remember_stores_the_identity_every_planned_title_and_every_track_of_the_job`, `a_remembered_file_round_trips_and_matches_its_title_and_streams_back`, `a_remembered_decision_applied_to_the_next_job_sets_the_track_confidence_to_100`, `a_dropped_track_is_remembered_as_a_drop`, `a_track_the_owner_marked_as_commentary_is_remembered_as_commentary`, `on_a_dvd_a_remembered_title_is_matched_back_by_its_dvd_title_number`, `the_owners_assign_titles_is_remembered_whole_in_title_order`, `remember_leaves_out_an_assigned_title_the_scan_lacks`, `planned_episodes_are_remembered_with_their_season_the_owners_season_filling_a_missing_one`, `an_episode_without_a_season_cannot_be_remembered`, `a_job_without_any_identity_cannot_be_remembered`, `the_owners_set_identity_is_the_identity_remembered`, `a_stream_signature_seen_in_two_titles_is_remembered_once`, `a_decision_that_is_not_a_title_of_the_plan_cannot_be_remembered`, `a_title_without_a_duration_cannot_be_remembered`, `an_unnamed_cut_cannot_be_remembered_until_the_owner_names_it`.
 
-The durations are attribute 9 in seconds: 1:58:42 is 7122, 2:06:10 is 7570, 1:35:00 is 5700, 1:38:12 is 5892, 0:21:37 is 1297, 0:43:05 is 2585. The signatures are spec 5's (type, language, codec family, channels, position among identical streams); title 2's Spanish Dolby Digital stereo stream is dropped by 8.6 step 1 (a language that is not wanted on an English work) and its Spanish PGS stream by 8.7's first sentence. The owner's Commentary mark names title 2's English Dolby Digital 5.1, which 8.6 keeps, so the `Reviewed` drop and the remembered `Commentary` can only come from the override. The owner's Assign titles is remembered whole (choice 9), so planned title 0, which it does not name, is left out; title 3 is outside the plan and stored as `Ignored`. A planned feature without an edition beside the "Theatrical Cut" is refused until the owner names it (choice 9). On the DVD, both titles have the segment map "1", the duration 1:38:12 and no attribute 16, so only attribute 24 ("01" against "02") tells title 0 from title 1 (Review Focus 1): the remembered title matches title 0 and not title 1.
+The durations are attribute 9 in seconds: 1:58:42 is 7122, 2:06:10 is 7570, 1:35:00 is 5700, 1:38:12 is 5892, 0:21:37 is 1297, 0:43:05 is 2585. The signatures are spec 5's (type, language, codec family, channels, position among identical streams); title 2's Spanish Dolby Digital stereo stream is dropped by 8.6 step 1 (a language that is not wanted on an English work) and its Spanish PGS stream by 8.7's first sentence. The owner's Commentary mark names title 2's English Dolby Digital 5.1, which 8.6 keeps, so the `Reviewed` drop and the remembered `Commentary` can only come from the override. The owner's Assign titles is remembered whole (choice 9), so planned title 0, which it does not name, is left out; title 3 is outside the plan and stored as `Ignored`. An assigned title the scan lacks (title 9) is left out, not refused (choice 9), as Task 7's re-plan leaves it out. A planned feature without an edition beside the "Theatrical Cut" is refused until the owner names it (choice 9). On the DVD, both titles have the segment map "1", the duration 1:38:12 and no attribute 16, so only attribute 24 ("01" against "02") tells title 0 from title 1 (Review Focus 1): the remembered title matches title 0 and not title 1.
 
 - [ ] **Step 11: Run the tests to see them fail**
 
@@ -42730,12 +42982,12 @@ Insert this block into `crates/core/src/decision.rs` directly after the closing 
 
 /// Spec 11 "Remember": the decisions of a reviewed job as a remembered-decisions file: the identity
 /// (overrides.identity, else plan.identity.tmdb; Err without one), the titles as RememberedTitles (source file, attribute
-/// 24, segment map, seconds and role): the owner's Assign titles whole, in title order (Ignored included), when it names
+/// 24, segment map, seconds and role): the owner's Assign titles whole, in title order (Ignored included, a title the scan lacks left out), when it names
 /// any title, else every planned title under its planned role (Err for an episode without a season or episode numbers,
 /// and for a feature without an edition in a plan of two or more features: an unnamed cut or structural rival the owner
 /// must name first, 8.4), every kept and dropped audio and subtitle stream of `decisions` as an override entry keyed by
 /// `remembered::signature`. The owner's Assign titles is stored as the decision and a re-plan apply it (whole: a planned
-/// title it does not name is not remembered); a planned feature without an edition beside another feature is not
+/// title it does not name is not remembered, and a title it names that the scan lacks is left out); a planned feature without an edition beside another feature is not
 /// `TitleRole::Feature`, which means the theatrical or main cut and would come back as a second "Theatrical Cut". A kept
 /// audio track is `Keep` with its 0-based final position and its default flag, a dropped one `Drop` (or `Commentary`
 /// when the owner marked it so); a kept subtitle track is `Keep` with its role, a dropped one `Drop`; a signature
@@ -42772,7 +43024,8 @@ pub fn remember(
             titles.push(remembered_title(disc.title(planned.title)?, role)?);
         }
     } else {
-        for assigned in &overrides.titles {
+        // A title the scan lacks is left out, as the decision and Task 7's re-plan leave it out (choice 9).
+        for assigned in overrides.titles.iter().filter(|assigned| disc.titles.contains_key(&assigned.title)) {
             titles.push(remembered_title(disc.title(assigned.title)?, assigned.role.clone())?);
         }
     }
@@ -42871,13 +43124,13 @@ fn push_subtitle(entries: &mut Vec<SubtitleOverrideEntry>, signature: StreamSign
 
 Run: `scripts/box.sh cargo test -p lazymkv-core decision::tests::`
 
-Expected: PASS, `test result: ok. 78 passed; 0 failed` (the 63 of Step 9 and these 15), and no warning naming `crates/core/src/decision.rs` (every import is now used). If `a_remembered_decision_applied_to_the_next_job_sets_the_track_confidence_to_100` fails on a confidence, Task 8's or Task 10's remembered overrides (`facts.remembered` covering every stream gives 1.00) are not in; that is a defect of that task, never a test bent to fit.
+Expected: PASS, `test result: ok. 80 passed; 0 failed` (the 64 of Step 9 and these 16), and no warning naming `crates/core/src/decision.rs` (every import is now used). If `a_remembered_decision_applied_to_the_next_job_sets_the_track_confidence_to_100` fails on a confidence, Task 8's or Task 10's remembered overrides (`facts.remembered` covering every stream gives 1.00) are not in; that is a defect of that task, never a test bent to fit.
 
 - [ ] **Step 14: Run the whole workspace**
 
 Run: `scripts/box.sh cargo test --workspace`
 
-Expected: every `test result:` line says `ok` with `0 failed` (the 78 tests of this task among them: `scripts/box.sh cargo test -p lazymkv-core decision::tests::` gives 78, and Task 7's tests in `plan::tests::` pass with `assigned_feature`), the evidence tests of `lazymkv-dev` pass or print their `skipped:` lines as before, and the compiler prints no warning naming `crates/core/src/decision.rs`. Then:
+Expected: every `test result:` line says `ok` with `0 failed` (the 80 tests of this task among them: `scripts/box.sh cargo test -p lazymkv-core decision::tests::` gives 80, and Task 7's tests in `plan::tests::` pass with `assigned_feature`), the evidence tests of `lazymkv-dev` pass or print their `skipped:` lines as before, and the compiler prints no warning naming `crates/core/src/decision.rs`. Then:
 
 ```bash
 git status --short
@@ -42901,9 +43154,9 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 
 **Files:**
 - Create: `crates/core/src/job.rs` (design spec 5 (job ID), 6.1 step 2 (job lookup), 10.1, 10.2 and 12, RP12: `NETWORK_RETRY_MIN`, `LOOKUP_RETRY_MIN`, `FailureClass`, `OutputCause`, `Failure`, `Tool`, `Held`, `State`, `WaitReason`, `NotifyEvent`, `Event`, `Action`, `Rejected`, `failure_outcome`, `classify_title_failure`, `new_job`, `resume`, `reduce`, `job_id`, `JobLookup`, `job_lookup`, and the private helpers `Rule`, `RULES`, `notify`, `any_state`, `direct_line`, `wait_reason`, `entering`, `outcome`, `copy_line`, `review_line`, `back_to`, `tool_missing`, `waits`, `step_failure`, `failures`, `disc_presence`, `job_number`, `waiting_return`; about 1,000 lines, so its tests sit in a sibling file as the conventions require for `job.rs`)
-- Create: `crates/core/src/job/tests.rs` (its 170 unit tests, in nine groups, one per behaviour unit below)
+- Create: `crates/core/src/job/tests.rs` (its 171 unit tests, in nine groups, one per behaviour unit below)
 - Modify: `crates/core/src/lib.rs` (one line, `pub mod job;`, before `pub mod lang;`)
-- Test: `crates/core/src/job/tests.rs` (170 new)
+- Test: `crates/core/src/job/tests.rs` (171 new)
 
 **Interfaces:**
 
@@ -43047,16 +43300,17 @@ impl Tool { pub fn as_str(self) -> &'static str; pub const ALL: [Tool; 5]; }
 #[serde(rename_all = "snake_case")]
 pub enum Held { AfterCopy, DispositionGate }
 
-/// 10.1's states. `Planned` carries the mode the plan chose; `Ejected` whether it follows a whole-disc copy (then the job is
-/// held next, 6.3 step 7) or a Direct rip (then it waits for the file-phase slot, spec 6); waiting states carry the state they
-/// return to; Failed carries its class and the state that failed. Disc-phase states: Detected, Fingerprinted, Scanned,
-/// Planned, Ripping, Copying, RipVerified. File-phase states: Ejected, Extracting, Inspecting, Decided, Remuxing, Verified.
+/// 10.1's states. `Planned` carries the mode the plan chose; `RipVerified` and `Ejected` whether they follow a whole-disc
+/// copy (then the job is held next, 6.3 step 7) or a Direct rip (then it waits for the file-phase slot, spec 6); waiting
+/// states carry the state they return to; `Decided` whether the owner approved the job (8.8); Failed carries its class
+/// and the state that failed. Disc-phase states: Detected, Fingerprinted, Scanned, Planned, Ripping, Copying,
+/// RipVerified. File-phase states: Ejected, Extracting, Inspecting, Decided, Remuxing, Verified.
 /// Def: T14. Use: T14, phase 2.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state")]
 pub enum State {
-    Detected, Fingerprinted, Scanned, Planned { mode: Mode }, Ripping, Copying, RipVerified, Ejected { after_copy: bool },
-    Inspecting, Decided, Remuxing, Verified, Filed,
+    Detected, Fingerprinted, Scanned, Planned { mode: Mode }, Ripping, Copying, RipVerified { after_copy: bool }, Ejected { after_copy: bool },
+    Inspecting, Decided { approved: bool }, Remuxing, Verified, Filed,
     NeedsReview { held: Held }, Extracting,
     AwaitingShare { return_to: Box<State> }, AwaitingSpace { return_to: Box<State> }, AwaitingMakeMkv { return_to: Box<State> },
     AwaitingNetwork { return_to: Box<State> }, AwaitingLookup { return_to: Box<State> }, AwaitingTool { return_to: Box<State> },
@@ -43149,9 +43403,10 @@ pub fn new_job() -> (State, Vec<Action>);
 /// (new state, actions) for every row of the reducer table below; every other pair is Rejected. Def: T14. Use: phase 2.
 pub fn reduce(state: &State, event: &Event) -> Result<(State, Vec<Action>), Rejected>;
 /// "Resuming after a restart" (and the actions of a waiting state's return): Detected [Fingerprint]; Fingerprinted
-/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided [Decide] (Decided may be entered with Decide pending, after
-/// approval or re-finalise); Ripping [EmptyTitleDirectory, RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle];
-/// Copying [EmptyCopyDirectory, CopyDisc]; RipVerified [Eject]; Inspecting [Probe]; Remuxing [DeletePartialFile, Remux];
+/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided { .. } [Decide] (Decided { approved: true } may be entered
+/// with Decide pending, after approval or re-finalise; Decided { approved: false } decides again too, and is gated
+/// again on NeedsReview); Ripping [EmptyTitleDirectory, RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle];
+/// Copying [EmptyCopyDirectory, CopyDisc]; RipVerified (either after_copy) [Eject]; Inspecting [Probe]; Remuxing [DeletePartialFile, Remux];
 /// Verified [File]; Ejected nothing (it waits for FilePhaseSlot or HoldForReview); a disc-phase state with `disc_present`
 /// false [WaitForDisc]; waiting, held, failed, filed and discarded states nothing, except AwaitingNetwork
 /// [StartTimer { minutes: NETWORK_RETRY_MIN }] and AwaitingLookup [StartTimer { minutes: LOOKUP_RETRY_MIN }]. The state is
@@ -43196,20 +43451,20 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `Ripping` | `TitleRipped` | `Ripping` | `[VerifyFile]` |
 | `Ripping` | `TitleVerified { last: false }`, or `TitleVerifyFailed { second: true, last: false }` | `Ripping` | `[RipTitle]` (the next title) |
 | `Ripping` | `TitleVerifyFailed { second: false, .. }` | `Ripping` | `[RipTitle]` (the same title again, 6.2 step 7) |
-| `Ripping` | `TitleVerified { last: true }`, or `TitleVerifyFailed { second: true, last: true }` | `RipVerified` | `[Eject]` |
-| `RipVerified` | `Ejected` | `Ejected { after_copy: false }` | `[Notify { DiscDone }]` |
-| `RipVerified` | `EjectFailed` | `Ejected { after_copy: false }` | `[Notify { EjectFailed }]` (the disc phase is over; the disc is removed by hand, 10.3, 12) |
+| `Ripping` | `TitleVerified { last: true }`, or `TitleVerifyFailed { second: true, last: true }` | `RipVerified { after_copy: false }` | `[Eject]` |
+| `RipVerified { after_copy: false }` | `Ejected` | `Ejected { after_copy: false }` | `[Notify { DiscDone }]` |
+| `RipVerified { after_copy: false }` | `EjectFailed` | `Ejected { after_copy: false }` | `[Notify { EjectFailed }]` (the disc phase is over; the disc is removed by hand, 10.3, 12) |
 | `Ejected { after_copy: false }` | `FilePhaseSlot` | `Inspecting` | `[Probe]` |
 | `Inspecting` | `ProbeDone` | `Inspecting` | `[ExtractSubtitleEvidence, Decide]` (performed in order) |
-| `Inspecting` | `DecisionDone { AutoFile, .. }` | `Decided` | `[CheckSpace]` |
+| `Inspecting` | `DecisionDone { AutoFile, .. }` | `Decided { approved: false }` | `[CheckSpace]` |
 | `Inspecting` | `DecisionDone { NeedsReview, reasons }` (10.1 "Decided, review reason or low confidence") | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
-| `Decided` | `SpaceOk` | `Remuxing` | `[Remux]` |
+| `Decided { .. }` | `SpaceOk` | `Remuxing` | `[Remux]` |
 | `Remuxing` | `RemuxDone` | `Remuxing` | `[VerifyFile]` |
 | `Remuxing` | `FileVerified` | `Verified` | `[File]` |
 | `Verified` | `FileDone` | `Filed` | `[Notify { Filed }]` |
-| `Copying` | `CopyDone { scan_listed_titles: true, .. }` | `Copying` | `[Eject]` |
-| `Copying` | `Ejected` | `Ejected { after_copy: true }` | `[Notify { DiscDone }]` |
-| `Copying` | `EjectFailed` | `Ejected { after_copy: true }` | `[Notify { EjectFailed }]` |
+| `Copying` | `CopyDone { scan_listed_titles: true, .. }` (10.1's main line "Ripping (or Copying) → RipVerified → Ejected": a restart or a Return before the eject ejects and never empties the finished copy to copy again) | `RipVerified { after_copy: true }` | `[Eject]` |
+| `RipVerified { after_copy: true }` | `Ejected` | `Ejected { after_copy: true }` | `[Notify { DiscDone }]` |
+| `RipVerified { after_copy: true }` | `EjectFailed` | `Ejected { after_copy: true }` | `[Notify { EjectFailed }]` |
 | `Ejected { after_copy: true }` | `HoldForReview { reasons }` (10.1 "Ejected, then NeedsReview") | `NeedsReview { AfterCopy }` | `[Notify { NeedsReview { reasons } }]` |
 | `Copying` | `CopyDone { scan_listed_titles: false, .. }` (D18) | `Planned { Direct }` | `[RecordNote { DirectModeFallback }, CheckSpace]` (the copy is kept; 6.3 step 6a's "waiting in AwaitingSpace if they do not fit") |
 | `Copying` | `CopyFailed { failure, second: false }` | Outcome (a read failure: `Failed { MediaReadError, from: Copying }`) | as Outcome |
@@ -43221,11 +43476,13 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `Extracting` | `TitleVerified { last: true }` | `Inspecting` | `[Probe]` |
 | `Extracting` | `TitleVerifyFailed { second: false, .. }`, or `TitleVerifyFailed { second: true, last: false }` | `Extracting` | `[ExtractTitle]` (the same title again after a first failure, the next after a second: 6.3 step 8 "verified as in 6.2 step 7") |
 | `Extracting` | `TitleVerifyFailed { second: true, last: true }` | `Inspecting` | `[Probe]` |
-| `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided` | `[Decide]` (with the owner's overrides) |
-| `Decided` | `DecisionDone { .. }` (any disposition: the owner approved, 8.8) | `Decided` | `[CheckSpace]` |
+| `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided { approved: true }` | `[Decide]` (with the owner's overrides) |
+| `Decided { approved: true }` | `DecisionDone { .. }` (any disposition: the owner approved, 8.8) | unchanged | `[CheckSpace]` |
+| `Decided { approved: false }` | `DecisionDone { AutoFile, .. }` (the decision made again after a restart, a Return or a Retry of an auto-filed job) | unchanged | `[CheckSpace]` |
+| `Decided { approved: false }` | `DecisionDone { NeedsReview, reasons }` (6.4 step 12: an auto-filed job whose decision, made again, now needs review is gated again) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
 | `NeedsReview { .. }` | `ReviewDiscarded` | `Discarded` | `[DeleteJobData]` |
-| `Filed` | `ReFinalise` | `Decided` | `[Decide]` |
-| `Filed`, `NeedsReview { .. }`, any file-phase state, `Failed { from, .. }` with `from` a file-phase state | `RipAgain` | unchanged | `[ArmRipAgain]` |
+| `Filed` | `ReFinalise` | `Decided { approved: true }` | `[Decide]` |
+| `Filed`, `NeedsReview { .. }`, any file-phase state, `Failed { from, .. }` with `from` a file-phase state, any waiting state whose `return_to` is a file-phase state | `RipAgain` | unchanged | `[ArmRipAgain]` |
 | any disc- or file-phase state | `ShareLost` | `AwaitingShare { return_to: state }` | `[Notify { Waiting { Share } }]` |
 | any disc- or file-phase state | `SpaceShort` | `AwaitingSpace { return_to: state }` | `[Notify { Waiting { Space } }]` |
 | `AwaitingShare` / `AwaitingSpace` | `ShareBack` / `SpaceFreed` | Return | as Return |
@@ -43242,7 +43499,7 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | any disc-phase state | `ToolMissing { Ffprobe }`, `ToolMissing { Ffmpeg }` | unchanged (the disc phase runs; the job waits when it would enter Inspecting) | `[]` |
 | any state | `ToolMissing { Java }` | unchanged | `[RecordNote { LabelRuleUnavailable }]` |
 | `AwaitingTool` | `ToolFound { .. }` | Return | as Return |
-| the state whose step failed, in the order of the events: `Detected`, `Fingerprinted`, `Scanned`, `Ripping`, `Extracting`, `Inspecting`, `Inspecting` or `Decided`, `Remuxing`, `Remuxing`, `Verified` | `FingerprintFailed`, `ScanFailed`, `PlanFailed`, `TitleRipFailed`, `ExtractFailed`, `ProbeFailed`, `DecisionFailed`, `RemuxFailed`, `FileVerifyFailed`, `FileFailed` | Outcome | as Outcome |
+| the state whose step failed, in the order of the events: `Detected`, `Fingerprinted`, `Scanned`, `Ripping`, `Extracting`, `Inspecting`, `Inspecting` or `Decided { .. }`, `Remuxing`, `Remuxing`, `Verified` | `FingerprintFailed`, `ScanFailed`, `PlanFailed`, `TitleRipFailed`, `ExtractFailed`, `ProbeFailed`, `DecisionFailed`, `RemuxFailed`, `FileVerifyFailed`, `FileFailed` | Outcome | as Outcome |
 | `Failed { class, from }`, class not DriveIncapable | `Retry` | `from` | `resume(from, true)`'s actions (phase 2 performs a disc-phase action only with the job's disc in a drive; when the disc is gone it performs none and feeds `MediaRemoved`, which gives `[WaitForDisc]`) |
 | `Failed { DriveIncapable, .. }` | `Retry` | Rejected (10.2 "no retry") | |
 | `Failed { MediaReadError, from }` | `MediaArrived` (the disc inserted again, either drive) | `from` | `resume(from, true)`'s actions, then `[Notify { Resumed }]` |
@@ -43254,25 +43511,25 @@ Beyond the shared entry, this task adds members the plan's conventions require o
 
 Where this task settles what the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **The table as disjoint rules.** `reduce` tries seven private rule functions in `RULES` (`any_state`, `direct_line`, `copy_line`, `review_line`, `waits`, `failures`, `disc_presence`), each holding a group of the table's rows. No pair of a state and an event is held by two rules, so the order of `RULES` is no precedence: `no_state_and_event_pair_is_held_by_two_rules` runs every one of 40 sample states against every one of 72 sample events and counts the rules that answer. Every pair no rule holds is `Rejected { state, event }` (the engine logs it and changes nothing).
+1. **The table as disjoint rules.** `reduce` tries seven private rule functions in `RULES` (`any_state`, `direct_line`, `copy_line`, `review_line`, `waits`, `failures`, `disc_presence`), each holding a group of the table's rows. No pair of a state and an event is held by two rules, so the order of `RULES` is no precedence: `no_state_and_event_pair_is_held_by_two_rules` runs every one of 42 sample states against every one of 72 sample events and counts the rules that answer. Every pair no rule holds is `Rejected { state, event }` (the engine logs it and changes nothing).
 2. **An extracted title that fails verification.** Spec 6.3 step 8 says each extracted title is "verified as in 6.2 step 7", which re-rips a title once and goes on after a second failure (the engine records `verify_failed`). The table's two `Extracting` rows for `TitleVerifyFailed` follow it: in `Extracting`, `TitleVerifyFailed { second: false, .. }` extracts the same title again, `{ second: true, last: false }` extracts the next, and `{ second: true, last: true }` goes on to `Inspecting` with `[Probe]`, as the `Ripping` rows do (`an_extracted_title_failing_verification_is_extracted_again_once_then_the_next_follows`, `the_last_extracted_title_verified_goes_on_to_inspecting_and_probes`).
 3. **A second copy failure that is not a read failure.** The table switches to Direct mode only on `CopyFailed { failure: MediaReadError, second: true }` (10.1 "second read failure"); a second failure of any other class is the table's Outcome, as a first failure is (`a_second_copy_failure_that_is_not_a_read_failure_is_an_ordinary_outcome`).
 4. **Timers after a restart.** A restart loses the engine's timers, so without a new one `AwaitingNetwork` ("retried every 10 minutes") and `AwaitingLookup` ("retried hourly") would never retry again. `resume` therefore gives `AwaitingNetwork` `[StartTimer { minutes: NETWORK_RETRY_MIN }]` and `AwaitingLookup` `[StartTimer { minutes: LOOKUP_RETRY_MIN }]`; every other waiting state still gives nothing (`resuming_a_wait_for_the_network_or_a_lookup_starts_its_retry_timer_again`). `reduce`'s Return never resumes a waiting state, so the table is unchanged.
-5. **Which state each step failure comes from.** The table's row "the state whose step failed" lists, for each step failure, the state whose action starts that step: `FingerprintFailed` in `Detected` (it issued `Fingerprint`), `ScanFailed` in `Fingerprinted` (`RunScan`), `PlanFailed` in `Scanned` (`Plan`), `TitleRipFailed` in `Ripping`, `ExtractFailed` in `Extracting`, `ProbeFailed` in `Inspecting`, `DecisionFailed` in `Inspecting` and in `Decided` (which issues `Decide` after approval and re-finalise), `RemuxFailed` and `FileVerifyFailed` in `Remuxing` (`Remux`, then `VerifyFile`), `FileFailed` in `Verified` (`File`). From any other state the event is rejected (`a_step_failure_is_rejected_from_a_state_that_did_not_run_the_step`). A copy's failure is `copy_line`'s.
+5. **Which state each step failure comes from.** The table's row "the state whose step failed" lists, for each step failure, the state whose action starts that step: `FingerprintFailed` in `Detected` (it issued `Fingerprint`), `ScanFailed` in `Fingerprinted` (`RunScan`), `PlanFailed` in `Scanned` (`Plan`), `TitleRipFailed` in `Ripping`, `ExtractFailed` in `Extracting`, `ProbeFailed` in `Inspecting`, `DecisionFailed` in `Inspecting` and in `Decided` (either `approved` value: it issues `Decide` after approval and re-finalise, and again on a resume), `RemuxFailed` and `FileVerifyFailed` in `Remuxing` (`Remux`, then `VerifyFile`), `FileFailed` in `Verified` (`File`). From any other state the event is rejected (`a_step_failure_is_rejected_from_a_state_that_did_not_run_the_step`). A copy's failure is `copy_line`'s.
 6. **Pairs the table leaves out are rejected, as the interface says.** Among them: `ToolMissing { Makemkvcon }` in a file-phase state other than `Extracting`; any `ToolMissing` but Java, `ShareLost` or `SpaceShort` for a held, filed, failed, discarded or waiting job; `MediaArrived` and `MediaRemoved` outside the disc phase, except `MediaArrived` for `Failed { MediaReadError }`; `RipAgain` in the disc phase. Each is pinned by a test whose name says it is rejected (for example `a_missing_makemkvcon_is_rejected_by_the_file_phase_states_that_do_not_run_it`).
 7. **Job numbers.** `job_id` reads an earlier ID as the fingerprint, `-`, and one or more ASCII digits up to `u32::MAX` (`job_number`); anything else (another fingerprint, `ABC-`, `ABC-3-2`, `ABC-+4`, `ABC- 4`, a number above `u32::MAX`) is ignored, and the next number is computed in `u64`, so `ABC-4294967295` gives `ABC-4294967296`. `job_lookup` has no fingerprint argument (its list is already this fingerprint's), so it reads the number after the last `-` and skips an ID without one.
 8. **Closed-set error sentences.** `FromStr` refuses an unknown text with the text in double quotes followed by `is not a failure class (spec 10.2)`, `is not an output failure cause (spec 10.2)`, `is not a tool (spec 4.4, 10.2)`, `is not a hold (spec 10.1)` or `is not a waiting reason (spec 12)` (for example `"full" is not an output failure cause (spec 10.2)`), in the form Task 1 gives `Note`.
 9. **No setting is read.** Nothing in 10.1, 10.2, 12, 5 or 6.1 step 2 is a spec 14 setting (the 10-minute and hourly waits are fixed values, Global Constraints), so the reducer takes no `&Settings`.
 10. **The licence, version and network rows name `Scanned`, as spec 10.1 does.** The scan itself runs while the job is `Fingerprinted` (`RunScan` is the action of entering it), so a licence, version or network message printed by the scan reaches the reducer in `Fingerprinted` and is rejected there (`a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying`, `only_scanned_ripping_and_copying_wait_for_the_network`). Phase 2's engine either delivers it after `ScanDone` or reports the scan as `ScanFailed` with class `Licence`, `NeedsMakeMkvUpdate` or `NeedsNetwork`, which the Outcome rows already send to `AwaitingMakeMkv` or `AwaitingNetwork` returning to `Fingerprinted`.
 11. **Events in JSON.** Every event round-trips through `serde_json` (`every_sample_event_round_trips_through_json`), including `ReviewApproved` with entries in the lists of `Overrides` (a title role and an audio override): spec 11's Approve reaches the engine over IPC (spec 4.5), the natural carrier of a JSON `Event`.
-12. **Deciding again in `Decided`.** `Decided` is entered three ways: from `Inspecting` with the decision made (`DecisionDone { AutoFile }`), and with `Decide` still pending after approval at the disposition gate or re-finalise. `resume` cannot tell them apart, so it gives `Decided` `[Decide]`, and the `Decided + DecisionDone` row then checks space. Decide is a pure function of the job's data (6.4 step 11) and 10.1 says header-only steps "simply run again", so deciding again is safe; a restart, a Return (an Output or LookupUnavailable failure of the decision, then `ShareBack` or `LookupAnswered`) or a Retry of a failed decision therefore never remuxes without a decision that holds the owner's overrides (`resuming_decided_decides_again`, `retrying_a_failed_decision_after_approval_decides_again`).
+12. **Deciding again in `Decided`.** `Decided` is entered three ways: from `Inspecting` with the decision made (`DecisionDone { AutoFile }`), and with `Decide` still pending after approval at the disposition gate or re-finalise. `Decided { approved }` records which way the job entered: `approved: false` from `Inspecting`, `approved: true` by approval or re-finalise (8.8: the owner approved). `resume` gives either value `[Decide]` (10.1 says header-only steps "simply run again"). An approved job then checks space whatever the disposition. An unapproved one checks space only on `AutoFile`, and on `NeedsReview` it goes to the disposition gate with the `NeedsReview` notification (6.4 step 12: such a job "enters NeedsReview and stops here until approved"), because Decide's inputs, such as the settings (`auto_threshold`, the roots) and the library facts, can change between the two runs (`a_redecided_auto_filed_job_that_now_needs_review_is_held`); a restart, a Return (an Output or LookupUnavailable failure of the decision, then `ShareBack` or `LookupAnswered`) or a Retry of a failed decision therefore never remuxes without a decision that holds the owner's overrides (`resuming_decided_decides_again`, `retrying_a_failed_decision_after_approval_decides_again`).
 13. **The file-phase slot after review.** Spec 6 lets one job be in the file phase at a time, and "jobs waiting for review occupy neither the drive nor the file-phase slot". The table makes only a Direct job in `Ejected { after_copy: false }` wait for `FilePhaseSlot`; an approval (into `Extracting` or `Decided`), a re-finalise (into `Decided`) and a Retry of a job that failed in its file phase enter the file phase directly. The reducer does not model the slot for them: the docs of `ReviewApproved`, `ReFinalise`, `Retry` and `FilePhaseSlot` say that phase 2 delivers those events only once the slot is free for the job, which then holds it until it reaches `Filed`, `NeedsReview`, `Failed` or `Discarded`.
-14. **The disc gone when a disc-phase step would run again.** A Return and a Retry use `resume(state, true)`, and `MediaRemoved` and `MediaArrived` are rejected in waiting and failed states, so a job returning to `Ripping` or `Copying` issues `RipTitle` or `CopyDisc` whether or not its disc is in. The docs of the table's Return and Retry, of `back_to` and of `Action::WaitForDisc` say that phase 2 performs a disc-phase action only with the job's disc in a drive; when the disc is gone it performs none and feeds `MediaRemoved`, which gives `[WaitForDisc]`. Phase 2 does not feed the media removal its own `Eject` causes, which would otherwise reach `RipVerified` or `Copying` as a spurious `[WaitForDisc]`.
-15. **A job that failed in its file phase is past the disc phase.** Spec 6.1 step 2 sends `already_ripped` for "a job that is past the disc phase". A job `Failed` with a class other than `MediaReadError` from a file-phase state (for example `Failed { Unknown, from: Remuxing }`) has finished its disc phase and keeps its raw rip for Retry, so `job_lookup` reads it as past the disc phase, as it reads a waiting state returning to a file-phase state: `AlreadyRipped` unless armed (`a_job_failed_in_its_file_phase_is_already_ripped`), where it gave `NewJob` before and started a needless second rip. So that the owner can still rip such a disc again, `RipAgain` is taken by a `Failed` job whose `from` is a file-phase state, as by a filed one (spec 11 "arm a new job for a disc that was already ripped"; Open point 24 says so). A job failed in its disc phase with another class still gives `NewJob`. The owner can overturn this reading of 6.1 step 2.
+14. **The disc gone when a disc-phase step would run again.** A Return and a Retry use `resume(state, true)`, and `MediaRemoved` and `MediaArrived` are rejected in waiting and failed states, so a job returning to `Ripping` or `Copying` issues `RipTitle` or `CopyDisc` whether or not its disc is in. The docs of the table's Return and Retry, of `back_to` and of `Action::WaitForDisc` say that phase 2 performs a disc-phase action only with the job's disc in a drive; when the disc is gone it performs none and feeds `MediaRemoved`, which gives `[WaitForDisc]`. Phase 2 does not feed the media removal its own `Eject` causes, which would otherwise reach `RipVerified` as a spurious `[WaitForDisc]` (a copy whose scan lists titles ejects from `RipVerified { after_copy: true }`, never from `Copying`). One window remains and is phase 2's to close, not the reducer's: `resume(RipVerified { .. }, false)` gives `[WaitForDisc]`, so an engine restart after the disc was ejected but before `Ejected` was persisted would wait for a disc that only needs ejecting. Phase 2, on finding a `RipVerified` job with no disc in any drive after a restart, feeds `Ejected` itself (the eject happened, or the owner removed the disc by hand); `resume` stays pure and unchanged, and its all-disc-phase-states test is unchanged.
+15. **A job that failed in its file phase is past the disc phase.** Spec 6.1 step 2 sends `already_ripped` for "a job that is past the disc phase". A job `Failed` with a class other than `MediaReadError` from a file-phase state (for example `Failed { Unknown, from: Remuxing }`) has finished its disc phase and keeps its raw rip for Retry, so `job_lookup` reads it as past the disc phase, as it reads a waiting state returning to a file-phase state: `AlreadyRipped` unless armed (`a_job_failed_in_its_file_phase_is_already_ripped`), where it gave `NewJob` before and started a needless second rip. So that the owner can still rip such a disc again, `RipAgain` is taken by a `Failed` job whose `from` is a file-phase state, as by a filed one (spec 11 "arm a new job for a disc that was already ripped"; Open point 24 says so). A job failed in its disc phase with another class still gives `NewJob`. A waiting state returning to a file-phase state also takes `RipAgain` (state unchanged, `[ArmRipAgain]`), so that the owner is not shut out while an AwaitingTool or AwaitingShare job waits, since `job_lookup` reads it as past the disc phase; `waiting_return`, which both read, is written with the review queue's rows (Step 24). The owner can overturn this reading of 6.1 step 2.
 
 - [ ] **Step 1: Confirm the starting point**
 
-This task ports no Python test (the reducer is new code, RP12, RP20). It adds 170 unit tests in `crates/core/src/job/tests.rs`, in nine groups: 21 on the closed sets and their spellings, 18 on the failure outcomes, 20 on `new_job` and `resume`, 27 on the rows for any state and the Direct main line, 19 on whole-disc copy mode and extraction, 9 on the review queue, 24 on the waiting states, 15 on step failures, Retry and the disc coming and going, and 17 on the job ID and the job lookup. Nothing goes into the 213-row mapping table.
+This task ports no Python test (the reducer is new code, RP12, RP20). It adds 171 unit tests in `crates/core/src/job/tests.rs`, in nine groups: 21 on the closed sets and their spellings, 18 on the failure outcomes, 20 on `new_job` and `resume`, 27 on the rows for any state and the Direct main line, 19 on whole-disc copy mode and extraction, 10 on the review queue, 24 on the waiting states, 15 on step failures, Retry and the disc coming and going, and 17 on the job ID and the job lookup. Nothing goes into the 213-row mapping table.
 
 Run from the repository root:
 
@@ -43319,7 +43576,7 @@ Create `crates/core/src/job.rs` with exactly this content (Step 4 inserts the `u
 mod tests;
 ```
 
-Create `crates/core/src/job/tests.rs` with exactly this content (every later test step appends its tests at the end of this file). The helpers build the sample states and events every group uses: `sample_states()` holds one state of every variant (40), `sample_events()` one event of every variant with every value of its boolean, mode, disposition and tool fields, and `ReviewApproved` both with `Overrides::default()` and with a title role and an audio override (72, covering all 50 variants). `use super::*;` brings in `job.rs`'s items and its `use` lines (`Disposition`, `Mode`, `Overrides`, `Note`, `ReviewReason`, `FromStr`); the file adds Task 6's `TitleOverrideEntry`, `TitleRole`, `AudioTrackOverride` and `AudioOverride` for that approval.
+Create `crates/core/src/job/tests.rs` with exactly this content (every later test step appends its tests at the end of this file). The helpers build the sample states and events every group uses: `sample_states()` holds one state of every variant (42), `sample_events()` one event of every variant with every value of its boolean, mode, disposition and tool fields, and `ReviewApproved` both with `Overrides::default()` and with a title role and an audio override (72, covering all 50 variants). `use super::*;` brings in `job.rs`'s items and its `use` lines (`Disposition`, `Mode`, `Overrides`, `Note`, `ReviewReason`, `FromStr`); the file adds Task 6's `TitleOverrideEntry`, `TitleRole`, `AudioTrackOverride` and `AudioOverride` for that approval.
 
 ```rust
 //! Tests of core::job (design spec 5, 6.1 step 2, 10.1, 10.2, 12; RP12): the closed sets and their spellings, the
@@ -43345,7 +43602,7 @@ fn output(cause: OutputCause) -> Failure {
     Failure { class: FailureClass::Output, output: Some(cause) }
 }
 
-/// The seven disc-phase states, with both Planned modes.
+/// The seven disc-phase states, with both Planned modes and both RipVerified values.
 fn disc_phase_states() -> Vec<State> {
     vec![
         State::Detected,
@@ -43355,18 +43612,20 @@ fn disc_phase_states() -> Vec<State> {
         State::Planned { mode: Mode::Copy },
         State::Ripping,
         State::Copying,
-        State::RipVerified,
+        State::RipVerified { after_copy: false },
+        State::RipVerified { after_copy: true },
     ]
 }
 
-/// The six file-phase states, with both Ejected values.
+/// The six file-phase states, with both Ejected values and both Decided values.
 fn file_phase_states() -> Vec<State> {
     vec![
         State::Ejected { after_copy: false },
         State::Ejected { after_copy: true },
         State::Extracting,
         State::Inspecting,
-        State::Decided,
+        State::Decided { approved: false },
+        State::Decided { approved: true },
         State::Remuxing,
         State::Verified,
     ]
@@ -43400,7 +43659,7 @@ fn resting_states() -> Vec<State> {
 }
 
 /// One state of every variant: every disc-phase and file-phase value, every waiting state returning to Ripping and to
-/// Inspecting, both holds, Filed, Discarded and Failed of every class (40 states).
+/// Inspecting, both holds, Filed, Discarded and Failed of every class (42 states).
 fn sample_states() -> Vec<State> {
     let mut states = disc_phase_states();
     states.extend(file_phase_states());
@@ -43637,10 +43896,12 @@ fn every_state_is_named_as_in_spec_10_1() {
             "Ripping",
             "Copying",
             "RipVerified",
+            "RipVerified",
             "Ejected",
             "Ejected",
             "Extracting",
             "Inspecting",
+            "Decided",
             "Decided",
             "Remuxing",
             "Verified",
@@ -43707,8 +43968,10 @@ fn held_filed_discarded_and_failed_states_are_in_no_phase_and_not_waiting() {
 #[test]
 fn a_state_is_written_with_its_name_under_state_and_its_fields_beside_it() {
     assert_eq!(json(&State::Ripping), r#"{"state":"Ripping"}"#);
+    assert_eq!(json(&State::RipVerified { after_copy: false }), r#"{"state":"RipVerified","after_copy":false}"#);
     assert_eq!(json(&State::Planned { mode: Mode::Copy }), r#"{"state":"Planned","mode":"copy"}"#);
     assert_eq!(json(&State::Ejected { after_copy: true }), r#"{"state":"Ejected","after_copy":true}"#);
+    assert_eq!(json(&State::Decided { approved: true }), r#"{"state":"Decided","approved":true}"#);
     assert_eq!(
         json(&State::NeedsReview { held: Held::DispositionGate }),
         r#"{"state":"NeedsReview","held":"disposition_gate"}"#
@@ -43997,10 +44260,11 @@ impl FromStr for Held {
     }
 }
 
-/// 10.1's states. `Planned` carries the mode the plan chose; `Ejected` whether it follows a whole-disc copy (then the job is
-/// held next, 6.3 step 7) or a Direct rip (then it waits for the file-phase slot, spec 6); waiting states carry the state they
-/// return to; Failed carries its class and the state that failed. Disc-phase states: Detected, Fingerprinted, Scanned,
-/// Planned, Ripping, Copying, RipVerified. File-phase states: Ejected, Extracting, Inspecting, Decided, Remuxing, Verified.
+/// 10.1's states. `Planned` carries the mode the plan chose; `RipVerified` and `Ejected` whether they follow a whole-disc
+/// copy (then the job is held next, 6.3 step 7) or a Direct rip (then it waits for the file-phase slot, spec 6); waiting
+/// states carry the state they return to; `Decided` whether the owner approved the job (8.8); Failed carries its class
+/// and the state that failed. Disc-phase states: Detected, Fingerprinted, Scanned, Planned, Ripping, Copying,
+/// RipVerified. File-phase states: Ejected, Extracting, Inspecting, Decided, Remuxing, Verified.
 /// Def: T14. Use: T14, phase 2.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state")]
@@ -44017,15 +44281,21 @@ pub enum State {
     Ripping,
     /// 10.1 main line: the whole disc is being copied and the copy scanned (6.3 steps 6 and 6a).
     Copying,
-    /// 10.1 main line: every planned title is ripped and verified; the disc is ejected (6.2 steps 7 and 8).
-    RipVerified,
+    /// 10.1 main line ("Ripping (or Copying) → RipVerified → Ejected"): every planned title is ripped and verified
+    /// (`after_copy` false, 6.2 steps 7 and 8), or the whole-disc copy is done and its scan lists titles (`after_copy`
+    /// true, 6.3 steps 6, 6a and 7); the disc is ejected. Resuming ejects only, so a finished copy is never emptied and
+    /// copied again.
+    RipVerified { after_copy: bool },
     /// 10.1 main line: the disc is out; a Direct job waits for the file-phase slot, a copy job to be held (6.2 step 8,
     /// 6.3 step 7).
     Ejected { after_copy: bool },
     /// 10.1 main line: the staged files are probed and the decision made (6.4 steps 9 to 11).
     Inspecting,
     /// 10.1 main line: the decision is made, or is being made again after approval or re-finalise (6.4 steps 11 and 12).
-    Decided,
+    /// `approved` is true when entered by approval at the disposition gate or by re-finalise (8.8: the owner approved),
+    /// false when entered from Inspecting with an AutoFile decision; an unapproved job whose decision, made again,
+    /// needs review goes to the disposition gate (6.4 step 12).
+    Decided { approved: bool },
     /// 10.1 main line: the partial final file is written and verified (6.4 steps 13 and 14).
     Remuxing,
     /// 10.1 main line: the partial file matched the decision; it is renamed into its final path (6.4 step 14).
@@ -44064,10 +44334,10 @@ impl State {
             State::Planned { .. } => "Planned",
             State::Ripping => "Ripping",
             State::Copying => "Copying",
-            State::RipVerified => "RipVerified",
+            State::RipVerified { .. } => "RipVerified",
             State::Ejected { .. } => "Ejected",
             State::Inspecting => "Inspecting",
-            State::Decided => "Decided",
+            State::Decided { .. } => "Decided",
             State::Remuxing => "Remuxing",
             State::Verified => "Verified",
             State::Filed => "Filed",
@@ -44094,7 +44364,7 @@ impl State {
                 | State::Planned { .. }
                 | State::Ripping
                 | State::Copying
-                | State::RipVerified
+                | State::RipVerified { .. }
         )
     }
 
@@ -44106,7 +44376,7 @@ impl State {
             State::Ejected { .. }
                 | State::Extracting
                 | State::Inspecting
-                | State::Decided
+                | State::Decided { .. }
                 | State::Remuxing
                 | State::Verified
         )
@@ -44679,7 +44949,8 @@ fn resuming_planned_checks_space_in_either_mode() {
 
 #[test]
 fn resuming_decided_decides_again() {
-    assert_eq!(resumed(State::Decided), [Action::Decide]);
+    assert_eq!(resumed(State::Decided { approved: false }), [Action::Decide]);
+    assert_eq!(resumed(State::Decided { approved: true }), [Action::Decide]);
 }
 
 #[test]
@@ -44698,8 +44969,9 @@ fn resuming_copying_empties_the_copy_directory_and_copies_again() {
 }
 
 #[test]
-fn resuming_rip_verified_ejects() {
-    assert_eq!(resumed(State::RipVerified), [Action::Eject]);
+fn resuming_rip_verified_ejects_after_a_rip_or_a_copy() {
+    assert_eq!(resumed(State::RipVerified { after_copy: false }), [Action::Eject]);
+    assert_eq!(resumed(State::RipVerified { after_copy: true }), [Action::Eject]);
 }
 
 #[test]
@@ -44794,9 +45066,10 @@ pub fn new_job() -> (State, Vec<Action>) {
 }
 
 /// "Resuming after a restart" (and the actions of a waiting state's return): Detected [Fingerprint]; Fingerprinted
-/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided [Decide] (Decided may be entered with Decide pending, after
-/// approval or re-finalise; Decide is pure, 6.4 step 11, so it simply runs again); Ripping [EmptyTitleDirectory,
-/// RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle]; Copying [EmptyCopyDirectory, CopyDisc]; RipVerified [Eject];
+/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided { .. } [Decide] (Decided { approved: true } may be entered
+/// with Decide pending, after approval or re-finalise; header-only steps simply run again, 10.1, and an unapproved job
+/// whose decision now needs review is gated again, settled choice 12); Ripping [EmptyTitleDirectory,
+/// RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle]; Copying [EmptyCopyDirectory, CopyDisc]; RipVerified (either after_copy) [Eject];
 /// Inspecting [Probe]; Remuxing [DeletePartialFile, Remux]; Verified [File]; Ejected nothing (it waits for FilePhaseSlot or
 /// HoldForReview); a disc-phase state with `disc_present` false [WaitForDisc]; waiting, held, failed, filed and discarded
 /// states nothing, except AwaitingNetwork [StartTimer { minutes: NETWORK_RETRY_MIN }] and AwaitingLookup
@@ -44811,11 +45084,11 @@ pub fn resume(state: &State, disc_present: bool) -> (State, Vec<Action>) {
         State::Fingerprinted => vec![Action::RunScan],
         State::Scanned => vec![Action::Plan],
         State::Planned { .. } => vec![Action::CheckSpace],
-        State::Decided => vec![Action::Decide],
+        State::Decided { .. } => vec![Action::Decide],
         State::Ripping => vec![Action::EmptyTitleDirectory, Action::RipTitle],
         State::Extracting => vec![Action::EmptyTitleDirectory, Action::ExtractTitle],
         State::Copying => vec![Action::EmptyCopyDirectory, Action::CopyDisc],
-        State::RipVerified => vec![Action::Eject],
+        State::RipVerified { .. } => vec![Action::Eject],
         State::Inspecting => vec![Action::Probe],
         State::Remuxing => vec![Action::DeletePartialFile, Action::Remux],
         State::Verified => vec![Action::File],
@@ -44977,21 +45250,24 @@ fn a_first_verification_failure_rips_the_same_title_again_even_for_the_last_titl
 
 #[test]
 fn the_last_title_verified_ends_the_rip_and_ejects() {
-    assert_eq!(step(&State::Ripping, &Event::TitleVerified { last: true }), (State::RipVerified, vec![Action::Eject]));
+    assert_eq!(
+        step(&State::Ripping, &Event::TitleVerified { last: true }),
+        (State::RipVerified { after_copy: false }, vec![Action::Eject])
+    );
 }
 
 #[test]
 fn the_last_title_failing_verification_a_second_time_ends_the_rip_and_ejects() {
     assert_eq!(
         step(&State::Ripping, &Event::TitleVerifyFailed { second: true, last: true }),
-        (State::RipVerified, vec![Action::Eject])
+        (State::RipVerified { after_copy: false }, vec![Action::Eject])
     );
 }
 
 #[test]
 fn a_verified_rip_ejected_sends_disc_done() {
     assert_eq!(
-        step(&State::RipVerified, &Event::Ejected),
+        step(&State::RipVerified { after_copy: false }, &Event::Ejected),
         (State::Ejected { after_copy: false }, vec![notify(NotifyEvent::DiscDone)])
     );
 }
@@ -44999,7 +45275,7 @@ fn a_verified_rip_ejected_sends_disc_done() {
 #[test]
 fn a_verified_rip_whose_eject_failed_sends_eject_failed_and_leaves_the_disc_phase() {
     assert_eq!(
-        step(&State::RipVerified, &Event::EjectFailed),
+        step(&State::RipVerified { after_copy: false }, &Event::EjectFailed),
         (State::Ejected { after_copy: false }, vec![notify(NotifyEvent::EjectFailed)])
     );
 }
@@ -45029,7 +45305,7 @@ fn a_finished_probe_extracts_the_subtitle_evidence_then_decides() {
 fn an_auto_file_decision_checks_space_for_the_remux() {
     assert_eq!(
         step(&State::Inspecting, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() }),
-        (State::Decided, vec![Action::CheckSpace])
+        (State::Decided { approved: false }, vec![Action::CheckSpace])
     );
 }
 
@@ -45045,7 +45321,9 @@ fn a_needs_review_decision_holds_the_job_at_the_disposition_gate_and_sends_its_r
 
 #[test]
 fn a_decided_job_with_space_remuxes() {
-    assert_eq!(step(&State::Decided, &Event::SpaceOk), (State::Remuxing, vec![Action::Remux]));
+    for approved in [false, true] {
+        assert_eq!(step(&State::Decided { approved }, &Event::SpaceOk), (State::Remuxing, vec![Action::Remux]));
+    }
 }
 
 #[test]
@@ -45180,12 +45458,12 @@ fn direct_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         | (State::Ripping, Event::TitleVerifyFailed { second: false, .. }) => (State::Ripping, vec![Action::RipTitle]),
         (State::Ripping, Event::TitleVerified { last: true })
         | (State::Ripping, Event::TitleVerifyFailed { second: true, last: true }) => {
-            (State::RipVerified, vec![Action::Eject])
+            (State::RipVerified { after_copy: false }, vec![Action::Eject])
         }
-        (State::RipVerified, Event::Ejected) => {
+        (State::RipVerified { after_copy: false }, Event::Ejected) => {
             (State::Ejected { after_copy: false }, vec![notify(NotifyEvent::DiscDone)])
         }
-        (State::RipVerified, Event::EjectFailed) => {
+        (State::RipVerified { after_copy: false }, Event::EjectFailed) => {
             (State::Ejected { after_copy: false }, vec![notify(NotifyEvent::EjectFailed)])
         }
         (State::Ejected { after_copy: false }, Event::FilePhaseSlot) => (State::Inspecting, vec![Action::Probe]),
@@ -45193,13 +45471,13 @@ fn direct_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
             (State::Inspecting, vec![Action::ExtractSubtitleEvidence, Action::Decide])
         }
         (State::Inspecting, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
-            (State::Decided, vec![Action::CheckSpace])
+            (State::Decided { approved: false }, vec![Action::CheckSpace])
         }
         (State::Inspecting, Event::DecisionDone { disposition: Disposition::NeedsReview, reasons }) => (
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
         ),
-        (State::Decided, Event::SpaceOk) => (State::Remuxing, vec![Action::Remux]),
+        (State::Decided { .. }, Event::SpaceOk) => (State::Remuxing, vec![Action::Remux]),
         (State::Remuxing, Event::RemuxDone) => (State::Remuxing, vec![Action::VerifyFile]),
         (State::Remuxing, Event::FileVerified) => (State::Verified, vec![Action::File]),
         (State::Verified, Event::FileDone) => (State::Filed, vec![notify(NotifyEvent::Filed)]),
@@ -45234,7 +45512,7 @@ fn a_copy_whose_scan_lists_titles_ejects_with_or_without_hash_errors() {
     for hash_errors in [false, true] {
         assert_eq!(
             step(&State::Copying, &Event::CopyDone { scan_listed_titles: true, hash_errors }),
-            (State::Copying, vec![Action::Eject])
+            (State::RipVerified { after_copy: true }, vec![Action::Eject])
         );
     }
 }
@@ -45242,15 +45520,16 @@ fn a_copy_whose_scan_lists_titles_ejects_with_or_without_hash_errors() {
 #[test]
 fn a_copy_ejected_sends_disc_done_and_waits_to_be_held() {
     assert_eq!(
-        step(&State::Copying, &Event::Ejected),
+        step(&State::RipVerified { after_copy: true }, &Event::Ejected),
         (State::Ejected { after_copy: true }, vec![notify(NotifyEvent::DiscDone)])
     );
+    assert!(rejects(&State::Copying, &Event::Ejected));
 }
 
 #[test]
 fn a_copy_whose_eject_failed_sends_eject_failed_and_waits_to_be_held() {
     assert_eq!(
-        step(&State::Copying, &Event::EjectFailed),
+        step(&State::RipVerified { after_copy: true }, &Event::EjectFailed),
         (State::Ejected { after_copy: true }, vec![notify(NotifyEvent::EjectFailed)])
     );
 }
@@ -45492,8 +45771,10 @@ fn outcome(failure: Failure, from: &State) -> (State, Vec<Action>) {
     }
 }
 
-/// Whole-disc copy mode (6.3, 10.1 and D18): a Copy plan copies the disc; a copy whose scan lists titles ejects and is held
-/// for review; a copy whose scan failed, or a second read failure of the copy, switches to Direct mode with a note and checks
+/// Whole-disc copy mode (6.3, 10.1 and D18): a Copy plan copies the disc; a copy whose scan lists titles enters
+/// RipVerified { after_copy: true } and ejects (10.1's main line "Ripping (or Copying) → RipVerified → Ejected", so a
+/// restart or a Return before the eject ejects and never empties the finished copy to copy again), and is held for
+/// review; a copy whose scan failed, or a second read failure of the copy, switches to Direct mode with a note and checks
 /// space for the titles (6.3 step 6a); a first copy failure is an Outcome (a read failure: Failed { MediaReadError }).
 /// After approval each assigned title is extracted and verified as in 6.2 step 7 (6.3 step 8: a first verification failure
 /// extracts the same title again), and the last one goes on to Inspecting.
@@ -45506,7 +45787,9 @@ fn copy_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     };
     let next = match (state, event) {
         (State::Planned { mode: Mode::Copy }, Event::SpaceOk) => (State::Copying, vec![Action::CopyDisc]),
-        (State::Copying, Event::CopyDone { scan_listed_titles: true, .. }) => (State::Copying, vec![Action::Eject]),
+        (State::Copying, Event::CopyDone { scan_listed_titles: true, .. }) => {
+            (State::RipVerified { after_copy: true }, vec![Action::Eject])
+        }
         (State::Copying, Event::CopyDone { scan_listed_titles: false, .. }) => direct_fallback(),
         (State::Copying, Event::CopyFailed { failure, second: true })
             if failure.class == FailureClass::MediaReadError =>
@@ -45514,8 +45797,10 @@ fn copy_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
             direct_fallback()
         }
         (State::Copying, Event::CopyFailed { failure, .. }) => outcome(*failure, state),
-        (State::Copying, Event::Ejected) => (State::Ejected { after_copy: true }, vec![notify(NotifyEvent::DiscDone)]),
-        (State::Copying, Event::EjectFailed) => {
+        (State::RipVerified { after_copy: true }, Event::Ejected) => {
+            (State::Ejected { after_copy: true }, vec![notify(NotifyEvent::DiscDone)])
+        }
+        (State::RipVerified { after_copy: true }, Event::EjectFailed) => {
             (State::Ejected { after_copy: true }, vec![notify(NotifyEvent::EjectFailed)])
         }
         (State::Ejected { after_copy: true }, Event::HoldForReview { reasons }) => (
@@ -45574,18 +45859,35 @@ fn approving_at_the_disposition_gate_decides_again_with_the_owners_overrides() {
     let overrides = Overrides { season: Some(3), ..Overrides::default() };
     assert_eq!(
         step(&State::NeedsReview { held: Held::DispositionGate }, &Event::ReviewApproved { overrides }),
-        (State::Decided, vec![Action::Decide])
+        (State::Decided { approved: true }, vec![Action::Decide])
     );
 }
 
 #[test]
 fn a_decision_after_approval_checks_space_whatever_its_disposition() {
+    let approved = State::Decided { approved: true };
     for disposition in [Disposition::AutoFile, Disposition::NeedsReview] {
         assert_eq!(
-            step(&State::Decided, &Event::DecisionDone { disposition, reasons: vec![ReviewReason::TvUnmapped] }),
-            (State::Decided, vec![Action::CheckSpace])
+            step(&approved, &Event::DecisionDone { disposition, reasons: vec![ReviewReason::TvUnmapped] }),
+            (approved.clone(), vec![Action::CheckSpace])
         );
     }
+}
+
+#[test]
+fn a_redecided_auto_filed_job_that_now_needs_review_is_held() {
+    // A job that auto-filed (Decided { approved: false }) decides again after a restart, a Return or a Retry; the
+    // settings or the library facts may have changed meanwhile (6.4 step 12: it "stops here until approved").
+    let unapproved = State::Decided { approved: false };
+    assert_eq!(
+        step(&unapproved, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() }),
+        (unapproved.clone(), vec![Action::CheckSpace])
+    );
+    let reasons = vec![ReviewReason::PathCollision];
+    assert_eq!(
+        step(&unapproved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone() }),
+        (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
+    );
 }
 
 #[test]
@@ -45627,7 +45929,7 @@ fn discarding_a_held_job_deletes_its_data() {
 
 #[test]
 fn re_finalising_a_filed_job_decides_again() {
-    assert_eq!(step(&State::Filed, &Event::ReFinalise), (State::Decided, vec![Action::Decide]));
+    assert_eq!(step(&State::Filed, &Event::ReFinalise), (State::Decided { approved: true }, vec![Action::Decide]));
 }
 
 #[test]
@@ -45639,15 +45941,17 @@ fn rip_again_arms_a_new_job_for_a_job_past_its_disc_phase_and_keeps_its_state() 
         State::Failed { class: FailureClass::Unknown, from: boxed(State::Remuxing) },
     ];
     states.extend(file_phase_states());
+    // A waiting job returning to a file-phase state is past the disc phase too (job_lookup's reading).
+    states.extend(waiting_states(State::Inspecting));
     for state in states {
         assert_eq!(step(&state, &Event::RipAgain), (state.clone(), vec![Action::ArmRipAgain]));
     }
 }
 
 #[test]
-fn rip_again_is_rejected_in_the_disc_phase_and_for_waiting_discarded_or_disc_phase_failed_jobs() {
+fn rip_again_is_rejected_in_the_disc_phase_and_for_discarded_or_disc_phase_waiting_or_failed_jobs() {
     let mut states = disc_phase_states();
-    states.extend(waiting_states(State::Inspecting));
+    states.extend(waiting_states(State::Ripping));
     states.push(State::Failed { class: FailureClass::Unknown, from: boxed(State::Ripping) });
     states.push(State::Discarded);
     for state in states {
@@ -45666,7 +45970,7 @@ fn a_held_job_takes_no_disc_or_file_phase_event() {
 
 #[test]
 fn re_finalise_and_discard_are_rejected_outside_their_states() {
-    assert!(rejects(&State::Decided, &Event::ReFinalise));
+    assert!(rejects(&State::Decided { approved: true }, &Event::ReFinalise));
     assert!(rejects(&State::NeedsReview { held: Held::DispositionGate }, &Event::ReFinalise));
     assert!(rejects(&State::Filed, &Event::ReviewDiscarded));
     assert!(rejects(&State::Inspecting, &Event::ReviewApproved { overrides: Overrides::default() }));
@@ -45679,7 +45983,7 @@ fn re_finalise_and_discard_are_rejected_outside_their_states() {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: the build succeeds; `test result: FAILED. 108 passed; 6 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: NeedsReview { held: DispositionGate } + ReviewApproved { overrides: Overrides { identity: None, season: Some(3), titles: [], audio: [], subtitles: [], collision: None } }`); the 105 earlier tests still pass, and so do the three that assert rejections: `rip_again_is_rejected_in_the_disc_phase_and_for_waiting_discarded_or_disc_phase_failed_jobs`, `a_held_job_takes_no_disc_or_file_phase_event`, `re_finalise_and_discard_are_rejected_outside_their_states`.
+Expected: the build succeeds; `test result: FAILED. 108 passed; 7 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: NeedsReview { held: DispositionGate } + ReviewApproved { overrides: Overrides { identity: None, season: Some(3), titles: [], audio: [], subtitles: [], collision: None } }`); the 105 earlier tests still pass, and so do the three that assert rejections: `rip_again_is_rejected_in_the_disc_phase_and_for_discarded_or_disc_phase_waiting_or_failed_jobs`, `a_held_job_takes_no_disc_or_file_phase_event`, `re_finalise_and_discard_are_rejected_outside_their_states`.
 
 - [ ] **Step 24: Write the review queue's rows**
 
@@ -45688,25 +45992,53 @@ In `crates/core/src/job.rs`, insert the following immediately above `#[cfg(test)
 ```rust
 /// The review queue's rows (10.1, spec 11): approving at the disposition gate decides again with the owner's overrides
 /// (the engine passes them to Decide), and a decision after approval goes on whatever its disposition (8.8: the owner
-/// approved it); Discard deletes the job's data; Re-finalise takes a filed job back to Decided; Rip again arms a new job
-/// for a filed, held or file-phase job, or one that failed in its file phase (6.1 step 2 counts it as past the disc
-/// phase), and leaves its state.
+/// approved it); a decision made again in an unapproved job (an auto-filed job after a restart, a Return or a Retry)
+/// goes on only when it files automatically and is otherwise held at the disposition gate (6.4 step 12); Discard
+/// deletes the job's data; Re-finalise takes a filed job back to an approved Decided; Rip again arms a new job for a
+/// filed, held or file-phase job, one that failed in its file phase, or a waiting job returning to a file-phase state
+/// (6.1 step 2 counts each as past the disc phase), and leaves its state.
 fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     let next = match (state, event) {
         (State::NeedsReview { held: Held::DispositionGate }, Event::ReviewApproved { .. }) => {
-            (State::Decided, vec![Action::Decide])
+            (State::Decided { approved: true }, vec![Action::Decide])
         }
-        (State::Decided, Event::DecisionDone { .. }) => (State::Decided, vec![Action::CheckSpace]),
+        (State::Decided { approved: true }, Event::DecisionDone { .. })
+        | (State::Decided { approved: false }, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
+            (state.clone(), vec![Action::CheckSpace])
+        }
+        (
+            State::Decided { approved: false },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons },
+        ) => (
+            State::NeedsReview { held: Held::DispositionGate },
+            vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
+        ),
         (State::NeedsReview { .. }, Event::ReviewDiscarded) => (State::Discarded, vec![Action::DeleteJobData]),
-        (State::Filed, Event::ReFinalise) => (State::Decided, vec![Action::Decide]),
+        (State::Filed, Event::ReFinalise) => (State::Decided { approved: true }, vec![Action::Decide]),
         (State::Filed | State::NeedsReview { .. }, Event::RipAgain) => (state.clone(), vec![Action::ArmRipAgain]),
         (State::Failed { from, .. }, Event::RipAgain) if from.is_file_phase() => {
             (state.clone(), vec![Action::ArmRipAgain])
         }
         (_, Event::RipAgain) if state.is_file_phase() => (state.clone(), vec![Action::ArmRipAgain]),
+        (_, Event::RipAgain) if waiting_return(state).is_some_and(State::is_file_phase) => {
+            (state.clone(), vec![Action::ArmRipAgain])
+        }
         _ => return None,
     };
     Some(next)
+}
+
+/// The state a waiting state returns to; None for every other state.
+fn waiting_return(state: &State) -> Option<&State> {
+    match state {
+        State::AwaitingShare { return_to }
+        | State::AwaitingSpace { return_to }
+        | State::AwaitingMakeMkv { return_to }
+        | State::AwaitingNetwork { return_to }
+        | State::AwaitingLookup { return_to }
+        | State::AwaitingTool { return_to } => Some(&**return_to),
+        _ => None,
+    }
 }
 ```
 
@@ -45728,7 +46060,7 @@ const RULES: &[Rule] = &[any_state, direct_line, copy_line, review_line];
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 114 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 115 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 26: Write the failing waiting-state tests**
 
@@ -45795,8 +46127,8 @@ fn the_share_back_returns_to_the_interrupted_state_with_its_resume_actions_then_
 #[test]
 fn space_freed_returns_to_the_interrupted_state_with_its_resume_actions_then_resumed() {
     assert_eq!(
-        step(&State::AwaitingSpace { return_to: boxed(State::Decided) }, &Event::SpaceFreed),
-        (State::Decided, vec![Action::Decide, notify(NotifyEvent::Resumed)])
+        step(&State::AwaitingSpace { return_to: boxed(State::Decided { approved: true }) }, &Event::SpaceFreed),
+        (State::Decided { approved: true }, vec![Action::Decide, notify(NotifyEvent::Resumed)])
     );
 }
 
@@ -45840,7 +46172,12 @@ fn a_licence_or_version_message_while_scanned_ripping_or_copying_waits_for_makem
 
 #[test]
 fn a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying() {
-    for state in [State::Fingerprinted, State::Planned { mode: Mode::Direct }, State::RipVerified, State::Inspecting] {
+    for state in [
+        State::Fingerprinted,
+        State::Planned { mode: Mode::Direct },
+        State::RipVerified { after_copy: false },
+        State::Inspecting,
+    ] {
         assert!(rejects(&state, &Event::LicenceMessage), "{state:?}");
         assert!(rejects(&state, &Event::VersionMessage), "{state:?}");
     }
@@ -45872,7 +46209,13 @@ fn a_disc_needing_the_network_waits_and_starts_the_10_minute_timer() {
 
 #[test]
 fn only_scanned_ripping_and_copying_wait_for_the_network() {
-    for state in [State::Detected, State::Fingerprinted, State::RipVerified, State::Inspecting, State::Remuxing] {
+    for state in [
+        State::Detected,
+        State::Fingerprinted,
+        State::RipVerified { after_copy: false },
+        State::Inspecting,
+        State::Remuxing,
+    ] {
         assert!(rejects(&state, &Event::NetworkNeeded), "{state:?}");
     }
 }
@@ -45906,7 +46249,9 @@ fn the_disc_phase_never_waits_for_a_lookup() {
     for state in disc_phase_states() {
         assert!(rejects(&state, &Event::LookupPending), "{state:?}");
     }
-    assert!(rejects(&State::Decided, &Event::LookupPending));
+    for approved in [false, true] {
+        assert!(rejects(&State::Decided { approved }, &Event::LookupPending));
+    }
 }
 
 #[test]
@@ -46037,7 +46382,7 @@ fn a_waiting_state_returns_only_on_its_own_event() {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: the build succeeds; `test result: FAILED. 120 passed; 18 failed`. The failing tests panic with a message starting `rejected: ` (for example `rejected: Detected + ShareLost`), except `a_waiting_state_returns_only_on_its_own_event`, whose `assert_eq!` fails with `left: true` and `right: false` for `AwaitingShare { return_to: Ripping }` and `ShareBack`; the 114 earlier tests still pass, and so do the six that assert rejections: `a_lost_share_or_short_space_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job`, `a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying`, `only_scanned_ripping_and_copying_wait_for_the_network`, `the_disc_phase_never_waits_for_a_lookup`, `a_missing_makemkvcon_is_rejected_by_the_file_phase_states_that_do_not_run_it`, `a_tool_missing_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job_except_java`.
+Expected: the build succeeds; `test result: FAILED. 121 passed; 18 failed`. The failing tests panic with a message starting `rejected: ` (for example `rejected: Detected + ShareLost`), except `a_waiting_state_returns_only_on_its_own_event`, whose `assert_eq!` fails with `left: true` and `right: false` for `AwaitingShare { return_to: Ripping }` and `ShareBack`; the 115 earlier tests still pass, and so do the six that assert rejections: `a_lost_share_or_short_space_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job`, `a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying`, `only_scanned_ripping_and_copying_wait_for_the_network`, `the_disc_phase_never_waits_for_a_lookup`, `a_missing_makemkvcon_is_rejected_by_the_file_phase_states_that_do_not_run_it`, `a_tool_missing_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job_except_java`.
 
 - [ ] **Step 28: Write the waiting states and their returns**
 
@@ -46122,7 +46467,7 @@ const RULES: &[Rule] = &[any_state, direct_line, copy_line, review_line, waits];
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 138 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 139 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 30: Write the failing failure tests**
 
@@ -46141,7 +46486,8 @@ fn failing_steps(failure: Failure) -> Vec<(State, Event)> {
         (State::Extracting, Event::ExtractFailed { failure }),
         (State::Inspecting, Event::ProbeFailed { failure }),
         (State::Inspecting, Event::DecisionFailed { failure }),
-        (State::Decided, Event::DecisionFailed { failure }),
+        (State::Decided { approved: false }, Event::DecisionFailed { failure }),
+        (State::Decided { approved: true }, Event::DecisionFailed { failure }),
         (State::Remuxing, Event::RemuxFailed { failure }),
         (State::Remuxing, Event::FileVerifyFailed { failure }),
         (State::Verified, Event::FileFailed { failure }),
@@ -46262,8 +46608,11 @@ fn retry_takes_a_failed_job_back_to_the_state_that_failed_with_its_resume_action
 #[test]
 fn retrying_a_failed_decision_after_approval_decides_again() {
     assert_eq!(
-        step(&State::Failed { class: FailureClass::Unknown, from: boxed(State::Decided) }, &Event::Retry),
-        (State::Decided, vec![Action::Decide])
+        step(
+            &State::Failed { class: FailureClass::Unknown, from: boxed(State::Decided { approved: true }) },
+            &Event::Retry,
+        ),
+        (State::Decided { approved: true }, vec![Action::Decide])
     );
 }
 
@@ -46347,7 +46696,7 @@ fn the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase() {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: the build succeeds; `test result: FAILED. 142 passed; 11 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: Detected + FingerprintFailed { failure: Failure { class: DriveIncapable, output: None } }`); the 138 earlier tests still pass, and so do the four that assert rejections: `a_step_failure_is_rejected_from_a_state_that_did_not_run_the_step`, `retry_is_rejected_for_a_drive_incapable_failure`, `retry_is_rejected_for_a_job_that_has_not_failed`, `the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase`.
+Expected: the build succeeds; `test result: FAILED. 143 passed; 11 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: Detected + FingerprintFailed { failure: Failure { class: DriveIncapable, output: None } }`); the 139 earlier tests still pass, and so do the four that assert rejections: `a_step_failure_is_rejected_from_a_state_that_did_not_run_the_step`, `retry_is_rejected_for_a_drive_incapable_failure`, `retry_is_rejected_for_a_job_that_has_not_failed`, `the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase`.
 
 - [ ] **Step 32: Write the step failures, Retry and the disc coming and going**
 
@@ -46367,7 +46716,7 @@ fn step_failure(state: &State, event: &Event) -> Option<Failure> {
         | (State::Ripping, Event::TitleRipFailed { failure })
         | (State::Extracting, Event::ExtractFailed { failure })
         | (State::Inspecting, Event::ProbeFailed { failure })
-        | (State::Inspecting | State::Decided, Event::DecisionFailed { failure })
+        | (State::Inspecting | State::Decided { .. }, Event::DecisionFailed { failure })
         | (State::Remuxing, Event::RemuxFailed { failure })
         | (State::Remuxing, Event::FileVerifyFailed { failure })
         | (State::Verified, Event::FileFailed { failure }) => Some(*failure),
@@ -46425,7 +46774,7 @@ const RULES: &[Rule] = &[any_state, direct_line, copy_line, review_line, waits, 
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 153 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 154 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 34: Write the failing job ID and job lookup tests**
 
@@ -46661,19 +47010,6 @@ pub fn job_lookup(earlier: &[(String, State, bool)]) -> JobLookup {
         JobLookup::NewJob
     }
 }
-
-/// The state a waiting state returns to; None for every other state.
-fn waiting_return(state: &State) -> Option<&State> {
-    match state {
-        State::AwaitingShare { return_to }
-        | State::AwaitingSpace { return_to }
-        | State::AwaitingMakeMkv { return_to }
-        | State::AwaitingNetwork { return_to }
-        | State::AwaitingLookup { return_to }
-        | State::AwaitingTool { return_to } => Some(&**return_to),
-        _ => None,
-    }
-}
 ```
 
 - [ ] **Step 37: Run the job ID and job lookup tests to see them pass**
@@ -46682,7 +47018,7 @@ fn waiting_return(state: &State) -> Option<&State> {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 170 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 171 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 38: Run the whole workspace**
 
@@ -46694,7 +47030,7 @@ grep -c '^pub mod job;' crates/core/src/lib.rs
 grep -c '#\[test\]' crates/core/src/job/tests.rs
 ```
 
-Expected: the build finishes without an error and without a change to `Cargo.lock` (no dependency was added); every `test result:` line of the test run reads `ok` with `0 failed`, and `lazymkv-core`'s unit tests count 170 more than before this task (the evidence tests of `lazymkv-dev` pass or print their `skipped:` line as before; `decide`'s and `reconcile`'s goldens are untouched); no `warning:` line names `job.rs` or `job/tests.rs`; `git status --short` lists exactly ` M crates/core/src/lib.rs`, `?? crates/core/src/job.rs` and `?? crates/core/src/job/`; then `1` and `170`.
+Expected: the build finishes without an error and without a change to `Cargo.lock` (no dependency was added); every `test result:` line of the test run reads `ok` with `0 failed`, and `lazymkv-core`'s unit tests count 171 more than before this task (the evidence tests of `lazymkv-dev` pass or print their `skipped:` line as before; `decide`'s and `reconcile`'s goldens are untouched); no `warning:` line names `job.rs` or `job/tests.rs`; `git status --short` lists exactly ` M crates/core/src/lib.rs`, `?? crates/core/src/job.rs` and `?? crates/core/src/job/`; then `1` and `170`.
 
 - [ ] **Step 39: Commit**
 
@@ -47118,7 +47454,9 @@ pub struct LibraryFacts {
     /// Earlier filed copies of this film: cut key ("theatrical", or the lower-cased edition name) to the edition name used
     /// ("" when that copy was filed without an edition name; this cut then gets None).
     pub earlier_edition_names: BTreeMap<String, String>,
-    /// Spec 7: the final path already exists and is not this job's file.
+    /// Spec 7: the final path already exists and is not this job's file. Phase 2 checks the plain path (no copy label);
+    /// under the owner's Resolve collision "keep both" it must also check the copy-labelled path (`- 2160p 2`) before
+    /// filing and hold the job with path_collision when that one is taken too (Open point 39).
     pub path_collision: bool,
 }
 
@@ -48293,7 +48631,7 @@ mod tests {
 }
 ```
 
-Create `crates/dev/tests/plan.rs` with exactly this content. The expected values are the "Expected plans" table of the interfaces file, read from the fixtures: each pinned log's attributes 9, 11, 16 and 24 for the planned titles (John Wick UHD title 0: 1:41:13 = 6073 s, 67,757,930,496 bytes, `00001.mpls`; its Blu-ray title 0: 25,234,495,488 bytes; Expendables 3 title 41: 2:11:31 = 7891 s, 28,831,358,976 bytes, `00756.mpls`, comment `FPL_MainFeature_UR`; Smile title 14: 1:55:37 = 6937 s, 79,673,339,904 bytes, `00040.mpls`; Knowing title 0: 2:01:14 = 7274 s, 7,098,400,768 bytes, DVD title `01`; Chernobyl disc 1 titles 1, 8, 7: 3534, 3896, 3707 s, `00801` to `00803.mpls`; disc 2 titles 6 and 8: 3899 and 4293 s; Firefly disc 1 titles 0, 1, 2: 5186, 2554, 2627 s, DVD titles `01` to `03`; disc 2 titles 0, 1, 2, 5: 2631, 2559, 2629, 2628 s, DVD titles `01`, `02`, `03`, `11`), the fingerprint of each log's HSH lines (each names one `corpus/thediscdb-api/dischash-*.json`), and each answer's `media` and episode items (John Wick 2014 movie 245891, The Expendables 3 2014 movie 138103, Smile 2022 movie 882598, Knowing 2009 movie 13811, Chernobyl 2019 series 87108, Firefly 2002 series 1437, with the episode titles below). For the four recordings, ruling RP21 decides what may be written here: a test in `crates/` never holds a value copied from the private clone that a reader could not derive from the public spec or the pinned MIT fixtures, so such a value is read from the clone when the test runs. Written as literals: what the interfaces' "Expected plans" table publishes (title numbers, keys with their playlists or DVD titles, kinds, identity steps, the TMDb IDs 1417 and 2316, confidences, modes, review reasons, episode numbers, the names `THE OFFICE S3D3` and `DVD_VIDEO`), Pan's Labyrinth's fingerprint, disc ID and title 0 (1:59:10 = 7150 s, 55,613,952,000 bytes, `00800.mpls`), which `docs/phase0` and `corpus/scenarios` already publish, and `lookup-status.txt`'s lines (`dischash 200`, `discid 404`, `tmdb movie/1417 200` for Pan's Labyrinth, `tmdb tv/2316 200` for the Office, `dischash 404` alone for both Short Circuit discs), the files present (both Short Circuit recordings hold an empty `thediscdb-hash.json` and no `thediscdb-discid.json` or `tmdb.json`) and `nav/BDMV/META/DL/bdmt_eng.xml` (`Pan's Labyrinth`; the Office's nav tree has no META folder). Read from the clone by `clone_facts` and `episode_names`: the Office's and both Short Circuit discs' fingerprints and the Office's disc ID (`meta.json`), the seconds and size of each of their planned titles (`scan.txt` typed by `disc::disc`, attributes 9 and 11), the first Short Circuit disc's volume label (the same scan's CINFO 32), and the Office's episode names (the Episode items of its `thediscdb-hash.json`, by source file).
+Create `crates/dev/tests/plan.rs` with exactly this content. The expected values are the "Expected plans" table of the interfaces file, read from the fixtures: each pinned log's attributes 9, 11, 16 and 24 for the planned titles (John Wick UHD title 0: 1:41:13 = 6073 s, 67,757,930,496 bytes, `00001.mpls`; its Blu-ray title 0: 25,234,495,488 bytes; Expendables 3 title 41: 2:11:31 = 7891 s, 28,831,358,976 bytes, `00756.mpls`, comment `FPL_MainFeature_UR`; Smile title 14: 1:55:37 = 6937 s, 79,673,339,904 bytes, `00040.mpls`; Knowing title 0: 2:01:14 = 7274 s, 7,098,400,768 bytes, DVD title `01`; Chernobyl disc 1 titles 1, 8, 7: 3534, 3896, 3707 s, `00801` to `00803.mpls`; disc 2 titles 6 and 8: 3899 and 4293 s; Firefly disc 1 titles 0, 1, 2: 5186, 2554, 2627 s, DVD titles `01` to `03`; disc 2 titles 0, 1, 2, 5: 2631, 2559, 2629, 2628 s, DVD titles `01`, `02`, `03`, `11`), the fingerprint of each log's HSH lines (each names one `corpus/thediscdb-api/dischash-*.json`), and each answer's `media` and episode items (John Wick 2014 movie 245891, The Expendables 3 2014 movie 138103, Smile 2022 movie 882598, Knowing 2009 movie 13811, Chernobyl 2019 series 87108, Firefly 2002 series 1437, with the episode titles below). For the four recordings, ruling RP21 decides what may be written here: a test in `crates/` never holds a value copied from the private clone that a reader could not derive from the public spec or the pinned MIT fixtures, so such a value is read from the clone when the test runs. Written as literals: what the interfaces' "Expected plans" table publishes (title numbers, the keys and playlists or DVD titles it gives (the pinned logs' and Pan's Labyrinth's; the Office row gives title numbers and episodes only), kinds, identity steps, the TMDb IDs 1417 and 2316, confidences, modes, review reasons, episode numbers, the names `THE OFFICE S3D3` and `DVD_VIDEO`), Pan's Labyrinth's fingerprint, disc ID and title 0 (1:59:10 = 7150 s, 55,613,952,000 bytes, `00800.mpls`), which `docs/phase0` and `corpus/scenarios` already publish, and `lookup-status.txt`'s lines (`dischash 200`, `discid 404`, `tmdb movie/1417 200` for Pan's Labyrinth, `tmdb tv/2316 200` for the Office, `dischash 404` alone for both Short Circuit discs), the files present (both Short Circuit recordings hold an empty `thediscdb-hash.json` and no `thediscdb-discid.json` or `tmdb.json`) and `nav/BDMV/META/DL/bdmt_eng.xml` (`Pan's Labyrinth`; the Office's nav tree has no META folder). Read from the clone by `clone_facts` and `episode_names`: the Office's and both Short Circuit discs' fingerprints and the Office's disc ID (`meta.json`), the seconds and size of each of their planned titles (`scan.txt` typed by `disc::disc`, attributes 9 and 11), the Office's playlist of each mapped title (attribute 16, from which its key is built), the first Short Circuit disc's volume label (the same scan's CINFO 32), and the Office's episode names (the Episode items of its `thediscdb-hash.json`, by source file).
 
 ```rust
 //! `lazymkv-dev plan` (ruling RP14 of the phase 1 plan; port spec 3.4) over the nine pinned TheDiscDB scan logs of
@@ -48753,22 +49091,31 @@ fn the_office_2005_s3d3_bluray() {
     let plan = doc.plan;
     assert_discdb_one(&plan, show(2316), "The Office", 2005);
     assert_eq!((plan.kind, plan.kind_source), (Kind::Tv, KindSource::Discdb));
-    // 8.5: TheDiscDB maps six titles, the two-episode title first; deleted scenes (title 4) are not episodes. Each
-    // title's duration and size are the clone's scan's, its episode name the clone's TheDiscDB answer's (RP21).
+    // 8.5: TheDiscDB maps the six titles of the Expected plans row, ordered by episode. Each title's playlist,
+    // duration and size are the clone's scan's, its episode name the clone's TheDiscDB answer's (RP21); its key is
+    // its plan position and its playlist's stem.
     let names = episode_names(&dir);
-    let mapped = |key: &str, title: u32, episodes: &[u32], playlist: &str| {
-        let name = names.get(playlist).unwrap_or_else(|| panic!("TheDiscDB's answer names no episode for {playlist}"));
-        scanned(&facts, key, title, episode(3, episodes, name), Some(playlist))
+    let mapped = |position: usize, title: u32, episodes: &[u32]| {
+        let playlist = facts
+            .disc
+            .title(title)
+            .unwrap_or_else(|sentence| panic!("{sentence}"))
+            .source_file
+            .clone()
+            .expect("a Blu-ray title has attribute 16");
+        let key = format!("t{position:02}-{}", playlist.trim_end_matches(".mpls"));
+        let name = names.get(&playlist).unwrap_or_else(|| panic!("TheDiscDB's answer names no episode for {playlist}"));
+        scanned(&facts, &key, title, episode(3, episodes, name), Some(playlist.as_str()))
     };
     assert_eq!(
         plan.titles,
         vec![
-            mapped("t00-00002", 3, &[12, 13], "00002.mpls"),
-            mapped("t01-00003", 2, &[14], "00003.mpls"),
-            mapped("t02-00004", 1, &[15], "00004.mpls"),
-            mapped("t03-00005", 0, &[16], "00005.mpls"),
-            mapped("t04-00006", 6, &[17], "00006.mpls"),
-            mapped("t05-00007", 5, &[18], "00007.mpls"),
+            mapped(0, 3, &[12, 13]),
+            mapped(1, 2, &[14]),
+            mapped(2, 1, &[15]),
+            mapped(3, 0, &[16]),
+            mapped(4, 6, &[17]),
+            mapped(5, 5, &[18]),
         ]
     );
     assert_eq!(
@@ -49993,7 +50340,7 @@ pub struct Title {
     pub streams: Vec<Stream>,
 }
 impl Title {
-    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T11.
+    /// The streams of one kind, in scan order. Def: T2. Use: T5, T8, T9, T10, T11.
     pub fn streams_of(&self, kind: StreamKind) -> Vec<&Stream>;
     /// The height of the first video stream's attribute 19 (8.9's resolution label). Def: T2. Use: T11, T13.
     pub fn video_height(&self) -> Option<u32>;
@@ -50351,7 +50698,7 @@ pub struct AudioTrack {
 pub const AUDIO_CONFIDENCE: f64 = 0.95;
 pub const G1_MAX_KBPS: u32 = 256;
 
-/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T9.
+/// How TheDiscDB's track list aligned with the scan's streams (8.6 step 1). Def: T8. Use: T8, T10, T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment { Full, WithoutDerived }
@@ -50519,6 +50866,10 @@ pub fn stream_of_track(report: &VerifyReport, track_id: i64) -> Option<u32>;
 /// subs/index.json's `n` to the scan stream, through each entry's `track_id` and `stream_of_track`; entries without a
 /// track_id or a pair are left out. Def: T12. Use: T16, T18.
 pub fn subs_streams(index: &[SubsIndexEntry], report: &VerifyReport) -> BTreeMap<i64, u32>;
+/// subs_dir/index.json as `align::index_streams` reads it (UTF-8 with a byte-order mark allowed, invalid bytes
+/// replaced); Err is the read error's text or "<path>: <serde error>". The one reading `subtitle_events` and decide's
+/// text decisions share. Def: T12. Use: T12, T16.
+pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEntry>, String>;
 /// `align::events` of every subs/index.json entry under `subs_dir` (packets through `align::load_packets`), keyed by scan
 /// stream (`subs_streams`): `clear_max_bytes` for image codecs, 0 where `align::is_text`. Def: T12. Use: T16, T18.
 pub fn subtitle_events(tree: &dyn Tree, subs_dir: &PathKey, report: &VerifyReport, clear_max_bytes: i64) -> Result<BTreeMap<u32, Vec<f64>>, String>;
@@ -50541,6 +50892,8 @@ pub enum Disposition { AutoFile, NeedsReview }
 /// Everything 6.4 step 11 decides from. Def: T13. Use: T16.
 pub struct DecisionInputs<'a> {
     pub plan: &'a Plan,
+    /// The scan the plan was made from: the owner's Assign titles leaves out a title it lacks, as a re-plan does (Open point 32).
+    pub disc: &'a Disc,
     pub planned: &'a PlannedTitle,
     pub title: &'a Title,
     pub audio: AudioFacts<'a>,
@@ -50752,8 +51105,8 @@ And in `crates/dev/src/cmd/plan.rs` (beside Task 15's private `recording_inputs`
 
 ```rust
 /// A recording's parsed lookup answers exactly as `plan_doc` reads them (`recording_inputs`: an answer file whose
-/// lookup-status.txt line is not 200 is left unparsed), so decide's decision section never reads them a second time or
-/// differently (one copy). Def: T16. Use: T16.
+/// lookup-status.txt line is not 200 is left unparsed), so decide's decision section reads them through the same code as
+/// plan_doc and never differently (one copy). Def: T16. Use: T16.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordedAnswers { pub by_fingerprint: Option<DiscDbRecord>, pub by_disc_id: Vec<DiscDbRecord>, pub recorded: Option<TmdbRecord> }
 /// The three answers of `recording_inputs(rec)?`, its refusal unchanged. Def: T16. Use: T16.
@@ -50830,7 +51183,7 @@ and replace it with:
     use lazymkv_core::audio::rule::{Dialogue, Veto};
     use lazymkv_core::decision::{Confidences, Disposition};
     use lazymkv_core::lookup::{IdentityStep, Kind};
-    use lazymkv_core::plan::{DiscDbMatch, Mode};
+    use lazymkv_core::plan::Mode;
     use lazymkv_core::recording::Ordered;
     use lazymkv_core::reconcile::Verdicts;
     use lazymkv_core::review::ReviewReason;
@@ -51588,7 +51941,7 @@ pub struct DecisionDoc {
 /// Which scan streams each fact of the file phase covered, each list sorted.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FactsSummary {
-    /// Streams with a packet MD5 from a level folder's manifest.txt (6.4 step 10a, D13).
+    /// Streams with a packet MD5 from a level folder's manifest.txt or audio-proxy.json (6.4 step 10a, D13).
     pub md5_streams: Vec<u32>,
     /// Audio streams with an ffprobe profile from ffprobe-streams.json (6.4 step 9).
     pub profile_streams: Vec<u32>,
@@ -51847,6 +52200,7 @@ pub fn decision_doc(
     let library = LibraryFacts::default();
     let inputs = DecisionInputs {
         plan: &plan.plan,
+        disc: &typed,
         planned,
         title: &title,
         audio: AudioFacts {
@@ -52118,6 +52472,15 @@ and replace them with:
         .unwrap();
         assert_eq!((two.facts.verdict_streams.clone(), two.facts.verdict_reference), (vec![2], Some(1)));
         assert_eq!(two.decision.audio.reviews, Vec::<ReviewReason>::new());
+        // A main-only folder gives nothing: it does not fix the reference for the folders after it.
+        let lead = decided_with(&root, "all-tracks", |_, doc| {
+            doc.audio = vec![
+                AudioEntry::Results(measured("3", &[], Some(false))),
+                AudioEntry::Results(measured("1", &[("2", Verdict::Commentary)], Some(false))),
+            ];
+        })
+        .unwrap();
+        assert_eq!((lead.facts.verdict_streams.clone(), lead.facts.verdict_reference), (vec![2], Some(1)));
         // A skipped folder gives nothing.
         let skipped = decided_with(&root, "all-tracks", |_, doc| {
             doc.audio = vec![AudioEntry::Skipped { folder: "audio-levels-20ms-1-2".to_string(), skipped: "made-up".to_string() }];
@@ -52165,8 +52528,9 @@ and replace it with:
 /// streams through the verify report's pairs. The first folder whose main stream maps gives the reference; a folder
 /// measured against another stream is left out, with its verdicts and its veto, since they answer another reference;
 /// within the reference's folders the first verdict of a stream wins, and D21's veto holds when one of them says it
-/// holds. A skipped folder gives nothing. When no verdict was taken (only main-only folders), there is no reference and
-/// no veto: AudioFacts.verdict_reference is None when there are no verdicts, so nothing measured is not judged.
+/// holds. A skipped folder, and a folder with no mapped candidate, gives nothing (it does not fix the reference). When
+/// no verdict was taken (only main-only folders), there is no reference and no veto: AudioFacts.verdict_reference is
+/// None when there are no verdicts, so nothing measured is not judged.
 fn content_verdicts(audio: &[AudioEntry], report: &VerifyReport) -> ContentVerdicts {
     let mut found = ContentVerdicts::default();
     for entry in audio {
@@ -52176,14 +52540,20 @@ fn content_verdicts(audio: &[AudioEntry], report: &VerifyReport) -> ContentVerdi
         let Some(main) = folder.main.get("main").and_then(|text| track_stream(text, report)) else {
             continue;
         };
+        let mapped: Vec<(u32, Verdict)> = folder
+            .candidates
+            .iter()
+            .filter_map(|candidate| track_stream(&candidate.stream, report).map(|stream| (stream, candidate.verdict)))
+            .collect();
+        if mapped.is_empty() {
+            continue;
+        }
         if *found.reference.get_or_insert(main) != main {
             continue;
         }
         found.veto_holds |= folder.veto.holds == Some(true);
-        for candidate in &folder.candidates {
-            if let Some(stream) = track_stream(&candidate.stream, report) {
-                found.by_stream.entry(stream).or_insert(candidate.verdict);
-            }
+        for (stream, verdict) in mapped {
+            found.by_stream.entry(stream).or_insert(verdict);
         }
     }
     if found.by_stream.is_empty() {
@@ -52314,18 +52684,6 @@ Expected: FAIL, `test result: FAILED. 0 passed; 2 failed`: `the_text_decisions_c
 In `crates/dev/src/cmd/decide.rs`, find in the `use` block:
 
 ```rust
-use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, Selection};
-```
-
-and replace it with:
-
-```rust
-use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, Selection, SubsIndexEntry};
-```
-
-Find:
-
-```rust
 use lazymkv_core::review::ReviewReason;
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Decision as TextDecision, Rule as TextRule, SubsJson};
 ```
@@ -52348,7 +52706,8 @@ and replace it with:
 
 ```rust
 use lazymkv_core::verify::{
-    by_scan_stream, selected_streams, stream_of_track, subs_streams, subtitle_events, verify_rip, ReadError, VerifyReport,
+    by_scan_stream, selected_streams, stream_of_track, subs_index, subs_streams, subtitle_events, verify_rip, ReadError,
+    VerifyReport,
 };
 ```
 
@@ -52377,9 +52736,8 @@ and replace it with:
 /// by its subs/index.json `n`, mapped through the index's track ids and the verify report's pairs
 /// (`verify::subs_streams`, `verify::by_scan_stream`); a stream without a decision is left out. Empty when the section
 /// was skipped (no OCR text), and when `settings.text_rule()` is not `text::Rule::default()`, the rule the section ran
-/// with, since its decisions answer other thresholds (spec 14's subtitle settings, RP15). subs/index.json is read as
-/// `verify::subtitle_events` reads it (UTF-8 with a byte-order mark, invalid bytes replaced). Err when it cannot be
-/// read or does not parse.
+/// with, since its decisions answer other thresholds (spec 14's subtitle settings, RP15). subs/index.json is read by
+/// `verify::subs_index`, the reading `verify::subtitle_events` shares. Err when it cannot be read or does not parse.
 fn text_decisions(
     subtitles: &SubtitleEntry,
     tree: &dyn Tree,
@@ -52397,10 +52755,7 @@ fn text_decisions(
         subs.streams.iter().filter_map(|stream| stream.decide.clone().map(|decided| (stream.n, decided))).collect();
     // Read as verify::subtitle_events reads it (invalid bytes replaced), so an index that gave the events never turns
     // the text into an Err that skips the decision.
-    let path = label_dir.join("subs/index.json");
-    let text = read_text(tree, &path, Encoding::Utf8Sig, Errors::Replace)?;
-    let index: Vec<SubsIndexEntry> =
-        serde_json::from_str(&text).map_err(|error| format!("{}: {}", tree.display(&path), error))?;
+    let index = subs_index(tree, &label_dir.join("subs"))?;
     Ok(by_scan_stream(&by_n, &subs_streams(&index, report)))
 }
 
@@ -52431,6 +52786,18 @@ and replace it with:
     use lazymkv_core::lookup::tmdb::{parse_recorded, TmdbIdentity, TmdbKind};
     use lazymkv_core::lookup::{DescriptionKind, IdentityStep, Kind};
     use lazymkv_core::naming::NamedPath;
+```
+
+Find:
+
+```rust
+    use lazymkv_core::plan::Mode;
+```
+
+and replace it with (`DiscDbMatch` is first used by this step's `a_printed_document_reads_back_whole`):
+
+```rust
+    use lazymkv_core::plan::{DiscDbMatch, Mode};
 ```
 
 Find:
@@ -52763,7 +53130,8 @@ Find:
 
 ```rust
 use lazymkv_core::verify::{
-    by_scan_stream, selected_streams, stream_of_track, subs_streams, subtitle_events, verify_rip, ReadError, VerifyReport,
+    by_scan_stream, selected_streams, stream_of_track, subs_index, subs_streams, subtitle_events, verify_rip, ReadError,
+    VerifyReport,
 };
 ```
 
@@ -52771,8 +53139,8 @@ and replace it with:
 
 ```rust
 use lazymkv_core::verify::{
-    by_scan_stream, failure_reviews, selected_streams, stream_of_track, subs_streams, subtitle_events, verify_rip,
-    VerifyReport,
+    by_scan_stream, failure_reviews, selected_streams, stream_of_track, subs_index, subs_streams, subtitle_events,
+    verify_rip, VerifyReport,
 };
 ```
 
@@ -52917,7 +53285,7 @@ Expected: PASS for every test binary of the dev crate (`0 failed` throughout), t
 
 `crates/dev/tests/decide.rs` runs decide once per rip label and compares its six sections with the goldens; it now also checks the two new sections of the same document, so no level folder is measured twice. The expected values are read from the recordings' files on 2026-10-16 and follow the rules:
 
-- **Plans** ("Expected plans" of the phase 1 plan): Pan's Labyrinth and the Office are TheDiscDB by fingerprint (8.1 step 3, 0.95; both disc-ID lookups answered 404), with 8.3 rule 1 at 0.98 for Pan's Labyrinth's title 0 and 8.5's mapped episodes at 0.98 for the Office in episode order (title 3 is S03E12-E13 on `00002.mpls`, so `t00-00002`; title 2 `t01-00003`; title 1 `t02-00004`; title 0 `t03-00005`; title 6 `t04-00006`; title 5 `t05-00007`); both Short Circuit DVDs have no answer (8.1 step 6, `identity_unknown`) and one structural rival (8.3 rule 3.5, 0.85), keyed `t00-title01`.
+- **Plans** ("Expected plans" of the phase 1 plan): Pan's Labyrinth and the Office are TheDiscDB by fingerprint (8.1 step 3, 0.95; both disc-ID lookups answered 404), with 8.3 rule 1 at 0.98 for Pan's Labyrinth's title 0 and 8.5's mapped episodes at 0.98 for the Office in episode order (title 3 is S03E12-E13, title 2 S03E14, title 1 S03E15, title 0 S03E16, title 6 S03E17, title 5 S03E18, keyed `t00-` to `t05-` and the stem of the title's playlist, which the test reads from the recording's scan when it runs, RP21); both Short Circuit DVDs have no answer (8.1 step 6, `identity_unknown`) and one structural rival (8.3 rule 3.5, 0.85), keyed `t00-title01`.
 - **Facts**: MD5s from the level folders' manifests and `audio-proxy.json` files (the proxies are tracked and name every audio stream of the file: Short Circuit 2's `all-tracks-2` folder `audio-levels-20ms-1` gives streams 1 to 4), mapped through the verify pairs (Pan's Labyrinth's `all-tracks` file holds scan streams 0, 1, 2, 3, 4, 6, so its ffprobe stream 5 is scan stream 6; its `eng-only` file holds 0, 3, 4, so ffprobe 1 is scan 3); profiles from `ffprobe-streams.json` (the DTS-HD MA and DTS streams; the Dolby Digital and DVD streams have none); events from `subs/index.json`; `MSG:4047` removals (the empty forced-only streams: Pan's Labyrinth's 5 and 7, the Office's 5, 6 and 5).
 - **Audio** (8.6): the derived DTS cores are dropped (flag 2048); the Office's `rehearsal` title 1 carries twin DTS-HD MA tracks with equal packet MD5s (streams 1 and 3), so stream 3 is dropped as a duplicate of stream 1 (D13) and its core 4 as derived; Pan's Labyrinth is Spanish, so its Spanish DTS-HD MA comes first (`original_language_first`), and its `eng-only` rip holds no Spanish stream (`original_language_missing`); Short Circuit 2's French, Spanish and Portuguese tracks are unwanted (no TMDb answer: English only). The content rule's verdicts (the audio goldens: `commentary-cross-language` on Pan's Labyrinth's English stereo, `commentary` on the Office's `e16-stereo` stereo track) raise `commentary_detected` and drop nothing (D15); `note-commentary` (`t3-all-tracks`) is a note.
 - **Subtitles** (8.7): one full English track kept as "English" at 0.90; the removed forced-only streams dropped empty; other languages dropped; Short Circuit 2's closed captions kept as SDH (its dialogue group has no SDH track); Short Circuit has no subtitle stream (0.95).
@@ -52950,11 +53318,14 @@ use lazymkv_core::audio::dataset::LEVELS_NOT_HERE;
 use lazymkv_core::audio::labels::is_slug;
 use lazymkv_core::audio::report::FolderJson;
 use lazymkv_core::decision::Disposition;
+use lazymkv_core::disc::{disc, Disc};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::lookup::{IdentityStep, Kind};
-use lazymkv_core::plan::Mode;
+use lazymkv_core::plan::{title_key, Mode};
 use lazymkv_core::recording::files::rip_labels;
+use lazymkv_core::recording::{decode_text, Encoding, Errors};
 use lazymkv_core::review::ReviewReason;
+use lazymkv_core::robot::parse;
 use lazymkv_core::subtitle::text::SubsJson;
 use lazymkv_core::tracks::audio::AudioDrop;
 use lazymkv_core::tracks::subtitle::SubtitleDrop;
@@ -53109,7 +53480,7 @@ struct PlanExpectation {
     identity_confidence: f64,
     tmdb: Option<TmdbIdentity>,
     kind: Kind,
-    titles: Vec<(u32, &'static str)>,
+    titles: Vec<(u32, String)>,
     title_confidence: f64,
     mode: Mode,
     reviews: Vec<ReviewReason>,
@@ -53124,7 +53495,7 @@ enum LabelExpectation {
 /// A decided rip label. The lists of scan streams are sorted; `audio_kept` is in final order (8.6 step 5),
 /// `subtitles_kept` in 8.10's order; the drops are compared sorted by stream.
 struct DecisionExpectation {
-    title_key: &'static str,
+    title_key: String,
     md5_streams: Vec<u32>,
     profile_streams: Vec<u32>,
     event_streams: Vec<u32>,
@@ -53155,7 +53526,7 @@ fn pans_labyrinth() -> RecordingExpectation {
             identity_confidence: 0.95,
             tmdb: Some(TmdbIdentity { kind: TmdbKind::Movie, id: 1417 }),
             kind: Kind::Movie,
-            titles: vec![(0, "t00-00800")],
+            titles: vec![(0, "t00-00800".to_string())],
             title_confidence: 0.98,
             mode: Mode::Direct,
             reviews: Vec::new(),
@@ -53164,7 +53535,7 @@ fn pans_labyrinth() -> RecordingExpectation {
             (
                 "all-tracks",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t00-00800",
+                    title_key: "t00-00800".to_string(),
                     md5_streams: vec![1, 2, 3],
                     profile_streams: vec![1, 2],
                     event_streams: vec![4, 6],
@@ -53190,7 +53561,7 @@ fn pans_labyrinth() -> RecordingExpectation {
             (
                 "eng-only",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t00-00800",
+                    title_key: "t00-00800".to_string(),
                     md5_streams: vec![3],
                     profile_streams: Vec::new(),
                     event_streams: vec![4],
@@ -53224,7 +53595,7 @@ fn short_circuit() -> RecordingExpectation {
             identity_confidence: 0.0,
             tmdb: None,
             kind: Kind::Movie,
-            titles: vec![(0, "t00-title01")],
+            titles: vec![(0, "t00-title01".to_string())],
             title_confidence: 0.85,
             mode: Mode::Direct,
             reviews: vec![ReviewReason::IdentityUnknown],
@@ -53232,7 +53603,7 @@ fn short_circuit() -> RecordingExpectation {
         labels: vec![(
             "all-tracks",
             LabelExpectation::Decided(DecisionExpectation {
-                title_key: "t00-title01",
+                title_key: "t00-title01".to_string(),
                 md5_streams: vec![1, 2],
                 profile_streams: Vec::new(),
                 event_streams: Vec::new(),
@@ -53265,7 +53636,7 @@ fn short_circuit_2() -> RecordingExpectation {
             identity_confidence: 0.0,
             tmdb: None,
             kind: Kind::Movie,
-            titles: vec![(0, "t00-title01")],
+            titles: vec![(0, "t00-title01".to_string())],
             title_confidence: 0.85,
             mode: Mode::Direct,
             reviews: vec![ReviewReason::IdentityUnknown],
@@ -53274,7 +53645,7 @@ fn short_circuit_2() -> RecordingExpectation {
             (
                 "all-tracks-2",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t00-title01",
+                    title_key: "t00-title01".to_string(),
                     // The manifest names stream 1 alone; the folder's audio-proxy.json holds all four audio streams.
                     md5_streams: vec![1, 2, 3, 4],
                     profile_streams: Vec::new(),
@@ -53301,7 +53672,7 @@ fn short_circuit_2() -> RecordingExpectation {
             (
                 "eng-only",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t00-title01",
+                    title_key: "t00-title01".to_string(),
                     md5_streams: vec![1],
                     profile_streams: Vec::new(),
                     event_streams: vec![5, 12],
@@ -53325,8 +53696,16 @@ fn short_circuit_2() -> RecordingExpectation {
 
 /// The Office season 3 disc 3 (Blu-ray): TheDiscDB by fingerprint, TMDb show 2316, mapped episodes. e16-stereo is title
 /// 0 (S03E16, "Business School"), rehearsal title 1 (S03E15, "Phyllis' Wedding", the twin DTS-HD MA tracks),
-/// t3-all-tracks title 3 (S03E12-E13, "Traveling Salesmen/The Return", whose slash 8.9 removes).
-fn the_office() -> RecordingExpectation {
+/// t3-all-tracks title 3 (S03E12-E13, "Traveling Salesmen/The Return", whose slash 8.9 removes). The title keys are
+/// built from the playlists of `disc`, the recording's own scan, when the test runs (RP21: which title is which
+/// playlist stays in the clone).
+fn the_office(disc: &Disc) -> RecordingExpectation {
+    // The titles in plan order (8.5: ordered by episode), and spec 5's key of each at its position.
+    let order = [3, 2, 1, 0, 6, 5];
+    let key = |title: u32| {
+        let position = order.iter().position(|&number| number == title).expect("a title of the plan");
+        title_key(position, disc.title(title).unwrap_or_else(|sentence| panic!("{sentence}")), disc.is_dvd)
+    };
     let show = r"\\unas-pro\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005)";
     RecordingExpectation {
         plan: PlanExpectation {
@@ -53334,14 +53713,7 @@ fn the_office() -> RecordingExpectation {
             identity_confidence: 0.95,
             tmdb: Some(TmdbIdentity { kind: TmdbKind::Tv, id: 2316 }),
             kind: Kind::Tv,
-            titles: vec![
-                (3, "t00-00002"),
-                (2, "t01-00003"),
-                (1, "t02-00004"),
-                (0, "t03-00005"),
-                (6, "t04-00006"),
-                (5, "t05-00007"),
-            ],
+            titles: order.iter().map(|&title| (title, key(title))).collect(),
             title_confidence: 0.98,
             mode: Mode::Direct,
             reviews: Vec::new(),
@@ -53350,7 +53722,7 @@ fn the_office() -> RecordingExpectation {
             (
                 "e16-stereo",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t03-00005",
+                    title_key: key(0),
                     md5_streams: vec![1, 2, 3],
                     profile_streams: vec![1, 2],
                     event_streams: vec![4],
@@ -53372,7 +53744,7 @@ fn the_office() -> RecordingExpectation {
             (
                 "rehearsal",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t02-00004",
+                    title_key: key(1),
                     md5_streams: vec![1, 2, 3, 4],
                     profile_streams: vec![1, 2, 3, 4],
                     event_streams: vec![5],
@@ -53398,7 +53770,7 @@ fn the_office() -> RecordingExpectation {
             (
                 "t3-all-tracks",
                 LabelExpectation::Decided(DecisionExpectation {
-                    title_key: "t00-00002",
+                    title_key: key(3),
                     md5_streams: vec![1, 2, 3],
                     profile_streams: vec![1, 2],
                     event_streams: vec![4],
@@ -53494,7 +53866,7 @@ fn check_decision(
         reasons.iter().copied().filter(|reason| measured || !VERDICT_REVIEWS.contains(reason)).collect()
     };
     let decision = &got.decision;
-    same(failures, &format!("{at}: title key"), got.title_key.as_str(), want.title_key);
+    same(failures, &format!("{at}: title key"), got.title_key.as_str(), want.title_key.as_str());
     same(failures, &format!("{at}: verify mismatches"), got.verify.mismatches.clone(), Vec::new());
     same(failures, &format!("{at}: verify ok"), got.verify.ok, true);
     same(failures, &format!("{at}: profile streams"), got.facts.profile_streams.clone(), want.profile_streams.clone());
@@ -53568,6 +53940,27 @@ fn check_decision(
     }
 }
 
+/// The typed scan.txt of `slug` in the evidence clone, read when the test runs; None, with the skip line written, when
+/// the clone or the recording is absent.
+fn recorded_disc(slug: &str) -> Option<Disc> {
+    let evidence = match resolve_evidence(&context(), None) {
+        Ok(dir) => dir,
+        Err(refused) => {
+            skip(&refused.line);
+            return None;
+        }
+    };
+    let path = evidence.join(slug).join("scan.txt");
+    if !path.is_file() {
+        skip(&format!("no {} (this recording is absent)", path.display()));
+        return None;
+    }
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {}", path.display(), error));
+    let text = decode_text(&bytes, Encoding::Utf8Sig, Errors::Replace)
+        .unwrap_or_else(|error| panic!("{}: {}", path.display(), error));
+    Some(disc(&parse(&text)).unwrap_or_else(|sentence| panic!("{}: {}", path.display(), sentence)))
+}
+
 #[test]
 fn pans_labyrinth_2006_uhd() {
     check_recording("pans-labyrinth-2006-uhd", &pans_labyrinth());
@@ -53585,7 +53978,9 @@ fn short_circuit_2_1988_dvd() {
 
 #[test]
 fn the_office_2005_s3d3_bluray() {
-    check_recording("the-office-2005-s3d3-bluray", &the_office());
+    let slug = "the-office-2005-s3d3-bluray";
+    let Some(disc) = recorded_disc(slug) else { return };
+    check_recording(slug, &the_office(&disc));
 }
 ```
 
@@ -53644,11 +54039,11 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 ### Task 17: Subtitle labels and `labels --subtitles`
 
 **Files:**
-- Create: `crates/core/src/subtitle/labels.rs` (RP15, spec 15 "Recordings" and its `retune` paragraph, section 17 row 14, D20, D23: `FORMAT`, `FILE_NAME`, `KINDS`, `HOW`, `COUNTING_HOW`, `OBSERVATION_HOW`, `SubtitleKind` with `as_str`, `ALL` and `FromStr`, `SubtitleLabel`, `problems`, `load`, `set_track`, `unset_track`, and the private `TRACK_KEYS`, `OPTIONAL_KEYS`, `LOOSE_KEYS`, `TOP_KEYS`, `SUBSTANCE`, `NO_TRACKS`, `entry_problems`, `key_of`, `how_names`, `tracks_of`, `checked`; its 35 unit tests in `mod tests`)
+- Create: `crates/core/src/subtitle/labels.rs` (RP15, spec 15 "Recordings" and its `retune` paragraph, section 17 row 14, D20, D23: `FORMAT`, `FILE_NAME`, `KINDS`, `HOW`, `COUNTING_HOW`, `OBSERVATION_HOW`, `SubtitleKind` with `as_str`, `ALL` and `FromStr`, `SubtitleLabel`, `problems`, `load`, `set_track`, `unset_track`, and the private `TRACK_KEYS`, `OPTIONAL_KEYS`, `LOOSE_KEYS`, `TOP_KEYS`, `SUBSTANCE`, `NO_TRACKS`, `entry_problems`, `key_of`, `tracks_of`, `checked`; its 35 unit tests in `mod tests`)
 - Create: `crates/dev/tests/labels_subtitles.rs` (`lazymkv-dev labels --subtitles` over synthetic recordings in a scratch folder, and `check` over the evidence clone, skipping without it: 16 tests)
 - Modify: `crates/core/src/subtitle/mod.rs` (its `//!` line names the labels; one line `pub mod labels;`)
-- Modify: `crates/core/src/audio/labels.rs` (visibility only: the six private helpers `read_value`, `get`, `repr_of`, `sorted_list`, `is_stream_number` and `track_sort_key` become `pub(crate)`, so the subtitle labels reuse them instead of copying them; no body changes)
-- Modify: `crates/dev/src/cmd/labels.rs` (the `--subtitles` main option, its four command words `kinds`, `check`, `set`, `unset`, and the private helpers `Main`, `SUBTITLE_SUBCOMMANDS`, `MAIN_OPTIONS`, `run_subtitles`, `SubtitleParsed`, `parse_subtitles`, `parse_subtitle_set`, `execute_subtitles`, `SubtitleFile`, `open_subtitles`, `subtitle_set_line`, `subtitle_kinds_lines`, `subtitle_check_lines`, `subtitle_usage`; the audio path is unchanged)
+- Modify: `crates/core/src/audio/labels.rs` (a refactor that keeps every audio sentence, test and golden byte-identical: the four private helpers `read_value`, `get`, `repr_of` and `track_sort_key` become `pub(crate)`; the blocks `problems` and `entry_problems` share with the subtitle labels move into four `pub(crate)` helpers that take the vocabulary as parameters, `head_problems(d, top_keys, format, folder)`, `removed_problems(d, loose)`, `base_entry_problems(m, where_, track_keys, allowed)` and `history_problems(m, where_, loose)`, and the private `how_names` becomes `pub(crate) fn names(table)`; audio's `problems`/`entry_problems` call them. `check_lines` is split so that a public `labels_check_lines(tree, root, file_name, load_count)` gives the ok, refusal and none lines (public, not `pub(crate)`, because the dev crate's subtitle `check` calls it) and audio's `check_lines` adds its fitted part after them. `sorted_list` and `is_stream_number` stay private: only the shared helpers call them)
+- Modify: `crates/dev/src/cmd/labels.rs` (the `--subtitles` main option, its four command words `kinds`, `check`, `set`, `unset`, and the private helpers `Main`, `SUBTITLE_SUBCOMMANDS`, `MAIN_OPTIONS`, `run_subtitles`, `SubtitleParsed`, `parse_subtitles`, `parse_subtitle_set`, `execute_subtitles`, `SubtitleFile`, `open_subtitles`, `subtitle_set_line`, `subtitle_kinds_lines`, `subtitle_check_lines`, `subtitle_usage`, and `check_paths`, the `check` loop over the paths that the `Check` arms of `execute` and `execute_subtitles` both call; the audio path is otherwise unchanged)
 - Modify: `crates/dev/src/lib.rs` (the `labels` row of `COMMANDS` gains `[--subtitles]`)
 - Test: `crates/core/src/subtitle/labels.rs` `mod tests` (35 new), `crates/dev/tests/labels_subtitles.rs` (16 new): 51 new tests; `crates/core/src/audio/labels/tests.rs` and `crates/dev/src/cmd/labels/tests.rs` pass unchanged
 
@@ -53664,9 +54059,17 @@ pub fn left_lines(left: &[String]) -> Vec<String>;                              
 fn read_value(tree: &dyn Tree, path: &PathKey) -> Result<Result<Value, String>, String>; // made pub(crate) by Step 2
 fn get<'a>(m: &'a Map<String, Value>, key: &str) -> &'a Value;                         // made pub(crate) by Step 2
 fn repr_of(m: &Map<String, Value>, key: &str) -> String;                               // made pub(crate) by Step 2
-fn sorted_list(mut names: Vec<&str>) -> String;                                        // made pub(crate) by Step 2
-fn is_stream_number(value: &Value) -> bool;                                            // made pub(crate) by Step 2
 fn track_sort_key(t: &Value) -> (String, i64);                                         // made pub(crate) by Step 2
+pub fn check_lines(tree: &dyn Tree, root: &PathKey) -> (Vec<String>, usize);           // split by Step 2; same lines
+// Added by Step 2: the blocks audio's problems, entry_problems and check_lines share with the subtitle labels (RP15),
+// moved out of those functions, which call them with audio's vocabulary.
+pub(crate) fn names<'a>(table: &[(&'a str, &'a str)]) -> Vec<&'a str>;                  // was the private how_names
+pub(crate) fn head_problems(d: &Map<String, Value>, top_keys: &[&str], format: &str, folder: Option<&str>) -> Vec<String>;
+pub(crate) fn removed_problems(d: &Map<String, Value>, loose: impl Fn(&Value, &str) -> Vec<String>) -> Vec<String>;
+pub(crate) fn base_entry_problems(m: &Map<String, Value>, where_: &str, track_keys: &[&str], allowed: &[&str]) -> Vec<String>;
+pub(crate) fn history_problems(m: &Map<String, Value>, where_: &str, loose: impl Fn(&Value, &str) -> Vec<String>) -> Vec<String>;
+pub fn labels_check_lines(tree: &dyn Tree, root: &PathKey, file_name: &str,
+                          load_count: &dyn Fn(&dyn Tree, &PathKey) -> Result<String, String>) -> (Vec<String>, usize);
 
 // lazymkv_core::recording (crates/core/src/recording/mod.rs, python.rs, text.rs)
 pub struct PathKey(Vec<String>);   // PathKey::root(), PathKey::new(path: &str), join(&self, name: &str), parent(&self)
@@ -53709,6 +54112,7 @@ fn yes(name: &str, value: &str, allow_unknown: bool) -> Result<Option<bool>, Usa
 fn required(missing: &[&str]) -> Result<(), Usage>;
 fn extra(words: &[String]) -> Result<(), Usage>;
 fn missing_words<'a>(words: &[String], names: &[&'a str]) -> Vec<&'a str>;
+fn execute(ctx: &Ctx, parsed: Parsed, fitting: &str, out: &mut dyn Write) -> Result<i32, String>;   // its Check arm calls check_paths (Step 20 Edit 9)
 ```
 
 Produces (exactly the `core::subtitle::labels`, the labels file (Task 17) entry of the plan's Shared interfaces; Task 18 relies on it):
@@ -53752,12 +54156,12 @@ And, from the same file's `decide.rs` additions section: `labels`' synopsis gain
 
 Where this task settles what RP15, the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **The file's shape.** `subtitle-labels.json` mirrors `audio-labels.json` without its `titles` object (RP15 names none; row 14's feature and TV split is the recording's, Task 18's business): top-level keys `format`, `slug`, `tracks` and the optional `removed`; every track has exactly `label`, `stream`, `kind`, `how`, `sure`, `date`, `saw_verdict`, `note`, `style` (all required, as the audio file's keys are) and may have `history`. The two keys beyond RP15's list are ruling RP25's (Review Focus 11). `saw_verdict`, as in `audio-labels.json`, records whether the owner saw the rule's verdict before giving the label, and such a label never counts (section 17 row 14 (a): "A track counts only when its content was checked before the verdict"): it is a `bool` after `date`, checked with `sure`, and Task 18 counts only a label whose `saw_verdict` is false. `style` is `null` or `"uk"` (`SubtitleLabel.style: Option<String>`, after `note`): `"uk"` marks a UK-style SDH track (speakers by colour, sounds without brackets), which row 14 asks for if the owner has a UK disc, and Task 18 counts it towards that requirement on a counted `sdh` label only; the file accepts it on any kind, and on another kind it is kept and reported but never counted. `note` is text or `null` (`SubtitleLabel.note: Option<String>`, written as `null` when absent, as every `Option` of the plan is); the command writes `null` when `--note` is not given. A `history` entry and a `removed` entry are checked only for what reading them needs (the keys, the label, the stream, the date, and their `replaced` or `removed` date), so an older vocabulary survives in them, as `audio::labels::entry_problems(strict = false)` does.
+1. **The file's shape.** `subtitle-labels.json` mirrors `audio-labels.json` without its `titles` object (RP15 names none; row 14's feature and TV split is the recording's, Task 18's business): top-level keys `format`, `slug`, `tracks` and the optional `removed`; every track has exactly `label`, `stream`, `kind`, `how`, `sure`, `date`, `saw_verdict`, `note`, `style` (all required, as the audio file's keys are) and may have `history`. The two keys beyond RP15's list are ruling RP25's (Review Focus 11). `saw_verdict`, as in `audio-labels.json`, records whether the owner saw the rule's verdict before giving the label, and such a label never counts (section 17 row 14 (a): "A track counts only when its content was checked before the verdict"): it is a `bool` after `date`, checked with `sure`, and Task 18 counts only a label whose `saw_verdict` is false. `style` is `null` or `"uk"` (`SubtitleLabel.style: Option<String>`, after `note`): `"uk"` marks a UK-style SDH track (speakers by colour, sounds without brackets), which row 14 asks for if the owner has a UK disc, and Task 18 counts it towards that requirement on a counted `sdh` label only; the file accepts it on any kind, and on another kind it is kept and reported but never counted. `note` is text or `null` (`SubtitleLabel.note: Option<String>`, written as `null` when absent, as every `Option` of the plan is); the command writes `null` when `--note` is not given. A `history` entry and a `removed` entry are checked only for what reading them needs (the keys, the label, the stream, the date, and their `replaced` or `removed` date), so an older vocabulary survives in them, as `audio::labels::entry_problems(strict = false)` does. `how` and `style` are closed sets but stay `String` and `Option<String>` (the file is read from the owner's disk, may carry an older vocabulary in `history`, and is validated by `problems` against `HOW` and `null`/"uk" as `audio-labels.json`'s `how` is), an exception to the conventions' "Closed sets are enums" that mirrors the audio file (RP15, RP25); `SubtitleKind` is the enum. Calling the port's existing `py_repr_str`, `py_str` and `py_truthy` (through `crate::recording` and `audio::labels`' shared helpers) to keep `audio::labels::problems`' sentences is RP15's reuse of validation code, not a new `py_*` spelling under RP20; the new module defines no `py_*` function and no `Ordered`.
 2. **`stream` is ffprobe's stream number** of the rip label's file (mkvmerge's track id, `subs/index.json`'s `track_id`), as in `audio-labels.json`, and the sentence says so; Task 18 maps it to the scan stream through `verify::stream_of_track`.
 3. **The sentences** are `audio::labels::problems`' wording with the subtitle vocabulary: `kind <the value> is not in the vocabulary (lazymkv-dev labels --subtitles kinds)` and `how <the value> is not one of read, watched, packaging, menu, flag, player, thediscdb`, and `style <the value> is not null or 'uk'`. The `how` vocabulary is RP15's with ruling RP25's `flag` (a flag in MakeMKV's scan, such as the commentary flag 1 or the forced flag 4096), placed after `menu` in row 14's order ("the packaging, the menu, a flag, the player and TheDiscDB"), so the observations are five and none counts on its own (D23). `load` compares the slug with the folder's resolved name (`Tree::resolved_name` of the file's parent), not the lexical parent the audio `load` uses, so `labels --subtitles check .` run inside a recording compares the real folder name.
 4. **Edits are pure and refuse a change that adds a problem** (as `audio::labels::prepare_save`): `set_track` keeps the value exactly as given (no sort, no write) when one old label of the track has the same `kind`, `how`, `sure`, `saw_verdict`, `note` and `style`; otherwise every old label of the track goes into the new entry's `history` (its own history first) with `replaced` set to the new date. `unset_track` moves every label of the track to `removed` with `removed` (the date) and `why`. Both sort the tracks stably by (label, stream). Their Err sentences carry no path (`not written: <the new problems>`, `<label> stream <n> has no label`, `unset needs --note: why the label is taken away`, `'removed' is not a list, so the label cannot be moved there`, `the file has no 'tracks' list, so nothing is changed`); the command prefixes `<slug_dir>/subtitle-labels.json: `. The slug is compared by `load` and `check`, never by an edit (`problems(.., None)`), since an edit never changes it.
 5. **The command.** `--subtitles` is a main option before the command word, beside `--spec` (argparse's prefix rule: `--su` names it, `--sp` names `--spec`, `--s` is ambiguous). It takes `kinds`, `check`, `set` and `unset`; `title`, `auto` and `fitted` with `--subtitles` are an argument error. The subtitle words read no spec (what counts towards row 14, the two fitting discs included, is Task 18's). `set` has `--how` (required), `--saw-verdict yes|no` (required, as the audio `set`'s: the owner says each time whether the verdict was seen first; settled point 1), `--sure yes|no` (default yes), `--date` (default today), `--note` (default none), `--style uk` (default none, written as `null`; RP25). Its line is `labelled|unchanged <label> stream <n>: <kind> (<how>, <date>, saw verdict yes|no, sure yes|no)`, with `, style uk` before the closing parenthesis when the label has that style, with ` ('<how>' is an observation, not a check of the track's text (row 14, D23))` for the five observations (D23) and `; replaces <n> earlier label(s), kept in its history` after a replacement. `check` reads `<path>/subtitle-labels.json` (`core::subtitle::labels::FILE_NAME`, the one copy of the name, which Task 18's harness uses too) when it exists, else every `*/subtitle-labels.json`, and prints `ok <file> (<n> tracks)`, the refusal, or `<path>: no subtitle-labels.json`; exit 2 when a file is bad.
-6. **Reuse.** The six audio helpers that are not about audio (the value accessors, the JSON reader, the stream check, the sort key) become `pub(crate)` and are called, never copied (the one-copy rule); `is_slug` and `date_ok` are already public.
+6. **Reuse.** The four audio helpers the subtitle labels call that are not about audio (the value accessors, the JSON reader, the sort key) become `pub(crate)`. As RP15 asks ("reusing the audio labels' validation code where it is shared"), the validation blocks the two files share move out of the audio functions into the `pub(crate)` helpers named under Files: the head checks (`head_problems`), the removed loop (`removed_problems`), the base entry checks (keys, label, stream, date: `base_entry_problems`) and the history loop (`history_problems`); the stream check and `sorted_list` stay private, called only by those helpers. The audio functions call them with audio's vocabulary, so their output is unchanged and their tests and goldens pass untouched. `subtitle::labels::problems`/`entry_problems` call them with the subtitle vocabulary and add only the subtitle checks (kind, how, `saw_verdict`/`sure`, note, style, and the duplicate (label, stream)). The private `how_names` becomes `pub(crate) fn names(table: &[(&str, &str)])`, called by both files. `check_lines`' labels part becomes the public `labels_check_lines`, which audio's `check_lines` and the dev crate's `subtitle_check_lines` both call. In the dev crate, the `Check` arms of `execute` and `execute_subtitles` both call one `check_paths(ctx, &paths, out, lines: fn(&dyn Tree, &PathKey) -> (Vec<String>, usize))`. Nothing is copied (the one-copy rule); `is_slug` and `date_ok` are already public.
 7. **Settings.** No code of this task reads `Settings`, so there is no default-and-other-value test.
 
 - [ ] **Step 1: Confirm the starting point and the test count**
@@ -53785,9 +54189,17 @@ pub mod text;
 
 then eight lines naming `pub fn is_slug`, `pub fn date_ok`, `fn read_value`, `fn get<'a>`, `fn repr_of`, `fn sorted_list`, `fn is_stream_number` and `fn track_sort_key` (the last six without `pub`); one line `<n>:    ("labels", cmd::labels::run as Command, "[--spec FILE] kinds|check|set|unset|title|auto|fitted ..."),`; and `0`.
 
+Then record the baseline counts, one command at a time, and write down the `N passed` of each (Steps 5 and 21 compare against them):
+
+Run: `scripts/box.sh cargo test -p lazymkv-core audio::labels`
+
+Run: `scripts/box.sh cargo test -p lazymkv-dev cmd::labels`
+
+Expected: PASS, `0 failed` for both; note the `N passed` of each as the audio::labels count and the cmd::labels count.
+
 - [ ] **Step 2: Share the audio helpers, declare the module and write the failing tests of the vocabulary**
 
-RP15 asks the subtitle labels to reuse "the audio labels' validation code where it is shared". Six helpers of `crates/core/src/audio/labels.rs` are about JSON values, not audio; make them visible to the crate. In `crates/core/src/audio/labels.rs` make these six one-line edits (bodies and doc comments unchanged):
+RP15 asks the subtitle labels to reuse "the audio labels' validation code where it is shared". Two changes to `crates/core/src/audio/labels.rs` serve that, and neither changes a sentence the audio labels print: four helpers about JSON values, not audio, become visible to the crate, and the validation blocks the two files share move out of the audio functions into helpers that take the vocabulary as parameters, which the audio functions then call with audio's vocabulary (settled point 6). First, in `crates/core/src/audio/labels.rs` make these four one-line edits (bodies and doc comments unchanged):
 
 Find `fn read_value(tree: &dyn Tree, path: &PathKey) -> Result<Result<Value, String>, String> {` and replace it with `pub(crate) fn read_value(tree: &dyn Tree, path: &PathKey) -> Result<Result<Value, String>, String> {`.
 
@@ -53795,11 +54207,286 @@ Find `fn get<'a>(m: &'a Map<String, Value>, key: &str) -> &'a Value {` and repla
 
 Find `fn repr_of(m: &Map<String, Value>, key: &str) -> String {` and replace it with `pub(crate) fn repr_of(m: &Map<String, Value>, key: &str) -> String {`.
 
-Find `fn sorted_list(mut names: Vec<&str>) -> String {` and replace it with `pub(crate) fn sorted_list(mut names: Vec<&str>) -> String {`.
-
-Find `fn is_stream_number(value: &Value) -> bool {` and replace it with `pub(crate) fn is_stream_number(value: &Value) -> bool {`.
-
 Find `fn track_sort_key(t: &Value) -> (String, i64) {` and replace it with `pub(crate) fn track_sort_key(t: &Value) -> (String, i64) {`.
+
+Then move the shared blocks into helpers. In `crates/core/src/audio/labels.rs`, replace the private `how_names`, these four lines:
+
+```rust
+/// The names of HOW, in order.
+fn how_names() -> Vec<&'static str> {
+    HOW.iter().map(|&(name, _)| name).collect()
+}
+```
+
+with the five shared helpers (`sorted_list`, `is_stream_number`, `date_ok`, `is_slug`, `get`, `repr_of` and `py_repr_str`, which they call, are already in the file or imported by it):
+
+```rust
+/// The names of a (name, meaning) table, in order: the `how` vocabulary of these labels and of the subtitle labels
+/// (`subtitle::labels`, RP15).
+pub(crate) fn names<'a>(table: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    table.iter().map(|&(name, _)| name).collect()
+}
+
+/// The first checks of a labels file, shared with the subtitle labels (RP15): the top-level keys that are not in
+/// `top_keys`, the format line against `format`, and the slug, compared with `folder` when it is given. Py: problems'
+/// first checks.
+pub(crate) fn head_problems(d: &Map<String, Value>, top_keys: &[&str], format: &str, folder: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let extra: Vec<&str> = d.keys().map(String::as_str).filter(|k| !top_keys.contains(k)).collect();
+    if !extra.is_empty() {
+        out.push(format!("unknown top-level keys {}", sorted_list(extra)));
+    }
+    if get(d, "format").as_str() != Some(format) {
+        out.push(format!("format is {}, not {}", repr_of(d, "format"), py_repr_str(format)));
+    }
+    match get(d, "slug").as_str() {
+        Some(own) if is_slug(own) => {
+            if let Some(folder) = folder {
+                if own != folder {
+                    out.push(format!("slug is {} but the file is in corpus/owner/{folder}", py_repr_str(own)));
+                }
+            }
+        }
+        _ => out.push(format!("slug {} is not lowercase letters, digits and hyphens", repr_of(d, "slug"))),
+    }
+    out
+}
+
+/// The problems of a labels file's `removed` list, shared with the subtitle labels (RP15): each entry read with
+/// `loose` (the file's own entry check with strict false) and its `removed` date. Py: problems' removed loop.
+pub(crate) fn removed_problems(d: &Map<String, Value>, loose: impl Fn(&Value, &str) -> Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    match d.get("removed") {
+        None => {}
+        Some(Value::Array(removed)) => {
+            for (k, r) in removed.iter().enumerate() {
+                let Some(rm) = r.as_object() else {
+                    out.push(format!("removed {k}: not an object"));
+                    continue;
+                };
+                out.extend(loose(r, &format!("removed {k}")));
+                if !date_ok(get(rm, "removed")) {
+                    out.push(format!("removed {k}: removed {} is not YYYY-MM-DD", repr_of(rm, "removed")));
+                }
+            }
+        }
+        Some(_) => out.push("removed is not a list".to_string()),
+    }
+    out
+}
+
+/// The checks every entry of a labels file has, strict or not, shared with the subtitle labels (RP15): the keys of
+/// `track_keys` that are missing, the keys in neither `track_keys` nor `allowed`, the label, the stream and the date,
+/// each sentence prefixed with `where_`. Py: entry_problems' first checks.
+pub(crate) fn base_entry_problems(m: &Map<String, Value>, where_: &str, track_keys: &[&str], allowed: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let missing: Vec<&str> = track_keys.iter().copied().filter(|k| !m.contains_key(*k)).collect();
+    let unknown: Vec<&str> = m.keys().map(String::as_str).filter(|k| !track_keys.contains(k) && !allowed.contains(k)).collect();
+    if !missing.is_empty() {
+        out.push(format!("{where_}: missing {}", sorted_list(missing)));
+    }
+    if !unknown.is_empty() {
+        out.push(format!("{where_}: unknown keys {}", sorted_list(unknown)));
+    }
+    if !get(m, "label").as_str().map_or(false, is_slug) {
+        out.push(format!("{where_}: label is not a rip label"));
+    }
+    if !is_stream_number(get(m, "stream")) {
+        out.push(format!("{where_}: stream is not ffprobe's stream number (an integer, 0 or more)"));
+    }
+    if !date_ok(get(m, "date")) {
+        out.push(format!("{where_}: date {} is not YYYY-MM-DD", repr_of(m, "date")));
+    }
+    out
+}
+
+/// The problems of a strict entry's `history` list, shared with the subtitle labels (RP15): each earlier label read
+/// with `loose` (the file's own entry check with strict false) and its `replaced` date. Py: entry_problems' history
+/// loop.
+pub(crate) fn history_problems(m: &Map<String, Value>, where_: &str, loose: impl Fn(&Value, &str) -> Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    match m.get("history") {
+        None => {}
+        Some(Value::Array(history)) => {
+            for (k, h) in history.iter().enumerate() {
+                let Some(hm) = h.as_object() else {
+                    out.push(format!("{where_}: history {k} is not an object"));
+                    continue;
+                };
+                out.extend(loose(h, &format!("{where_} history {k}")));
+                if !date_ok(get(hm, "replaced")) {
+                    out.push(format!("{where_} history {k}: replaced {} is not YYYY-MM-DD", repr_of(hm, "replaced")));
+                }
+            }
+        }
+        Some(_) => out.push(format!("{where_}: history is not a list")),
+    }
+    out
+}
+```
+
+Replace the whole of `entry_problems` and `problems`, which are adjacent: from the line `/// The problems of one track entry. strict=false (history and removed entries) checks only that the entry can be` to the closing brace of `problems` (the `}` before the empty line and `/// A title's facts. ...`), with this. The doc comments, the title checks, the kind, how, md5, saw_verdict, sure, note and film_audible checks and the duplicate check are the file's own lines, unchanged; the head, the `removed` loop, the base entry checks and the history loop are now the helpers' calls:
+
+```rust
+/// The problems of one track entry. strict=false (history and removed entries) checks only that the entry can be
+/// read: its kind and how may come from an older vocabulary. A value that is not an object is read as an empty one.
+/// Py: entry_problems.
+pub fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
+    let empty = Map::new();
+    let m = t.as_object().unwrap_or(&empty);
+    let allowed: &[&str] = if strict { &OPTIONAL_KEYS } else { &LOOSE_KEYS };
+    let mut out = base_entry_problems(m, where_, &TRACK_KEYS, allowed);
+    if !strict {
+        return out;
+    }
+    let kind = get(m, "kind").as_str();
+    let how = get(m, "how").as_str();
+    if !kind.map_or(false, |k| kind_of(k).is_some()) {
+        out.push(format!("{where_}: kind {} is not in the vocabulary (lazymkv-dev labels kinds)", repr_of(m, "kind")));
+    }
+    if !how.map_or(false, |h| HOW.iter().any(|(name, _)| *name == h)) {
+        out.push(format!("{where_}: how {} is not one of {}", repr_of(m, "how"), names(&HOW).join(", ")));
+    }
+    if how == Some("md5") && kind != Some("duplicate") {
+        out.push(format!("{where_}: how md5 only says that a track is a duplicate"));
+    }
+    for key in ["saw_verdict", "sure"] {
+        if !get(m, key).is_boolean() {
+            out.push(format!("{where_}: {key} must be true or false"));
+        }
+    }
+    if !m.get("note").map_or(true, Value::is_string) {
+        out.push(format!("{where_}: note is not text"));
+    }
+    if m.contains_key("film_audible") {
+        if !kind.map_or(false, |k| COMMENTARY_KINDS.contains(&k)) {
+            out.push(format!("{where_}: film_audible is only for {}", COMMENTARY_KINDS.join(" and ")));
+        } else if !true_false_none(m.get("film_audible")) {
+            out.push(format!("{where_}: film_audible must be true, false or null"));
+        }
+    }
+    out.extend(history_problems(m, where_, |h, w| entry_problems(h, w, false)));
+    out
+}
+
+/// Every problem of a parsed labels file, one sentence each, verbatim; empty when it is valid. `slug` is the folder
+/// the file is in (None: not compared). Py: problems.
+pub fn problems(data: &Value, slug: Option<&str>) -> Vec<String> {
+    let Some(d) = data.as_object() else { return vec!["the file is not a JSON object".to_string()] };
+    let mut out = head_problems(d, &TOP_KEYS, FORMAT, slug);
+    let no_titles = Map::new();
+    let titles = match d.get("titles") {
+        Some(Value::Object(titles)) => titles,
+        _ => {
+            out.push("titles is not an object".to_string());
+            &no_titles
+        }
+    };
+    for (label, t) in titles {
+        let where_ = format!("title {label}");
+        if !is_slug(label) {
+            out.push(format!("{where_}: not a rip label"));
+        }
+        let Some(tm) = t.as_object() else {
+            out.push(format!("{where_}: not an object"));
+            continue;
+        };
+        let unknown: Vec<&str> = tm.keys().map(String::as_str).filter(|k| !TITLE_KEYS.contains(k)).collect();
+        if !unknown.is_empty() {
+            out.push(format!("{where_}: unknown keys {}", sorted_list(unknown)));
+        }
+        if !get(tm, "title_kind").as_str().map_or(false, |k| TITLE_KINDS.contains(&k)) {
+            out.push(format!("{where_}: title_kind {} is not one of {}", repr_of(tm, "title_kind"), TITLE_KINDS.join(", ")));
+        }
+        if !true_false_none(tm.get("dialogue_heavy")) {
+            out.push(format!("{where_}: dialogue_heavy must be true, false or null"));
+        }
+        if !tm.get("note").map_or(true, Value::is_string) {
+            out.push(format!("{where_}: note is not text"));
+        }
+    }
+    out.extend(removed_problems(d, |r, where_| entry_problems(r, where_, false)));
+    let Some(tracks) = get(d, "tracks").as_array() else {
+        out.push("tracks is not a list".to_string());
+        return out;
+    };
+    let mut seen: Vec<(Value, Value)> = Vec::new();
+    for (k, t) in tracks.iter().enumerate() {
+        let Some(tm) = t.as_object() else {
+            out.push(format!("track {k}: not an object"));
+            continue;
+        };
+        let (label, stream) = (get(tm, "label").clone(), get(tm, "stream").clone());
+        let where_ = format!("track {} stream {}", py_str(&label), py_str(&stream));
+        out.extend(entry_problems(t, &where_, true));
+        if seen.iter().any(|(l, s)| py_eq(l, &label) && py_eq(s, &stream)) {
+            out.push(format!("{where_}: labelled twice"));
+        }
+        seen.push((label, stream));
+    }
+    out
+}
+```
+
+Replace the whole of `check_lines`, from its doc comment's first line `` /// `labels check <root>`'s lines for one root and the number of bad files: root/audio-labels.json when it exists, `` to its closing brace, with `labels_check_lines` and the shorter `check_lines` (same lines, same order, same count of bad files):
+
+```rust
+/// The labels part of `labels check <root>`, shared with `labels --subtitles check` (RP15): root/<file_name> when it
+/// exists, else every */<file_name> (never one under golden/), each "ok <file> (<what load_count says of it>)" or the
+/// refusal `load_count` gives, which makes the file a bad one; "<root>: no <file_name>" when there is none. Returns
+/// the lines and the number of bad files. Public because the dev crate's subtitle `check` calls it. Py: main's check
+/// branch.
+pub fn labels_check_lines(
+    tree: &dyn Tree,
+    root: &PathKey,
+    file_name: &str,
+    load_count: &dyn Fn(&dyn Tree, &PathKey) -> Result<String, String>,
+) -> (Vec<String>, usize) {
+    let mut lines = Vec::new();
+    let mut bad = 0;
+    let own = root.join(file_name);
+    let files = if tree.exists(&own) { vec![own] } else { tree.glob(root, &format!("*/{file_name}")) };
+    if files.is_empty() {
+        lines.push(format!("{}: no {file_name}", tree.display(root)));
+    }
+    for path in &files {
+        match load_count(tree, path) {
+            Ok(count) => lines.push(format!("ok {} ({count})", tree.display(path))),
+            Err(e) => {
+                lines.push(e);
+                bad += 1;
+            }
+        }
+    }
+    (lines, bad)
+}
+
+/// `labels check <root>`'s lines for one root and the number of bad files: root/audio-labels.json when it exists,
+/// else every */audio-labels.json (never one under golden/), then root/audio-fitted.json when it exists.
+/// Py: main's check branch.
+pub fn check_lines(tree: &dyn Tree, root: &PathKey) -> (Vec<String>, usize) {
+    let (mut lines, mut bad) = labels_check_lines(tree, root, "audio-labels.json", &|tree, path| {
+        load(tree, path).map(|labels| format!("{} tracks, {} titles", labels.tracks.len(), labels.titles.len()))
+    });
+    let fitted_path = root.join("audio-fitted.json");
+    if tree.exists(&fitted_path) {
+        match load_fitted(tree, root, None) {
+            Ok(fitted) => lines.push(format!("ok {} ({} entries)", tree.display(&fitted_path), fitted.len())),
+            Err(e) => {
+                lines.push(e);
+                bad += 1;
+            }
+        }
+    }
+    (lines, bad)
+}
+```
+
+Run the audio labels' own tests, which must pass with no change to any test (the refactor moves code, not sentences):
+
+Run: `scripts/box.sh cargo test -p lazymkv-core audio::labels`
+
+Expected: PASS, `0 failed`, with no warning naming `crates/core/src/audio/labels.rs`, and `git diff --stat -- crates/core/src/audio/labels/tests.rs` prints nothing.
 
 In `crates/core/src/subtitle/mod.rs`, replace the whole file (the four lines Step 1 printed) with:
 
@@ -53824,9 +54511,10 @@ Create `crates/core/src/subtitle/labels.rs` with exactly this content: the modul
 //! a problem; `lazymkv-dev labels --subtitles` reads and writes the file. Which labels count towards row 14 is Task
 //! 18's (`retune --subtitles`): only a `read` or `watched` label given before the verdict (`saw_verdict` false) can
 //! (D23, section 17 row 14 (a)), and a counted `sdh` label with `style` "uk" is row 14's UK-style SDH track (RP25).
-//! The helpers this file shares with the
-//! audio labels (`is_slug`, `date_ok`, the value accessors, the JSON reader, the stream check and the sort key) are
-//! `audio::labels`' own, called rather than copied. Written from the spec (RP20); no I/O (RP19): files come through a
+//! The validation this file shares
+//! with the audio labels (the head checks, the `removed` list, an entry's keys, label, stream and date, and its
+//! history) and the helpers it needs (the value accessors, the JSON reader, the `how` names and the sort key) are
+//! `audio::labels`' own, called rather than copied (RP15). Written from the spec (RP20); no I/O (RP19): files come through a
 //! `Tree`. Used by Tasks 17 and 18.
 
 #[cfg(test)]
@@ -53951,17 +54639,19 @@ Expected: the build fails with `error[E0425]: cannot find value `KINDS` in this 
 
 - [ ] **Step 4: Implement the vocabulary, `SubtitleKind` and `SubtitleLabel`**
 
-In `crates/core/src/subtitle/labels.rs`, insert this on its own lines between the module header's last `//!` line and `#[cfg(test)]` (one empty line before and after it). The `use` lines serve Steps 4 to 16, so `cargo` warns `unused import` for `json`, `Map`, `date_ok`, `get`, `is_slug`, `is_stream_number`, `read_value`, `repr_of`, `sorted_list`, `track_sort_key`, `py_str`, `PathKey` and `Tree` until Step 16 uses the last of them.
+In `crates/core/src/subtitle/labels.rs`, insert this on its own lines between the module header's last `//!` line and `#[cfg(test)]` (one empty line before and after it). The `use` lines serve Steps 4 to 16, so `cargo` warns `unused import` for `json`, `Map`, `base_entry_problems`, `get`, `head_problems`, `history_problems`, `names`, `read_value`, `removed_problems`, `repr_of`, `track_sort_key`, `py_str`, `PathKey` and `Tree` until Step 16 uses the last of them.
 
 ```rust
 use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
 
-use crate::audio::labels::{date_ok, get, is_slug, is_stream_number, read_value, repr_of, sorted_list, track_sort_key};
+use crate::audio::labels::{
+    base_entry_problems, get, head_problems, history_problems, names, read_value, removed_problems, repr_of, track_sort_key,
+};
 use crate::recording::{py_repr_str, py_str, PathKey, Tree};
 
-/// The subtitle labels file's format line (RP15), as `audio::labels::FORMAT` is the audio labels'.
+/// The subtitle labels file's format line, as `audio::labels::FORMAT` is the audio labels'. Spec 15, RP15.
 pub const FORMAT: &str = "lazymkv subtitle labels v1";
 /// The subtitle labels file's name in a recording folder, beside `audio-labels.json`; the one copy of the name, which
 /// `lazymkv-dev labels --subtitles` and Task 18's harness both use. Spec 15, RP15.
@@ -54029,7 +54719,7 @@ pub enum SubtitleKind {
 }
 
 impl SubtitleKind {
-    /// Every kind in `KINDS` order. RP15.
+    /// Every kind in `KINDS` order. Spec 15, section 17 row 14, RP15.
     pub const ALL: [SubtitleKind; 10] = [
         SubtitleKind::Regular,
         SubtitleKind::Sdh,
@@ -54043,7 +54733,7 @@ impl SubtitleKind {
         SubtitleKind::Other,
     ];
 
-    /// The kind's spelling in the file and in `KINDS`. RP15.
+    /// The kind's spelling in the file and in `KINDS`. Spec 15, section 17 row 14, RP15.
     pub fn as_str(self) -> &'static str {
         match self {
             SubtitleKind::Regular => "regular",
@@ -54063,7 +54753,8 @@ impl SubtitleKind {
 impl FromStr for SubtitleKind {
     type Err = String;
 
-    /// The kind a label spells, exactly; Err "'<text>' is not one of <the ten spellings, joined by ', '>" for anything else. RP15.
+    /// The kind a label spells, exactly; Err "'<text>' is not one of <the ten spellings, joined by ', '>" for anything
+    /// else. Spec 15, RP15.
     fn from_str(text: &str) -> Result<SubtitleKind, String> {
         SubtitleKind::ALL.into_iter().find(|kind| kind.as_str() == text).ok_or_else(|| {
             let names: Vec<&str> = SubtitleKind::ALL.iter().map(|kind| kind.as_str()).collect();
@@ -54102,11 +54793,11 @@ pub struct SubtitleLabel {
 
 Run: `scripts/box.sh cargo test -p lazymkv-core subtitle::labels::tests`
 
-Expected: PASS, `test result: ok. 4 passed; 0 failed`, with the unused-import and never-used warnings Steps 2 and 4 named. Then confirm the audio labels are untouched by the visibility edits:
+Expected: PASS, `test result: ok. 4 passed; 0 failed`, with the unused-import and never-used warnings Steps 2 and 4 named. Then confirm the audio labels are unchanged by Step 2's refactor:
 
 Run: `scripts/box.sh cargo test -p lazymkv-core audio::labels`
 
-Expected: PASS, `0 failed` (the same count as before this task).
+Expected: PASS, `0 failed`, with the same `N passed` as the audio::labels count Step 1 recorded.
 
 - [ ] **Step 6: Write the failing tests of `problems`**
 
@@ -54360,44 +55051,14 @@ const TOP_KEYS: [&str; 4] = ["format", "slug", "tracks", "removed"];
 /// subtitle vocabulary; empty when it is valid. `slug` is the name of the folder the file is in (None: not compared).
 /// The checks, in order: the top-level keys, the format line, the slug, the `removed` list (each entry read loosely,
 /// with its `removed` date), the `tracks` list, then each track's keys, label, stream, date, kind, how,
-/// saw_verdict and sure, note, style and history, and a (label, stream) labelled twice. Spec 15, section 17 row 14, D23,
-/// RP15, RP25.
+/// saw_verdict and sure, note, style and history, and a (label, stream) labelled twice. The head, the `removed` list,
+/// each entry's keys, label, stream and date, and its history are checked by the helpers `audio::labels` shares with
+/// this file (`head_problems`, `removed_problems`, `base_entry_problems`, `history_problems`; RP15), so the two files
+/// say those sentences through one copy of the code. Spec 15, section 17 row 14, D23, RP15, RP25.
 pub fn problems(data: &Value, slug: Option<&str>) -> Vec<String> {
     let Some(d) = data.as_object() else { return vec!["the file is not a JSON object".to_string()] };
-    let mut out = Vec::new();
-    let extra: Vec<&str> = d.keys().map(String::as_str).filter(|k| !TOP_KEYS.contains(k)).collect();
-    if !extra.is_empty() {
-        out.push(format!("unknown top-level keys {}", sorted_list(extra)));
-    }
-    if get(d, "format").as_str() != Some(FORMAT) {
-        out.push(format!("format is {}, not {}", repr_of(d, "format"), py_repr_str(FORMAT)));
-    }
-    match get(d, "slug").as_str() {
-        Some(own) if is_slug(own) => {
-            if let Some(folder) = slug {
-                if own != folder {
-                    out.push(format!("slug is {} but the file is in corpus/owner/{folder}", py_repr_str(own)));
-                }
-            }
-        }
-        _ => out.push(format!("slug {} is not lowercase letters, digits and hyphens", repr_of(d, "slug"))),
-    }
-    match d.get("removed") {
-        None => {}
-        Some(Value::Array(removed)) => {
-            for (k, r) in removed.iter().enumerate() {
-                let Some(rm) = r.as_object() else {
-                    out.push(format!("removed {k}: not an object"));
-                    continue;
-                };
-                out.extend(entry_problems(r, &format!("removed {k}"), false));
-                if !date_ok(get(rm, "removed")) {
-                    out.push(format!("removed {k}: removed {} is not YYYY-MM-DD", repr_of(rm, "removed")));
-                }
-            }
-        }
-        Some(_) => out.push("removed is not a list".to_string()),
-    }
+    let mut out = head_problems(d, &TOP_KEYS, FORMAT, slug);
+    out.extend(removed_problems(d, |r, where_| entry_problems(r, where_, false)));
     let Some(tracks) = get(d, "tracks").as_array() else {
         out.push("tracks is not a list".to_string());
         return out;
@@ -54421,30 +55082,15 @@ pub fn problems(data: &Value, slug: Option<&str>) -> Vec<String> {
 }
 
 /// The problems of one entry, each prefixed with `where_`. `strict` false (history and removed entries) checks only
-/// that the entry can be read: its keys, label, stream and date, so its kind and how may come from an older
-/// vocabulary. A value that is not an object is read as an empty one. Spec 15, RP15.
+/// that the entry can be read: its keys, label, stream and date (`audio::labels::base_entry_problems` with this file's
+/// keys), so its kind and how may come from an older vocabulary. A strict entry adds this file's kind, how,
+/// saw_verdict and sure, note and style checks, then its history (`audio::labels::history_problems`). A value that is
+/// not an object is read as an empty one. Spec 15, RP15.
 fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
     let empty = Map::new();
     let m = t.as_object().unwrap_or(&empty);
     let allowed: &[&str] = if strict { &OPTIONAL_KEYS } else { &LOOSE_KEYS };
-    let mut out = Vec::new();
-    let missing: Vec<&str> = TRACK_KEYS.iter().copied().filter(|k| !m.contains_key(*k)).collect();
-    let unknown: Vec<&str> = m.keys().map(String::as_str).filter(|k| !TRACK_KEYS.contains(k) && !allowed.contains(k)).collect();
-    if !missing.is_empty() {
-        out.push(format!("{where_}: missing {}", sorted_list(missing)));
-    }
-    if !unknown.is_empty() {
-        out.push(format!("{where_}: unknown keys {}", sorted_list(unknown)));
-    }
-    if !get(m, "label").as_str().map_or(false, is_slug) {
-        out.push(format!("{where_}: label is not a rip label"));
-    }
-    if !is_stream_number(get(m, "stream")) {
-        out.push(format!("{where_}: stream is not ffprobe's stream number (an integer, 0 or more)"));
-    }
-    if !date_ok(get(m, "date")) {
-        out.push(format!("{where_}: date {} is not YYYY-MM-DD", repr_of(m, "date")));
-    }
+    let mut out = base_entry_problems(m, where_, &TRACK_KEYS, allowed);
     if !strict {
         return out;
     }
@@ -54452,7 +55098,7 @@ fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
         out.push(format!("{where_}: kind {} is not in the vocabulary (lazymkv-dev labels --subtitles kinds)", repr_of(m, "kind")));
     }
     if !get(m, "how").as_str().map_or(false, |h| HOW.iter().any(|(name, _)| *name == h)) {
-        out.push(format!("{where_}: how {} is not one of {}", repr_of(m, "how"), how_names().join(", ")));
+        out.push(format!("{where_}: how {} is not one of {}", repr_of(m, "how"), names(&HOW).join(", ")));
     }
     for key in ["saw_verdict", "sure"] {
         if !get(m, key).is_boolean() {
@@ -54467,22 +55113,7 @@ fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
     if !style.is_null() && style.as_str() != Some("uk") {
         out.push(format!("{where_}: style {} is not null or 'uk'", repr_of(m, "style")));
     }
-    match m.get("history") {
-        None => {}
-        Some(Value::Array(history)) => {
-            for (k, h) in history.iter().enumerate() {
-                let Some(hm) = h.as_object() else {
-                    out.push(format!("{where_}: history {k} is not an object"));
-                    continue;
-                };
-                out.extend(entry_problems(h, &format!("{where_} history {k}"), false));
-                if !date_ok(get(hm, "replaced")) {
-                    out.push(format!("{where_} history {k}: replaced {} is not YYYY-MM-DD", repr_of(hm, "replaced")));
-                }
-            }
-        }
-        Some(_) => out.push(format!("{where_}: history is not a list")),
-    }
+    out.extend(history_problems(m, where_, |h, w| entry_problems(h, w, false)));
     out
 }
 
@@ -54490,11 +55121,6 @@ fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
 /// its own problems already).
 fn key_of(m: &Map<String, Value>) -> Option<(String, i64)> {
     Some((m.get("label")?.as_str()?.to_string(), m.get("stream")?.as_i64()?))
-}
-
-/// The names of HOW, in order.
-fn how_names() -> Vec<&'static str> {
-    HOW.iter().map(|&(name, _)| name).collect()
 }
 ```
 
@@ -55365,7 +55991,7 @@ Expected: FAIL, `test result: FAILED. 1 passed; 15 failed`. The one that passes 
 
 - [ ] **Step 20: Implement `labels --subtitles` and its `COMMANDS` row**
 
-Seven edits to `crates/dev/src/cmd/labels.rs` (Edits 1 to 7; the audio path's code is untouched apart from the main parser, which learns the second option) and one to `crates/dev/src/lib.rs` (Edit 8).
+Eight edits to `crates/dev/src/cmd/labels.rs` (Edits 1 to 7 and 9; the audio path's code is untouched apart from the main parser, which learns the second option, and `execute`'s `Check` arm, which calls the `check_paths` of Edit 7 that the subtitle `check` calls too) and one to `crates/dev/src/lib.rs` (Edit 8).
 
 Edit 1. In `crates/dev/src/cmd/labels.rs`, replace the module header, these eight lines:
 
@@ -55412,6 +56038,10 @@ use std::str::FromStr;
 Edit 3. Find:
 
 ```rust
+use lazymkv_core::audio::labels::{
+    add_fitted, auto, check_lines, exp13_requirements, kinds_lines, left_lines, load_fitted, open_for_change, set_title,
+    set_track, unset_track, yes_no_unknown, FilmAudible, Fitted, Opened, SetOutcome, SetTrack, HOW, KINDS, TITLE_KINDS,
+};
 use lazymkv_core::audio::rule::RULE_VERSION;
 use lazymkv_core::recording::{
     decode_text, pathlib_under, py_int, py_repr_str, py_str, py_truthy, Encoding, Errors, MemTree, PathKey,
@@ -55422,6 +56052,11 @@ use serde_json::Value;
 and replace it with:
 
 ```rust
+use lazymkv_core::audio::labels::{
+    add_fitted, auto, check_lines, exp13_requirements, kinds_lines, labels_check_lines, left_lines, load_fitted,
+    open_for_change, set_title, set_track, unset_track, yes_no_unknown, FilmAudible, Fitted, Opened, SetOutcome,
+    SetTrack, HOW, KINDS, TITLE_KINDS,
+};
 use lazymkv_core::audio::rule::RULE_VERSION;
 use lazymkv_core::recording::{
     decode_text, pathlib_under, py_int, py_repr_str, py_str, py_truthy, Encoding, Errors, MemTree, PathKey, Tree,
@@ -55603,6 +56238,34 @@ mod tests;
 and insert this before them (one empty line before and after it):
 
 ```rust
+/// `check`'s loop over its paths, for the audio labels (`execute`) and the subtitle labels (`execute_subtitles`): each
+/// path is read through a DiskTree when it is a folder, else through an empty tree (so `lines` finds no file), and
+/// `lines`' lines for it are printed. Ok(2) when a file is bad, else Ok(0); Err(the OSError text) when a folder cannot
+/// be opened.
+fn check_paths(
+    ctx: &Ctx,
+    paths: &[String],
+    out: &mut dyn Write,
+    lines: fn(&dyn Tree, &PathKey) -> (Vec<String>, usize),
+) -> Result<i32, String> {
+    let mut bad = 0;
+    for path in paths {
+        let shown = pathlib_str(path);
+        let dir = ctx.abs(path);
+        let (printed, found) = if dir.is_dir() {
+            let tree = DiskTree::open(&dir, &shown).map_err(|e| os_error_text(&e, &shown))?;
+            lines(&tree, &PathKey::root())
+        } else {
+            lines(&MemTree::new(&shown, ""), &PathKey::root())
+        };
+        for line in printed {
+            let _ = writeln!(out, "{line}");
+        }
+        bad += found;
+    }
+    Ok(if bad > 0 { 2 } else { 0 })
+}
+
 /// `labels --subtitles <cmd> <arguments>` (RP15): the owner's subtitle labels through `core::subtitle::labels`. No spec is
 /// read. Exit 0, or 2 for an argument error, a recording folder that does not exist, a file that is not JSON or does
 /// not validate (`check`), and a change that would add a problem.
@@ -55710,24 +56373,7 @@ fn execute_subtitles(ctx: &Ctx, parsed: SubtitleParsed, out: &mut dyn Write) -> 
             }
             Ok(0)
         }
-        SubtitleParsed::Check { paths } => {
-            let mut bad = 0;
-            for path in &paths {
-                let shown = pathlib_str(path);
-                let dir = ctx.abs(path);
-                let (lines, found) = if dir.is_dir() {
-                    let tree = DiskTree::open(&dir, &shown).map_err(|e| os_error_text(&e, &shown))?;
-                    subtitle_check_lines(&tree, &PathKey::root())
-                } else {
-                    subtitle_check_lines(&MemTree::new(&shown, ""), &PathKey::root())
-                };
-                for line in lines {
-                    let _ = writeln!(out, "{line}");
-                }
-                bad += found;
-            }
-            Ok(if bad > 0 { 2 } else { 0 })
-        }
+        SubtitleParsed::Check { paths } => check_paths(ctx, &paths, out, subtitle_check_lines),
         SubtitleParsed::Set { slug_dir, label } => {
             let SubtitleFile { path, shown, data } = open_subtitles(ctx, &slug_dir)?;
             let (written, left) = subtitle_labels::set_track(data.clone(), &label).map_err(|e| format!("{shown}: {e}"))?;
@@ -55830,25 +56476,12 @@ fn subtitle_kinds_lines() -> Vec<String> {
 
 /// `labels --subtitles check <root>`'s lines for one root and the number of bad files: root/subtitle-labels.json when
 /// it exists, else every */subtitle-labels.json (never one under golden/), each "ok <file> (<n> tracks)" or `load`'s
-/// refusal; "<root>: no subtitle-labels.json" when there is none.
+/// refusal; "<root>: no subtitle-labels.json" when there is none. The audio labels' `labels_check_lines`, with the
+/// subtitle file's name and count (RP15).
 fn subtitle_check_lines(tree: &dyn Tree, root: &PathKey) -> (Vec<String>, usize) {
-    let mut lines = Vec::new();
-    let mut bad = 0;
-    let own = root.join(subtitle_labels::FILE_NAME);
-    let files = if tree.exists(&own) { vec![own] } else { tree.glob(root, &format!("*/{}", subtitle_labels::FILE_NAME)) };
-    if files.is_empty() {
-        lines.push(format!("{}: no {}", tree.display(root), subtitle_labels::FILE_NAME));
-    }
-    for path in &files {
-        match subtitle_labels::load(tree, path) {
-            Ok(labels) => lines.push(format!("ok {} ({} tracks)", tree.display(path), labels.len())),
-            Err(e) => {
-                lines.push(e);
-                bad += 1;
-            }
-        }
-    }
-    (lines, bad)
+    labels_check_lines(tree, root, subtitle_labels::FILE_NAME, &|tree, path| {
+        subtitle_labels::load(tree, path).map(|labels| format!("{} tracks", labels.len()))
+    })
 }
 
 /// The synopsis of one `--subtitles` command word (after "usage: lazymkv-dev ").
@@ -55876,17 +56509,46 @@ and replace it with:
     ("labels", cmd::labels::run as Command, "[--spec FILE] [--subtitles] kinds|check|set|unset|title|auto|fitted ..."),
 ```
 
+Edit 9. In `crates/dev/src/cmd/labels.rs`, `execute`'s `Check` arm calls the `check_paths` of Edit 7 (the same loop, the same lines and exit code). Find:
+
+```rust
+        Parsed::Check { paths } => {
+            let mut bad = 0;
+            for path in &paths {
+                let shown = pathlib_str(path);
+                let dir = ctx.abs(path);
+                let (lines, found) = if dir.is_dir() {
+                    let tree = DiskTree::open(&dir, &shown).map_err(|e| os_error_text(&e, &shown))?;
+                    check_lines(&tree, &PathKey::root())
+                } else {
+                    check_lines(&MemTree::new(&shown, ""), &PathKey::root())
+                };
+                for line in lines {
+                    let _ = writeln!(out, "{line}");
+                }
+                bad += found;
+            }
+            Ok(if bad > 0 { 2 } else { 0 })
+        }
+```
+
+and replace it with:
+
+```rust
+        Parsed::Check { paths } => check_paths(ctx, &paths, out, check_lines),
+```
+
 - [ ] **Step 21: Run the tests to see them pass**
 
 Run: `scripts/box.sh cargo test -p lazymkv-dev --test labels_subtitles`
 
 Expected: PASS, `test result: ok. 16 passed; 0 failed`, with `skipped: the evidence repository is not cloned at corpus/owner` on stderr from `the_subtitle_labels_of_the_evidence_clone_validate` (the mirror holds no clone), and no warning from `crates/dev/src/cmd/labels.rs`.
 
-Then run the audio labels' own tests, which this task must leave passing unchanged (the main parser now knows two options):
+Then run the audio labels' own tests, which this task must leave passing unchanged (the main parser now knows two options, and `execute`'s `check` goes through `check_paths`):
 
 Run: `scripts/box.sh cargo test -p lazymkv-dev cmd::labels`
 
-Expected: PASS, `0 failed`, the same count as before this task (`argument_errors_are_argparses_with_exit_2` still sees `argument cmd: invalid choice: 'frob' (choose from 'kinds', 'check', 'set', 'unset', 'title', 'auto', 'fitted')`, and every usage line still starts with `usage: lazymkv-dev labels`).
+Expected: PASS, `0 failed`, with the same `N passed` as the cmd::labels count Step 1 recorded (`argument_errors_are_argparses_with_exit_2` still sees `argument cmd: invalid choice: 'frob' (choose from 'kinds', 'check', 'set', 'unset', 'title', 'auto', 'fitted')`, and every usage line still starts with `usage: lazymkv-dev labels`).
 
 - [ ] **Step 22: Run the evidence test with the clone**
 
@@ -55900,13 +56562,13 @@ Run: `scripts/box.sh cargo test --workspace`
 
 Expected: PASS for every test binary (`test result: ok.` with `0 failed` throughout); the core library's count is up by the 35 `subtitle::labels::tests`, the dev crate has the new `labels_subtitles` binary with 16, and `audio::labels::tests`, `cmd::labels::tests` and every golden test pass unchanged. No warning names `crates/core/src/subtitle/labels.rs`, `crates/core/src/audio/labels.rs` or `crates/dev/src/cmd/labels.rs`.
 
-Then confirm that the audio labels' change is visibility only:
+Then confirm that the audio labels' refactor changed no test: `audio::labels::tests`, `cmd::labels::tests` and the audio goldens pass above with no change to any test, and
 
 ```bash
-git diff -U0 -- crates/core/src/audio/labels.rs | grep '^[-+][^-+]'
+git diff --stat -- crates/core/src/audio/labels/tests.rs crates/dev/src/cmd/labels/tests.rs crates/dev/tests/golden.rs
 ```
 
-Expected: exactly twelve lines, six lines starting `-fn ` and the same six starting `+pub(crate) fn ` (`read_value`, `get`, `repr_of`, `sorted_list`, `is_stream_number`, `track_sort_key`), nothing else.
+prints nothing.
 
 - [ ] **Step 24: Commit**
 
@@ -55923,11 +56585,12 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 ### Task 18: retune --subtitles
 
 **Files:**
-- Modify: `crates/core/src/subtitle/labels.rs` (Task 17's file). Appended at its end: the re-export `pub use row14::{costly, exp14_requirements, harness, Costly, Outcome, Row14, SubtitleHarness};` and the private module `row14` (spec section 17 row 14 read from the spec text, the costly verdicts of row 14 (a), and the subtitle harness that `lazymkv-dev retune --subtitles` prints), with its private helpers and its 33 unit tests in `row14::tests::{requirements, verdicts, runs}`. Nothing Task 17 wrote is changed.
+- Modify: `crates/core/src/subtitle/labels.rs` (Task 17's file): the line `mod row14;` and the re-export `pub use row14::{costly, exp14_requirements, harness, Costly, Outcome, Row14, SubtitleHarness};`, inserted just before Task 17's `#[cfg(test)]` line. Nothing else Task 17 wrote is changed.
+- Create: `crates/core/src/subtitle/labels/row14.rs` (the private module `row14`: spec section 17 row 14 read from the spec text, the costly verdicts of row 14 (a), and the subtitle harness that `lazymkv-dev retune --subtitles` prints, with its private helpers; it ends with `#[cfg(test)] mod tests;`) and `crates/core/src/subtitle/labels/row14/tests.rs` (its 33 unit tests in `mod requirements`, `mod verdicts` and `mod runs`), so `labels.rs` keeps its tests at its bottom and no file passes about 900 lines of code with its tests inline.
 - Modify: `crates/dev/src/cmd/retune.rs` (the `//!` paragraph, three `use` lines, `USAGE`, `FLAGS`, three new constants, two blocks of `run`, and the private functions `spec_file` and `run_subtitles`).
 - Modify: `crates/dev/src/lib.rs` (the `retune` row of `COMMANDS`: its synopsis gains `[--subtitles] [--text DIR]`).
 - Create: `crates/dev/tests/retune_subtitles.rs` (10 tests: the design spec's row 14, the command over a synthetic evidence folder written to a scratch folder, which always run, and three tests of the harness over the evidence clone, which print `skipped: <reason>` and pass without it).
-- Test: `crates/core/src/subtitle/labels.rs` `row14::tests` (33 new), `crates/dev/tests/retune_subtitles.rs` (10 new).
+- Test: `crates/core/src/subtitle/labels/row14/tests.rs` (`row14::tests`, 33 new), `crates/dev/tests/retune_subtitles.rs` (10 new).
 
 **Interfaces:**
 
@@ -56056,7 +56719,7 @@ impl SubtitleRole {
 }
 
 // lazymkv_core::disc (T2)
-/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T11, T12.
+/// Attribute 1 of a stream: 6201 "Video", 6202 "Audio", 6203 "Subtitles". Spec 9.4. Def: T2. Use: T3, T6, T8, T9, T10, T11, T12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind { Video, Audio, Subtitles }
@@ -56301,6 +56964,10 @@ pub fn removed_scan_streams(rip_log: Option<&str>, selection: &[u32]) -> BTreeSe
 /// subs/index.json's `n` to the scan stream, through each entry's `track_id` and `stream_of_track`; entries without a
 /// track_id or a pair are left out. Def: T12. Use: T16, T18.
 pub fn subs_streams(index: &[SubsIndexEntry], report: &VerifyReport) -> BTreeMap<i64, u32>;
+/// subs_dir/index.json as `align::index_streams` reads it (UTF-8 with a byte-order mark allowed, invalid bytes
+/// replaced); Err is the read error's text or "<path>: <serde error>". The one reading `subtitle_events` and decide's
+/// text decisions share. Def: T12. Use: T12, T16.
+pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEntry>, String>;
 /// `align::events` of every subs/index.json entry under `subs_dir` (packets through `align::load_packets`), keyed by scan
 /// stream (`subs_streams`): `clear_max_bytes` for image codecs, 0 where `align::is_text`. Def: T12. Use: T16, T18.
 pub fn subtitle_events(tree: &dyn Tree, subs_dir: &PathKey, report: &VerifyReport, clear_max_bytes: i64) -> Result<BTreeMap<u32, Vec<f64>>, String>;
@@ -56421,10 +57088,9 @@ pub fn exp14_requirements(spec_text: &str) -> Result<Row14, String>;
 #[serde(rename_all = "snake_case")]
 pub enum Costly { DialogueDropped, SdhAsRegular, RegularAsSdh, ForcedWrongly, ForcedAsDialogue, UnwantedKept }
 /// What the rules gave a labelled track: the role the judged rule places it in (row 14 (a) judges the text rule; for a
-/// stream the text rule sets aside, 8.7's), None = dropped; whether that rule raised a review; and the text rule's role
-/// (for the report). Def: T18. Use: T18.
+/// stream the text rule sets aside, 8.7's), None = dropped; and whether that rule raised a review. Def: T18. Use: T18.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outcome { pub role: Option<SubtitleRole>, pub review: bool, pub text_role: Option<crate::subtitle::text::Role> }
+pub struct Outcome { pub role: Option<SubtitleRole>, pub review: bool }
 /// The costly verdict, if any, of one labelled track's outcome: a dialogue kind (regular, sdh, translation, dub-transcript,
 /// closed-captions) dropped; sdh as Regular or regular as Sdh without review; Forced without review on a non-forced kind, or a
 /// forced kind as Regular or Sdh without review; commentary, trivia or lyrics kept without review. Def: T18. Use: T18.
@@ -56448,7 +57114,7 @@ Beside these, `Costly` gets the closed-set members the plan's conventions give e
 
 Where this task settles what the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **What row 14 (a) judges.** Row 14 (a) asks whether "the text rule of 8.7" gives a costly verdict, so the judged outcome of a labelled track is the text rule's decision for its stream (`text::decide` through `subs_run`): `regular`, `sdh` and `forced` place the track in that role, `drop` drops it, `keep` keeps it unplaced (it is always reviewed, so it counts as kept as regular with a review), each with the decision's own review. For a stream the text rule sets aside (the DVD closed captions, which it never reads), the judged outcome is 8.7's, since the text rule hands that stream back to 8.7. The report also shows what 8.7 decides before experiment 14 answers (`decide_subtitles`, with the text adding reviews only where the app reads it, spec 8.7 "Text" and 6.4 step 10: a title whose file holds two or more English or no-language subtitle streams; a title with one keeps it as "English" without the text, row 14 (b)'s fallback): its role and whether the title raised `subtitle_ambiguous`. `costly` judges an outcome's `role` and `review` only; `text_role` is carried for the report. `Outcome.role` is the role of the rule being judged, as the interfaces' doc of `Outcome` says.
+1. **What row 14 (a) judges.** Row 14 (a) asks whether "the text rule of 8.7" gives a costly verdict, so the judged outcome of a labelled track is the text rule's decision for its stream (`text::decide` through `subs_run`): `regular`, `sdh` and `forced` place the track in that role, `drop` drops it, `keep` keeps it unplaced (it is always reviewed, so it counts as kept as regular with a review), each with the decision's own review. For a stream the text rule sets aside (the DVD closed captions, which it never reads), the judged outcome is 8.7's, since the text rule hands that stream back to 8.7. The report also shows what 8.7 decides before experiment 14 answers (`decide_subtitles`, with the text adding reviews only where the app reads it, spec 8.7 "Text" and 6.4 step 10: a title whose file holds two or more English or no-language subtitle streams; a title with one keeps it as "English" without the text, row 14 (b)'s fallback): its role and whether the title raised `subtitle_ambiguous`. `costly` judges an outcome's `role` and `review` only. `Outcome.role` is the role of the rule being judged, as the interfaces' doc of `Outcome` says.
 2. **A label's `stream`** is the rip file's track id (the ffprobe stream number, as in `audio-labels.json`), mapped onto the scan stream through `verify::stream_of_track` of the verified rip. A label on a file track the rip does not have, or on a track that is not a subtitle stream, cannot be judged and says so.
 3. **What counts towards row 14 (a)'s totals** (D23): a label that the harness judged, whose `how` is in `COUNTING_HOW` (`read`, `watched`), that the owner is `sure` of, that was given before the owner saw the verdict (`saw_verdict` false: ruling RP25, row 14's "checked before the verdict"), and that is not on a fitting disc (row 14's two backticked slugs). A label from an observation (`how` in `OBSERVATION_HOW`: the packaging, the menu, a flag, the player or TheDiscDB, the five of row 14, `flag` added by RP25) never counts. Every other label is still judged and reported, and a costly verdict on it still fails the run, as row 14 says of the fitting discs.
 4. **"1 feature film and 1 TV episode"**: a title with a counted regular and a counted SDH track is a feature film when the recording's `tmdb.json` has a `title`, a TV episode when it has a `name` (TMDb's two spellings), else neither. "From at least 2 discs" counts distinct recordings.
@@ -56475,14 +57141,15 @@ grep -c 'pub fn decide_subtitles\|pub(crate) fn english_or_none' crates/core/src
 grep -c 'pub fn verify_rip\|pub fn subtitle_events\|pub fn by_scan_stream\|pub fn stream_of_track\|pub fn subs_streams\|pub fn selected_streams\|pub fn removed_scan_streams' crates/core/src/verify.rs
 grep -c 'pub fn text_rule' crates/core/src/settings.rs
 grep -n '"retune"' crates/dev/src/lib.rs
-tail -n 3 crates/core/src/subtitle/labels.rs
+ls crates/core/src/subtitle/labels
+grep -c '^#\[cfg(test)\]$' crates/core/src/subtitle/labels.rs
 ```
 
-Expected: `phase-1-decision-core`; no output from `git status --short`; `1`; five lines (Task 17's `FORMAT`, `FILE_NAME`, `COUNTING_HOW`, `SubtitleKind`, `SubtitleLabel`); `2` (ruling RP25's `saw_verdict` and `style` fields of `SubtitleLabel`); `0` (none of this task's names exists yet, so the re-export below collides with nothing of Task 17's); `2` (Task 10's `decide_subtitles` and Task 9's `english_or_none`, `pub(crate)`); `7` (Task 12's six and its `removed_scan_streams`); `1`; one line, the `retune` row of `COMMANDS` ending `[--allow-unmeasured]"),`; the last lines of Task 17's file (whatever they are: this task appends after them).
+Expected: `phase-1-decision-core`; no output from `git status --short`; `1`; five lines (Task 17's `FORMAT`, `FILE_NAME`, `COUNTING_HOW`, `SubtitleKind`, `SubtitleLabel`); `2` (ruling RP25's `saw_verdict` and `style` fields of `SubtitleLabel`); `0` (none of this task's names exists yet, so the re-export below collides with nothing of Task 17's); `2` (Task 10's `decide_subtitles` and Task 9's `english_or_none`, `pub(crate)`); `7` (Task 12's six and its `removed_scan_streams`); `1`; one line, the `retune` row of `COMMANDS` ending `[--allow-unmeasured]"),`; one `No such file or directory` line from `ls` (row 14's files do not exist yet); `1` (Task 17's test module, before which this task inserts its two module lines).
 
 - [ ] **Step 2: Write the failing tests of `exp14_requirements` (spec section 17 row 14 read from the spec text)**
 
-Append to the end of `crates/core/src/subtitle/labels.rs` (after Task 17's last line, which stays as it is), preceded by one blank line:
+Row 14's code lives in its own files beside Task 17's, `crates/core/src/subtitle/labels/row14.rs` with its tests in `crates/core/src/subtitle/labels/row14/tests.rs`, so `labels.rs` gains only the module line and its re-export, and Task 17's test module stays at its bottom. In `crates/core/src/subtitle/labels.rs`, insert these lines immediately before Task 17's test module (the line `#[cfg(test)]` directly above `mod tests {`), followed by one blank line:
 
 ```rust
 // ------------------------------------------------------------------ row 14 and the harness (Task 18)
@@ -56490,90 +57157,98 @@ Append to the end of `crates/core/src/subtitle/labels.rs` (after Task 17's last 
 /// Spec section 17 row 14 (a) read from the spec text, its costly verdicts, and the subtitle harness behind
 /// `lazymkv-dev retune --subtitles` (RP15; spec 15 "Rules against the stored evidence"; 8.7 "Text"; Task 18). Private:
 /// what other code uses is re-exported above it.
-mod row14 {
-    #[cfg(test)]
-    mod tests {
-        //! Row 14 read from synthetic spec text (the design spec's own row is read by crates/dev/tests/retune_subtitles.rs,
-        //! since core's tests read no repository document), the costly verdicts, and the harness over synthetic
-        //! recordings in memory.
+mod row14;
+```
 
-        mod requirements {
-            use super::super::{exp14_requirements, Row14};
+Create `crates/core/src/subtitle/labels/row14.rs` with exactly this content (Steps 4, 8 and 12 fill it):
 
-            /// A section 17 table: row 13 (which also names a fitting disc and must not be read), a row 14 with number words,
-            /// counts other than the design spec's and three fitting discs, and row 15.
-            const SPEC: &str = "| # | Question | If the answer is no | Result |\n\
+```rust
+#[cfg(test)]
+mod tests;
+```
+
+Create `crates/core/src/subtitle/labels/row14/tests.rs` with exactly this content (Steps 6 and 10 append to it):
+
+```rust
+//! Row 14 read from synthetic spec text (the design spec's own row is read by crates/dev/tests/retune_subtitles.rs,
+//! since core's tests read no repository document), the costly verdicts, and the harness over synthetic
+//! recordings in memory.
+
+mod requirements {
+    use super::super::{exp14_requirements, Row14};
+
+    /// A section 17 table: row 13 (which also names a fitting disc and must not be read), a row 14 with number words,
+    /// counts other than the design spec's and three fitting discs, and row 15.
+    const SPEC: &str = "| # | Question | If the answer is no | Result |\n\
 | 13 | at least 8 commentaries; Every threshold was fitted on two tracks (`the-office-2005-s3d3-bluray`: the S03E16 commentary), so no track of that disc counts. | fallback | result |\n\
 | 14 | (a) Before (a) may be yes, the labelled tracks must include: at least three titles from at least two discs (at least one feature film and two TV episodes) that each have both a regular and an SDH English track; at least 5 SDH and 4 regular English tracks in all; at least 2 real forced English tracks with events; at least 3 commentary subtitle tracks; at least 2 DVDs with English VobSub subtitles; at least 0 UK-style SDH tracks if the owner has a UK disc. Every threshold was fitted on `disc-x` (E1) and `disc-y` and `disc-z`, so none of their tracks counts towards any total above. | fallback | result |\n\
 | 15 | later | | |\n";
 
-            #[test]
-            fn row_14_is_read_with_its_number_words_and_every_fitting_disc() {
-                assert_eq!(
-                    exp14_requirements(SPEC),
-                    Ok(Row14 {
-                        pair_titles: 3,
-                        pair_discs: 2,
-                        pair_features: 1,
-                        pair_tv: 2,
-                        sdh: 5,
-                        regular: 4,
-                        forced: 2,
-                        commentary: 3,
-                        dvd_vobsub: 2,
-                        uk_sdh: 0,
-                        fitting_discs: vec!["disc-x".to_string(), "disc-y".to_string(), "disc-z".to_string()],
-                    })
-                );
-            }
+    #[test]
+    fn row_14_is_read_with_its_number_words_and_every_fitting_disc() {
+        assert_eq!(
+            exp14_requirements(SPEC),
+            Ok(Row14 {
+                pair_titles: 3,
+                pair_discs: 2,
+                pair_features: 1,
+                pair_tv: 2,
+                sdh: 5,
+                regular: 4,
+                forced: 2,
+                commentary: 3,
+                dvd_vobsub: 2,
+                uk_sdh: 0,
+                fitting_discs: vec!["disc-x".to_string(), "disc-y".to_string(), "disc-z".to_string()],
+            })
+        );
+    }
 
-            #[test]
-            fn a_spec_without_row_14_is_refused() {
-                assert_eq!(
-                    exp14_requirements("| 13 | a row |\n| 15 | another |\n"),
-                    Err("spec section 17 has no row starting '| 14 |'".to_string())
-                );
-            }
+    #[test]
+    fn a_spec_without_row_14_is_refused() {
+        assert_eq!(
+            exp14_requirements("| 13 | a row |\n| 15 | another |\n"),
+            Err("spec section 17 has no row starting '| 14 |'".to_string())
+        );
+    }
 
-            #[test]
-            fn a_reworded_row_14_names_the_phrase_it_no_longer_finds() {
-                let reworded = SPEC.replace("regular English tracks in all", "plain English tracks in all");
-                assert_eq!(
-                    exp14_requirements(&reworded),
-                    Err("spec section 17 row 14 no longer contains the phrase /at least \
-                         ([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten) SDH and \
-                         ([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten) regular English tracks in all/; update \
-                         core::subtitle::labels"
-                        .to_string())
-                );
-                let reworded = SPEC.replace("UK-style SDH tracks", "British SDH tracks");
-                assert_eq!(
-                    exp14_requirements(&reworded),
-                    Err("spec section 17 row 14 no longer contains the phrase /at least \
-                         ([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten) UK-style SDH tracks?/; update \
-                         core::subtitle::labels"
-                        .to_string())
-                );
-            }
+    #[test]
+    fn a_reworded_row_14_names_the_phrase_it_no_longer_finds() {
+        let reworded = SPEC.replace("regular English tracks in all", "plain English tracks in all");
+        assert_eq!(
+            exp14_requirements(&reworded),
+            Err("spec section 17 row 14 no longer contains the phrase /at least \
+                 ([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten) SDH and \
+                 ([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten) regular English tracks in all/; update \
+                 core::subtitle::labels"
+                .to_string())
+        );
+        let reworded = SPEC.replace("UK-style SDH tracks", "British SDH tracks");
+        assert_eq!(
+            exp14_requirements(&reworded),
+            Err("spec section 17 row 14 no longer contains the phrase /at least \
+                 ([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten) UK-style SDH tracks?/; update \
+                 core::subtitle::labels"
+                .to_string())
+        );
+    }
 
-            #[test]
-            fn a_row_14_that_names_no_fitting_disc_is_refused() {
-                let refused = Err("spec section 17 row 14 no longer names the discs the thresholds were fitted on".to_string());
-                let unnamed = SPEC.replace(
-                    "Every threshold was fitted on `disc-x` (E1) and `disc-y` and `disc-z`, so none",
-                    "The thresholds are provisional, so none",
-                );
-                assert_eq!(exp14_requirements(&unnamed), refused);
-                let unquoted = SPEC.replace("`disc-x` (E1) and `disc-y` and `disc-z`", "two discs");
-                assert_eq!(exp14_requirements(&unquoted), refused);
-            }
+    #[test]
+    fn a_row_14_that_names_no_fitting_disc_is_refused() {
+        let refused = Err("spec section 17 row 14 no longer names the discs the thresholds were fitted on".to_string());
+        let unnamed = SPEC.replace(
+            "Every threshold was fitted on `disc-x` (E1) and `disc-y` and `disc-z`, so none",
+            "The thresholds are provisional, so none",
+        );
+        assert_eq!(exp14_requirements(&unnamed), refused);
+        let unquoted = SPEC.replace("`disc-x` (E1) and `disc-y` and `disc-z`", "two discs");
+        assert_eq!(exp14_requirements(&unquoted), refused);
+    }
 
-            #[test]
-            fn a_count_that_is_no_number_is_refused() {
-                let huge = SPEC.replace("at least 5 SDH", "at least 99999999999 SDH");
-                assert_eq!(exp14_requirements(&huge), Err("spec section 17 row 14: 99999999999 is not a count".to_string()));
-            }
-        }
+    #[test]
+    fn a_count_that_is_no_number_is_refused() {
+        let huge = SPEC.replace("at least 5 SDH", "at least 99999999999 SDH");
+        assert_eq!(exp14_requirements(&huge), Err("spec section 17 row 14: 99999999999 is not a count".to_string()));
     }
 }
 ```
@@ -56602,293 +57277,288 @@ and replace it with:
 pub use row14::{exp14_requirements, Row14};
 ```
 
-Then find the three lines
+Then, in `crates/core/src/subtitle/labels/row14.rs`, find the two lines
 
 ```rust
-mod row14 {
-    #[cfg(test)]
-    mod tests {
+#[cfg(test)]
+mod tests;
 ```
 
 and replace them with:
 
 ```rust
-mod row14 {
-    use regex::Regex;
+use regex::Regex;
 
-    // ------------------------------------------------------------------ row 14 (a)'s list
+// ------------------------------------------------------------------ row 14 (a)'s list
 
-    /// A number in row 14: ASCII digits, or a word from one to ten (the spec spells small numbers either way).
-    const NUM: &str = "([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)";
-    /// The number words NUM allows. Not audio::labels' private WORDS and number (row 13's reader): that pair is the
-    /// Python's port (`py_int`, i64, Python's ValueError text), while row 14 is read from the spec alone (RP20) into u32
-    /// counts with this reader's own sentence.
-    const WORDS: [(&str, u32); 10] = [
-        ("one", 1),
-        ("two", 2),
-        ("three", 3),
-        ("four", 4),
-        ("five", 5),
-        ("six", 6),
-        ("seven", 7),
-        ("eight", 8),
-        ("nine", 9),
-        ("ten", 10),
-    ];
-    /// Row 14 (a)'s phrases, in the row's order, `{num}` standing for NUM; a plural `s` is optional wherever the row may
-    /// grow past 1.
-    const PAIR_TITLES: &str = r"at least {num} titles? from at least {num} discs? \(at least {num} feature films? and {num} TV episodes?\) that each have both a regular and an SDH English track";
-    const SDH_REGULAR: &str = "at least {num} SDH and {num} regular English tracks in all";
-    const FORCED_WITH_EVENTS: &str = "at least {num} real forced English tracks? with events";
-    const COMMENTARY_TRACK: &str = "at least {num} commentary subtitle tracks?";
-    const DVD_VOBSUB: &str = "at least {num} DVDs? with English VobSub subtitles";
-    const UK_SDH: &str = "at least {num} UK-style SDH tracks?";
-    /// The sentence naming the discs every threshold was fitted on, and a slug in backticks inside it.
-    const FITTED: &str = "Every threshold was fitted on (.{0,200}?), so none of their tracks counts";
-    const QUOTED_SLUG: &str = "`([a-z0-9][a-z0-9-]*)`";
+/// A number in row 14: ASCII digits, or a word from one to ten (the spec spells small numbers either way).
+const NUM: &str = "([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)";
+/// The number words NUM allows. Not audio::labels' private WORDS and number (row 13's reader): that pair is the
+/// Python's port (`py_int`, i64, Python's ValueError text), while row 14 is read from the spec alone (RP20) into u32
+/// counts with this reader's own sentence.
+const WORDS: [(&str, u32); 10] = [
+    ("one", 1),
+    ("two", 2),
+    ("three", 3),
+    ("four", 4),
+    ("five", 5),
+    ("six", 6),
+    ("seven", 7),
+    ("eight", 8),
+    ("nine", 9),
+    ("ten", 10),
+];
+/// Row 14 (a)'s phrases, in the row's order, `{num}` standing for NUM; a plural `s` is optional wherever the row may
+/// grow past 1.
+const PAIR_TITLES: &str = r"at least {num} titles? from at least {num} discs? \(at least {num} feature films? and {num} TV episodes?\) that each have both a regular and an SDH English track";
+const SDH_REGULAR: &str = "at least {num} SDH and {num} regular English tracks in all";
+const FORCED_WITH_EVENTS: &str = "at least {num} real forced English tracks? with events";
+const COMMENTARY_TRACK: &str = "at least {num} commentary subtitle tracks?";
+const DVD_VOBSUB: &str = "at least {num} DVDs? with English VobSub subtitles";
+const UK_SDH: &str = "at least {num} UK-style SDH tracks?";
+/// The sentence naming the discs every threshold was fitted on, and a slug in backticks inside it.
+const FITTED: &str = "Every threshold was fitted on (.{0,200}?), so none of their tracks counts";
+const QUOTED_SLUG: &str = "`([a-z0-9][a-z0-9-]*)`";
 
-    /// Row 14 (a)'s required counts read from the spec text (the first line starting "| 14 |"): titles with both regular
-    /// and SDH (3, from 2 discs, 1 feature, 1 TV), SDH (6), regular (6), forced with events (1), commentary (1), DVD VobSub
-    /// (1), UK SDH (1, only if the owner has one), the two fitting discs. Spec 17 row 14 (a), RP15. Def: T18. Use: T18.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct Row14 {
-        pub pair_titles: u32,
-        pub pair_discs: u32,
-        pub pair_features: u32,
-        pub pair_tv: u32,
-        pub sdh: u32,
-        pub regular: u32,
-        pub forced: u32,
-        pub commentary: u32,
-        pub dvd_vobsub: u32,
-        pub uk_sdh: u32,
-        pub fitting_discs: Vec<String>,
+/// Row 14 (a)'s required counts read from the spec text (the first line starting "| 14 |"): titles with both regular
+/// and SDH (3, from 2 discs, 1 feature, 1 TV), SDH (6), regular (6), forced with events (1), commentary (1), DVD VobSub
+/// (1), UK SDH (1, only if the owner has one), the two fitting discs. Spec 17 row 14 (a), RP15. Def: T18. Use: T18.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row14 {
+    pub pair_titles: u32,
+    pub pair_discs: u32,
+    pub pair_features: u32,
+    pub pair_tv: u32,
+    pub sdh: u32,
+    pub regular: u32,
+    pub forced: u32,
+    pub commentary: u32,
+    pub dvd_vobsub: u32,
+    pub uk_sdh: u32,
+    pub fitting_discs: Vec<String>,
+}
+
+/// Reads row 14 (the first line of `spec_text` starting "| 14 |") with the phrases above. Err names the phrase it no
+/// longer finds, so a reworded row is noticed instead of being counted against old numbers, as row 13's reader does.
+/// Spec 17 row 14 (a), RP15. Def: T18. Use: T18.
+pub fn exp14_requirements(spec_text: &str) -> Result<Row14, String> {
+    let row = spec_text
+        .lines()
+        .find(|line| line.starts_with("| 14 |"))
+        .ok_or_else(|| "spec section 17 has no row starting '| 14 |'".to_string())?;
+    let pairs = numbers(row, PAIR_TITLES)?;
+    let totals = numbers(row, SDH_REGULAR)?;
+    let forced = numbers(row, FORCED_WITH_EVENTS)?;
+    let commentary = numbers(row, COMMENTARY_TRACK)?;
+    let dvd_vobsub = numbers(row, DVD_VOBSUB)?;
+    let uk_sdh = numbers(row, UK_SDH)?;
+    let unnamed = || "spec section 17 row 14 no longer names the discs the thresholds were fitted on".to_string();
+    let sentence = Regex::new(FITTED)
+        .expect("the fitted pattern is valid")
+        .captures(row)
+        .map(|caps| caps[1].to_string())
+        .ok_or_else(unnamed)?;
+    let fitting_discs: Vec<String> = Regex::new(QUOTED_SLUG)
+        .expect("the slug pattern is valid")
+        .captures_iter(&sentence)
+        .map(|caps| caps[1].to_string())
+        .collect();
+    if fitting_discs.is_empty() {
+        return Err(unnamed());
     }
+    Ok(Row14 {
+        pair_titles: pairs[0],
+        pair_discs: pairs[1],
+        pair_features: pairs[2],
+        pair_tv: pairs[3],
+        sdh: totals[0],
+        regular: totals[1],
+        forced: forced[0],
+        commentary: commentary[0],
+        dvd_vobsub: dvd_vobsub[0],
+        uk_sdh: uk_sdh[0],
+        fitting_discs,
+    })
+}
 
-    /// Reads row 14 (the first line of `spec_text` starting "| 14 |") with the phrases above. Err names the phrase it no
-    /// longer finds, so a reworded row is noticed instead of being counted against old numbers, as row 13's reader does.
-    /// Spec 17 row 14 (a), RP15. Def: T18. Use: T18.
-    pub fn exp14_requirements(spec_text: &str) -> Result<Row14, String> {
-        let row = spec_text
-            .lines()
-            .find(|line| line.starts_with("| 14 |"))
-            .ok_or_else(|| "spec section 17 has no row starting '| 14 |'".to_string())?;
-        let pairs = numbers(row, PAIR_TITLES)?;
-        let totals = numbers(row, SDH_REGULAR)?;
-        let forced = numbers(row, FORCED_WITH_EVENTS)?;
-        let commentary = numbers(row, COMMENTARY_TRACK)?;
-        let dvd_vobsub = numbers(row, DVD_VOBSUB)?;
-        let uk_sdh = numbers(row, UK_SDH)?;
-        let unnamed = || "spec section 17 row 14 no longer names the discs the thresholds were fitted on".to_string();
-        let sentence = Regex::new(FITTED)
-            .expect("the fitted pattern is valid")
-            .captures(row)
-            .map(|caps| caps[1].to_string())
-            .ok_or_else(unnamed)?;
-        let fitting_discs: Vec<String> = Regex::new(QUOTED_SLUG)
-            .expect("the slug pattern is valid")
-            .captures_iter(&sentence)
-            .map(|caps| caps[1].to_string())
-            .collect();
-        if fitting_discs.is_empty() {
-            return Err(unnamed());
-        }
-        Ok(Row14 {
-            pair_titles: pairs[0],
-            pair_discs: pairs[1],
-            pair_features: pairs[2],
-            pair_tv: pairs[3],
-            sdh: totals[0],
-            regular: totals[1],
-            forced: forced[0],
-            commentary: commentary[0],
-            dvd_vobsub: dvd_vobsub[0],
-            uk_sdh: uk_sdh[0],
-            fitting_discs,
-        })
+/// The numbers `template` (with `{num}` for NUM) finds in `row`, one per group, in order; Err names the phrase.
+fn numbers(row: &str, template: &str) -> Result<Vec<u32>, String> {
+    let pattern = template.replace("{num}", NUM);
+    let caps = Regex::new(&pattern).expect("row 14's patterns are valid").captures(row).ok_or_else(|| {
+        format!("spec section 17 row 14 no longer contains the phrase /{pattern}/; update core::subtitle::labels")
+    })?;
+    caps.iter().skip(1).map(|group| number(group.map_or("", |found| found.as_str()))).collect()
+}
+
+/// A count written in digits or as a word from one to ten. Kept apart from audio::labels' private `number`, which
+/// gives an i64 through `py_int` with Python's ValueError text; this one gives a u32 with row 14's own sentence.
+fn number(text: &str) -> Result<u32, String> {
+    if let Ok(count) = text.parse::<u32>() {
+        return Ok(count);
     }
+    WORDS
+        .iter()
+        .find(|(word, _)| *word == text)
+        .map(|&(_, count)| count)
+        .ok_or_else(|| format!("spec section 17 row 14: {text} is not a count"))
+}
 
-    /// The numbers `template` (with `{num}` for NUM) finds in `row`, one per group, in order; Err names the phrase.
-    fn numbers(row: &str, template: &str) -> Result<Vec<u32>, String> {
-        let pattern = template.replace("{num}", NUM);
-        let caps = Regex::new(&pattern).expect("row 14's patterns are valid").captures(row).ok_or_else(|| {
-            format!("spec section 17 row 14 no longer contains the phrase /{pattern}/; update core::subtitle::labels")
-        })?;
-        caps.iter().skip(1).map(|group| number(group.map_or("", |found| found.as_str()))).collect()
-    }
-
-    /// A count written in digits or as a word from one to ten. Kept apart from audio::labels' private `number`, which
-    /// gives an i64 through `py_int` with Python's ValueError text; this one gives a u32 with row 14's own sentence.
-    fn number(text: &str) -> Result<u32, String> {
-        if let Ok(count) = text.parse::<u32>() {
-            return Ok(count);
-        }
-        WORDS
-            .iter()
-            .find(|(word, _)| *word == text)
-            .map(|&(_, count)| count)
-            .ok_or_else(|| format!("spec section 17 row 14: {text} is not a count"))
-    }
-
-    #[cfg(test)]
-    mod tests {
+#[cfg(test)]
+mod tests;
 ```
 
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `scripts/box.sh cargo test -p lazymkv-core subtitle::labels::row14::tests::requirements`
 
-Expected: PASS, `test result: ok. 5 passed; 0 failed`, with no warning from `crates/core/src/subtitle/labels.rs`.
+Expected: PASS, `test result: ok. 5 passed; 0 failed`, with no warning from `crates/core/src/subtitle/labels.rs` or its `labels/row14` files.
 
 - [ ] **Step 6: Write the failing tests of the costly verdicts (spec section 17 row 14 (a))**
 
-In `crates/core/src/subtitle/labels.rs`, insert this module immediately before the file's last two lines (`    }`, which closes `mod tests`, and `}`, which closes `mod row14`), preceded by one blank line:
+Append this module to the end of `crates/core/src/subtitle/labels/row14/tests.rs`, preceded by one blank line:
 
 ```rust
-        mod verdicts {
-            use crate::subtitle::labels::SubtitleKind;
-            use crate::subtitle::text::Role;
-            use crate::tracks::SubtitleRole;
+mod verdicts {
+    use crate::subtitle::labels::SubtitleKind;
+    use crate::tracks::SubtitleRole;
 
-            use super::super::{costly, Costly, Outcome};
+    use super::super::{costly, Costly, Outcome};
 
-            /// An outcome without a text role: `costly` reads only the role and the review.
-            fn placed(role: Option<SubtitleRole>, review: bool) -> Outcome {
-                Outcome { role, review, text_role: None }
-            }
+    /// An outcome: `costly` reads only the role and the review.
+    fn placed(role: Option<SubtitleRole>, review: bool) -> Outcome {
+        Outcome { role, review }
+    }
 
-            /// Row 14's dialogue kinds.
-            const DIALOGUE: [SubtitleKind; 5] = [
-                SubtitleKind::Regular,
-                SubtitleKind::Sdh,
-                SubtitleKind::Translation,
-                SubtitleKind::DubTranscript,
-                SubtitleKind::ClosedCaptions,
-            ];
+    /// Row 14's dialogue kinds.
+    const DIALOGUE: [SubtitleKind; 5] = [
+        SubtitleKind::Regular,
+        SubtitleKind::Sdh,
+        SubtitleKind::Translation,
+        SubtitleKind::DubTranscript,
+        SubtitleKind::ClosedCaptions,
+    ];
 
-            #[test]
-            fn a_dialogue_track_dropped_is_costly_with_or_without_a_review() {
-                for kind in DIALOGUE {
-                    for review in [false, true] {
-                        assert_eq!(costly(kind, &placed(None, review)), Some(Costly::DialogueDropped), "{kind:?} {review}");
-                    }
-                }
-                let not_dialogue =
-                    [SubtitleKind::Forced, SubtitleKind::Commentary, SubtitleKind::Trivia, SubtitleKind::Lyrics, SubtitleKind::Other];
-                for kind in not_dialogue {
-                    for review in [false, true] {
-                        assert_eq!(costly(kind, &placed(None, review)), None, "{kind:?} {review}");
-                    }
-                }
-            }
-
-            #[test]
-            fn an_sdh_track_placed_as_regular_without_review_is_costly() {
-                assert_eq!(costly(SubtitleKind::Sdh, &placed(Some(SubtitleRole::Regular), false)), Some(Costly::SdhAsRegular));
-                assert_eq!(costly(SubtitleKind::Sdh, &placed(Some(SubtitleRole::Regular), true)), None);
-                assert_eq!(costly(SubtitleKind::Sdh, &placed(Some(SubtitleRole::Sdh), false)), None);
-            }
-
-            #[test]
-            fn a_regular_track_placed_as_sdh_without_review_is_costly() {
-                assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Sdh), false)), Some(Costly::RegularAsSdh));
-                assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Sdh), true)), None);
-                assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Regular), false)), None);
-            }
-
-            #[test]
-            fn a_track_flagged_forced_without_review_that_the_owner_does_not_name_forced_is_costly() {
-                for kind in SubtitleKind::ALL.into_iter().filter(|kind| *kind != SubtitleKind::Forced) {
-                    assert_eq!(costly(kind, &placed(Some(SubtitleRole::Forced), false)), Some(Costly::ForcedWrongly), "{kind:?}");
-                    assert_eq!(costly(kind, &placed(Some(SubtitleRole::Forced), true)), None, "{kind:?}");
-                }
-                assert_eq!(costly(SubtitleKind::Forced, &placed(Some(SubtitleRole::Forced), false)), None);
-            }
-
-            #[test]
-            fn a_forced_track_placed_as_regular_or_sdh_without_review_is_costly() {
-                for role in [SubtitleRole::Regular, SubtitleRole::Sdh] {
-                    assert_eq!(costly(SubtitleKind::Forced, &placed(Some(role), false)), Some(Costly::ForcedAsDialogue), "{role:?}");
-                    assert_eq!(costly(SubtitleKind::Forced, &placed(Some(role), true)), None, "{role:?}");
-                }
-            }
-
-            #[test]
-            fn a_commentary_trivia_or_lyrics_track_kept_without_review_is_costly() {
-                for kind in [SubtitleKind::Commentary, SubtitleKind::Trivia, SubtitleKind::Lyrics] {
-                    for role in [SubtitleRole::Regular, SubtitleRole::Sdh] {
-                        assert_eq!(costly(kind, &placed(Some(role), false)), Some(Costly::UnwantedKept), "{kind:?} {role:?}");
-                        assert_eq!(costly(kind, &placed(Some(role), true)), None, "{kind:?} {role:?}");
-                    }
-                    // Kept as forced, the verdict is row 14's earlier one: flagged forced without being forced.
-                    assert_eq!(costly(kind, &placed(Some(SubtitleRole::Forced), false)), Some(Costly::ForcedWrongly), "{kind:?}");
-                    assert_eq!(costly(kind, &placed(None, false)), None, "{kind:?}");
-                }
-            }
-
-            #[test]
-            fn every_right_place_and_every_reviewed_place_is_not_costly() {
-                let right = [
-                    (SubtitleKind::Regular, Some(SubtitleRole::Regular)),
-                    (SubtitleKind::Sdh, Some(SubtitleRole::Sdh)),
-                    (SubtitleKind::Forced, Some(SubtitleRole::Forced)),
-                    (SubtitleKind::Forced, None),
-                    (SubtitleKind::Translation, Some(SubtitleRole::Regular)),
-                    (SubtitleKind::Translation, Some(SubtitleRole::Sdh)),
-                    (SubtitleKind::DubTranscript, Some(SubtitleRole::Regular)),
-                    (SubtitleKind::ClosedCaptions, Some(SubtitleRole::Sdh)),
-                    (SubtitleKind::ClosedCaptions, Some(SubtitleRole::Regular)),
-                    (SubtitleKind::Commentary, None),
-                    (SubtitleKind::Trivia, None),
-                    (SubtitleKind::Lyrics, None),
-                    (SubtitleKind::Other, Some(SubtitleRole::Regular)),
-                    (SubtitleKind::Other, Some(SubtitleRole::Sdh)),
-                    (SubtitleKind::Other, None),
-                ];
-                for (kind, role) in right {
-                    assert_eq!(costly(kind, &placed(role, false)), None, "{kind:?} {role:?}");
-                }
-                for kind in SubtitleKind::ALL {
-                    for role in SubtitleRole::ALL {
-                        assert_eq!(costly(kind, &placed(Some(role), true)), None, "{kind:?} {role:?} with a review");
-                    }
-                }
-            }
-
-            #[test]
-            fn the_text_role_alone_never_makes_a_verdict() {
-                let kept = Outcome { role: Some(SubtitleRole::Regular), review: false, text_role: Some(Role::Sdh) };
-                assert_eq!(costly(SubtitleKind::Regular, &kept), None);
-                let dropped = Outcome { role: None, review: false, text_role: Some(Role::Regular) };
-                assert_eq!(costly(SubtitleKind::Regular, &dropped), Some(Costly::DialogueDropped));
-            }
-
-            #[test]
-            fn costly_verdicts_have_the_spellings_and_the_meanings_of_row_14() {
-                let spelt: Vec<&str> = Costly::ALL.iter().map(|verdict| verdict.as_str()).collect();
-                assert_eq!(
-                    spelt,
-                    ["dialogue_dropped", "sdh_as_regular", "regular_as_sdh", "forced_wrongly", "forced_as_dialogue", "unwanted_kept"]
-                );
-                for verdict in Costly::ALL {
-                    assert_eq!(serde_json::to_string(&verdict).unwrap(), format!("\"{}\"", verdict.as_str()));
-                    assert_eq!(verdict.as_str().parse::<Costly>(), Ok(verdict));
-                }
-                assert_eq!("dropped".parse::<Costly>(), Err("not a costly verdict: dropped".to_string()));
-                let meanings: Vec<&str> = Costly::ALL.iter().map(|verdict| verdict.meaning()).collect();
-                assert_eq!(
-                    meanings,
-                    [
-                        "a dialogue track dropped, with or without a review",
-                        "an SDH track placed as regular without review",
-                        "a regular track placed as SDH without review",
-                        "a track that is not forced flagged forced without review",
-                        "a forced track placed as regular or SDH without review",
-                        "a commentary, trivia or lyrics track kept without review",
-                    ]
-                );
+    #[test]
+    fn a_dialogue_track_dropped_is_costly_with_or_without_a_review() {
+        for kind in DIALOGUE {
+            for review in [false, true] {
+                assert_eq!(costly(kind, &placed(None, review)), Some(Costly::DialogueDropped), "{kind:?} {review}");
             }
         }
+        let not_dialogue =
+            [SubtitleKind::Forced, SubtitleKind::Commentary, SubtitleKind::Trivia, SubtitleKind::Lyrics, SubtitleKind::Other];
+        for kind in not_dialogue {
+            for review in [false, true] {
+                assert_eq!(costly(kind, &placed(None, review)), None, "{kind:?} {review}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_sdh_track_placed_as_regular_without_review_is_costly() {
+        assert_eq!(costly(SubtitleKind::Sdh, &placed(Some(SubtitleRole::Regular), false)), Some(Costly::SdhAsRegular));
+        assert_eq!(costly(SubtitleKind::Sdh, &placed(Some(SubtitleRole::Regular), true)), None);
+        assert_eq!(costly(SubtitleKind::Sdh, &placed(Some(SubtitleRole::Sdh), false)), None);
+    }
+
+    #[test]
+    fn a_regular_track_placed_as_sdh_without_review_is_costly() {
+        assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Sdh), false)), Some(Costly::RegularAsSdh));
+        assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Sdh), true)), None);
+        assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Regular), false)), None);
+    }
+
+    #[test]
+    fn a_track_flagged_forced_without_review_that_the_owner_does_not_name_forced_is_costly() {
+        for kind in SubtitleKind::ALL.into_iter().filter(|kind| *kind != SubtitleKind::Forced) {
+            assert_eq!(costly(kind, &placed(Some(SubtitleRole::Forced), false)), Some(Costly::ForcedWrongly), "{kind:?}");
+            assert_eq!(costly(kind, &placed(Some(SubtitleRole::Forced), true)), None, "{kind:?}");
+        }
+        assert_eq!(costly(SubtitleKind::Forced, &placed(Some(SubtitleRole::Forced), false)), None);
+    }
+
+    #[test]
+    fn a_forced_track_placed_as_regular_or_sdh_without_review_is_costly() {
+        for role in [SubtitleRole::Regular, SubtitleRole::Sdh] {
+            assert_eq!(costly(SubtitleKind::Forced, &placed(Some(role), false)), Some(Costly::ForcedAsDialogue), "{role:?}");
+            assert_eq!(costly(SubtitleKind::Forced, &placed(Some(role), true)), None, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn a_commentary_trivia_or_lyrics_track_kept_without_review_is_costly() {
+        for kind in [SubtitleKind::Commentary, SubtitleKind::Trivia, SubtitleKind::Lyrics] {
+            for role in [SubtitleRole::Regular, SubtitleRole::Sdh] {
+                assert_eq!(costly(kind, &placed(Some(role), false)), Some(Costly::UnwantedKept), "{kind:?} {role:?}");
+                assert_eq!(costly(kind, &placed(Some(role), true)), None, "{kind:?} {role:?}");
+            }
+            // Kept as forced, the verdict is row 14's earlier one: flagged forced without being forced.
+            assert_eq!(costly(kind, &placed(Some(SubtitleRole::Forced), false)), Some(Costly::ForcedWrongly), "{kind:?}");
+            assert_eq!(costly(kind, &placed(None, false)), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_right_place_and_every_reviewed_place_is_not_costly() {
+        let right = [
+            (SubtitleKind::Regular, Some(SubtitleRole::Regular)),
+            (SubtitleKind::Sdh, Some(SubtitleRole::Sdh)),
+            (SubtitleKind::Forced, Some(SubtitleRole::Forced)),
+            (SubtitleKind::Forced, None),
+            (SubtitleKind::Translation, Some(SubtitleRole::Regular)),
+            (SubtitleKind::Translation, Some(SubtitleRole::Sdh)),
+            (SubtitleKind::DubTranscript, Some(SubtitleRole::Regular)),
+            (SubtitleKind::ClosedCaptions, Some(SubtitleRole::Sdh)),
+            (SubtitleKind::ClosedCaptions, Some(SubtitleRole::Regular)),
+            (SubtitleKind::Commentary, None),
+            (SubtitleKind::Trivia, None),
+            (SubtitleKind::Lyrics, None),
+            (SubtitleKind::Other, Some(SubtitleRole::Regular)),
+            (SubtitleKind::Other, Some(SubtitleRole::Sdh)),
+            (SubtitleKind::Other, None),
+        ];
+        for (kind, role) in right {
+            assert_eq!(costly(kind, &placed(role, false)), None, "{kind:?} {role:?}");
+        }
+        for kind in SubtitleKind::ALL {
+            for role in SubtitleRole::ALL {
+                assert_eq!(costly(kind, &placed(Some(role), true)), None, "{kind:?} {role:?} with a review");
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_track_with_no_review_is_no_verdict_for_its_kind() {
+        assert_eq!(costly(SubtitleKind::Regular, &placed(Some(SubtitleRole::Regular), false)), None);
+        assert_eq!(costly(SubtitleKind::Regular, &placed(None, false)), Some(Costly::DialogueDropped));
+    }
+
+    #[test]
+    fn costly_verdicts_have_the_spellings_and_the_meanings_of_row_14() {
+        let spelt: Vec<&str> = Costly::ALL.iter().map(|verdict| verdict.as_str()).collect();
+        assert_eq!(
+            spelt,
+            ["dialogue_dropped", "sdh_as_regular", "regular_as_sdh", "forced_wrongly", "forced_as_dialogue", "unwanted_kept"]
+        );
+        for verdict in Costly::ALL {
+            assert_eq!(serde_json::to_string(&verdict).unwrap(), format!("\"{}\"", verdict.as_str()));
+            assert_eq!(verdict.as_str().parse::<Costly>(), Ok(verdict));
+        }
+        assert_eq!("dropped".parse::<Costly>(), Err("not a costly verdict: dropped".to_string()));
+        let meanings: Vec<&str> = Costly::ALL.iter().map(|verdict| verdict.meaning()).collect();
+        assert_eq!(
+            meanings,
+            [
+                "a dialogue track dropped, with or without a review",
+                "an SDH track placed as regular without review",
+                "a regular track placed as SDH without review",
+                "a track that is not forced flagged forced without review",
+                "a forced track placed as regular or SDH without review",
+                "a commentary, trivia or lyrics track kept without review",
+            ]
+        );
+    }
+}
 ```
 
 - [ ] **Step 7: Run the tests to see them fail**
@@ -56911,128 +57581,127 @@ and replace it with:
 pub use row14::{costly, exp14_requirements, Costly, Outcome, Row14};
 ```
 
-Then find the first line inside `mod row14`:
+Then, in `crates/core/src/subtitle/labels/row14.rs`, find its first line:
 
 ```rust
-    use regex::Regex;
+use regex::Regex;
 ```
 
 and replace it with:
 
 ```rust
-    use regex::Regex;
+use regex::Regex;
 
-    use crate::tracks::SubtitleRole;
+use crate::tracks::SubtitleRole;
 
-    use super::SubtitleKind;
+use super::SubtitleKind;
 ```
 
-Then insert this code immediately before the two lines `    #[cfg(test)]` and `    mod tests {` (indented four spaces, inside `mod row14`), preceded by one blank line:
+Then insert this code into `crates/core/src/subtitle/labels/row14.rs` immediately before its last two lines, `#[cfg(test)]` and `mod tests;`, preceded by one blank line:
 
 ```rust
-    // ------------------------------------------------------------------ the costly verdicts
+// ------------------------------------------------------------------ the costly verdicts
 
-    /// Row 14's costly verdicts, in the row's order. Spec 17 row 14 (a). Def: T18. Use: T18.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum Costly {
-        DialogueDropped,
-        SdhAsRegular,
-        RegularAsSdh,
-        ForcedWrongly,
-        ForcedAsDialogue,
-        UnwantedKept,
-    }
+/// Row 14's costly verdicts, in the row's order. Spec 17 row 14 (a). Def: T18. Use: T18.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Costly {
+    DialogueDropped,
+    SdhAsRegular,
+    RegularAsSdh,
+    ForcedWrongly,
+    ForcedAsDialogue,
+    UnwantedKept,
+}
 
-    impl Costly {
-        /// Every costly verdict, in row 14's order. Spec 17 row 14 (a).
-        pub const ALL: [Costly; 6] = [
-            Costly::DialogueDropped,
-            Costly::SdhAsRegular,
-            Costly::RegularAsSdh,
-            Costly::ForcedWrongly,
-            Costly::ForcedAsDialogue,
-            Costly::UnwantedKept,
-        ];
-
-        /// The verdict's snake_case spelling, its serde name. Spec 17 row 14 (a).
-        pub fn as_str(self) -> &'static str {
-            match self {
-                Costly::DialogueDropped => "dialogue_dropped",
-                Costly::SdhAsRegular => "sdh_as_regular",
-                Costly::RegularAsSdh => "regular_as_sdh",
-                Costly::ForcedWrongly => "forced_wrongly",
-                Costly::ForcedAsDialogue => "forced_as_dialogue",
-                Costly::UnwantedKept => "unwanted_kept",
-            }
-        }
-
-        /// What the verdict is, in row 14's words, for the report's COSTLY lines. Spec 17 row 14 (a).
-        pub fn meaning(self) -> &'static str {
-            match self {
-                Costly::DialogueDropped => "a dialogue track dropped, with or without a review",
-                Costly::SdhAsRegular => "an SDH track placed as regular without review",
-                Costly::RegularAsSdh => "a regular track placed as SDH without review",
-                Costly::ForcedWrongly => "a track that is not forced flagged forced without review",
-                Costly::ForcedAsDialogue => "a forced track placed as regular or SDH without review",
-                Costly::UnwantedKept => "a commentary, trivia or lyrics track kept without review",
-            }
-        }
-    }
-
-    impl std::str::FromStr for Costly {
-        type Err = String;
-
-        /// Exactly the `as_str` spellings. Spec 17 row 14 (a).
-        fn from_str(text: &str) -> Result<Costly, String> {
-            Costly::ALL
-                .into_iter()
-                .find(|verdict| verdict.as_str() == text)
-                .ok_or_else(|| format!("not a costly verdict: {text}"))
-        }
-    }
-
-    /// What the rules gave a labelled track: the role the judged rule places it in (None = dropped), whether a review was
-    /// raised, and the text rule's role. The harness builds two per track: the text rule's (what row 14 (a) judges; for a
-    /// stream the text rule sets aside, 8.7's) and 8.7's as the app decides before experiment 14 answers (shown beside it).
-    /// Spec 17 row 14 (a), 8.7 "Text". Def: T18. Use: T18.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct Outcome {
-        pub role: Option<SubtitleRole>,
-        pub review: bool,
-        pub text_role: Option<crate::subtitle::text::Role>,
-    }
-
-    /// Row 14's dialogue kinds: dropping one is costly, with or without a review.
-    const DIALOGUE_KINDS: [SubtitleKind; 5] = [
-        SubtitleKind::Regular,
-        SubtitleKind::Sdh,
-        SubtitleKind::Translation,
-        SubtitleKind::DubTranscript,
-        SubtitleKind::ClosedCaptions,
+impl Costly {
+    /// Every costly verdict, in row 14's order. Spec 17 row 14 (a).
+    pub const ALL: [Costly; 6] = [
+        Costly::DialogueDropped,
+        Costly::SdhAsRegular,
+        Costly::RegularAsSdh,
+        Costly::ForcedWrongly,
+        Costly::ForcedAsDialogue,
+        Costly::UnwantedKept,
     ];
-    /// Row 14's unwanted kinds: keeping one without review is costly.
-    const UNWANTED_KINDS: [SubtitleKind; 3] = [SubtitleKind::Commentary, SubtitleKind::Trivia, SubtitleKind::Lyrics];
 
-    /// The costly verdict, if any, of one labelled track's outcome, checked in row 14's order (the first that applies): a
-    /// dialogue kind (regular, sdh, translation, dub-transcript, closed-captions) dropped; sdh as Regular or regular as Sdh
-    /// without review; Forced without review on a non-forced kind, or a forced kind as Regular or Sdh without review;
-    /// commentary, trivia or lyrics kept without review. Reads `role` and `review` only. Spec 17 row 14 (a). Def: T18.
-    /// Use: T18.
-    pub fn costly(kind: SubtitleKind, outcome: &Outcome) -> Option<Costly> {
-        let quiet = !outcome.review;
-        match outcome.role {
-            None if DIALOGUE_KINDS.contains(&kind) => Some(Costly::DialogueDropped),
-            Some(SubtitleRole::Regular) if quiet && kind == SubtitleKind::Sdh => Some(Costly::SdhAsRegular),
-            Some(SubtitleRole::Sdh) if quiet && kind == SubtitleKind::Regular => Some(Costly::RegularAsSdh),
-            Some(SubtitleRole::Forced) if quiet && kind != SubtitleKind::Forced => Some(Costly::ForcedWrongly),
-            Some(SubtitleRole::Regular | SubtitleRole::Sdh) if quiet && kind == SubtitleKind::Forced => {
-                Some(Costly::ForcedAsDialogue)
-            }
-            Some(_) if quiet && UNWANTED_KINDS.contains(&kind) => Some(Costly::UnwantedKept),
-            _ => None,
+    /// The verdict's snake_case spelling, its serde name. Spec 17 row 14 (a).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Costly::DialogueDropped => "dialogue_dropped",
+            Costly::SdhAsRegular => "sdh_as_regular",
+            Costly::RegularAsSdh => "regular_as_sdh",
+            Costly::ForcedWrongly => "forced_wrongly",
+            Costly::ForcedAsDialogue => "forced_as_dialogue",
+            Costly::UnwantedKept => "unwanted_kept",
         }
     }
+
+    /// What the verdict is, in row 14's words, for the report's COSTLY lines. Spec 17 row 14 (a).
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Costly::DialogueDropped => "a dialogue track dropped, with or without a review",
+            Costly::SdhAsRegular => "an SDH track placed as regular without review",
+            Costly::RegularAsSdh => "a regular track placed as SDH without review",
+            Costly::ForcedWrongly => "a track that is not forced flagged forced without review",
+            Costly::ForcedAsDialogue => "a forced track placed as regular or SDH without review",
+            Costly::UnwantedKept => "a commentary, trivia or lyrics track kept without review",
+        }
+    }
+}
+
+impl std::str::FromStr for Costly {
+    type Err = String;
+
+    /// Exactly the `as_str` spellings. Spec 17 row 14 (a).
+    fn from_str(text: &str) -> Result<Costly, String> {
+        Costly::ALL
+            .into_iter()
+            .find(|verdict| verdict.as_str() == text)
+            .ok_or_else(|| format!("not a costly verdict: {text}"))
+    }
+}
+
+/// What the rules gave a labelled track: the role the judged rule places it in (None = dropped) and whether a review
+/// was raised. The harness builds two per track: the text rule's (what row 14 (a) judges; for a
+/// stream the text rule sets aside, 8.7's) and 8.7's as the app decides before experiment 14 answers (shown beside it).
+/// Spec 17 row 14 (a), 8.7 "Text". Def: T18. Use: T18.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub role: Option<SubtitleRole>,
+    pub review: bool,
+}
+
+/// Row 14's dialogue kinds: dropping one is costly, with or without a review.
+const DIALOGUE_KINDS: [SubtitleKind; 5] = [
+    SubtitleKind::Regular,
+    SubtitleKind::Sdh,
+    SubtitleKind::Translation,
+    SubtitleKind::DubTranscript,
+    SubtitleKind::ClosedCaptions,
+];
+/// Row 14's unwanted kinds: keeping one without review is costly.
+const UNWANTED_KINDS: [SubtitleKind; 3] = [SubtitleKind::Commentary, SubtitleKind::Trivia, SubtitleKind::Lyrics];
+
+/// The costly verdict, if any, of one labelled track's outcome, checked in row 14's order (the first that applies): a
+/// dialogue kind (regular, sdh, translation, dub-transcript, closed-captions) dropped; sdh as Regular or regular as Sdh
+/// without review; Forced without review on a non-forced kind, or a forced kind as Regular or Sdh without review;
+/// commentary, trivia or lyrics kept without review. Reads `role` and `review` only. Spec 17 row 14 (a). Def: T18.
+/// Use: T18.
+pub fn costly(kind: SubtitleKind, outcome: &Outcome) -> Option<Costly> {
+    let quiet = !outcome.review;
+    match outcome.role {
+        None if DIALOGUE_KINDS.contains(&kind) => Some(Costly::DialogueDropped),
+        Some(SubtitleRole::Regular) if quiet && kind == SubtitleKind::Sdh => Some(Costly::SdhAsRegular),
+        Some(SubtitleRole::Sdh) if quiet && kind == SubtitleKind::Regular => Some(Costly::RegularAsSdh),
+        Some(SubtitleRole::Forced) if quiet && kind != SubtitleKind::Forced => Some(Costly::ForcedWrongly),
+        Some(SubtitleRole::Regular | SubtitleRole::Sdh) if quiet && kind == SubtitleKind::Forced => {
+            Some(Costly::ForcedAsDialogue)
+        }
+        Some(_) if quiet && UNWANTED_KINDS.contains(&kind) => Some(Costly::UnwantedKept),
+        _ => None,
+    }
+}
 
 ```
 
@@ -57040,7 +57709,7 @@ Then insert this code immediately before the two lines `    #[cfg(test)]` and ` 
 
 Run: `scripts/box.sh cargo test -p lazymkv-core subtitle::labels::row14::`
 
-Expected: PASS, `test result: ok. 14 passed; 0 failed` (the 5 of `requirements` and the 9 of `verdicts`), with no warning from `crates/core/src/subtitle/labels.rs`.
+Expected: PASS, `test result: ok. 14 passed; 0 failed` (the 5 of `requirements` and the 9 of `verdicts`), with no warning from `crates/core/src/subtitle/labels.rs` or its `labels/row14` files.
 
 - [ ] **Step 10: Write the failing tests of the harness (RP15, spec 15, row 14 (a), 8.7 "Text")**
 
@@ -57052,866 +57721,866 @@ The synthetic recordings below are written into a `MemTree` exactly as a recordi
 - The UK-style SDH count (RP25) reuses those outcomes: disc-b's cued stream (`keep` with a review), labelled `sdh` with `style` "uk", counts; the plain stream of disc-a's layout under three other slugs, labelled `sdh` from a flag, `regular`, and `sdh` after the verdict was seen, each with `style` "uk", does not count as a UK-style SDH track (its two sdh labels are costly, as disc-a's sdh label is in the first test).
 - The settings tests run without OCR text and read the 8.7 column: one stream of 40 events against a second offset by 0.5 s with 4 more events (Different at 300 ms, Same at 600 ms); and streams sharing exactly half their starts (a share of 0.5: between the bands at the defaults, Same at `subs_same_min` 0.5, Different at `subs_diff_max` 0.5).
 
-In `crates/core/src/subtitle/labels.rs`, insert this module immediately before the file's last two lines (`    }`, which closes `mod tests`, and `}`, which closes `mod row14`), preceded by one blank line:
+Append this module to the end of `crates/core/src/subtitle/labels/row14/tests.rs`, preceded by one blank line:
 
 ```rust
-        mod runs {
-            use serde_json::{json, Value};
+mod runs {
+    use serde_json::{json, Value};
 
-            use crate::recording::{MemTree, PathKey, Tree};
-            use crate::settings::Settings;
-            use crate::subtitle::labels::{load, FORMAT};
-            use crate::testsupport::scan_text;
+    use crate::recording::{MemTree, PathKey, Tree};
+    use crate::settings::Settings;
+    use crate::subtitle::labels::{load, FORMAT};
+    use crate::testsupport::scan_text;
 
-            use super::super::{harness, Costly, Row14, SubtitleHarness};
+    use super::super::{harness, Costly, Row14, SubtitleHarness};
 
-            /// Made-up English lines for the OCR text (no line of any real subtitle): the dialogue of `lazymkv-dev decide`'s
-            /// unit test fixture, whose text rule outcomes that test pins.
-            const LINES: [&str; 6] = [
-                "The cat and the dog went to the shop.",
-                "You know that is not what I said.",
-                "We have to go back to the house now.",
-                "It was the best day of the year.",
-                "He said that you would be there.",
-                "What do you want me to do with this.",
-            ];
-            /// A made-up sound cue, put before every third line of a cued stream.
-            const CUE: &str = "[DOOR CLOSES]";
-            /// MakeMKV's log of a rip: one made-up message, no MSG:4047 removal.
-            const RIP: &str = "MSG:5011,0,0,\"made-up line\",\"made-up line\"\n";
-            /// The rip summaries' profiles: the eng selection and the all selection.
-            const ENG_ONLY: &str = "C:\\made-up\\eng-only.mmcp.xml";
-            const ALL_TRACKS: &str = "C:\\made-up\\all-tracks.mmcp.xml";
-            /// Title 0's attributes: 2 chapters, 10 minutes, and a playlist on a Blu-ray or a DVD title number on a DVD.
-            const BD_TITLE: &[(u32, &str)] = &[(8, "2"), (9, "0:10:00"), (16, "00001.mpls")];
-            const DVD_TITLE: &[(u32, &str)] = &[(8, "2"), (9, "0:10:00"), (24, "01")];
-            /// Stream attributes as MakeMKV writes them (spec 9.4; the codec names of the recordings).
-            const AVC: &[(u32, &str)] = &[(1, "Video"), (5, "V_MPEG4/ISO/AVC"), (6, "Mpeg4"), (7, "Mpeg4 AVC High@L4.1")];
-            const MPEG2: &[(u32, &str)] = &[(1, "Video"), (5, "V_MPEG2"), (6, "Mpeg2"), (7, "Mpeg2")];
-            const AC3: &[(u32, &str)] =
-                &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
-            const VOBSUB: &[(u32, &str)] = &[(1, "Subtitles"), (3, "eng"), (5, "S_VOBSUB"), (6, ""), (7, "Dvd Subtitles")];
-            const CAPTIONS: &[(u32, &str)] = &[
-                (1, "Subtitles"),
-                (3, "eng"),
-                (5, "S_CC608/DVD"),
-                (6, "CC"),
-                (7, "Closed Captions"),
-                (41, "Text"),
-                (42, "( Lossy conversion )"),
-            ];
+    /// Made-up English lines for the OCR text (no line of any real subtitle): the dialogue of `lazymkv-dev decide`'s
+    /// unit test fixture, whose text rule outcomes that test pins.
+    const LINES: [&str; 6] = [
+        "The cat and the dog went to the shop.",
+        "You know that is not what I said.",
+        "We have to go back to the house now.",
+        "It was the best day of the year.",
+        "He said that you would be there.",
+        "What do you want me to do with this.",
+    ];
+    /// A made-up sound cue, put before every third line of a cued stream.
+    const CUE: &str = "[DOOR CLOSES]";
+    /// MakeMKV's log of a rip: one made-up message, no MSG:4047 removal.
+    const RIP: &str = "MSG:5011,0,0,\"made-up line\",\"made-up line\"\n";
+    /// The rip summaries' profiles: the eng selection and the all selection.
+    const ENG_ONLY: &str = "C:\\made-up\\eng-only.mmcp.xml";
+    const ALL_TRACKS: &str = "C:\\made-up\\all-tracks.mmcp.xml";
+    /// Title 0's attributes: 2 chapters, 10 minutes, and a playlist on a Blu-ray or a DVD title number on a DVD.
+    const BD_TITLE: &[(u32, &str)] = &[(8, "2"), (9, "0:10:00"), (16, "00001.mpls")];
+    const DVD_TITLE: &[(u32, &str)] = &[(8, "2"), (9, "0:10:00"), (24, "01")];
+    /// Stream attributes as MakeMKV writes them (spec 9.4; the codec names of the recordings).
+    const AVC: &[(u32, &str)] = &[(1, "Video"), (5, "V_MPEG4/ISO/AVC"), (6, "Mpeg4"), (7, "Mpeg4 AVC High@L4.1")];
+    const MPEG2: &[(u32, &str)] = &[(1, "Video"), (5, "V_MPEG2"), (6, "Mpeg2"), (7, "Mpeg2")];
+    const AC3: &[(u32, &str)] =
+        &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
+    const VOBSUB: &[(u32, &str)] = &[(1, "Subtitles"), (3, "eng"), (5, "S_VOBSUB"), (6, ""), (7, "Dvd Subtitles")];
+    const CAPTIONS: &[(u32, &str)] = &[
+        (1, "Subtitles"),
+        (3, "eng"),
+        (5, "S_CC608/DVD"),
+        (6, "CC"),
+        (7, "Closed Captions"),
+        (41, "Text"),
+        (42, "( Lossy conversion )"),
+    ];
 
-            /// A label: (rip label, file track, kind, how, sure).
-            type Label = (&'static str, i64, &'static str, &'static str, bool);
+    /// A label: (rip label, file track, kind, how, sure).
+    type Label = (&'static str, i64, &'static str, &'static str, bool);
 
-            /// One subtitle stream of a synthetic rip: its subs/index.json entry, its packets, and its OCR text when read.
-            struct Sub {
-                n: i64,
-                track: i64,
-                language: &'static str,
-                codec: &'static str,
-                packets: Vec<Value>,
-                ocr: Option<String>,
+    /// One subtitle stream of a synthetic rip: its subs/index.json entry, its packets, and its OCR text when read.
+    struct Sub {
+        n: i64,
+        track: i64,
+        language: &'static str,
+        codec: &'static str,
+        packets: Vec<Value>,
+        ocr: Option<String>,
+    }
+
+    /// One synthetic recording with one rip label of title 0.
+    struct Rec {
+        slug: &'static str,
+        scan: String,
+        tmdb: Option<Value>,
+        label: &'static str,
+        profile: &'static str,
+        tracks: Vec<Value>,
+        chapters: i64,
+        subs: Vec<Sub>,
+        labels: Vec<Label>,
+    }
+
+    /// `count` start times from `from`, `step` seconds apart.
+    fn starts(count: usize, from: f64, step: f64) -> Vec<f64> {
+        (0..count).map(|k| from + step * k as f64).collect()
+    }
+
+    /// The OCR text of events at `starts`: one record per event carrying LINES in turn, CUE first on every third
+    /// when `cue`.
+    fn ocr_text(starts: &[f64], cue: bool) -> String {
+        let mut text = String::new();
+        for (k, t) in starts.iter().enumerate() {
+            let mut lines = vec![LINES[k % 6]];
+            if cue && k % 3 == 0 {
+                lines.insert(0, CUE);
             }
+            text.push_str(&json!({"frame": k, "t": t, "pts": t, "lines": lines}).to_string());
+            text.push('\n');
+        }
+        text
+    }
 
-            /// One synthetic recording with one rip label of title 0.
-            struct Rec {
-                slug: &'static str,
-                scan: String,
-                tmdb: Option<Value>,
-                label: &'static str,
-                profile: &'static str,
-                tracks: Vec<Value>,
-                chapters: i64,
-                subs: Vec<Sub>,
-                labels: Vec<Label>,
-            }
+    /// A PGS stream: a 3000-byte packet at each start, a 30-byte clear packet 2 s later.
+    fn pgs(n: i64, track: i64, language: &'static str, starts: &[f64], cue: bool, read: bool) -> Sub {
+        let packets = starts
+            .iter()
+            .flat_map(|&t| {
+                [
+                    json!({"pts_time": format!("{t:.6}"), "duration_time": "2.000000", "size": "3000"}),
+                    json!({"pts_time": format!("{:.6}", t + 2.0), "duration_time": "N/A", "size": "30"}),
+                ]
+            })
+            .collect();
+        Sub { n, track, language, codec: "HDMV PGS", packets, ocr: read.then(|| ocr_text(starts, cue)) }
+    }
 
-            /// `count` start times from `from`, `step` seconds apart.
-            fn starts(count: usize, from: f64, step: f64) -> Vec<f64> {
-                (0..count).map(|k| from + step * k as f64).collect()
-            }
+    /// An English VobSub stream: a 2000-byte packet at each start, no clear packet.
+    fn vobsub(n: i64, track: i64, starts: &[f64], read: bool) -> Sub {
+        let packets = starts
+            .iter()
+            .map(|&t| json!({"pts_time": format!("{t:.6}"), "duration_time": "2.000000", "size": "2000"}))
+            .collect();
+        Sub { n, track, language: "eng", codec: "VobSub", packets, ocr: read.then(|| ocr_text(starts, false)) }
+    }
 
-            /// The OCR text of events at `starts`: one record per event carrying LINES in turn, CUE first on every third
-            /// when `cue`.
-            fn ocr_text(starts: &[f64], cue: bool) -> String {
-                let mut text = String::new();
-                for (k, t) in starts.iter().enumerate() {
-                    let mut lines = vec![LINES[k % 6]];
-                    if cue && k % 3 == 0 {
-                        lines.insert(0, CUE);
-                    }
-                    text.push_str(&json!({"frame": k, "t": t, "pts": t, "lines": lines}).to_string());
-                    text.push('\n');
-                }
-                text
-            }
+    /// The DVD's English closed captions as MakeMKV converts them: a text stream, every packet an event, no OCR text.
+    fn captions(n: i64, track: i64, starts: &[f64]) -> Sub {
+        let packets = starts
+            .iter()
+            .map(|&t| json!({"pts_time": format!("{t:.6}"), "duration_time": "2.000000", "size": "40"}))
+            .collect();
+        Sub { n, track, language: "eng", codec: "SubRip/SRT", packets, ocr: None }
+    }
 
-            /// A PGS stream: a 3000-byte packet at each start, a 30-byte clear packet 2 s later.
-            fn pgs(n: i64, track: i64, language: &'static str, starts: &[f64], cue: bool, read: bool) -> Sub {
-                let packets = starts
-                    .iter()
-                    .flat_map(|&t| {
-                        [
-                            json!({"pts_time": format!("{t:.6}"), "duration_time": "2.000000", "size": "3000"}),
-                            json!({"pts_time": format!("{:.6}", t + 2.0), "duration_time": "N/A", "size": "30"}),
-                        ]
-                    })
-                    .collect();
-                Sub { n, track, language, codec: "HDMV PGS", packets, ocr: read.then(|| ocr_text(starts, cue)) }
-            }
+    /// mkvmerge -J tracks.
+    fn video_track(id: i64, codec: &str) -> Value {
+        json!({"id": id, "type": "video", "codec": codec, "properties": {}})
+    }
+    fn audio_track(id: i64) -> Value {
+        json!({"id": id, "type": "audio", "codec": "AC-3", "properties": {"language": "eng", "audio_channels": 2}})
+    }
+    fn subtitle_track(id: i64, codec: &str, language: &str) -> Value {
+        json!({"id": id, "type": "subtitles", "codec": codec, "properties": {"language": language}})
+    }
 
-            /// An English VobSub stream: a 2000-byte packet at each start, no clear packet.
-            fn vobsub(n: i64, track: i64, starts: &[f64], read: bool) -> Sub {
-                let packets = starts
-                    .iter()
-                    .map(|&t| json!({"pts_time": format!("{t:.6}"), "duration_time": "2.000000", "size": "2000"}))
-                    .collect();
-                Sub { n, track, language: "eng", codec: "VobSub", packets, ocr: read.then(|| ocr_text(starts, false)) }
-            }
+    /// A PGS stream's attributes in `language`.
+    fn pgs_attrs(language: &'static str) -> Vec<(u32, &'static str)> {
+        vec![(1, "Subtitles"), (3, language), (5, "S_HDMV/PGS"), (6, "PGS"), (7, "HDMV PGS Subtitles")]
+    }
 
-            /// The DVD's English closed captions as MakeMKV converts them: a text stream, every packet an event, no OCR text.
-            fn captions(n: i64, track: i64, starts: &[f64]) -> Sub {
-                let packets = starts
-                    .iter()
-                    .map(|&t| json!({"pts_time": format!("{t:.6}"), "duration_time": "2.000000", "size": "40"}))
-                    .collect();
-                Sub { n, track, language: "eng", codec: "SubRip/SRT", packets, ocr: None }
-            }
+    /// A one-title robot log: the disc's CINFO, title 0's attributes, its streams numbered from 0.
+    fn scan_of(disc: &[(u32, &str)], title: &[(u32, &str)], streams: &[Vec<(u32, &'static str)>]) -> String {
+        let numbered: Vec<(u32, &[(u32, &str)])> =
+            streams.iter().enumerate().map(|(k, attrs)| (k as u32, attrs.as_slice())).collect();
+        scan_text(disc, &[(0, title, numbered.as_slice())])
+    }
 
-            /// mkvmerge -J tracks.
-            fn video_track(id: i64, codec: &str) -> Value {
-                json!({"id": id, "type": "video", "codec": codec, "properties": {}})
-            }
-            fn audio_track(id: i64) -> Value {
-                json!({"id": id, "type": "audio", "codec": "AC-3", "properties": {"language": "eng", "audio_channels": 2}})
-            }
-            fn subtitle_track(id: i64, codec: &str, language: &str) -> Value {
-                json!({"id": id, "type": "subtitles", "codec": codec, "properties": {"language": language}})
-            }
+    /// A Blu-ray recording: title 0 with video (scan stream 0, file track 0) and one PGS stream per entry of `subs`
+    /// (language, starts, cue, read): scan stream k + 1, file track k + 1, subs/index.json n = k.
+    fn bluray(
+        slug: &'static str,
+        tmdb: Option<Value>,
+        label: &'static str,
+        profile: &'static str,
+        subs: &[(&'static str, Vec<f64>, bool, bool)],
+        labels: Vec<Label>,
+    ) -> Rec {
+        let mut streams = vec![AVC.to_vec()];
+        let mut tracks = vec![video_track(0, "AVC/H.264/MPEG-4p10")];
+        let mut built = Vec::new();
+        for (k, (language, at, cue, read)) in subs.iter().enumerate() {
+            let n = k as i64;
+            streams.push(pgs_attrs(*language));
+            tracks.push(subtitle_track(n + 1, "HDMV PGS", language));
+            built.push(pgs(n, n + 1, *language, at, *cue, *read));
+        }
+        let scan = scan_of(&[(1, "Blu-ray disc")], BD_TITLE, &streams);
+        Rec { slug, scan, tmdb, label, profile, tracks, chapters: 2, subs: built, labels }
+    }
 
-            /// A PGS stream's attributes in `language`.
-            fn pgs_attrs(language: &'static str) -> Vec<(u32, &'static str)> {
-                vec![(1, "Subtitles"), (3, language), (5, "S_HDMV/PGS"), (6, "PGS"), (7, "HDMV PGS Subtitles")]
-            }
+    /// TMDb's slim record of a film (`title`) and of a show (`name`).
+    fn film() -> Option<Value> {
+        Some(json!({"title": "Made Up Film", "original_language": "en"}))
+    }
+    fn show() -> Option<Value> {
+        Some(json!({"name": "Made Up Show", "original_language": "en"}))
+    }
 
-            /// A one-title robot log: the disc's CINFO, title 0's attributes, its streams numbered from 0.
-            fn scan_of(disc: &[(u32, &str)], title: &[(u32, &str)], streams: &[Vec<(u32, &'static str)>]) -> String {
-                let numbered: Vec<(u32, &[(u32, &str)])> =
-                    streams.iter().enumerate().map(|(k, attrs)| (k as u32, attrs.as_slice())).collect();
-                scan_text(disc, &[(0, title, numbered.as_slice())])
-            }
+    /// A film with one English PGS stream (scan stream 1, file track 1) of 40 events, the plain dialogue; read by
+    /// OCR when `read`.
+    fn disc_a(slug: &'static str, labels: Vec<Label>, read: bool) -> Rec {
+        bluray(slug, film(), "eng-only", ENG_ONLY, &[("eng", starts(40, 10.0, 3.0), false, read)], labels)
+    }
 
-            /// A Blu-ray recording: title 0 with video (scan stream 0, file track 0) and one PGS stream per entry of `subs`
-            /// (language, starts, cue, read): scan stream k + 1, file track k + 1, subs/index.json n = k.
-            fn bluray(
-                slug: &'static str,
-                tmdb: Option<Value>,
-                label: &'static str,
-                profile: &'static str,
-                subs: &[(&'static str, Vec<f64>, bool, bool)],
-                labels: Vec<Label>,
-            ) -> Rec {
-                let mut streams = vec![AVC.to_vec()];
-                let mut tracks = vec![video_track(0, "AVC/H.264/MPEG-4p10")];
-                let mut built = Vec::new();
-                for (k, (language, at, cue, read)) in subs.iter().enumerate() {
-                    let n = k as i64;
-                    streams.push(pgs_attrs(*language));
-                    tracks.push(subtitle_track(n + 1, "HDMV PGS", language));
-                    built.push(pgs(n, n + 1, *language, at, *cue, *read));
-                }
-                let scan = scan_of(&[(1, "Blu-ray disc")], BD_TITLE, &streams);
-                Rec { slug, scan, tmdb, label, profile, tracks, chapters: 2, subs: built, labels }
-            }
+    /// disc-b, a TV episode: two English PGS streams with the same 40 starts, the plain dialogue (scan stream 1)
+    /// and the cued one (scan stream 2, read by OCR when `read_second`).
+    fn disc_b(labels: Vec<Label>, read_second: bool) -> Rec {
+        let at = starts(40, 10.0, 3.0);
+        let subs = [("eng", at.clone(), false, true), ("eng", at, true, read_second)];
+        bluray("disc-b", show(), "eng-only", ENG_ONLY, &subs, labels)
+    }
 
-            /// TMDb's slim record of a film (`title`) and of a show (`name`).
-            fn film() -> Option<Value> {
-                Some(json!({"title": "Made Up Film", "original_language": "en"}))
-            }
-            fn show() -> Option<Value> {
-                Some(json!({"name": "Made Up Show", "original_language": "en"}))
-            }
+    /// disc-d, a DVD: MPEG-2 video (0), English AC-3 audio (1), English VobSub (2, the plain dialogue, read by OCR)
+    /// and closed captions (3). The file holds the captions right after the audio (6.2 step 7): file tracks 0
+    /// video, 1 audio, 2 captions (n 0), 3 VobSub (n 1).
+    fn disc_d(labels: Vec<Label>) -> Rec {
+        let at = starts(40, 10.0, 3.0);
+        Rec {
+            slug: "disc-d",
+            scan: scan_of(&[(1, "DVD disc")], DVD_TITLE, &[MPEG2.to_vec(), AC3.to_vec(), VOBSUB.to_vec(), CAPTIONS.to_vec()]),
+            tmdb: None,
+            label: "all-tracks",
+            profile: ALL_TRACKS,
+            tracks: vec![
+                video_track(0, "MPEG-1/2"),
+                audio_track(1),
+                subtitle_track(2, "SubRip/SRT", "eng"),
+                subtitle_track(3, "VobSub", "eng"),
+            ],
+            chapters: 2,
+            subs: vec![captions(0, 2, &at), vobsub(1, 3, &at, true)],
+            labels,
+        }
+    }
 
-            /// A film with one English PGS stream (scan stream 1, file track 1) of 40 events, the plain dialogue; read by
-            /// OCR when `read`.
-            fn disc_a(slug: &'static str, labels: Vec<Label>, read: bool) -> Rec {
-                bluray(slug, film(), "eng-only", ENG_ONLY, &[("eng", starts(40, 10.0, 3.0), false, read)], labels)
-            }
+    /// subtitle-labels.json with `labels`, each dated 2026-10-16, given before the verdict was seen
+    /// (`saw_verdict` false), with no note and no style (RP25).
+    fn labels_json(slug: &str, labels: &[Label]) -> String {
+        let tracks: Vec<Value> = labels
+            .iter()
+            .map(|&(label, stream, kind, how, sure)| {
+                json!({"label": label, "stream": stream, "kind": kind, "how": how, "sure": sure,
+                       "date": "2026-10-16", "saw_verdict": false, "note": null, "style": null})
+            })
+            .collect();
+        json!({"format": FORMAT, "slug": slug, "tracks": tracks}).to_string()
+    }
 
-            /// disc-b, a TV episode: two English PGS streams with the same 40 starts, the plain dialogue (scan stream 1)
-            /// and the cued one (scan stream 2, read by OCR when `read_second`).
-            fn disc_b(labels: Vec<Label>, read_second: bool) -> Rec {
-                let at = starts(40, 10.0, 3.0);
-                let subs = [("eng", at.clone(), false, true), ("eng", at, true, read_second)];
-                bluray("disc-b", show(), "eng-only", ENG_ONLY, &subs, labels)
-            }
+    /// Rewrites `slug`'s subtitle-labels.json with `labels`, label number `at` carrying each (key, value) of `set`
+    /// (RP25's `saw_verdict` and `style`).
+    fn relabel(evidence: &mut MemTree, slug: &str, labels: &[Label], at: usize, set: &[(&str, Value)]) {
+        let mut file: Value = serde_json::from_str(&labels_json(slug, labels)).expect("labels_json writes JSON");
+        for (key, value) in set {
+            file["tracks"][at][*key] = value.clone();
+        }
+        evidence.insert_file(&format!("{slug}/subtitle-labels.json"), file.to_string());
+    }
 
-            /// disc-d, a DVD: MPEG-2 video (0), English AC-3 audio (1), English VobSub (2, the plain dialogue, read by OCR)
-            /// and closed captions (3). The file holds the captions right after the audio (6.2 step 7): file tracks 0
-            /// video, 1 audio, 2 captions (n 0), 3 VobSub (n 1).
-            fn disc_d(labels: Vec<Label>) -> Rec {
-                let at = starts(40, 10.0, 3.0);
-                Rec {
-                    slug: "disc-d",
-                    scan: scan_of(&[(1, "DVD disc")], DVD_TITLE, &[MPEG2.to_vec(), AC3.to_vec(), VOBSUB.to_vec(), CAPTIONS.to_vec()]),
-                    tmdb: None,
-                    label: "all-tracks",
-                    profile: ALL_TRACKS,
-                    tracks: vec![
-                        video_track(0, "MPEG-1/2"),
-                        audio_track(1),
-                        subtitle_track(2, "SubRip/SRT", "eng"),
-                        subtitle_track(3, "VobSub", "eng"),
-                    ],
-                    chapters: 2,
-                    subs: vec![captions(0, 2, &at), vobsub(1, 3, &at, true)],
-                    labels,
-                }
-            }
-
-            /// subtitle-labels.json with `labels`, each dated 2026-10-16, given before the verdict was seen
-            /// (`saw_verdict` false), with no note and no style (RP25).
-            fn labels_json(slug: &str, labels: &[Label]) -> String {
-                let tracks: Vec<Value> = labels
-                    .iter()
-                    .map(|&(label, stream, kind, how, sure)| {
-                        json!({"label": label, "stream": stream, "kind": kind, "how": how, "sure": sure,
-                               "date": "2026-10-16", "saw_verdict": false, "note": null, "style": null})
-                    })
-                    .collect();
-                json!({"format": FORMAT, "slug": slug, "tracks": tracks}).to_string()
-            }
-
-            /// Rewrites `slug`'s subtitle-labels.json with `labels`, label number `at` carrying each (key, value) of `set`
-            /// (RP25's `saw_verdict` and `style`).
-            fn relabel(evidence: &mut MemTree, slug: &str, labels: &[Label], at: usize, set: &[(&str, Value)]) {
-                let mut file: Value = serde_json::from_str(&labels_json(slug, labels)).expect("labels_json writes JSON");
-                for (key, value) in set {
-                    file["tracks"][at][*key] = value.clone();
-                }
-                evidence.insert_file(&format!("{slug}/subtitle-labels.json"), file.to_string());
-            }
-
-            /// Writes `rec` into the evidence tree and its OCR text into the text tree.
-            fn put(rec: &Rec, evidence: &mut MemTree, text: &mut MemTree) {
-                let slug = rec.slug;
-                evidence.insert_file(&format!("{slug}/scan.txt"), rec.scan.as_str());
-                if let Some(tmdb) = &rec.tmdb {
-                    evidence.insert_file(&format!("{slug}/tmdb.json"), tmdb.to_string());
-                }
-                evidence.insert_file(&format!("{slug}/subtitle-labels.json"), labels_json(slug, &rec.labels));
-                let label = format!("{slug}/{}", rec.label);
-                let summary = json!({"ok": true, "title": 0, "profile": rec.profile});
-                evidence.insert_file(&format!("{label}/rip-summary.json"), summary.to_string());
-                let ident = json!({"tracks": rec.tracks, "chapters": [{"num_entries": rec.chapters}],
-                                   "container": {"properties": {"duration": 600_000_000_000_i64}}});
-                evidence.insert_file(&format!("{label}/mkvmerge.json"), ident.to_string());
-                evidence.insert_file(&format!("{label}/rip.txt"), RIP);
-                let index: Vec<Value> = rec
-                    .subs
-                    .iter()
-                    .map(|sub| {
-                        json!({"n": sub.n, "track_id": sub.track, "language": sub.language, "codec": sub.codec,
-                               "track_name": null, "forced": false, "default": false})
-                    })
-                    .collect();
-                evidence.insert_file(&format!("{label}/subs/index.json"), Value::Array(index).to_string());
-                for sub in &rec.subs {
-                    let packets = json!({"packets": sub.packets});
-                    evidence.insert_file(&format!("{label}/subs/sub-{}.packets.json", sub.n), packets.to_string());
-                    if let Some(ocr) = &sub.ocr {
-                        text.insert_file(&format!("{label}/subs-ocr/sub-{}.ocr.jsonl", sub.n), ocr.as_str());
-                    }
-                }
-            }
-
-            /// The evidence tree (shown as corpus/owner) and the OCR text tree (shown as text) of `recs`.
-            fn trees(recs: &[Rec]) -> (MemTree, MemTree) {
-                let mut evidence = MemTree::new("corpus/owner", "owner");
-                let mut text = MemTree::new("text", "text");
-                for rec in recs {
-                    put(rec, &mut evidence, &mut text);
-                }
-                (evidence, text)
-            }
-
-            /// The harness over the trees, with or without the OCR text.
-            fn judge(evidence: &MemTree, text: Option<&MemTree>, row14: &Row14, settings: &Settings) -> SubtitleHarness {
-                harness(evidence, text.map(|tree| tree as &dyn Tree), row14, settings)
-            }
-
-            /// Row 14 as the design spec states it (crates/dev/tests/retune_subtitles.rs pins that the spec gives exactly this).
-            fn spec_row14() -> Row14 {
-                Row14 {
-                    pair_titles: 3,
-                    pair_discs: 2,
-                    pair_features: 1,
-                    pair_tv: 1,
-                    sdh: 6,
-                    regular: 6,
-                    forced: 1,
-                    commentary: 1,
-                    dvd_vobsub: 1,
-                    uk_sdh: 1,
-                    fitting_discs: vec!["the-office-2005-s3d3-bluray".to_string(), "pans-labyrinth-2006-uhd".to_string()],
-                }
-            }
-
-            /// A row 14 that asks for nothing and names no fitting disc.
-            fn met_row14() -> Row14 {
-                Row14 {
-                    pair_titles: 0,
-                    pair_discs: 0,
-                    pair_features: 0,
-                    pair_tv: 0,
-                    sdh: 0,
-                    regular: 0,
-                    forced: 0,
-                    commentary: 0,
-                    dvd_vobsub: 0,
-                    uk_sdh: 0,
-                    fitting_discs: Vec::new(),
-                }
-            }
-
-            /// The lines of the section whose header starts with `header`, up to the next empty line.
-            fn section<'h>(h: &'h SubtitleHarness, header: &str) -> Vec<&'h str> {
-                let start = h
-                    .lines
-                    .iter()
-                    .position(|line| line.starts_with(header))
-                    .unwrap_or_else(|| panic!("no section {header} in {:#?}", h.lines));
-                h.lines[start + 1..].iter().take_while(|line| !line.is_empty()).map(String::as_str).collect()
-            }
-
-            /// The one line starting with `start`.
-            fn line<'h>(h: &'h SubtitleHarness, start: &str) -> &'h str {
-                h.lines
-                    .iter()
-                    .find(|line| line.starts_with(start))
-                    .map(String::as_str)
-                    .unwrap_or_else(|| panic!("no line {start} in {:#?}", h.lines))
-            }
-
-            /// The report's last line.
-            fn last(h: &SubtitleHarness) -> &str {
-                h.lines.last().map(String::as_str).unwrap_or("")
-            }
-
-            #[test]
-            fn the_report_counts_each_kind_against_row_14_and_exits_1_on_a_costly_verdict() {
-                let (evidence, text) = trees(&[
-                    disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true),
-                    disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "watched", true)], true),
-                    disc_d(vec![("all-tracks", 2, "closed-captions", "read", true), ("all-tracks", 3, "regular", "read", true)]),
-                ]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    h.lines,
-                    [
-                        "subtitle labels: corpus/owner: 3 recordings with subtitle-labels.json, 5 labelled tracks: 5 judged, 0 not judged, 0 in another language",
-                        "rule: 8.7 with sub_clear_max_bytes 64, subs_tolerance_ms 300, subs_same_min 0.7, subs_diff_max 0.3; the text rule (EXP-14-design.md section 3) with the same four and its other thresholds as in the code, all provisional",
-                        "",
-                        "Tracks (the owner's label; 8.7 as the app decides before experiment 14 answers; the text rule as row 14 (a) judges it):",
-                        "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text regular; COSTLY sdh_as_regular",
-                        "  disc-b/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text keep (review); reviewed",
-                        "  disc-b/eng-only stream 2 (scan stream 2, 40 events): labelled sdh (watched); 8.7 sdh (review); text keep (review); reviewed",
-                        "  disc-d/all-tracks stream 2 (scan stream 3, 40 events): labelled closed-captions (read); 8.7 sdh; text set aside; placed",
-                        "  disc-d/all-tracks stream 3 (scan stream 2, 40 events): labelled regular (read); 8.7 regular; text regular; placed",
-                        "",
-                        "Experiment 14 (spec section 17 row 14 (a); tracks that count: judged here, labelled from text read or watched before the verdict, the owner sure, never on the-office-2005-s3d3-bluray or pans-labyrinth-2006-uhd; the packaging, the menu, the player and TheDiscDB are observations and do not count on their own, D23):",
-                        "  regular               2 of 6",
-                        "  sdh                   2 of 6",
-                        "  forced                0, with events 0 of 1",
-                        "  commentary            0 of 1",
-                        "  trivia                0 (every one the owner has; checked by hand)",
-                        "  lyrics                0 (every one the owner has; checked by hand)",
-                        "  translation           0 (every second translation the owner has; checked by hand)",
-                        "  dub-transcript        0 (every one the owner has; checked by hand)",
-                        "  closed-captions       1 (with its DVD's VobSub tracks)",
-                        "  other                 0",
-                        "  regular and SDH       1 of 3 titles, from 1 of 2 discs; feature films 0 of 1, TV episodes 1 of 1",
-                        "  DVD VobSub            1 of 1 DVDs with a counted English VobSub track",
-                        "  UK-style SDH          0 of 1 counted SDH tracks labelled style uk (only if the owner has a UK disc)",
-                        "  placed, no review     3 of 5 judged tracks (row 14 (a) asks for at least half)",
-                        "  costly verdicts       1",
-                        "  as it stands: no: 1 costly verdict(s)",
-                        "  not counted: none",
-                        "",
-                        "Costly verdicts (row 14 (a): the text rule's verdict, or 8.7's for a stream the text rule sets aside):",
-                        "  COSTLY disc-a/eng-only stream 1: labelled sdh, an SDH track placed as regular without review",
-                        "",
-                        "Labels that cannot be judged:",
-                        "  none",
-                        "",
-                        "Labels in another language (row 14 judges English and no-language tracks only):",
-                        "  none",
-                        "",
-                        "RESULT FAILED: 1 costly verdict(s): disc-a/eng-only stream 1 (sdh_as_regular)",
-                    ]
-                );
-                let counts: Vec<(&str, u32)> = h.counts.iter().map(|(kind, n)| (kind.as_str(), *n)).collect();
-                assert_eq!(
-                    counts,
-                    [
-                        ("closed-captions", 1),
-                        ("commentary", 0),
-                        ("dub-transcript", 0),
-                        ("forced", 0),
-                        ("lyrics", 0),
-                        ("other", 0),
-                        ("regular", 2),
-                        ("sdh", 2),
-                        ("translation", 0),
-                        ("trivia", 0),
-                    ]
-                );
-                assert_eq!(h.costly, [("disc-a/eng-only stream 1".to_string(), Costly::SdhAsRegular)]);
-                assert_eq!(
-                    h.missing,
-                    [
-                        "titles with regular and SDH",
-                        "discs with such titles",
-                        "feature films with such a title",
-                        "SDH tracks",
-                        "regular tracks",
-                        "forced tracks with events",
-                        "commentary tracks",
-                    ]
-                );
-                assert_eq!((h.placed_without_review, h.labelled, h.exit_code), (3, 5, 1));
-            }
-
-            #[test]
-            fn with_every_label_judged_and_no_costly_verdict_the_harness_exits_0() {
-                let (evidence, text) = trees(&[
-                    disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "watched", true)], true),
-                    disc_d(vec![("all-tracks", 2, "closed-captions", "read", true), ("all-tracks", 3, "regular", "read", true)]),
-                ]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(line(&h, "  regular "), "  regular               2 of 6");
-                assert_eq!(line(&h, "  sdh "), "  sdh                   1 of 6");
-                assert_eq!(
-                    line(&h, "  as it stands: "),
-                    "  as it stands: not answered: too few titles with regular and SDH, discs with such titles, feature films \
-                     with such a title, SDH tracks, regular tracks, forced tracks with events, commentary tracks"
-                );
-                assert_eq!(section(&h, "Costly verdicts ("), ["  none"]);
-                assert_eq!(last(&h), "RESULT ok");
-                assert_eq!(h.costly, Vec::<(String, Costly)>::new());
-                assert_eq!((h.placed_without_review, h.labelled, h.exit_code), (2, 4, 0));
-            }
-
-            #[test]
-            fn a_row_14_that_is_met_answers_by_the_share_placed_without_review() {
-                let (evidence, text) =
-                    trees(&[disc_d(vec![("all-tracks", 2, "closed-captions", "read", true), ("all-tracks", 3, "regular", "read", true)])]);
-                let h = judge(&evidence, Some(&text), &met_row14(), &Settings::default());
-                assert_eq!(h.missing, Vec::<String>::new());
-                assert_eq!(line(&h, "  as it stands: "), "  as it stands: yes for (a) on the tracks judged (row 14 also asks (b))");
-                assert_eq!((h.placed_without_review, h.exit_code), (2, 0));
-                let (evidence, text) =
-                    trees(&[disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)], true)]);
-                let h = judge(&evidence, Some(&text), &met_row14(), &Settings::default());
-                assert_eq!(
-                    line(&h, "  as it stands: "),
-                    "  as it stands: no: fewer than half of the judged tracks are placed without review"
-                );
-                assert_eq!(line(&h, "  placed, no review "), "  placed, no review     0 of 2 judged tracks (row 14 (a) asks for at least half)");
-                assert_eq!((h.placed_without_review, h.exit_code), (0, 0));
-                assert_eq!(last(&h), "RESULT ok");
-            }
-
-            #[test]
-            fn a_forced_or_commentary_label_on_a_track_placed_as_regular_is_costly() {
-                let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "forced", "read", true)], true)]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(h.costly, [("disc-a/eng-only stream 1".to_string(), Costly::ForcedAsDialogue)]);
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled forced (read); 8.7 regular; text regular; COSTLY forced_as_dialogue"]
-                );
-                assert_eq!(line(&h, "  forced "), "  forced                1, with events 1 of 1");
-                assert_eq!(
-                    section(&h, "Costly verdicts ("),
-                    ["  COSTLY disc-a/eng-only stream 1: labelled forced, a forced track placed as regular or SDH without review"]
-                );
-                assert_eq!(h.exit_code, 1);
-                let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "commentary", "read", true)], true)]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(h.costly, [("disc-a/eng-only stream 1".to_string(), Costly::UnwantedKept)]);
-                assert_eq!(line(&h, "  commentary "), "  commentary            1 of 1");
-                assert_eq!(last(&h), "RESULT FAILED: 1 costly verdict(s): disc-a/eng-only stream 1 (unwanted_kept)");
-                assert_eq!(h.exit_code, 1);
-                let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "translation", "read", true)], true)]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled translation (read); 8.7 regular; text regular; placed"]
-                );
-                assert_eq!((h.costly.len(), h.exit_code), (0, 0));
-            }
-
-            #[test]
-            fn a_closed_caption_stream_the_text_rule_sets_aside_is_judged_by_8_7() {
-                let (evidence, text) = trees(&[disc_d(vec![("all-tracks", 2, "regular", "read", true)])]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-d/all-tracks stream 2 (scan stream 3, 40 events): labelled regular (read); 8.7 sdh; text set aside; COSTLY regular_as_sdh"]
-                );
-                assert_eq!(h.costly, [("disc-d/all-tracks stream 2".to_string(), Costly::RegularAsSdh)]);
-                assert_eq!(h.exit_code, 1);
-            }
-
-            #[test]
-            fn labels_without_ocr_text_are_not_judged_and_the_harness_exits_3() {
-                let (evidence, _) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
-                let h = judge(&evidence, None, &spec_row14(), &Settings::default());
-                assert_eq!(
-                    h.lines[0],
-                    "subtitle labels: corpus/owner: 1 recordings with subtitle-labels.json, 1 labelled tracks: 0 judged, 1 not judged, 0 in another language"
-                );
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text not read; not judged"]
-                );
-                assert_eq!(
-                    section(&h, "Labels that cannot be judged:"),
-                    ["  disc-a/eng-only stream 1: no OCR text (give --text DIR or LAZYMKV_OCR_TEXT)"]
-                );
-                assert_eq!(line(&h, "  placed, no review "), "  placed, no review     0 of 0 judged tracks (row 14 (a) asks for at least half)");
-                assert_eq!(line(&h, "  as it stands: "), "  as it stands: not answered: 1 labelled track(s) not judged");
-                assert_eq!(line(&h, "  not counted: "), "  not counted: disc-a 1");
-                assert_eq!(last(&h), "RESULT FAILED: not everything was judged: 1 labelled track(s) (see Labels that cannot be judged)");
-                assert_eq!((h.costly.len(), h.placed_without_review, h.labelled, h.exit_code), (0, 0, 1, 3));
-                assert_eq!(h.counts["sdh"], 0);
-            }
-
-            #[test]
-            fn a_title_without_its_ocr_folder_or_with_an_english_stream_left_unread_is_not_judged() {
-                let (evidence, text) = trees(&[
-                    disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], false),
-                    disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)], false),
-                ]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Labels that cannot be judged:"),
-                    [
-                        "  disc-a/eng-only stream 1: no OCR text: text/disc-a/eng-only/subs-ocr (give --text DIR or LAZYMKV_OCR_TEXT)",
-                        "  disc-b/eng-only stream 1: stream s1 eng: no OCR text (no sub-1.ocr.jsonl in text/disc-b/eng-only/subs-ocr); read it with ocr-subs.ps1",
-                        "  disc-b/eng-only stream 2: stream s1 eng: no OCR text (no sub-1.ocr.jsonl in text/disc-b/eng-only/subs-ocr); read it with ocr-subs.ps1",
-                    ]
-                );
-                assert_eq!(h.exit_code, 3);
-            }
-
-            #[test]
-            fn without_any_subtitle_label_the_harness_exits_3() {
-                let mut evidence = MemTree::new("corpus/owner", "owner");
-                evidence.insert_file("disc-a/scan.txt", "CINFO:1,0,\"Blu-ray disc\"\n");
-                let h = judge(&evidence, None, &spec_row14(), &Settings::default());
-                assert_eq!(
-                    h.lines[0],
-                    "subtitle labels: corpus/owner: 0 recordings with subtitle-labels.json, 0 labelled tracks: 0 judged, 0 not judged, 0 in another language"
-                );
-                assert_eq!(section(&h, "Tracks ("), ["  none"]);
-                assert_eq!(last(&h), "RESULT FAILED: no subtitle label to judge (lazymkv-dev labels --subtitles set)");
-                assert_eq!((h.labelled, h.exit_code, h.counts.len()), (0, 3, 10));
-            }
-
-            #[test]
-            fn a_labels_file_that_does_not_validate_stops_the_run_with_exit_2() {
-                let (mut evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
-                let bad = json!({"format": "lazymkv subtitle labels v0", "slug": "disc-x", "tracks": []});
-                evidence.insert_file("disc-x/subtitle-labels.json", bad.to_string());
-                let problem = load(&evidence, &PathKey::new("disc-x/subtitle-labels.json")).unwrap_err();
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    h.lines,
-                    [
-                        "subtitle labels: corpus/owner: 1 labels file(s) do not validate".to_string(),
-                        format!("  {problem}"),
-                        String::new(),
-                        "RESULT FAILED: a subtitle labels file does not validate (lazymkv-dev labels --subtitles check)".to_string(),
-                    ]
-                );
-                assert_eq!((h.labelled, h.costly.len(), h.exit_code), (0, 0, 2));
-            }
-
-            #[test]
-            fn a_rip_or_scan_that_cannot_be_read_or_does_not_verify_leaves_its_labels_unjudged() {
-                let mut chapters = disc_a("disc-c", vec![("eng-only", 1, "regular", "read", true)], true);
-                chapters.chapters = 3;
-                let (mut evidence, text) =
-                    trees(&[disc_a("disc-a", vec![("absent", 1, "regular", "read", true)], true), chapters]);
-                evidence.insert_file("disc-n/subtitle-labels.json", labels_json("disc-n", &[("eng-only", 1, "regular", "read", true)]));
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(section(&h, "Tracks ("), ["  none"]);
-                assert_eq!(
-                    section(&h, "Labels that cannot be judged:"),
-                    [
-                        "  disc-a/absent stream 1: absent: no rip-summary.json or extract-summary.json saying ok",
-                        "  disc-c/eng-only stream 1: eng-only: the rip does not verify against the scan: chapters: expected 2, file 3",
-                        "  disc-n/eng-only stream 1: [Errno 2] No such file or directory: 'corpus/owner/disc-n/scan.txt'",
-                    ]
-                );
-                assert_eq!((h.labelled, h.exit_code), (3, 3));
-            }
-
-            #[test]
-            fn a_label_on_a_track_that_is_not_a_subtitle_stream_of_the_rip_is_not_judged() {
-                let (evidence, text) = trees(&[disc_a(
-                    "disc-a",
-                    vec![("eng-only", 0, "regular", "read", true), ("eng-only", 7, "regular", "read", true)],
-                    true,
-                )]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(section(&h, "Tracks ("), ["  none"]);
-                assert_eq!(
-                    section(&h, "Labels that cannot be judged:"),
-                    [
-                        "  disc-a/eng-only stream 0: file track 0 is scan stream 0, a video stream, not a subtitle stream",
-                        "  disc-a/eng-only stream 7: file track 7 is not a track of the rip",
-                    ]
-                );
-                assert_eq!(h.exit_code, 3);
-            }
-
-            #[test]
-            fn a_label_in_another_language_is_listed_apart_and_not_judged() {
-                let at = starts(40, 10.0, 3.0);
-                let subs = [("eng", at.clone(), false, true), ("spa", at, false, false)];
-                let labels = vec![("all-tracks", 1, "regular", "read", true), ("all-tracks", 2, "translation", "read", true)];
-                let (evidence, text) = trees(&[bluray("disc-s", None, "all-tracks", ALL_TRACKS, &subs, labels)]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    h.lines[0],
-                    "subtitle labels: corpus/owner: 1 recordings with subtitle-labels.json, 2 labelled tracks: 1 judged, 0 not judged, 1 in another language"
-                );
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-s/all-tracks stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text regular; placed"]
-                );
-                assert_eq!(
-                    section(&h, "Labels in another language ("),
-                    ["  disc-s/all-tracks stream 2: labelled translation, scan stream 2 is in spa"]
-                );
-                assert_eq!(line(&h, "  not counted: "), "  not counted: disc-s 1");
-                assert_eq!(last(&h), "RESULT ok");
-                assert_eq!((h.labelled, h.placed_without_review, h.exit_code), (2, 1, 0));
-            }
-
-            #[test]
-            fn only_sure_labels_read_or_watched_off_the_fitting_discs_count() {
-                let (evidence, text) = trees(&[
-                    disc_a("disc-a", vec![("eng-only", 1, "regular", "packaging", true)], true),
-                    disc_a("disc-f", vec![("eng-only", 1, "regular", "read", true)], true),
-                    disc_a("disc-p", vec![("eng-only", 1, "regular", "read", false)], true),
-                    disc_a("disc-w", vec![("eng-only", 1, "regular", "watched", true)], true),
-                ]);
-                let fitted = Row14 { fitting_discs: vec!["disc-f".to_string()], ..spec_row14() };
-                let h = judge(&evidence, Some(&text), &fitted, &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled regular (packaging); 8.7 regular; text regular; placed",
-                        "  disc-f/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text regular; placed",
-                        "  disc-p/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read, not sure); 8.7 regular; text regular; placed",
-                        "  disc-w/eng-only stream 1 (scan stream 1, 40 events): labelled regular (watched); 8.7 regular; text regular; placed",
-                    ]
-                );
-                assert!(line(&h, "Experiment 14 (").contains("the owner sure, never on disc-f; the packaging"), "{:?}", h.lines);
-                assert_eq!(line(&h, "  regular "), "  regular               1 of 6");
-                assert_eq!(line(&h, "  not counted: "), "  not counted: disc-a 1, disc-f 1, disc-p 1");
-                assert_eq!((h.counts["regular"], h.placed_without_review, h.exit_code), (1, 4, 0));
-            }
-
-            #[test]
-            fn a_label_made_after_seeing_the_verdict_or_from_an_observation_never_counts() {
-                let seen = [("eng-only", 1, "regular", "read", true)];
-                let (mut evidence, text) = trees(&[
-                    disc_a("disc-a", seen.to_vec(), true),
-                    disc_a("disc-w", vec![("eng-only", 1, "regular", "packaging", true)], true),
-                ]);
-                relabel(&mut evidence, "disc-a", &seen, 0, &[("saw_verdict", json!(true))]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read, saw the verdict); 8.7 regular; text regular; placed",
-                        "  disc-w/eng-only stream 1 (scan stream 1, 40 events): labelled regular (packaging); 8.7 regular; text regular; placed",
-                    ]
-                );
-                assert_eq!(line(&h, "  regular "), "  regular               0 of 6");
-                assert_eq!(line(&h, "  not counted: "), "  not counted: disc-a 1, disc-w 1");
-                assert_eq!((h.counts["regular"], h.placed_without_review, h.exit_code), (0, 2, 0));
-            }
-
-            #[test]
-            fn a_uk_style_sdh_label_counts_towards_row_14s_uk_style_track_only_when_the_label_counts() {
-                let cued = [("eng-only", 2, "sdh", "read", true)];
-                let flagged = [("eng-only", 1, "sdh", "flag", true)];
-                let plain = [("eng-only", 1, "regular", "read", true)];
-                let seen = [("eng-only", 1, "sdh", "read", true)];
-                let (mut evidence, text) = trees(&[
-                    disc_b(cued.to_vec(), true),
-                    disc_a("disc-f", flagged.to_vec(), true),
-                    disc_a("disc-r", plain.to_vec(), true),
-                    disc_a("disc-v", seen.to_vec(), true),
-                ]);
-                let uk = ("style", json!("uk"));
-                relabel(&mut evidence, "disc-b", &cued, 0, &[uk.clone()]);
-                relabel(&mut evidence, "disc-f", &flagged, 0, &[uk.clone()]);
-                relabel(&mut evidence, "disc-r", &plain, 0, &[uk.clone()]);
-                relabel(&mut evidence, "disc-v", &seen, 0, &[uk, ("saw_verdict", json!(true))]);
-                let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-b/eng-only stream 2 (scan stream 2, 40 events): labelled sdh (read, style uk); 8.7 sdh (review); text keep (review); reviewed",
-                        "  disc-f/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (flag, style uk); 8.7 regular; text regular; COSTLY sdh_as_regular",
-                        "  disc-r/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read, style uk); 8.7 regular; text regular; placed",
-                        "  disc-v/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read, saw the verdict, style uk); 8.7 regular; text regular; COSTLY sdh_as_regular",
-                    ]
-                );
-                // Only disc-b's label is a UK-style SDH track that counts: disc-f's is an observation (a flag, D23),
-                // disc-r's is not an sdh label, and disc-v's was given after the verdict was seen.
-                assert_eq!(
-                    line(&h, "  UK-style SDH "),
-                    "  UK-style SDH          1 of 1 counted SDH tracks labelled style uk (only if the owner has a UK disc)"
-                );
-                assert_eq!(line(&h, "  sdh "), "  sdh                   1 of 6");
-                assert_eq!(line(&h, "  regular "), "  regular               1 of 6");
-                assert_eq!(line(&h, "  not counted: "), "  not counted: disc-f 1, disc-v 1");
-                // Row 14 asks for the UK-style track only if the owner has a UK disc, so it is never a missing kind.
-                assert!(h.missing.iter().all(|name| !name.contains("UK")), "{:?}", h.missing);
-                assert_eq!((h.counts["sdh"], h.exit_code), (1, 1));
-            }
-
-            #[test]
-            fn sub_clear_max_bytes_decides_which_packets_are_events() {
-                let (evidence, _) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
-                let h = judge(&evidence, None, &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text not read; not judged"]
-                );
-                // At 29 bytes the 30-byte clear packets are events too (spec 8.7 "Events").
-                let low = Settings { sub_clear_max_bytes: 29, ..Settings::default() };
-                let h = judge(&evidence, None, &spec_row14(), &low);
-                assert_eq!(
-                    h.lines[1],
-                    "rule: 8.7 with sub_clear_max_bytes 29, subs_tolerance_ms 300, subs_same_min 0.7, subs_diff_max 0.3; the text rule (EXP-14-design.md section 3) with the same four and its other thresholds as in the code, all provisional"
-                );
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    ["  disc-a/eng-only stream 1 (scan stream 1, 80 events): labelled sdh (read); 8.7 regular; text not read; not judged"]
-                );
-            }
-
-            #[test]
-            fn subs_tolerance_ms_decides_whether_two_tracks_align() {
-                let mut later = starts(40, 10.5, 3.0);
-                later.extend(starts(4, 300.0, 3.0));
-                let subs = [("eng", starts(40, 10.0, 3.0), false, false), ("eng", later, false, false)];
-                let labels = vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)];
-                let (evidence, _) = trees(&[bluray("disc-t", None, "eng-only", ENG_ONLY, &subs, labels)]);
-                // 0.5 s apart: no start within 300 ms, so the two full tracks are in different groups and none is picked:
-                // the first group stands in and the other full track is kept as regular under the review (Task 10, D15,
-                // D20).
-                let h = judge(&evidence, None, &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-t/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text not read; not judged",
-                        "  disc-t/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 regular (review); text not read; not judged",
-                    ]
-                );
-                // Within 600 ms every start aligns: one group, the track with more events is SDH.
-                let wide = Settings { subs_tolerance_ms: 600, ..Settings::default() };
-                let h = judge(&evidence, None, &spec_row14(), &wide);
-                assert!(h.lines[1].starts_with("rule: 8.7 with sub_clear_max_bytes 64, subs_tolerance_ms 600,"), "{}", h.lines[1]);
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-t/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text not read; not judged",
-                        "  disc-t/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
-                    ]
-                );
-            }
-
-            #[test]
-            fn subs_same_min_decides_when_a_share_joins_one_group() {
-                let mut half = starts(20, 10.0, 3.0);
-                half.extend(starts(20, 71.0, 3.0));
-                half.extend(starts(4, 300.0, 3.0));
-                let subs = [("eng", starts(40, 10.0, 3.0), false, false), ("eng", half, false, false)];
-                let labels = vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)];
-                let (evidence, _) = trees(&[bluray("disc-m", None, "eng-only", ENG_ONLY, &subs, labels)]);
-                // A share of 0.5 lies between 0.30 and 0.70: subtitle_ambiguous, two groups, none picked; the first stands
-                // in and the other full track is kept as regular under the review (Task 10, D15, D20).
-                let h = judge(&evidence, None, &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-m/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text not read; not judged",
-                        "  disc-m/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 regular (review); text not read; not judged",
-                    ]
-                );
-                let lower = Settings { subs_same_min: 0.5, ..Settings::default() };
-                let h = judge(&evidence, None, &spec_row14(), &lower);
-                assert!(h.lines[1].contains("subs_same_min 0.5, subs_diff_max 0.3;"), "{}", h.lines[1]);
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-m/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text not read; not judged",
-                        "  disc-m/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
-                    ]
-                );
-            }
-
-            #[test]
-            fn subs_diff_max_decides_when_a_share_parts_two_groups() {
-                let mut half = starts(20, 10.0, 3.0);
-                half.extend(starts(20, 71.0, 3.0));
-                let mut more = starts(40, 10.0, 3.0);
-                more.extend(starts(4, 300.0, 3.0));
-                let subs = [("eng", starts(40, 10.0, 3.0), false, false), ("eng", half, false, false), ("eng", more, false, false)];
-                let labels = vec![
-                    ("eng-only", 1, "regular", "read", true),
-                    ("eng-only", 2, "commentary", "read", true),
-                    ("eng-only", 3, "sdh", "read", true),
-                ];
-                let (evidence, _) = trees(&[bluray("disc-3", None, "eng-only", ENG_ONLY, &subs, labels)]);
-                // Streams 1 and 3 align fully and form the picked (largest) group; stream 2 shares half its starts with
-                // each: between the bands, a review, and a track Between with a track of the picked group is kept as
-                // regular under it, never dropped unconfirmed (Task 10, D20).
-                let h = judge(&evidence, None, &spec_row14(), &Settings::default());
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-3/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text not read; not judged",
-                        "  disc-3/eng-only stream 2 (scan stream 2, 40 events): labelled commentary (read); 8.7 regular (review); text not read; not judged",
-                        "  disc-3/eng-only stream 3 (scan stream 3, 44 events): labelled sdh (read); 8.7 sdh (review); text not read; not judged",
-                    ]
-                );
-                // At 0.5 the half share is Different from both: no review; the larger group is the dialogue group and the
-                // track outside it is dropped (OutsideDialogueGroup).
-                let wider = Settings { subs_diff_max: 0.5, ..Settings::default() };
-                let h = judge(&evidence, None, &spec_row14(), &wider);
-                assert!(h.lines[1].contains("subs_same_min 0.7, subs_diff_max 0.5;"), "{}", h.lines[1]);
-                assert_eq!(
-                    section(&h, "Tracks ("),
-                    [
-                        "  disc-3/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text not read; not judged",
-                        "  disc-3/eng-only stream 2 (scan stream 2, 40 events): labelled commentary (read); 8.7 dropped; text not read; not judged",
-                        "  disc-3/eng-only stream 3 (scan stream 3, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
-                    ]
-                );
+    /// Writes `rec` into the evidence tree and its OCR text into the text tree.
+    fn put(rec: &Rec, evidence: &mut MemTree, text: &mut MemTree) {
+        let slug = rec.slug;
+        evidence.insert_file(&format!("{slug}/scan.txt"), rec.scan.as_str());
+        if let Some(tmdb) = &rec.tmdb {
+            evidence.insert_file(&format!("{slug}/tmdb.json"), tmdb.to_string());
+        }
+        evidence.insert_file(&format!("{slug}/subtitle-labels.json"), labels_json(slug, &rec.labels));
+        let label = format!("{slug}/{}", rec.label);
+        let summary = json!({"ok": true, "title": 0, "profile": rec.profile});
+        evidence.insert_file(&format!("{label}/rip-summary.json"), summary.to_string());
+        let ident = json!({"tracks": rec.tracks, "chapters": [{"num_entries": rec.chapters}],
+                           "container": {"properties": {"duration": 600_000_000_000_i64}}});
+        evidence.insert_file(&format!("{label}/mkvmerge.json"), ident.to_string());
+        evidence.insert_file(&format!("{label}/rip.txt"), RIP);
+        let index: Vec<Value> = rec
+            .subs
+            .iter()
+            .map(|sub| {
+                json!({"n": sub.n, "track_id": sub.track, "language": sub.language, "codec": sub.codec,
+                       "track_name": null, "forced": false, "default": false})
+            })
+            .collect();
+        evidence.insert_file(&format!("{label}/subs/index.json"), Value::Array(index).to_string());
+        for sub in &rec.subs {
+            let packets = json!({"packets": sub.packets});
+            evidence.insert_file(&format!("{label}/subs/sub-{}.packets.json", sub.n), packets.to_string());
+            if let Some(ocr) = &sub.ocr {
+                text.insert_file(&format!("{label}/subs-ocr/sub-{}.ocr.jsonl", sub.n), ocr.as_str());
             }
         }
+    }
+
+    /// The evidence tree (shown as corpus/owner) and the OCR text tree (shown as text) of `recs`.
+    fn trees(recs: &[Rec]) -> (MemTree, MemTree) {
+        let mut evidence = MemTree::new("corpus/owner", "owner");
+        let mut text = MemTree::new("text", "text");
+        for rec in recs {
+            put(rec, &mut evidence, &mut text);
+        }
+        (evidence, text)
+    }
+
+    /// The harness over the trees, with or without the OCR text.
+    fn judge(evidence: &MemTree, text: Option<&MemTree>, row14: &Row14, settings: &Settings) -> SubtitleHarness {
+        harness(evidence, text.map(|tree| tree as &dyn Tree), row14, settings)
+    }
+
+    /// Row 14 as the design spec states it (crates/dev/tests/retune_subtitles.rs pins that the spec gives exactly this).
+    fn spec_row14() -> Row14 {
+        Row14 {
+            pair_titles: 3,
+            pair_discs: 2,
+            pair_features: 1,
+            pair_tv: 1,
+            sdh: 6,
+            regular: 6,
+            forced: 1,
+            commentary: 1,
+            dvd_vobsub: 1,
+            uk_sdh: 1,
+            fitting_discs: vec!["the-office-2005-s3d3-bluray".to_string(), "pans-labyrinth-2006-uhd".to_string()],
+        }
+    }
+
+    /// A row 14 that asks for nothing and names no fitting disc.
+    fn met_row14() -> Row14 {
+        Row14 {
+            pair_titles: 0,
+            pair_discs: 0,
+            pair_features: 0,
+            pair_tv: 0,
+            sdh: 0,
+            regular: 0,
+            forced: 0,
+            commentary: 0,
+            dvd_vobsub: 0,
+            uk_sdh: 0,
+            fitting_discs: Vec::new(),
+        }
+    }
+
+    /// The lines of the section whose header starts with `header`, up to the next empty line.
+    fn section<'h>(h: &'h SubtitleHarness, header: &str) -> Vec<&'h str> {
+        let start = h
+            .lines
+            .iter()
+            .position(|line| line.starts_with(header))
+            .unwrap_or_else(|| panic!("no section {header} in {:#?}", h.lines));
+        h.lines[start + 1..].iter().take_while(|line| !line.is_empty()).map(String::as_str).collect()
+    }
+
+    /// The one line starting with `start`.
+    fn line<'h>(h: &'h SubtitleHarness, start: &str) -> &'h str {
+        h.lines
+            .iter()
+            .find(|line| line.starts_with(start))
+            .map(String::as_str)
+            .unwrap_or_else(|| panic!("no line {start} in {:#?}", h.lines))
+    }
+
+    /// The report's last line.
+    fn last(h: &SubtitleHarness) -> &str {
+        h.lines.last().map(String::as_str).unwrap_or("")
+    }
+
+    #[test]
+    fn the_report_counts_each_kind_against_row_14_and_exits_1_on_a_costly_verdict() {
+        let (evidence, text) = trees(&[
+            disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true),
+            disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "watched", true)], true),
+            disc_d(vec![("all-tracks", 2, "closed-captions", "read", true), ("all-tracks", 3, "regular", "read", true)]),
+        ]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            h.lines,
+            [
+                "subtitle labels: corpus/owner: 3 recordings with subtitle-labels.json, 5 labelled tracks: 5 judged, 0 not judged, 0 in another language",
+                "rule: 8.7 with sub_clear_max_bytes 64, subs_tolerance_ms 300, subs_same_min 0.7, subs_diff_max 0.3; the text rule (EXP-14-design.md section 3) with the same four and its other thresholds as in the code, all provisional",
+                "",
+                "Tracks (the owner's label; 8.7 as the app decides before experiment 14 answers; the text rule as row 14 (a) judges it):",
+                "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text regular; COSTLY sdh_as_regular",
+                "  disc-b/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text keep (review); reviewed",
+                "  disc-b/eng-only stream 2 (scan stream 2, 40 events): labelled sdh (watched); 8.7 sdh (review); text keep (review); reviewed",
+                "  disc-d/all-tracks stream 2 (scan stream 3, 40 events): labelled closed-captions (read); 8.7 sdh; text set aside; placed",
+                "  disc-d/all-tracks stream 3 (scan stream 2, 40 events): labelled regular (read); 8.7 regular; text regular; placed",
+                "",
+                "Experiment 14 (spec section 17 row 14 (a); tracks that count: judged here, labelled from text read or watched before the verdict, the owner sure, never on the-office-2005-s3d3-bluray or pans-labyrinth-2006-uhd; the packaging, the menu, a flag, the player and TheDiscDB are observations and do not count on their own, D23):",
+                "  regular               2 of 6",
+                "  sdh                   2 of 6",
+                "  forced                0, with events 0 of 1",
+                "  commentary            0 of 1",
+                "  trivia                0 (every one the owner has; checked by hand)",
+                "  lyrics                0 (every one the owner has; checked by hand)",
+                "  translation           0 (every second translation the owner has; checked by hand)",
+                "  dub-transcript        0 (every one the owner has; checked by hand)",
+                "  closed-captions       1 (with its DVD's VobSub tracks)",
+                "  other                 0",
+                "  regular and SDH       1 of 3 titles, from 1 of 2 discs; feature films 0 of 1, TV episodes 1 of 1",
+                "  DVD VobSub            1 of 1 DVDs with a counted English VobSub track",
+                "  UK-style SDH          0 of 1 counted SDH tracks labelled style uk (only if the owner has a UK disc)",
+                "  placed, no review     3 of 5 judged tracks (row 14 (a) asks for at least half)",
+                "  costly verdicts       1",
+                "  as it stands: no: 1 costly verdict(s)",
+                "  not counted: none",
+                "",
+                "Costly verdicts (row 14 (a): the text rule's verdict, or 8.7's for a stream the text rule sets aside):",
+                "  COSTLY disc-a/eng-only stream 1: labelled sdh, an SDH track placed as regular without review",
+                "",
+                "Labels that cannot be judged:",
+                "  none",
+                "",
+                "Labels in another language (row 14 judges English and no-language tracks only):",
+                "  none",
+                "",
+                "RESULT FAILED: 1 costly verdict(s): disc-a/eng-only stream 1 (sdh_as_regular)",
+            ]
+        );
+        let counts: Vec<(&str, u32)> = h.counts.iter().map(|(kind, n)| (kind.as_str(), *n)).collect();
+        assert_eq!(
+            counts,
+            [
+                ("closed-captions", 1),
+                ("commentary", 0),
+                ("dub-transcript", 0),
+                ("forced", 0),
+                ("lyrics", 0),
+                ("other", 0),
+                ("regular", 2),
+                ("sdh", 2),
+                ("translation", 0),
+                ("trivia", 0),
+            ]
+        );
+        assert_eq!(h.costly, [("disc-a/eng-only stream 1".to_string(), Costly::SdhAsRegular)]);
+        assert_eq!(
+            h.missing,
+            [
+                "titles with regular and SDH",
+                "discs with such titles",
+                "feature films with such a title",
+                "SDH tracks",
+                "regular tracks",
+                "forced tracks with events",
+                "commentary tracks",
+            ]
+        );
+        assert_eq!((h.placed_without_review, h.labelled, h.exit_code), (3, 5, 1));
+    }
+
+    #[test]
+    fn with_every_label_judged_and_no_costly_verdict_the_harness_exits_0() {
+        let (evidence, text) = trees(&[
+            disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "watched", true)], true),
+            disc_d(vec![("all-tracks", 2, "closed-captions", "read", true), ("all-tracks", 3, "regular", "read", true)]),
+        ]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(line(&h, "  regular "), "  regular               2 of 6");
+        assert_eq!(line(&h, "  sdh "), "  sdh                   1 of 6");
+        assert_eq!(
+            line(&h, "  as it stands: "),
+            "  as it stands: not answered: too few titles with regular and SDH, discs with such titles, feature films \
+             with such a title, SDH tracks, regular tracks, forced tracks with events, commentary tracks"
+        );
+        assert_eq!(section(&h, "Costly verdicts ("), ["  none"]);
+        assert_eq!(last(&h), "RESULT ok");
+        assert_eq!(h.costly, Vec::<(String, Costly)>::new());
+        assert_eq!((h.placed_without_review, h.labelled, h.exit_code), (2, 4, 0));
+    }
+
+    #[test]
+    fn a_row_14_that_is_met_answers_by_the_share_placed_without_review() {
+        let (evidence, text) =
+            trees(&[disc_d(vec![("all-tracks", 2, "closed-captions", "read", true), ("all-tracks", 3, "regular", "read", true)])]);
+        let h = judge(&evidence, Some(&text), &met_row14(), &Settings::default());
+        assert_eq!(h.missing, Vec::<String>::new());
+        assert_eq!(line(&h, "  as it stands: "), "  as it stands: yes for (a) on the tracks judged (row 14 also asks (b))");
+        assert_eq!((h.placed_without_review, h.exit_code), (2, 0));
+        let (evidence, text) =
+            trees(&[disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)], true)]);
+        let h = judge(&evidence, Some(&text), &met_row14(), &Settings::default());
+        assert_eq!(
+            line(&h, "  as it stands: "),
+            "  as it stands: no: fewer than half of the judged tracks are placed without review"
+        );
+        assert_eq!(line(&h, "  placed, no review "), "  placed, no review     0 of 2 judged tracks (row 14 (a) asks for at least half)");
+        assert_eq!((h.placed_without_review, h.exit_code), (0, 0));
+        assert_eq!(last(&h), "RESULT ok");
+    }
+
+    #[test]
+    fn a_forced_or_commentary_label_on_a_track_placed_as_regular_is_costly() {
+        let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "forced", "read", true)], true)]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(h.costly, [("disc-a/eng-only stream 1".to_string(), Costly::ForcedAsDialogue)]);
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled forced (read); 8.7 regular; text regular; COSTLY forced_as_dialogue"]
+        );
+        assert_eq!(line(&h, "  forced "), "  forced                1, with events 1 of 1");
+        assert_eq!(
+            section(&h, "Costly verdicts ("),
+            ["  COSTLY disc-a/eng-only stream 1: labelled forced, a forced track placed as regular or SDH without review"]
+        );
+        assert_eq!(h.exit_code, 1);
+        let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "commentary", "read", true)], true)]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(h.costly, [("disc-a/eng-only stream 1".to_string(), Costly::UnwantedKept)]);
+        assert_eq!(line(&h, "  commentary "), "  commentary            1 of 1");
+        assert_eq!(last(&h), "RESULT FAILED: 1 costly verdict(s): disc-a/eng-only stream 1 (unwanted_kept)");
+        assert_eq!(h.exit_code, 1);
+        let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "translation", "read", true)], true)]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled translation (read); 8.7 regular; text regular; placed"]
+        );
+        assert_eq!((h.costly.len(), h.exit_code), (0, 0));
+    }
+
+    #[test]
+    fn a_closed_caption_stream_the_text_rule_sets_aside_is_judged_by_8_7() {
+        let (evidence, text) = trees(&[disc_d(vec![("all-tracks", 2, "regular", "read", true)])]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-d/all-tracks stream 2 (scan stream 3, 40 events): labelled regular (read); 8.7 sdh; text set aside; COSTLY regular_as_sdh"]
+        );
+        assert_eq!(h.costly, [("disc-d/all-tracks stream 2".to_string(), Costly::RegularAsSdh)]);
+        assert_eq!(h.exit_code, 1);
+    }
+
+    #[test]
+    fn labels_without_ocr_text_are_not_judged_and_the_harness_exits_3() {
+        let (evidence, _) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
+        let h = judge(&evidence, None, &spec_row14(), &Settings::default());
+        assert_eq!(
+            h.lines[0],
+            "subtitle labels: corpus/owner: 1 recordings with subtitle-labels.json, 1 labelled tracks: 0 judged, 1 not judged, 0 in another language"
+        );
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text not read; not judged"]
+        );
+        assert_eq!(
+            section(&h, "Labels that cannot be judged:"),
+            ["  disc-a/eng-only stream 1: no OCR text (give --text DIR or LAZYMKV_OCR_TEXT)"]
+        );
+        assert_eq!(line(&h, "  placed, no review "), "  placed, no review     0 of 0 judged tracks (row 14 (a) asks for at least half)");
+        assert_eq!(line(&h, "  as it stands: "), "  as it stands: not answered: 1 labelled track(s) not judged");
+        assert_eq!(line(&h, "  not counted: "), "  not counted: disc-a 1");
+        assert_eq!(last(&h), "RESULT FAILED: not everything was judged: 1 labelled track(s) (see Labels that cannot be judged)");
+        assert_eq!((h.costly.len(), h.placed_without_review, h.labelled, h.exit_code), (0, 0, 1, 3));
+        assert_eq!(h.counts["sdh"], 0);
+    }
+
+    #[test]
+    fn a_title_without_its_ocr_folder_or_with_an_english_stream_left_unread_is_not_judged() {
+        let (evidence, text) = trees(&[
+            disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], false),
+            disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)], false),
+        ]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Labels that cannot be judged:"),
+            [
+                "  disc-a/eng-only stream 1: no OCR text: text/disc-a/eng-only/subs-ocr (give --text DIR or LAZYMKV_OCR_TEXT)",
+                "  disc-b/eng-only stream 1: stream s1 eng: no OCR text (no sub-1.ocr.jsonl in text/disc-b/eng-only/subs-ocr); read it with ocr-subs.ps1",
+                "  disc-b/eng-only stream 2: stream s1 eng: no OCR text (no sub-1.ocr.jsonl in text/disc-b/eng-only/subs-ocr); read it with ocr-subs.ps1",
+            ]
+        );
+        assert_eq!(h.exit_code, 3);
+    }
+
+    #[test]
+    fn without_any_subtitle_label_the_harness_exits_3() {
+        let mut evidence = MemTree::new("corpus/owner", "owner");
+        evidence.insert_file("disc-a/scan.txt", "CINFO:1,0,\"Blu-ray disc\"\n");
+        let h = judge(&evidence, None, &spec_row14(), &Settings::default());
+        assert_eq!(
+            h.lines[0],
+            "subtitle labels: corpus/owner: 0 recordings with subtitle-labels.json, 0 labelled tracks: 0 judged, 0 not judged, 0 in another language"
+        );
+        assert_eq!(section(&h, "Tracks ("), ["  none"]);
+        assert_eq!(last(&h), "RESULT FAILED: no subtitle label to judge (lazymkv-dev labels --subtitles set)");
+        assert_eq!((h.labelled, h.exit_code, h.counts.len()), (0, 3, 10));
+    }
+
+    #[test]
+    fn a_labels_file_that_does_not_validate_stops_the_run_with_exit_2() {
+        let (mut evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
+        let bad = json!({"format": "lazymkv subtitle labels v0", "slug": "disc-x", "tracks": []});
+        evidence.insert_file("disc-x/subtitle-labels.json", bad.to_string());
+        let problem = load(&evidence, &PathKey::new("disc-x/subtitle-labels.json")).unwrap_err();
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            h.lines,
+            [
+                "subtitle labels: corpus/owner: 1 labels file(s) do not validate".to_string(),
+                format!("  {problem}"),
+                String::new(),
+                "RESULT FAILED: a subtitle labels file does not validate (lazymkv-dev labels --subtitles check)".to_string(),
+            ]
+        );
+        assert_eq!((h.labelled, h.costly.len(), h.exit_code), (0, 0, 2));
+    }
+
+    #[test]
+    fn a_rip_or_scan_that_cannot_be_read_or_does_not_verify_leaves_its_labels_unjudged() {
+        let mut chapters = disc_a("disc-c", vec![("eng-only", 1, "regular", "read", true)], true);
+        chapters.chapters = 3;
+        let (mut evidence, text) =
+            trees(&[disc_a("disc-a", vec![("absent", 1, "regular", "read", true)], true), chapters]);
+        evidence.insert_file("disc-n/subtitle-labels.json", labels_json("disc-n", &[("eng-only", 1, "regular", "read", true)]));
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(section(&h, "Tracks ("), ["  none"]);
+        assert_eq!(
+            section(&h, "Labels that cannot be judged:"),
+            [
+                "  disc-a/absent stream 1: absent: no rip-summary.json or extract-summary.json saying ok",
+                "  disc-c/eng-only stream 1: eng-only: the rip does not verify against the scan: chapters: expected 2, file 3",
+                "  disc-n/eng-only stream 1: [Errno 2] No such file or directory: 'corpus/owner/disc-n/scan.txt'",
+            ]
+        );
+        assert_eq!((h.labelled, h.exit_code), (3, 3));
+    }
+
+    #[test]
+    fn a_label_on_a_track_that_is_not_a_subtitle_stream_of_the_rip_is_not_judged() {
+        let (evidence, text) = trees(&[disc_a(
+            "disc-a",
+            vec![("eng-only", 0, "regular", "read", true), ("eng-only", 7, "regular", "read", true)],
+            true,
+        )]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(section(&h, "Tracks ("), ["  none"]);
+        assert_eq!(
+            section(&h, "Labels that cannot be judged:"),
+            [
+                "  disc-a/eng-only stream 0: file track 0 is scan stream 0, a video stream, not a subtitle stream",
+                "  disc-a/eng-only stream 7: file track 7 is not a track of the rip",
+            ]
+        );
+        assert_eq!(h.exit_code, 3);
+    }
+
+    #[test]
+    fn a_label_in_another_language_is_listed_apart_and_not_judged() {
+        let at = starts(40, 10.0, 3.0);
+        let subs = [("eng", at.clone(), false, true), ("spa", at, false, false)];
+        let labels = vec![("all-tracks", 1, "regular", "read", true), ("all-tracks", 2, "translation", "read", true)];
+        let (evidence, text) = trees(&[bluray("disc-s", None, "all-tracks", ALL_TRACKS, &subs, labels)]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            h.lines[0],
+            "subtitle labels: corpus/owner: 1 recordings with subtitle-labels.json, 2 labelled tracks: 1 judged, 0 not judged, 1 in another language"
+        );
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-s/all-tracks stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text regular; placed"]
+        );
+        assert_eq!(
+            section(&h, "Labels in another language ("),
+            ["  disc-s/all-tracks stream 2: labelled translation, scan stream 2 is in spa"]
+        );
+        assert_eq!(line(&h, "  not counted: "), "  not counted: disc-s 1");
+        assert_eq!(last(&h), "RESULT ok");
+        assert_eq!((h.labelled, h.placed_without_review, h.exit_code), (2, 1, 0));
+    }
+
+    #[test]
+    fn only_sure_labels_read_or_watched_off_the_fitting_discs_count() {
+        let (evidence, text) = trees(&[
+            disc_a("disc-a", vec![("eng-only", 1, "regular", "packaging", true)], true),
+            disc_a("disc-f", vec![("eng-only", 1, "regular", "read", true)], true),
+            disc_a("disc-p", vec![("eng-only", 1, "regular", "read", false)], true),
+            disc_a("disc-w", vec![("eng-only", 1, "regular", "watched", true)], true),
+        ]);
+        let fitted = Row14 { fitting_discs: vec!["disc-f".to_string()], ..spec_row14() };
+        let h = judge(&evidence, Some(&text), &fitted, &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled regular (packaging); 8.7 regular; text regular; placed",
+                "  disc-f/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text regular; placed",
+                "  disc-p/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read, not sure); 8.7 regular; text regular; placed",
+                "  disc-w/eng-only stream 1 (scan stream 1, 40 events): labelled regular (watched); 8.7 regular; text regular; placed",
+            ]
+        );
+        assert!(line(&h, "Experiment 14 (").contains("the owner sure, never on disc-f; the packaging"), "{:?}", h.lines);
+        assert_eq!(line(&h, "  regular "), "  regular               1 of 6");
+        assert_eq!(line(&h, "  not counted: "), "  not counted: disc-a 1, disc-f 1, disc-p 1");
+        assert_eq!((h.counts["regular"], h.placed_without_review, h.exit_code), (1, 4, 0));
+    }
+
+    #[test]
+    fn a_label_made_after_seeing_the_verdict_or_from_an_observation_never_counts() {
+        let seen = [("eng-only", 1, "regular", "read", true)];
+        let (mut evidence, text) = trees(&[
+            disc_a("disc-a", seen.to_vec(), true),
+            disc_a("disc-w", vec![("eng-only", 1, "regular", "packaging", true)], true),
+        ]);
+        relabel(&mut evidence, "disc-a", &seen, 0, &[("saw_verdict", json!(true))]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read, saw the verdict); 8.7 regular; text regular; placed",
+                "  disc-w/eng-only stream 1 (scan stream 1, 40 events): labelled regular (packaging); 8.7 regular; text regular; placed",
+            ]
+        );
+        assert_eq!(line(&h, "  regular "), "  regular               0 of 6");
+        assert_eq!(line(&h, "  not counted: "), "  not counted: disc-a 1, disc-w 1");
+        assert_eq!((h.counts["regular"], h.placed_without_review, h.exit_code), (0, 2, 0));
+    }
+
+    #[test]
+    fn a_uk_style_sdh_label_counts_towards_row_14s_uk_style_track_only_when_the_label_counts() {
+        let cued = [("eng-only", 2, "sdh", "read", true)];
+        let flagged = [("eng-only", 1, "sdh", "flag", true)];
+        let plain = [("eng-only", 1, "regular", "read", true)];
+        let seen = [("eng-only", 1, "sdh", "read", true)];
+        let (mut evidence, text) = trees(&[
+            disc_b(cued.to_vec(), true),
+            disc_a("disc-f", flagged.to_vec(), true),
+            disc_a("disc-r", plain.to_vec(), true),
+            disc_a("disc-v", seen.to_vec(), true),
+        ]);
+        let uk = ("style", json!("uk"));
+        relabel(&mut evidence, "disc-b", &cued, 0, &[uk.clone()]);
+        relabel(&mut evidence, "disc-f", &flagged, 0, &[uk.clone()]);
+        relabel(&mut evidence, "disc-r", &plain, 0, &[uk.clone()]);
+        relabel(&mut evidence, "disc-v", &seen, 0, &[uk, ("saw_verdict", json!(true))]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-b/eng-only stream 2 (scan stream 2, 40 events): labelled sdh (read, style uk); 8.7 sdh (review); text keep (review); reviewed",
+                "  disc-f/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (flag, style uk); 8.7 regular; text regular; COSTLY sdh_as_regular",
+                "  disc-r/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read, style uk); 8.7 regular; text regular; placed",
+                "  disc-v/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read, saw the verdict, style uk); 8.7 regular; text regular; COSTLY sdh_as_regular",
+            ]
+        );
+        // Only disc-b's label is a UK-style SDH track that counts: disc-f's is an observation (a flag, D23),
+        // disc-r's is not an sdh label, and disc-v's was given after the verdict was seen.
+        assert_eq!(
+            line(&h, "  UK-style SDH "),
+            "  UK-style SDH          1 of 1 counted SDH tracks labelled style uk (only if the owner has a UK disc)"
+        );
+        assert_eq!(line(&h, "  sdh "), "  sdh                   1 of 6");
+        assert_eq!(line(&h, "  regular "), "  regular               1 of 6");
+        assert_eq!(line(&h, "  not counted: "), "  not counted: disc-f 1, disc-v 1");
+        // Row 14 asks for the UK-style track only if the owner has a UK disc, so it is never a missing kind.
+        assert!(h.missing.iter().all(|name| !name.contains("UK")), "{:?}", h.missing);
+        assert_eq!((h.counts["sdh"], h.exit_code), (1, 1));
+    }
+
+    #[test]
+    fn sub_clear_max_bytes_decides_which_packets_are_events() {
+        let (evidence, _) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
+        let h = judge(&evidence, None, &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text not read; not judged"]
+        );
+        // At 29 bytes the 30-byte clear packets are events too (spec 8.7 "Events").
+        let low = Settings { sub_clear_max_bytes: 29, ..Settings::default() };
+        let h = judge(&evidence, None, &spec_row14(), &low);
+        assert_eq!(
+            h.lines[1],
+            "rule: 8.7 with sub_clear_max_bytes 29, subs_tolerance_ms 300, subs_same_min 0.7, subs_diff_max 0.3; the text rule (EXP-14-design.md section 3) with the same four and its other thresholds as in the code, all provisional"
+        );
+        assert_eq!(
+            section(&h, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 80 events): labelled sdh (read); 8.7 regular; text not read; not judged"]
+        );
+    }
+
+    #[test]
+    fn subs_tolerance_ms_decides_whether_two_tracks_align() {
+        let mut later = starts(40, 10.5, 3.0);
+        later.extend(starts(4, 300.0, 3.0));
+        let subs = [("eng", starts(40, 10.0, 3.0), false, false), ("eng", later, false, false)];
+        let labels = vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)];
+        let (evidence, _) = trees(&[bluray("disc-t", None, "eng-only", ENG_ONLY, &subs, labels)]);
+        // 0.5 s apart: no start within 300 ms, so the two full tracks are in different groups and none is picked:
+        // the first group stands in and the other full track is kept as regular under the review (Task 10, D15,
+        // D20).
+        let h = judge(&evidence, None, &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-t/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text not read; not judged",
+                "  disc-t/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 regular (review); text not read; not judged",
+            ]
+        );
+        // Within 600 ms every start aligns: one group, the track with more events is SDH.
+        let wide = Settings { subs_tolerance_ms: 600, ..Settings::default() };
+        let h = judge(&evidence, None, &spec_row14(), &wide);
+        assert!(h.lines[1].starts_with("rule: 8.7 with sub_clear_max_bytes 64, subs_tolerance_ms 600,"), "{}", h.lines[1]);
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-t/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text not read; not judged",
+                "  disc-t/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
+            ]
+        );
+    }
+
+    #[test]
+    fn subs_same_min_decides_when_a_share_joins_one_group() {
+        let mut half = starts(20, 10.0, 3.0);
+        half.extend(starts(20, 71.0, 3.0));
+        half.extend(starts(4, 300.0, 3.0));
+        let subs = [("eng", starts(40, 10.0, 3.0), false, false), ("eng", half, false, false)];
+        let labels = vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)];
+        let (evidence, _) = trees(&[bluray("disc-m", None, "eng-only", ENG_ONLY, &subs, labels)]);
+        // A share of 0.5 lies between 0.30 and 0.70: subtitle_ambiguous, two groups, none picked; the first stands
+        // in and the other full track is kept as regular under the review (Task 10, D15, D20).
+        let h = judge(&evidence, None, &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-m/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text not read; not judged",
+                "  disc-m/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 regular (review); text not read; not judged",
+            ]
+        );
+        let lower = Settings { subs_same_min: 0.5, ..Settings::default() };
+        let h = judge(&evidence, None, &spec_row14(), &lower);
+        assert!(h.lines[1].contains("subs_same_min 0.5, subs_diff_max 0.3;"), "{}", h.lines[1]);
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-m/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text not read; not judged",
+                "  disc-m/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
+            ]
+        );
+    }
+
+    #[test]
+    fn subs_diff_max_decides_when_a_share_parts_two_groups() {
+        let mut half = starts(20, 10.0, 3.0);
+        half.extend(starts(20, 71.0, 3.0));
+        let mut more = starts(40, 10.0, 3.0);
+        more.extend(starts(4, 300.0, 3.0));
+        let subs = [("eng", starts(40, 10.0, 3.0), false, false), ("eng", half, false, false), ("eng", more, false, false)];
+        let labels = vec![
+            ("eng-only", 1, "regular", "read", true),
+            ("eng-only", 2, "commentary", "read", true),
+            ("eng-only", 3, "sdh", "read", true),
+        ];
+        let (evidence, _) = trees(&[bluray("disc-3", None, "eng-only", ENG_ONLY, &subs, labels)]);
+        // Streams 1 and 3 align fully and form the picked (largest) group; stream 2 shares half its starts with
+        // each: between the bands, a review, and a track Between with a track of the picked group is kept as
+        // regular under it, never dropped unconfirmed (Task 10, D20).
+        let h = judge(&evidence, None, &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-3/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text not read; not judged",
+                "  disc-3/eng-only stream 2 (scan stream 2, 40 events): labelled commentary (read); 8.7 regular (review); text not read; not judged",
+                "  disc-3/eng-only stream 3 (scan stream 3, 44 events): labelled sdh (read); 8.7 sdh (review); text not read; not judged",
+            ]
+        );
+        // At 0.5 the half share is Different from both: no review; the larger group is the dialogue group and the
+        // track outside it is dropped (OutsideDialogueGroup).
+        let wider = Settings { subs_diff_max: 0.5, ..Settings::default() };
+        let h = judge(&evidence, None, &spec_row14(), &wider);
+        assert!(h.lines[1].contains("subs_same_min 0.7, subs_diff_max 0.5;"), "{}", h.lines[1]);
+        assert_eq!(
+            section(&h, "Tracks ("),
+            [
+                "  disc-3/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular; text not read; not judged",
+                "  disc-3/eng-only stream 2 (scan stream 2, 40 events): labelled commentary (read); 8.7 dropped; text not read; not judged",
+                "  disc-3/eng-only stream 3 (scan stream 3, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
+            ]
+        );
+    }
+}
 ```
 
 The arithmetic behind the settings tests: in `disc-t` every start of stream 2 is 0.5 s after one of stream 1, so `aligned` is 0 both ways at 300 ms (Different) and 1.0 from stream 1 at 600 ms (Same); in `disc-m` and `disc-3` the half-aligned stream holds stream 1's first 20 starts (10 to 67 s) and then starts 1 s later (71 to 128 s), so `aligned` is 20 of 40 = 0.5 from the 40-event side and 20 of 44 from the 44-event side, and the larger, 0.5, is between 0.30 and 0.70 at the defaults, Same at `subs_same_min` 0.5 and Different at `subs_diff_max` 0.5. Every stream is full (at least 10% of the largest English track's 44 events). With two groups and no pick, Task 10 raises `subtitle_ambiguous`, lets the first group stand in, and keeps the other group's full track as regular (never dropped by position); in `disc-3` at the defaults the group of streams 1 and 3 is picked (Largest), and stream 2, Between with both, is kept as regular under the same review (never dropped unconfirmed), while at `subs_diff_max` 0.5 it is Different from both and dropped; with one group of 40 and 44 events, the track with more events is SDH (`by_events_rule` alignment).
@@ -57936,690 +58605,688 @@ and replace it with:
 pub use row14::{costly, exp14_requirements, harness, Costly, Outcome, Row14, SubtitleHarness};
 ```
 
-Then find the `use` lines at the top of `mod row14`:
+Then find the `use` lines at the top of `crates/core/src/subtitle/labels/row14.rs`:
 
 ```rust
-    use regex::Regex;
+use regex::Regex;
 
-    use crate::tracks::SubtitleRole;
+use crate::tracks::SubtitleRole;
 
-    use super::SubtitleKind;
+use super::SubtitleKind;
 ```
 
 and replace them with:
 
 ```rust
-    use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet};
 
-    use regex::Regex;
+use regex::Regex;
 
-    use crate::audio::labels::is_slug;
-    use crate::codec::Family;
-    use crate::disc::{disc, Disc, StreamKind, Title};
-    use crate::recording::files::{rip_label, MkvmergeIdent, SubsIndexEntry, Tmdb};
-    use crate::recording::{read_json, read_text, Encoding, Errors, PathKey, Tree};
-    use crate::reconcile::RIP_LOG_NAMES;
-    use crate::review::ReviewReason;
-    use crate::robot::{parse, Scan};
-    use crate::settings::Settings;
-    use crate::subtitle::text::{subs_run, Decision, Role};
-    use crate::tracks::subtitle::{decide_subtitles, english_or_none, SubtitleDecision, SubtitleFacts};
-    use crate::tracks::SubtitleRole;
-    use crate::verify::{
-        by_scan_stream, removed_scan_streams, selected_streams, stream_of_track, subs_streams, subtitle_events,
-        verify_rip, VerifyReport,
-    };
+use crate::audio::labels::is_slug;
+use crate::codec::Family;
+use crate::disc::{disc, Disc, StreamKind, Title};
+use crate::recording::files::{rip_label, MkvmergeIdent, SubsIndexEntry, Tmdb};
+use crate::recording::{read_json, read_text, Encoding, Errors, PathKey, Tree};
+use crate::reconcile::RIP_LOG_NAMES;
+use crate::review::ReviewReason;
+use crate::robot::{parse, Scan};
+use crate::settings::Settings;
+use crate::subtitle::text::{subs_run, Decision, Role};
+use crate::tracks::subtitle::{decide_subtitles, english_or_none, SubtitleDecision, SubtitleFacts};
+use crate::tracks::SubtitleRole;
+use crate::verify::{
+    by_scan_stream, removed_scan_streams, selected_streams, stream_of_track, subs_streams, subtitle_events,
+    verify_rip, VerifyReport,
+};
 
-    use super::{load, SubtitleKind, SubtitleLabel, COUNTING_HOW, FILE_NAME};
+use super::{load, SubtitleKind, SubtitleLabel, COUNTING_HOW, FILE_NAME};
 ```
 
-Then insert this code immediately before the two lines `    #[cfg(test)]` and `    mod tests {` (inside `mod row14`), preceded by one blank line:
+Then insert this code into `crates/core/src/subtitle/labels/row14.rs` immediately before its last two lines, `#[cfg(test)]` and `mod tests;`, preceded by one blank line:
 
 ```rust
-    // ------------------------------------------------------------------ the harness
+// ------------------------------------------------------------------ the harness
 
-    /// The reading folder of a rip label under the OCR text, `<text>/<slug>/<label>/subs-ocr/`: the goldens' layout, the
-    /// folder ocr-subs.ps1 writes and `lazymkv-dev decide` reads first.
-    const READING: &str = "subs-ocr";
-    /// How to give the harness the OCR text, at the end of every reason that names none.
-    const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
-    /// The width the count block pads its names to.
-    const COLUMN: usize = 22;
+/// The reading folder of a rip label under the OCR text, `<text>/<slug>/<label>/subs-ocr/`: the goldens' layout, the
+/// folder ocr-subs.ps1 writes and `lazymkv-dev decide` reads first.
+const READING: &str = "subs-ocr";
+/// How to give the harness the OCR text, at the end of every reason that names none.
+const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
+/// The width the count block pads its names to.
+const COLUMN: usize = 22;
 
-    /// What a recording's tmdb.json says it is, for row 14's "1 feature film and 1 TV episode".
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Media {
-        Film,
-        Tv,
-        Unknown,
-    }
+/// What a recording's tmdb.json says it is, for row 14's "1 feature film and 1 TV episode".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Media {
+    Film,
+    Tv,
+    Unknown,
+}
 
-    /// What one rip label gives every labelled track of it.
-    struct Rip {
-        title: Title,
-        report: VerifyReport,
-        events: BTreeMap<u32, Vec<f64>>,
-        decision: SubtitleDecision,
-        /// The text rule's decisions by scan stream, or why the title's text was not read.
-        text: Result<BTreeMap<u32, Decision>, String>,
-    }
+/// What one rip label gives every labelled track of it.
+struct Rip {
+    title: Title,
+    report: VerifyReport,
+    events: BTreeMap<u32, Vec<f64>>,
+    decision: SubtitleDecision,
+    /// The text rule's decisions by scan stream, or why the title's text was not read.
+    text: Result<BTreeMap<u32, Decision>, String>,
+}
 
-    /// A labelled track mapped onto an English or no-language subtitle stream of its rip.
-    struct Mapped {
-        /// The rip's title and the scan stream.
-        title: u32,
-        stream: u32,
-        events: usize,
-        family: Family,
-        dvd: bool,
-        /// 8.7 as the app decides before experiment 14 answers (the text adding reviews where the app reads it, 6.4 step
-        /// 10 and 8.7 "Text").
-        rule: Outcome,
-        /// The text rule's decision for the stream (None when it gave none), or why the text was not read.
-        text: Result<Option<Decision>, String>,
-        /// What row 14 (a) judges: the text rule's outcome, or 8.7's for a stream the text rule sets aside; None when the
-        /// text was not read.
-        judged: Option<Outcome>,
-    }
+/// A labelled track mapped onto an English or no-language subtitle stream of its rip.
+struct Mapped {
+    /// The rip's title and the scan stream.
+    title: u32,
+    stream: u32,
+    events: usize,
+    family: Family,
+    dvd: bool,
+    /// 8.7 as the app decides before experiment 14 answers (the text adding reviews where the app reads it, 6.4 step
+    /// 10 and 8.7 "Text").
+    rule: Outcome,
+    /// The text rule's decision for the stream (None when it gave none), or why the text was not read.
+    text: Result<Option<Decision>, String>,
+    /// What row 14 (a) judges: the text rule's outcome, or 8.7's for a stream the text rule sets aside; None when the
+    /// text was not read.
+    judged: Option<Outcome>,
+}
 
-    /// Where a labelled track ended up.
-    enum Place {
-        /// Not judged and not among the tracks: its scan or rip could not be read, or its file track is no subtitle
-        /// stream of the rip.
-        Unreadable(String),
-        /// A subtitle stream in another language than English and none: listed, never judged (row 14 covers English and
-        /// no-language tracks).
-        OtherLanguage { stream: u32, language: String },
-        Track(Mapped),
-    }
+/// Where a labelled track ended up.
+enum Place {
+    /// Not judged and not among the tracks: its scan or rip could not be read, or its file track is no subtitle
+    /// stream of the rip.
+    Unreadable(String),
+    /// A subtitle stream in another language than English and none: listed, never judged (row 14 covers English and
+    /// no-language tracks).
+    OtherLanguage { stream: u32, language: String },
+    Track(Mapped),
+}
 
-    /// One labelled track and what the harness found for it.
-    struct Judged {
-        slug: String,
-        media: Media,
-        entry: SubtitleLabel,
-        place: Place,
-    }
+/// One labelled track and what the harness found for it.
+struct Judged {
+    slug: String,
+    media: Media,
+    entry: SubtitleLabel,
+    place: Place,
+}
 
-    impl Judged {
-        fn mapped(&self) -> Option<&Mapped> {
-            match &self.place {
-                Place::Track(mapped) => Some(mapped),
-                _ => None,
-            }
-        }
-
-        fn outcome(&self) -> Option<&Outcome> {
-            self.mapped().and_then(|mapped| mapped.judged.as_ref())
-        }
-
-        /// "<slug>/<rip label> stream <file track>".
-        fn key(&self) -> String {
-            format!("{}/{} stream {}", self.slug, self.entry.label, self.entry.stream)
-        }
-
-        /// Why the track was not judged; None when it was, and for a track in another language.
-        fn why_not(&self) -> Option<String> {
-            match &self.place {
-                Place::Unreadable(why) => Some(why.clone()),
-                Place::OtherLanguage { .. } => None,
-                Place::Track(mapped) if mapped.judged.is_some() => None,
-                Place::Track(mapped) => Some(match &mapped.text {
-                    Err(why) => why.clone(),
-                    Ok(_) => format!("the text rule gave scan stream {} no verdict", mapped.stream),
-                }),
-            }
-        }
-    }
-
-    /// The harness's result. Spec 15, 17 row 14 (a), RP15. Def: T18. Use: T18.
-    #[derive(Clone, Debug, PartialEq)]
-    pub struct SubtitleHarness {
-        /// Counted labels per kind, every kind of `SubtitleKind::ALL` present (0 when none counts).
-        pub counts: BTreeMap<String, u32>,
-        /// ("<slug>/<rip label> stream <file track>", verdict) of every costly verdict, in the report's track order.
-        pub costly: Vec<(String, Costly)>,
-        /// Judged tracks placed without review (row 14 (a)'s "at least half").
-        pub placed_without_review: u32,
-        /// Every label of every valid labels file.
-        pub labelled: u32,
-        /// Row 14 (a)'s totals not reached, by name, in the row's order.
-        pub missing: Vec<String>,
-        /// The report.
-        pub lines: Vec<String>,
-        /// 0; 1 a costly verdict; 2 a labels file that does not validate; 3 no label, or a label that could not be judged.
-        pub exit_code: i32,
-    }
-
-    /// Every labelled English or no-language track of every rip label of the evidence: decide_subtitles over the
-    /// recording's scan and subs/ packets (the rip verified with `verify_rip` over `selected_streams`, events through
-    /// `verify::subtitle_events` with settings.sub_clear_max_bytes), text::decide with `settings.text_rule()` when OCR text
-    /// is found under `text` (re-keyed through `verify::by_scan_stream`), the costly verdicts, the counts against `row14`
-    /// (counting only `read` and `watched` labels the owner is sure of, given before the verdict, never a fitting disc's;
-    /// row 14's UK-style SDH track from `style` "uk" on a counted `sdh` label, RP25), the report lines, exit 1 on
-    /// any costly verdict, 2 when a labels file does not validate (the run stops), 3 when there is no label or a labelled
-    /// track could not be judged (spec 15: "separately, when some evidence could not be read"). The recordings are the
-    /// slug folders of `evidence` holding subtitle-labels.json. Spec 15, 17 row 14 (a), 8.7 "Text", RP15. Def: T18.
-    /// Use: T18 (retune --subtitles).
-    pub fn harness(evidence: &dyn Tree, text: Option<&dyn Tree>, row14: &Row14, settings: &Settings) -> SubtitleHarness {
-        let root = PathKey::root();
-        let shown = evidence.display(&root);
-        let recordings: Vec<PathKey> = evidence
-            .list(&root)
-            .into_iter()
-            .filter(|dir| evidence.is_dir(dir) && is_slug(dir.name()) && evidence.is_file(&dir.join(FILE_NAME)))
-            .collect();
-        let mut files = Vec::new();
-        let mut bad = Vec::new();
-        for dir in &recordings {
-            // load's Err already starts with the file as shown ("<shown>: <problems>", Task 17).
-            match load(evidence, &dir.join(FILE_NAME)) {
-                Ok(entries) => files.push((dir.clone(), entries)),
-                Err(problems) => bad.push(problems),
-            }
-        }
-        if !bad.is_empty() {
-            let mut lines = vec![format!("subtitle labels: {shown}: {} labels file(s) do not validate", bad.len())];
-            lines.extend(bad.iter().map(|problem| format!("  {problem}")));
-            lines.push(String::new());
-            lines.push("RESULT FAILED: a subtitle labels file does not validate (lazymkv-dev labels --subtitles check)".to_string());
-            return SubtitleHarness {
-                counts: BTreeMap::new(),
-                costly: Vec::new(),
-                placed_without_review: 0,
-                labelled: 0,
-                missing: Vec::new(),
-                lines,
-                exit_code: 2,
-            };
-        }
-        let mut judged: Vec<Judged> = files
-            .iter()
-            .flat_map(|(dir, entries)| judge_recording(evidence, text, dir, entries, settings))
-            .collect();
-        judged.sort_by(|a, b| {
-            (a.slug.as_str(), a.entry.label.as_str(), a.entry.stream).cmp(&(b.slug.as_str(), b.entry.label.as_str(), b.entry.stream))
-        });
-        report(&shown, files.len(), &judged, row14, settings)
-    }
-
-    /// TMDb's kind of the recording from its tmdb.json: `name` a show, `title` a film, else (or unreadable) unknown.
-    fn media(evidence: &dyn Tree, dir: &PathKey) -> Media {
-        let path = dir.join("tmdb.json");
-        if !evidence.is_file(&path) {
-            return Media::Unknown;
-        }
-        match read_json::<Tmdb>(evidence, &path) {
-            Ok(tmdb) if tmdb.name.is_some() => Media::Tv,
-            Ok(tmdb) if tmdb.title.is_some() => Media::Film,
-            _ => Media::Unknown,
-        }
-    }
-
-    /// Every label of one recording: its scan once, then each rip label once for the labels on it.
-    fn judge_recording(
-        evidence: &dyn Tree,
-        text: Option<&dyn Tree>,
-        dir: &PathKey,
-        entries: &[SubtitleLabel],
-        settings: &Settings,
-    ) -> Vec<Judged> {
-        let slug = dir.name().to_string();
-        let media = media(evidence, dir);
-        let judged = |entry: &SubtitleLabel, place: Place| Judged { slug: slug.clone(), media, entry: entry.clone(), place };
-        let scanned = read_text(evidence, &dir.join("scan.txt"), Encoding::Utf8Sig, Errors::Replace)
-            .map(|log| parse(&log))
-            .and_then(|scan| disc(&scan).map(|typed| (scan, typed)));
-        let (scan, typed) = match scanned {
-            Ok(found) => found,
-            Err(why) => return entries.iter().map(|entry| judged(entry, Place::Unreadable(why.clone()))).collect(),
-        };
-        let mut by_label: BTreeMap<&str, Vec<&SubtitleLabel>> = BTreeMap::new();
-        for entry in entries {
-            by_label.entry(entry.label.as_str()).or_default().push(entry);
-        }
-        let mut out = Vec::new();
-        for (label, labelled) in by_label {
-            match read_rip(evidence, text, dir, label, &scan, &typed, settings) {
-                Ok(rip) => out.extend(labelled.into_iter().map(|entry| judged(entry, map_track(entry, &rip, typed.is_dvd)))),
-                Err(why) => out.extend(labelled.into_iter().map(|entry| judged(entry, Place::Unreadable(why.clone())))),
-            }
-        }
-        out
-    }
-
-    /// One rip label as 6.4 step 10 and 8.7 read it: rip_label's title and selection, the rip verified against the scan
-    /// (`verify_rip` over `selected_streams`, with its rip log), the events of subs/ keyed by scan stream, MSG:4047's
-    /// removals mapped to scan streams (`verify::removed_scan_streams`), the text rule's decisions when the OCR text is
-    /// there, and `decide_subtitles` with them. `decide_subtitles` gets the text only where the app reads it (6.4 step 10,
-    /// 8.7 "Text"): a file holding two or more English or no-language subtitle streams; a title with one keeps it as
-    /// "English" without the text (row 14 (b)'s fallback), so the 8.7 column shows what the app decides. The text rule's
-    /// decisions are still judged for every title (row 14 (a) judges the text rule). Err when a file cannot be read or the
-    /// rip does not verify (its file tracks could not be mapped).
-    fn read_rip(
-        evidence: &dyn Tree,
-        text: Option<&dyn Tree>,
-        dir: &PathKey,
-        label: &str,
-        scan: &Scan,
-        typed: &Disc,
-        settings: &Settings,
-    ) -> Result<Rip, String> {
-        let rip = rip_label(evidence, dir, label)?;
-        let number = u32::try_from(rip.title).map_err(|_| format!("{label}: the summary names title {}", rip.title))?;
-        let title = typed.title(number)?.clone();
-        let selection = selected_streams(scan, number, rip.selection)?;
-        let folder = dir.join(label);
-        let ident: MkvmergeIdent = read_json(evidence, &folder.join("mkvmerge.json"))?;
-        let log_path = RIP_LOG_NAMES.iter().map(|name| folder.join(name)).find(|path| evidence.is_file(path));
-        let rip_log = match &log_path {
-            Some(path) => Some(read_text(evidence, path, Encoding::Utf8Sig, Errors::Replace)?),
-            None => None,
-        };
-        let report = verify_rip(&title, &ident, &selection, rip_log.as_deref(), typed.is_dvd);
-        if !report.ok {
-            return Err(format!("{label}: the rip does not verify against the scan: {}", report.mismatches.join("; ")));
-        }
-        let events = subtitle_events(evidence, &folder.join("subs"), &report, settings.sub_clear_max_bytes)?;
-        let removed = removed_scan_streams(rip_log.as_deref(), &selection);
-        let english_in_file = title
-            .streams
-            .iter()
-            .filter(|s| {
-                s.kind == StreamKind::Subtitles
-                    && selection.contains(&s.number)
-                    && !removed.contains(&s.number)
-                    && english_or_none(s.language.as_deref())
-            })
-            .count();
-        let text = text_decisions(evidence, text, dir, label, &report, settings);
-        let decision = {
-            let facts = SubtitleFacts {
-                events: events.clone(),
-                removed,
-                discdb: None,
-                text: if english_in_file >= 2 { text.as_ref().ok() } else { None },
-                remembered: None,
-                reviewed: None,
-            };
-            decide_subtitles(&title, &facts, settings)
-        };
-        Ok(Rip { title, report, events, decision, text })
-    }
-
-    /// The text rule's decisions for one rip label, keyed by scan stream: `subs_run` over the label folder with the OCR
-    /// text of `<text>/<slug>/<label>/subs-ocr/`, `settings.sub_clear_max_bytes` and `settings.text_rule()`, the original
-    /// language from the recording's tmdb.json; Err with why the text was not read (no text given, no reading folder,
-    /// or subs_run's own refusal).
-    fn text_decisions(
-        evidence: &dyn Tree,
-        text: Option<&dyn Tree>,
-        dir: &PathKey,
-        label: &str,
-        report: &VerifyReport,
-        settings: &Settings,
-    ) -> Result<BTreeMap<u32, Decision>, String> {
-        let text_tree = text.ok_or_else(|| format!("no OCR text {TEXT_HINT}"))?;
-        let folder = dir.join(label);
-        let reading = folder.join(READING);
-        if !text_tree.is_dir(&reading) {
-            return Err(format!("no OCR text: {} {TEXT_HINT}", text_tree.display(&reading)));
-        }
-        let run = subs_run(evidence, &folder, text_tree, &reading, None, settings.sub_clear_max_bytes, &settings.text_rule());
-        if run.exit_code != 0 {
-            return Err(run.stderr.join("; "));
-        }
-        let analysis = run.analysis.ok_or_else(|| "the text rule gave no analysis".to_string())?;
-        let index_path = folder.join("subs/index.json");
-        let index_text = read_text(evidence, &index_path, Encoding::Utf8Sig, Errors::Replace)?;
-        let index: Vec<SubsIndexEntry> =
-            serde_json::from_str(&index_text).map_err(|error| format!("{}: {error}", evidence.display(&index_path)))?;
-        Ok(by_scan_stream(&analysis.decide, &subs_streams(&index, report)))
-    }
-
-    /// Maps one label onto its rip: the file track through the verified pairs, which must be a subtitle stream; a stream
-    /// in another language is listed apart; an English or no-language one gets 8.7's outcome and the judged one.
-    fn map_track(entry: &SubtitleLabel, rip: &Rip, dvd: bool) -> Place {
-        let Some(stream) = stream_of_track(&rip.report, entry.stream) else {
-            return Place::Unreadable(format!("file track {} is not a track of the rip", entry.stream));
-        };
-        let scan_stream = match rip.title.streams.iter().find(|candidate| candidate.number == stream) {
-            Some(found) if found.kind == StreamKind::Subtitles => found,
-            Some(found) => {
-                return Place::Unreadable(format!(
-                    "file track {} is scan stream {stream}, a {} stream, not a subtitle stream",
-                    entry.stream,
-                    found.kind.as_str()
-                ))
-            }
-            None => return Place::Unreadable(format!("file track {} is not a track of the rip", entry.stream)),
-        };
-        let language = scan_stream.language.as_deref();
-        if !english_or_none(language) {
-            return Place::OtherLanguage { stream, language: language.unwrap_or_default().to_string() };
-        }
-        let text = match &rip.text {
-            Ok(decisions) => Ok(decisions.get(&stream).cloned()),
-            Err(why) => Err(why.clone()),
-        };
-        let text_role = text.as_ref().ok().and_then(|found| found.as_ref().map(|decision| decision.role));
-        let rule = rule_outcome(&rip.decision, stream, text_role);
-        let judged = match &text {
-            Ok(Some(decision)) if decision.role == Role::SetAside => Some(rule.clone()),
-            Ok(Some(decision)) => Some(text_outcome(decision)),
+impl Judged {
+    fn mapped(&self) -> Option<&Mapped> {
+        match &self.place {
+            Place::Track(mapped) => Some(mapped),
             _ => None,
-        };
-        Place::Track(Mapped {
-            title: rip.title.number,
-            stream,
-            events: rip.events.get(&stream).map_or(0, Vec::len),
-            family: scan_stream.codec.family,
-            dvd,
-            rule,
-            text,
-            judged,
-        })
-    }
-
-    /// 8.7's outcome for a stream, as the app decides before experiment 14 answers: its kept role (None when dropped) and
-    /// whether the title raised subtitle_ambiguous.
-    fn rule_outcome(decision: &SubtitleDecision, stream: u32, text_role: Option<Role>) -> Outcome {
-        Outcome {
-            role: decision.kept.iter().find(|kept| kept.stream == stream).map(|kept| kept.role),
-            review: decision.reviews.contains(&ReviewReason::SubtitleAmbiguous),
-            text_role,
         }
     }
 
-    /// The text rule's outcome: regular, sdh and forced place the track, drop drops it, keep keeps it unplaced (always
-    /// with a review: counted as kept as regular), with the decision's own review.
-    fn text_outcome(decision: &Decision) -> Outcome {
-        let role = match decision.role {
-            Role::Regular | Role::Keep => Some(SubtitleRole::Regular),
-            Role::Sdh => Some(SubtitleRole::Sdh),
-            Role::Forced => Some(SubtitleRole::Forced),
-            Role::Drop | Role::SetAside => None,
-        };
-        Outcome { role, review: decision.review.is_some(), text_role: Some(decision.role) }
+    fn outcome(&self) -> Option<&Outcome> {
+        self.mapped().and_then(|mapped| mapped.judged.as_ref())
     }
 
-    /// "regular", "sdh", "forced" or "dropped", with " (review)" when a review was raised.
-    fn outcome_word(outcome: &Outcome) -> String {
-        let role = outcome.role.map_or("dropped", SubtitleRole::as_str);
-        if outcome.review {
-            format!("{role} (review)")
-        } else {
-            role.to_string()
+    /// "<slug>/<rip label> stream <file track>".
+    fn key(&self) -> String {
+        format!("{}/{} stream {}", self.slug, self.entry.label, self.entry.stream)
+    }
+
+    /// Why the track was not judged; None when it was, and for a track in another language.
+    fn why_not(&self) -> Option<String> {
+        match &self.place {
+            Place::Unreadable(why) => Some(why.clone()),
+            Place::OtherLanguage { .. } => None,
+            Place::Track(mapped) if mapped.judged.is_some() => None,
+            Place::Track(mapped) => Some(match &mapped.text {
+                Err(why) => why.clone(),
+                Ok(_) => format!("the text rule gave scan stream {} no verdict", mapped.stream),
+            }),
         }
     }
+}
 
-    /// The text rule's role for the report, with " (review)"; "no verdict" or "not read" without one.
-    fn text_word(text: &Result<Option<Decision>, String>) -> String {
-        match text {
-            Ok(Some(decision)) if decision.review.is_some() => format!("{} (review)", decision.role.as_str()),
-            Ok(Some(decision)) => decision.role.as_str().to_string(),
-            Ok(None) => "no verdict".to_string(),
-            Err(_) => "not read".to_string(),
+/// The harness's result. Spec 15, 17 row 14 (a), RP15. Def: T18. Use: T18.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubtitleHarness {
+    /// Counted labels per kind, every kind of `SubtitleKind::ALL` present (0 when none counts).
+    pub counts: BTreeMap<String, u32>,
+    /// ("<slug>/<rip label> stream <file track>", verdict) of every costly verdict, in the report's track order.
+    pub costly: Vec<(String, Costly)>,
+    /// Judged tracks placed without review (row 14 (a)'s "at least half").
+    pub placed_without_review: u32,
+    /// Every label of every valid labels file.
+    pub labelled: u32,
+    /// Row 14 (a)'s totals not reached, by name, in the row's order.
+    pub missing: Vec<String>,
+    /// The report.
+    pub lines: Vec<String>,
+    /// 0; 1 a costly verdict; 2 a labels file that does not validate; 3 no label, or a label that could not be judged.
+    pub exit_code: i32,
+}
+
+/// Every labelled English or no-language track of every rip label of the evidence: decide_subtitles over the
+/// recording's scan and subs/ packets (the rip verified with `verify_rip` over `selected_streams`, events through
+/// `verify::subtitle_events` with settings.sub_clear_max_bytes), text::decide with `settings.text_rule()` when OCR text
+/// is found under `text` (re-keyed through `verify::by_scan_stream`), the costly verdicts, the counts against `row14`
+/// (counting only `read` and `watched` labels the owner is sure of, given before the verdict, never a fitting disc's;
+/// row 14's UK-style SDH track from `style` "uk" on a counted `sdh` label, RP25), the report lines, exit 1 on
+/// any costly verdict, 2 when a labels file does not validate (the run stops), 3 when there is no label or a labelled
+/// track could not be judged (spec 15: "separately, when some evidence could not be read"). The recordings are the
+/// slug folders of `evidence` holding subtitle-labels.json. Spec 15, 17 row 14 (a), 8.7 "Text", RP15. Def: T18.
+/// Use: T18 (retune --subtitles).
+pub fn harness(evidence: &dyn Tree, text: Option<&dyn Tree>, row14: &Row14, settings: &Settings) -> SubtitleHarness {
+    let root = PathKey::root();
+    let shown = evidence.display(&root);
+    let recordings: Vec<PathKey> = evidence
+        .list(&root)
+        .into_iter()
+        .filter(|dir| evidence.is_dir(dir) && is_slug(dir.name()) && evidence.is_file(&dir.join(FILE_NAME)))
+        .collect();
+    let mut files = Vec::new();
+    let mut bad = Vec::new();
+    for dir in &recordings {
+        // load's Err already starts with the file as shown ("<shown>: <problems>", Task 17).
+        match load(evidence, &dir.join(FILE_NAME)) {
+            Ok(entries) => files.push((dir.clone(), entries)),
+            Err(problems) => bad.push(problems),
         }
     }
-
-    /// One line of the Tracks section.
-    fn track_line(judged: &Judged, mapped: &Mapped) -> String {
-        let entry = &judged.entry;
-        let sure = if entry.sure { "" } else { ", not sure" };
-        let seen = if entry.saw_verdict { ", saw the verdict" } else { "" };
-        let style = entry.style.as_deref().map_or(String::new(), |style| format!(", style {style}"));
-        let verdict = match &mapped.judged {
-            Some(outcome) => match costly(entry.kind, outcome) {
-                Some(found) => format!("COSTLY {}", found.as_str()),
-                None if outcome.review => "reviewed".to_string(),
-                None => "placed".to_string(),
-            },
-            None => "not judged".to_string(),
-        };
-        format!(
-            "  {} (scan stream {}, {} events): labelled {} ({}{sure}{seen}{style}); 8.7 {}; text {}; {verdict}",
-            judged.key(),
-            mapped.stream,
-            mapped.events,
-            entry.kind.as_str(),
-            entry.how,
-            outcome_word(&mapped.rule),
-            text_word(&mapped.text)
-        )
-    }
-
-    /// A count-block line: two spaces, the name padded to COLUMN, the tail.
-    fn column(name: &str, tail: &str) -> String {
-        format!("  {name:<width$}{tail}", width = COLUMN)
-    }
-
-    /// What the count block says after a kind's count.
-    fn kind_tail(kind: SubtitleKind, count: u32, forced_with_events: u32, row14: &Row14) -> String {
-        match kind {
-            SubtitleKind::Regular => format!("{count} of {}", row14.regular),
-            SubtitleKind::Sdh => format!("{count} of {}", row14.sdh),
-            SubtitleKind::Forced => format!("{count}, with events {forced_with_events} of {}", row14.forced),
-            SubtitleKind::Commentary => format!("{count} of {}", row14.commentary),
-            SubtitleKind::Trivia | SubtitleKind::Lyrics | SubtitleKind::DubTranscript => {
-                format!("{count} (every one the owner has; checked by hand)")
-            }
-            SubtitleKind::Translation => format!("{count} (every second translation the owner has; checked by hand)"),
-            SubtitleKind::ClosedCaptions => format!("{count} (with its DVD's VobSub tracks)"),
-            SubtitleKind::Other => count.to_string(),
-        }
-    }
-
-    /// The counts, the answer, the report lines and the exit code over the judged labels.
-    fn report(shown: &str, recordings: usize, judged: &[Judged], row14: &Row14, settings: &Settings) -> SubtitleHarness {
-        let fitting = |slug: &str| row14.fitting_discs.iter().any(|fitted| fitted == slug);
-        // D23 and RP25: judged here, read or watched, the owner sure, given before the verdict was seen, off
-        // the fitting discs.
-        let counts_here = |j: &Judged| {
-            j.outcome().is_some()
-                && COUNTING_HOW.contains(&j.entry.how.as_str())
-                && j.entry.sure
-                && !j.entry.saw_verdict
-                && !fitting(&j.slug)
-        };
-        let counted: Vec<&Judged> = judged.iter().filter(|&j| counts_here(j)).collect();
-        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-        for kind in SubtitleKind::ALL {
-            counts.insert(kind.as_str().to_string(), counted.iter().filter(|j| j.entry.kind == kind).count() as u32);
-        }
-        let forced_with_events = counted
-            .iter()
-            .filter(|j| j.entry.kind == SubtitleKind::Forced && j.mapped().is_some_and(|mapped| mapped.events > 0))
-            .count() as u32;
-        let titles_of = |kind: SubtitleKind| -> BTreeSet<(String, u32)> {
-            counted
-                .iter()
-                .filter(|j| j.entry.kind == kind)
-                .filter_map(|j| j.mapped().map(|mapped| (j.slug.clone(), mapped.title)))
-                .collect()
-        };
-        let regular_titles = titles_of(SubtitleKind::Regular);
-        let sdh_titles = titles_of(SubtitleKind::Sdh);
-        let pairs: BTreeSet<(String, u32)> = regular_titles.intersection(&sdh_titles).cloned().collect();
-        let pair_titles = pairs.len() as u32;
-        let pair_discs = pairs.iter().map(|(slug, _)| slug.as_str()).collect::<BTreeSet<&str>>().len() as u32;
-        let media_of = |slug: &str| judged.iter().find(|j| j.slug == slug).map_or(Media::Unknown, |j| j.media);
-        let pair_features = pairs.iter().filter(|(slug, _)| media_of(slug) == Media::Film).count() as u32;
-        let pair_tv = pairs.iter().filter(|(slug, _)| media_of(slug) == Media::Tv).count() as u32;
-        let dvd_vobsub = counted
-            .iter()
-            .filter(|j| j.mapped().is_some_and(|mapped| mapped.dvd && mapped.family == Family::VobSub))
-            .map(|j| j.slug.as_str())
-            .collect::<BTreeSet<&str>>()
-            .len() as u32;
-        // Row 14's UK-style SDH track (RP25): a counted sdh label whose style is "uk".
-        let uk_sdh = counted
-            .iter()
-            .filter(|j| j.entry.kind == SubtitleKind::Sdh && j.entry.style.as_deref() == Some("uk"))
-            .count() as u32;
-        let judged_count = judged.iter().filter(|j| j.outcome().is_some()).count() as u32;
-        let placed = judged.iter().filter(|j| j.outcome().is_some_and(|outcome| !outcome.review)).count() as u32;
-        let costly_found: Vec<(String, Costly)> = judged
-            .iter()
-            .filter_map(|j| {
-                let outcome = j.outcome()?;
-                costly(j.entry.kind, outcome).map(|found| (j.key(), found))
-            })
-            .collect();
-        let not_judged: Vec<(String, String)> = judged.iter().filter_map(|j| j.why_not().map(|why| (j.key(), why))).collect();
-        let others: Vec<&Judged> = judged.iter().filter(|j| matches!(j.place, Place::OtherLanguage { .. })).collect();
-        let checks = [
-            (pair_titles, row14.pair_titles, "titles with regular and SDH"),
-            (pair_discs, row14.pair_discs, "discs with such titles"),
-            (pair_features, row14.pair_features, "feature films with such a title"),
-            (pair_tv, row14.pair_tv, "TV episodes with such a title"),
-            (counts["sdh"], row14.sdh, "SDH tracks"),
-            (counts["regular"], row14.regular, "regular tracks"),
-            (forced_with_events, row14.forced, "forced tracks with events"),
-            (counts["commentary"], row14.commentary, "commentary tracks"),
-            (dvd_vobsub, row14.dvd_vobsub, "DVDs with English VobSub"),
-        ];
-        let missing: Vec<String> =
-            checks.iter().filter(|(have, want, _)| have < want).map(|(_, _, name)| name.to_string()).collect();
-        let answer = if !costly_found.is_empty() {
-            format!("no: {} costly verdict(s)", costly_found.len())
-        } else if !not_judged.is_empty() {
-            format!("not answered: {} labelled track(s) not judged", not_judged.len())
-        } else if !missing.is_empty() {
-            format!("not answered: too few {}", missing.join(", "))
-        } else if placed * 2 < judged_count {
-            "no: fewer than half of the judged tracks are placed without review".to_string()
-        } else {
-            "yes for (a) on the tracks judged (row 14 also asks (b))".to_string()
-        };
-        let mut not_counted: BTreeMap<&str, usize> = BTreeMap::new();
-        for j in judged.iter().filter(|&j| !counts_here(j)) {
-            *not_counted.entry(j.slug.as_str()).or_default() += 1;
-        }
-        let not_counted_text = if not_counted.is_empty() {
-            "none".to_string()
-        } else {
-            not_counted.iter().map(|(slug, count)| format!("{slug} {count}")).collect::<Vec<String>>().join(", ")
-        };
-
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "subtitle labels: {shown}: {recordings} recordings with {FILE_NAME}, {} labelled tracks: {judged_count} judged, {} not judged, {} in another language",
-            judged.len(),
-            not_judged.len(),
-            others.len()
-        ));
-        lines.push(format!(
-            "rule: 8.7 with sub_clear_max_bytes {}, subs_tolerance_ms {}, subs_same_min {}, subs_diff_max {}; the text rule (EXP-14-design.md section 3) with the same four and its other thresholds as in the code, all provisional",
-            settings.sub_clear_max_bytes, settings.subs_tolerance_ms, settings.subs_same_min, settings.subs_diff_max
-        ));
+    if !bad.is_empty() {
+        let mut lines = vec![format!("subtitle labels: {shown}: {} labels file(s) do not validate", bad.len())];
+        lines.extend(bad.iter().map(|problem| format!("  {problem}")));
         lines.push(String::new());
-        lines.push(
-            "Tracks (the owner's label; 8.7 as the app decides before experiment 14 answers; the text rule as row 14 (a) judges it):"
-                .to_string(),
-        );
-        let start = lines.len();
-        for j in judged {
-            if let Some(mapped) = j.mapped() {
-                lines.push(track_line(j, mapped));
-            }
-        }
-        if lines.len() == start {
-            lines.push("  none".to_string());
-        }
-        lines.push(String::new());
-        let never = if row14.fitting_discs.is_empty() {
-            String::new()
-        } else {
-            format!(", never on {}", row14.fitting_discs.join(" or "))
-        };
-        lines.push(format!(
-            "Experiment 14 (spec section 17 row 14 (a); tracks that count: judged here, labelled from text read or watched before the verdict, the owner sure{never}; the packaging, the menu, the player and TheDiscDB are observations and do not count on their own, D23):"
-        ));
-        for kind in SubtitleKind::ALL {
-            lines.push(column(kind.as_str(), &kind_tail(kind, counts[kind.as_str()], forced_with_events, row14)));
-        }
-        lines.push(column(
-            "regular and SDH",
-            &format!(
-                "{pair_titles} of {} titles, from {pair_discs} of {} discs; feature films {pair_features} of {}, TV episodes {pair_tv} of {}",
-                row14.pair_titles, row14.pair_discs, row14.pair_features, row14.pair_tv
-            ),
-        ));
-        lines.push(column("DVD VobSub", &format!("{dvd_vobsub} of {} DVDs with a counted English VobSub track", row14.dvd_vobsub)));
-        // Row 14's UK-style SDH track, counted from the labels' style (RP25); never among the missing kinds, since row 14
-        // asks for it only if the owner has a UK disc, which the harness cannot know.
-        lines.push(column(
-            "UK-style SDH",
-            &format!("{uk_sdh} of {} counted SDH tracks labelled style uk (only if the owner has a UK disc)", row14.uk_sdh),
-        ));
-        lines.push(column(
-            "placed, no review",
-            &format!("{placed} of {judged_count} judged tracks (row 14 (a) asks for at least half)"),
-        ));
-        lines.push(column("costly verdicts", &costly_found.len().to_string()));
-        lines.push(format!("  as it stands: {answer}"));
-        lines.push(format!("  not counted: {not_counted_text}"));
-        lines.push(String::new());
-        lines.push("Costly verdicts (row 14 (a): the text rule's verdict, or 8.7's for a stream the text rule sets aside):".to_string());
-        for j in judged {
-            if let Some(found) = j.outcome().and_then(|outcome| costly(j.entry.kind, outcome)) {
-                lines.push(format!("  COSTLY {}: labelled {}, {}", j.key(), j.entry.kind.as_str(), found.meaning()));
-            }
-        }
-        if costly_found.is_empty() {
-            lines.push("  none".to_string());
-        }
-        lines.push(String::new());
-        lines.push("Labels that cannot be judged:".to_string());
-        for (key, why) in &not_judged {
-            lines.push(format!("  {key}: {why}"));
-        }
-        if not_judged.is_empty() {
-            lines.push("  none".to_string());
-        }
-        lines.push(String::new());
-        lines.push("Labels in another language (row 14 judges English and no-language tracks only):".to_string());
-        for j in &others {
-            if let Place::OtherLanguage { stream, language } = &j.place {
-                lines.push(format!("  {}: labelled {}, scan stream {stream} is in {language}", j.key(), j.entry.kind.as_str()));
-            }
-        }
-        if others.is_empty() {
-            lines.push("  none".to_string());
-        }
-        lines.push(String::new());
-        let (result, exit_code) = if !costly_found.is_empty() {
-            let named: Vec<String> = costly_found.iter().map(|(key, found)| format!("{key} ({})", found.as_str())).collect();
-            let mut result = format!("RESULT FAILED: {} costly verdict(s): {}", costly_found.len(), named.join("; "));
-            if !not_judged.is_empty() {
-                result.push_str(&format!("; not judged: {} labelled track(s)", not_judged.len()));
-            }
-            (result, 1)
-        } else if judged.is_empty() {
-            ("RESULT FAILED: no subtitle label to judge (lazymkv-dev labels --subtitles set)".to_string(), 3)
-        } else if !not_judged.is_empty() {
-            (
-                format!(
-                    "RESULT FAILED: not everything was judged: {} labelled track(s) (see Labels that cannot be judged)",
-                    not_judged.len()
-                ),
-                3,
-            )
-        } else {
-            ("RESULT ok".to_string(), 0)
-        };
-        lines.push(result);
-        SubtitleHarness {
-            counts,
-            costly: costly_found,
-            placed_without_review: placed,
-            labelled: judged.len() as u32,
-            missing,
+        lines.push("RESULT FAILED: a subtitle labels file does not validate (lazymkv-dev labels --subtitles check)".to_string());
+        return SubtitleHarness {
+            counts: BTreeMap::new(),
+            costly: Vec::new(),
+            placed_without_review: 0,
+            labelled: 0,
+            missing: Vec::new(),
             lines,
-            exit_code,
+            exit_code: 2,
+        };
+    }
+    let mut judged: Vec<Judged> = files
+        .iter()
+        .flat_map(|(dir, entries)| judge_recording(evidence, text, dir, entries, settings))
+        .collect();
+    judged.sort_by(|a, b| {
+        (a.slug.as_str(), a.entry.label.as_str(), a.entry.stream).cmp(&(b.slug.as_str(), b.entry.label.as_str(), b.entry.stream))
+    });
+    report(&shown, files.len(), &judged, row14, settings)
+}
+
+/// TMDb's kind of the recording from its tmdb.json: `name` a show, `title` a film, else (or unreadable) unknown.
+fn media(evidence: &dyn Tree, dir: &PathKey) -> Media {
+    let path = dir.join("tmdb.json");
+    if !evidence.is_file(&path) {
+        return Media::Unknown;
+    }
+    match read_json::<Tmdb>(evidence, &path) {
+        Ok(tmdb) if tmdb.name.is_some() => Media::Tv,
+        Ok(tmdb) if tmdb.title.is_some() => Media::Film,
+        _ => Media::Unknown,
+    }
+}
+
+/// Every label of one recording: its scan once, then each rip label once for the labels on it.
+fn judge_recording(
+    evidence: &dyn Tree,
+    text: Option<&dyn Tree>,
+    dir: &PathKey,
+    entries: &[SubtitleLabel],
+    settings: &Settings,
+) -> Vec<Judged> {
+    let slug = dir.name().to_string();
+    let media = media(evidence, dir);
+    let judged = |entry: &SubtitleLabel, place: Place| Judged { slug: slug.clone(), media, entry: entry.clone(), place };
+    let scanned = read_text(evidence, &dir.join("scan.txt"), Encoding::Utf8Sig, Errors::Replace)
+        .map(|log| parse(&log))
+        .and_then(|scan| disc(&scan).map(|typed| (scan, typed)));
+    let (scan, typed) = match scanned {
+        Ok(found) => found,
+        Err(why) => return entries.iter().map(|entry| judged(entry, Place::Unreadable(why.clone()))).collect(),
+    };
+    let mut by_label: BTreeMap<&str, Vec<&SubtitleLabel>> = BTreeMap::new();
+    for entry in entries {
+        by_label.entry(entry.label.as_str()).or_default().push(entry);
+    }
+    let mut out = Vec::new();
+    for (label, labelled) in by_label {
+        match read_rip(evidence, text, dir, label, &scan, &typed, settings) {
+            Ok(rip) => out.extend(labelled.into_iter().map(|entry| judged(entry, map_track(entry, &rip, typed.is_dvd)))),
+            Err(why) => out.extend(labelled.into_iter().map(|entry| judged(entry, Place::Unreadable(why.clone())))),
         }
     }
+    out
+}
+
+/// One rip label as 6.4 step 10 and 8.7 read it: rip_label's title and selection, the rip verified against the scan
+/// (`verify_rip` over `selected_streams`, with its rip log), the events of subs/ keyed by scan stream, MSG:4047's
+/// removals mapped to scan streams (`verify::removed_scan_streams`), the text rule's decisions when the OCR text is
+/// there, and `decide_subtitles` with them. `decide_subtitles` gets the text only where the app reads it (6.4 step 10,
+/// 8.7 "Text"): a file holding two or more English or no-language subtitle streams; a title with one keeps it as
+/// "English" without the text (row 14 (b)'s fallback), so the 8.7 column shows what the app decides. The text rule's
+/// decisions are still judged for every title (row 14 (a) judges the text rule). Err when a file cannot be read or the
+/// rip does not verify (its file tracks could not be mapped).
+fn read_rip(
+    evidence: &dyn Tree,
+    text: Option<&dyn Tree>,
+    dir: &PathKey,
+    label: &str,
+    scan: &Scan,
+    typed: &Disc,
+    settings: &Settings,
+) -> Result<Rip, String> {
+    let rip = rip_label(evidence, dir, label)?;
+    let number = u32::try_from(rip.title).map_err(|_| format!("{label}: the summary names title {}", rip.title))?;
+    let title = typed.title(number)?.clone();
+    let selection = selected_streams(scan, number, rip.selection)?;
+    let folder = dir.join(label);
+    let ident: MkvmergeIdent = read_json(evidence, &folder.join("mkvmerge.json"))?;
+    let log_path = RIP_LOG_NAMES.iter().map(|name| folder.join(name)).find(|path| evidence.is_file(path));
+    let rip_log = match &log_path {
+        Some(path) => Some(read_text(evidence, path, Encoding::Utf8Sig, Errors::Replace)?),
+        None => None,
+    };
+    let report = verify_rip(&title, &ident, &selection, rip_log.as_deref(), typed.is_dvd);
+    if !report.ok {
+        return Err(format!("{label}: the rip does not verify against the scan: {}", report.mismatches.join("; ")));
+    }
+    let events = subtitle_events(evidence, &folder.join("subs"), &report, settings.sub_clear_max_bytes)?;
+    let removed = removed_scan_streams(rip_log.as_deref(), &selection);
+    let english_in_file = title
+        .streams
+        .iter()
+        .filter(|s| {
+            s.kind == StreamKind::Subtitles
+                && selection.contains(&s.number)
+                && !removed.contains(&s.number)
+                && english_or_none(s.language.as_deref())
+        })
+        .count();
+    let text = text_decisions(evidence, text, dir, label, &report, settings);
+    let decision = {
+        let facts = SubtitleFacts {
+            events: events.clone(),
+            removed,
+            discdb: None,
+            text: if english_in_file >= 2 { text.as_ref().ok() } else { None },
+            remembered: None,
+            reviewed: None,
+        };
+        decide_subtitles(&title, &facts, settings)
+    };
+    Ok(Rip { title, report, events, decision, text })
+}
+
+/// The text rule's decisions for one rip label, keyed by scan stream: `subs_run` over the label folder with the OCR
+/// text of `<text>/<slug>/<label>/subs-ocr/`, `settings.sub_clear_max_bytes` and `settings.text_rule()`, the original
+/// language from the recording's tmdb.json; Err with why the text was not read (no text given, no reading folder,
+/// or subs_run's own refusal).
+fn text_decisions(
+    evidence: &dyn Tree,
+    text: Option<&dyn Tree>,
+    dir: &PathKey,
+    label: &str,
+    report: &VerifyReport,
+    settings: &Settings,
+) -> Result<BTreeMap<u32, Decision>, String> {
+    let text_tree = text.ok_or_else(|| format!("no OCR text {TEXT_HINT}"))?;
+    let folder = dir.join(label);
+    let reading = folder.join(READING);
+    if !text_tree.is_dir(&reading) {
+        return Err(format!("no OCR text: {} {TEXT_HINT}", text_tree.display(&reading)));
+    }
+    let run = subs_run(evidence, &folder, text_tree, &reading, None, settings.sub_clear_max_bytes, &settings.text_rule());
+    if run.exit_code != 0 {
+        return Err(run.stderr.join("; "));
+    }
+    let analysis = run.analysis.ok_or_else(|| "the text rule gave no analysis".to_string())?;
+    let index_path = folder.join("subs/index.json");
+    let index_text = read_text(evidence, &index_path, Encoding::Utf8Sig, Errors::Replace)?;
+    let index: Vec<SubsIndexEntry> =
+        serde_json::from_str(&index_text).map_err(|error| format!("{}: {error}", evidence.display(&index_path)))?;
+    Ok(by_scan_stream(&analysis.decide, &subs_streams(&index, report)))
+}
+
+/// Maps one label onto its rip: the file track through the verified pairs, which must be a subtitle stream; a stream
+/// in another language is listed apart; an English or no-language one gets 8.7's outcome and the judged one.
+fn map_track(entry: &SubtitleLabel, rip: &Rip, dvd: bool) -> Place {
+    let Some(stream) = stream_of_track(&rip.report, entry.stream) else {
+        return Place::Unreadable(format!("file track {} is not a track of the rip", entry.stream));
+    };
+    let scan_stream = match rip.title.streams.iter().find(|candidate| candidate.number == stream) {
+        Some(found) if found.kind == StreamKind::Subtitles => found,
+        Some(found) => {
+            return Place::Unreadable(format!(
+                "file track {} is scan stream {stream}, a {} stream, not a subtitle stream",
+                entry.stream,
+                found.kind.as_str()
+            ))
+        }
+        None => return Place::Unreadable(format!("file track {} is not a track of the rip", entry.stream)),
+    };
+    let language = scan_stream.language.as_deref();
+    if !english_or_none(language) {
+        return Place::OtherLanguage { stream, language: language.unwrap_or_default().to_string() };
+    }
+    let text = match &rip.text {
+        Ok(decisions) => Ok(decisions.get(&stream).cloned()),
+        Err(why) => Err(why.clone()),
+    };
+    let rule = rule_outcome(&rip.decision, stream);
+    let judged = match &text {
+        Ok(Some(decision)) if decision.role == Role::SetAside => Some(rule.clone()),
+        Ok(Some(decision)) => Some(text_outcome(decision)),
+        _ => None,
+    };
+    Place::Track(Mapped {
+        title: rip.title.number,
+        stream,
+        events: rip.events.get(&stream).map_or(0, Vec::len),
+        family: scan_stream.codec.family,
+        dvd,
+        rule,
+        text,
+        judged,
+    })
+}
+
+/// 8.7's outcome for a stream, as the app decides before experiment 14 answers: its kept role (None when dropped) and
+/// whether the title raised subtitle_ambiguous.
+fn rule_outcome(decision: &SubtitleDecision, stream: u32) -> Outcome {
+    Outcome {
+        role: decision.kept.iter().find(|kept| kept.stream == stream).map(|kept| kept.role),
+        review: decision.reviews.contains(&ReviewReason::SubtitleAmbiguous),
+    }
+}
+
+/// The text rule's outcome: regular, sdh and forced place the track, drop drops it, keep keeps it unplaced (always
+/// with a review: counted as kept as regular), with the decision's own review.
+fn text_outcome(decision: &Decision) -> Outcome {
+    let role = match decision.role {
+        Role::Regular | Role::Keep => Some(SubtitleRole::Regular),
+        Role::Sdh => Some(SubtitleRole::Sdh),
+        Role::Forced => Some(SubtitleRole::Forced),
+        Role::Drop | Role::SetAside => None,
+    };
+    Outcome { role, review: decision.review.is_some() }
+}
+
+/// "regular", "sdh", "forced" or "dropped", with " (review)" when a review was raised.
+fn outcome_word(outcome: &Outcome) -> String {
+    let role = outcome.role.map_or("dropped", SubtitleRole::as_str);
+    if outcome.review {
+        format!("{role} (review)")
+    } else {
+        role.to_string()
+    }
+}
+
+/// The text rule's role for the report, with " (review)"; "no verdict" or "not read" without one.
+fn text_word(text: &Result<Option<Decision>, String>) -> String {
+    match text {
+        Ok(Some(decision)) if decision.review.is_some() => format!("{} (review)", decision.role.as_str()),
+        Ok(Some(decision)) => decision.role.as_str().to_string(),
+        Ok(None) => "no verdict".to_string(),
+        Err(_) => "not read".to_string(),
+    }
+}
+
+/// One line of the Tracks section.
+fn track_line(judged: &Judged, mapped: &Mapped) -> String {
+    let entry = &judged.entry;
+    let sure = if entry.sure { "" } else { ", not sure" };
+    let seen = if entry.saw_verdict { ", saw the verdict" } else { "" };
+    let style = entry.style.as_deref().map_or(String::new(), |style| format!(", style {style}"));
+    let verdict = match &mapped.judged {
+        Some(outcome) => match costly(entry.kind, outcome) {
+            Some(found) => format!("COSTLY {}", found.as_str()),
+            None if outcome.review => "reviewed".to_string(),
+            None => "placed".to_string(),
+        },
+        None => "not judged".to_string(),
+    };
+    format!(
+        "  {} (scan stream {}, {} events): labelled {} ({}{sure}{seen}{style}); 8.7 {}; text {}; {verdict}",
+        judged.key(),
+        mapped.stream,
+        mapped.events,
+        entry.kind.as_str(),
+        entry.how,
+        outcome_word(&mapped.rule),
+        text_word(&mapped.text)
+    )
+}
+
+/// A count-block line: two spaces, the name padded to COLUMN, the tail.
+fn column(name: &str, tail: &str) -> String {
+    format!("  {name:<width$}{tail}", width = COLUMN)
+}
+
+/// What the count block says after a kind's count.
+fn kind_tail(kind: SubtitleKind, count: u32, forced_with_events: u32, row14: &Row14) -> String {
+    match kind {
+        SubtitleKind::Regular => format!("{count} of {}", row14.regular),
+        SubtitleKind::Sdh => format!("{count} of {}", row14.sdh),
+        SubtitleKind::Forced => format!("{count}, with events {forced_with_events} of {}", row14.forced),
+        SubtitleKind::Commentary => format!("{count} of {}", row14.commentary),
+        SubtitleKind::Trivia | SubtitleKind::Lyrics | SubtitleKind::DubTranscript => {
+            format!("{count} (every one the owner has; checked by hand)")
+        }
+        SubtitleKind::Translation => format!("{count} (every second translation the owner has; checked by hand)"),
+        SubtitleKind::ClosedCaptions => format!("{count} (with its DVD's VobSub tracks)"),
+        SubtitleKind::Other => count.to_string(),
+    }
+}
+
+/// The counts, the answer, the report lines and the exit code over the judged labels.
+fn report(shown: &str, recordings: usize, judged: &[Judged], row14: &Row14, settings: &Settings) -> SubtitleHarness {
+    let fitting = |slug: &str| row14.fitting_discs.iter().any(|fitted| fitted == slug);
+    // D23 and RP25: judged here, read or watched, the owner sure, given before the verdict was seen, off
+    // the fitting discs.
+    let counts_here = |j: &Judged| {
+        j.outcome().is_some()
+            && COUNTING_HOW.contains(&j.entry.how.as_str())
+            && j.entry.sure
+            && !j.entry.saw_verdict
+            && !fitting(&j.slug)
+    };
+    let counted: Vec<&Judged> = judged.iter().filter(|&j| counts_here(j)).collect();
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for kind in SubtitleKind::ALL {
+        counts.insert(kind.as_str().to_string(), counted.iter().filter(|j| j.entry.kind == kind).count() as u32);
+    }
+    let forced_with_events = counted
+        .iter()
+        .filter(|j| j.entry.kind == SubtitleKind::Forced && j.mapped().is_some_and(|mapped| mapped.events > 0))
+        .count() as u32;
+    let titles_of = |kind: SubtitleKind| -> BTreeSet<(String, u32)> {
+        counted
+            .iter()
+            .filter(|j| j.entry.kind == kind)
+            .filter_map(|j| j.mapped().map(|mapped| (j.slug.clone(), mapped.title)))
+            .collect()
+    };
+    let regular_titles = titles_of(SubtitleKind::Regular);
+    let sdh_titles = titles_of(SubtitleKind::Sdh);
+    let pairs: BTreeSet<(String, u32)> = regular_titles.intersection(&sdh_titles).cloned().collect();
+    let pair_titles = pairs.len() as u32;
+    let pair_discs = pairs.iter().map(|(slug, _)| slug.as_str()).collect::<BTreeSet<&str>>().len() as u32;
+    let media_of = |slug: &str| judged.iter().find(|j| j.slug == slug).map_or(Media::Unknown, |j| j.media);
+    let pair_features = pairs.iter().filter(|(slug, _)| media_of(slug) == Media::Film).count() as u32;
+    let pair_tv = pairs.iter().filter(|(slug, _)| media_of(slug) == Media::Tv).count() as u32;
+    let dvd_vobsub = counted
+        .iter()
+        .filter(|j| j.mapped().is_some_and(|mapped| mapped.dvd && mapped.family == Family::VobSub))
+        .map(|j| j.slug.as_str())
+        .collect::<BTreeSet<&str>>()
+        .len() as u32;
+    // Row 14's UK-style SDH track (RP25): a counted sdh label whose style is "uk".
+    let uk_sdh = counted
+        .iter()
+        .filter(|j| j.entry.kind == SubtitleKind::Sdh && j.entry.style.as_deref() == Some("uk"))
+        .count() as u32;
+    let judged_count = judged.iter().filter(|j| j.outcome().is_some()).count() as u32;
+    let placed = judged.iter().filter(|j| j.outcome().is_some_and(|outcome| !outcome.review)).count() as u32;
+    let costly_found: Vec<(String, Costly)> = judged
+        .iter()
+        .filter_map(|j| {
+            let outcome = j.outcome()?;
+            costly(j.entry.kind, outcome).map(|found| (j.key(), found))
+        })
+        .collect();
+    let not_judged: Vec<(String, String)> = judged.iter().filter_map(|j| j.why_not().map(|why| (j.key(), why))).collect();
+    let others: Vec<&Judged> = judged.iter().filter(|j| matches!(j.place, Place::OtherLanguage { .. })).collect();
+    let checks = [
+        (pair_titles, row14.pair_titles, "titles with regular and SDH"),
+        (pair_discs, row14.pair_discs, "discs with such titles"),
+        (pair_features, row14.pair_features, "feature films with such a title"),
+        (pair_tv, row14.pair_tv, "TV episodes with such a title"),
+        (counts["sdh"], row14.sdh, "SDH tracks"),
+        (counts["regular"], row14.regular, "regular tracks"),
+        (forced_with_events, row14.forced, "forced tracks with events"),
+        (counts["commentary"], row14.commentary, "commentary tracks"),
+        (dvd_vobsub, row14.dvd_vobsub, "DVDs with English VobSub"),
+    ];
+    let missing: Vec<String> =
+        checks.iter().filter(|(have, want, _)| have < want).map(|(_, _, name)| name.to_string()).collect();
+    let answer = if !costly_found.is_empty() {
+        format!("no: {} costly verdict(s)", costly_found.len())
+    } else if !not_judged.is_empty() {
+        format!("not answered: {} labelled track(s) not judged", not_judged.len())
+    } else if !missing.is_empty() {
+        format!("not answered: too few {}", missing.join(", "))
+    } else if placed * 2 < judged_count {
+        "no: fewer than half of the judged tracks are placed without review".to_string()
+    } else {
+        "yes for (a) on the tracks judged (row 14 also asks (b))".to_string()
+    };
+    let mut not_counted: BTreeMap<&str, usize> = BTreeMap::new();
+    for j in judged.iter().filter(|&j| !counts_here(j)) {
+        *not_counted.entry(j.slug.as_str()).or_default() += 1;
+    }
+    let not_counted_text = if not_counted.is_empty() {
+        "none".to_string()
+    } else {
+        not_counted.iter().map(|(slug, count)| format!("{slug} {count}")).collect::<Vec<String>>().join(", ")
+    };
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "subtitle labels: {shown}: {recordings} recordings with {FILE_NAME}, {} labelled tracks: {judged_count} judged, {} not judged, {} in another language",
+        judged.len(),
+        not_judged.len(),
+        others.len()
+    ));
+    lines.push(format!(
+        "rule: 8.7 with sub_clear_max_bytes {}, subs_tolerance_ms {}, subs_same_min {}, subs_diff_max {}; the text rule (EXP-14-design.md section 3) with the same four and its other thresholds as in the code, all provisional",
+        settings.sub_clear_max_bytes, settings.subs_tolerance_ms, settings.subs_same_min, settings.subs_diff_max
+    ));
+    lines.push(String::new());
+    lines.push(
+        "Tracks (the owner's label; 8.7 as the app decides before experiment 14 answers; the text rule as row 14 (a) judges it):"
+            .to_string(),
+    );
+    let start = lines.len();
+    for j in judged {
+        if let Some(mapped) = j.mapped() {
+            lines.push(track_line(j, mapped));
+        }
+    }
+    if lines.len() == start {
+        lines.push("  none".to_string());
+    }
+    lines.push(String::new());
+    let never = if row14.fitting_discs.is_empty() {
+        String::new()
+    } else {
+        format!(", never on {}", row14.fitting_discs.join(" or "))
+    };
+    lines.push(format!(
+        "Experiment 14 (spec section 17 row 14 (a); tracks that count: judged here, labelled from text read or watched before the verdict, the owner sure{never}; the packaging, the menu, a flag, the player and TheDiscDB are observations and do not count on their own, D23):"
+    ));
+    for kind in SubtitleKind::ALL {
+        lines.push(column(kind.as_str(), &kind_tail(kind, counts[kind.as_str()], forced_with_events, row14)));
+    }
+    lines.push(column(
+        "regular and SDH",
+        &format!(
+            "{pair_titles} of {} titles, from {pair_discs} of {} discs; feature films {pair_features} of {}, TV episodes {pair_tv} of {}",
+            row14.pair_titles, row14.pair_discs, row14.pair_features, row14.pair_tv
+        ),
+    ));
+    lines.push(column("DVD VobSub", &format!("{dvd_vobsub} of {} DVDs with a counted English VobSub track", row14.dvd_vobsub)));
+    // Row 14's UK-style SDH track, counted from the labels' style (RP25); never among the missing kinds, since row 14
+    // asks for it only if the owner has a UK disc, which the harness cannot know.
+    lines.push(column(
+        "UK-style SDH",
+        &format!("{uk_sdh} of {} counted SDH tracks labelled style uk (only if the owner has a UK disc)", row14.uk_sdh),
+    ));
+    lines.push(column(
+        "placed, no review",
+        &format!("{placed} of {judged_count} judged tracks (row 14 (a) asks for at least half)"),
+    ));
+    lines.push(column("costly verdicts", &costly_found.len().to_string()));
+    lines.push(format!("  as it stands: {answer}"));
+    lines.push(format!("  not counted: {not_counted_text}"));
+    lines.push(String::new());
+    lines.push("Costly verdicts (row 14 (a): the text rule's verdict, or 8.7's for a stream the text rule sets aside):".to_string());
+    for j in judged {
+        if let Some(found) = j.outcome().and_then(|outcome| costly(j.entry.kind, outcome)) {
+            lines.push(format!("  COSTLY {}: labelled {}, {}", j.key(), j.entry.kind.as_str(), found.meaning()));
+        }
+    }
+    if costly_found.is_empty() {
+        lines.push("  none".to_string());
+    }
+    lines.push(String::new());
+    lines.push("Labels that cannot be judged:".to_string());
+    for (key, why) in &not_judged {
+        lines.push(format!("  {key}: {why}"));
+    }
+    if not_judged.is_empty() {
+        lines.push("  none".to_string());
+    }
+    lines.push(String::new());
+    lines.push("Labels in another language (row 14 judges English and no-language tracks only):".to_string());
+    for j in &others {
+        if let Place::OtherLanguage { stream, language } = &j.place {
+            lines.push(format!("  {}: labelled {}, scan stream {stream} is in {language}", j.key(), j.entry.kind.as_str()));
+        }
+    }
+    if others.is_empty() {
+        lines.push("  none".to_string());
+    }
+    lines.push(String::new());
+    let (result, exit_code) = if !costly_found.is_empty() {
+        let named: Vec<String> = costly_found.iter().map(|(key, found)| format!("{key} ({})", found.as_str())).collect();
+        let mut result = format!("RESULT FAILED: {} costly verdict(s): {}", costly_found.len(), named.join("; "));
+        if !not_judged.is_empty() {
+            result.push_str(&format!("; not judged: {} labelled track(s)", not_judged.len()));
+        }
+        (result, 1)
+    } else if judged.is_empty() {
+        ("RESULT FAILED: no subtitle label to judge (lazymkv-dev labels --subtitles set)".to_string(), 3)
+    } else if !not_judged.is_empty() {
+        (
+            format!(
+                "RESULT FAILED: not everything was judged: {} labelled track(s) (see Labels that cannot be judged)",
+                not_judged.len()
+            ),
+            3,
+        )
+    } else {
+        ("RESULT ok".to_string(), 0)
+    };
+    lines.push(result);
+    SubtitleHarness {
+        counts,
+        costly: costly_found,
+        placed_without_review: placed,
+        labelled: judged.len() as u32,
+        missing,
+        lines,
+        exit_code,
+    }
+}
 
 ```
 
@@ -58636,7 +59303,7 @@ Notes on the code:
 
 Run: `scripts/box.sh cargo test -p lazymkv-core subtitle::labels::row14::`
 
-Expected: PASS, `test result: ok. 33 passed; 0 failed` (5 `requirements`, 9 `verdicts`, 19 `runs`), with no warning from `crates/core/src/subtitle/labels.rs`. Then run Task 17's tests with this task's:
+Expected: PASS, `test result: ok. 33 passed; 0 failed` (5 `requirements`, 9 `verdicts`, 19 `runs`), with no warning from `crates/core/src/subtitle/labels.rs` or its `labels/row14` files. Then run Task 17's tests with this task's:
 
 Run: `scripts/box.sh cargo test -p lazymkv-core subtitle::labels::`
 
@@ -58747,7 +59414,7 @@ const REPORT: [&str; 35] = [
     "Tracks (the owner's label; 8.7 as the app decides before experiment 14 answers; the text rule as row 14 (a) judges it):",
     "  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text regular; COSTLY sdh_as_regular",
     "",
-    "Experiment 14 (spec section 17 row 14 (a); tracks that count: judged here, labelled from text read or watched before the verdict, the owner sure, never on the-office-2005-s3d3-bluray or pans-labyrinth-2006-uhd; the packaging, the menu, the player and TheDiscDB are observations and do not count on their own, D23):",
+    "Experiment 14 (spec section 17 row 14 (a); tracks that count: judged here, labelled from text read or watched before the verdict, the owner sure, never on the-office-2005-s3d3-bluray or pans-labyrinth-2006-uhd; the packaging, the menu, a flag, the player and TheDiscDB are observations and do not count on their own, D23):",
     "  regular               0 of 6",
     "  sdh                   1 of 6",
     "  forced                0, with events 0 of 1",
@@ -59521,18 +60188,18 @@ Expected: PASS, `test result: ok. 10 passed; 0 failed`. `the_clone_without_subti
 
 Run: `scripts/box.sh cargo test --workspace`
 
-Expected: every `test result:` line says `ok` with `0 failed`, the 33 new tests of `lazymkv-core` and the 10 of `crates/dev/tests/retune_subtitles.rs` among them; the evidence tests of `lazymkv-dev` pass or print their `skipped:` lines as before; the compiler prints no warning naming `crates/core/src/subtitle/labels.rs`, `crates/dev/src/cmd/retune.rs` or `crates/dev/tests/retune_subtitles.rs`. Then:
+Expected: every `test result:` line says `ok` with `0 failed`, the 33 new tests of `lazymkv-core` and the 10 of `crates/dev/tests/retune_subtitles.rs` among them; the evidence tests of `lazymkv-dev` pass or print their `skipped:` lines as before; the compiler prints no warning naming `crates/core/src/subtitle/labels.rs`, its `labels/row14` files, `crates/dev/src/cmd/retune.rs` or `crates/dev/tests/retune_subtitles.rs`. Then:
 
 ```bash
 git status --short
 ```
 
-Expected: exactly ` M crates/core/src/subtitle/labels.rs`, ` M crates/dev/src/cmd/retune.rs`, ` M crates/dev/src/lib.rs` and `?? crates/dev/tests/retune_subtitles.rs` (`Cargo.lock` unchanged: no dependency was added).
+Expected: exactly ` M crates/core/src/subtitle/labels.rs`, ` M crates/dev/src/cmd/retune.rs`, ` M crates/dev/src/lib.rs`, `?? crates/core/src/subtitle/labels/` (the new `row14.rs` and `row14/tests.rs`; `git status --short -uall` lists both) and `?? crates/dev/tests/retune_subtitles.rs` (`Cargo.lock` unchanged: no dependency was added).
 
 - [ ] **Step 20: Commit**
 
 ```bash
-git add crates/core/src/subtitle/labels.rs crates/dev/src/cmd/retune.rs crates/dev/src/lib.rs crates/dev/tests/retune_subtitles.rs
+git add crates/core/src/subtitle/labels.rs crates/core/src/subtitle/labels/row14.rs crates/core/src/subtitle/labels/row14/tests.rs crates/dev/src/cmd/retune.rs crates/dev/src/lib.rs crates/dev/tests/retune_subtitles.rs
 git commit -m "core::subtitle::labels and retune --subtitles: judge the labelled subtitle tracks against spec section 17 row 14" -m "exp14_requirements reads row 14 (a)'s required counts and fitting discs from the spec text; costly gives row 14's six costly verdicts; harness maps every labelled English or no-language track of the evidence onto its verified rip, runs 8.7 (decide_subtitles) and the text rule over the OCR text, judges the text rule's outcome (8.7's for a stream it sets aside), counts the sure read or watched labels given before the verdict, off the fitting discs, per kind against row 14 (the UK-style SDH track from the labels' style uk) and names the missing kinds, and exits 1 on a costly verdict, 2 on a labels file that does not validate, 3 when there is no label or one could not be judged. lazymkv-dev retune --subtitles [--text DIR] prints that report. Tested on synthetic recordings and, without changing it, on the evidence clone's rips with row 14's labels, every clone value derived when the test runs."
 git log -1 --format='%G? %an <%ae> %cn <%ce>%n%B'
 ```
@@ -60407,7 +61074,7 @@ and `retune` depends on the tuning evidence in the same way.
 Replace with:
 
 ```markdown
-and `retune` depends on the tuning evidence in the same way. `lazymkv-dev retune --subtitles [--text DIR]` judges every English or no-language subtitle track the owner labelled in a recording's `subtitle-labels.json` (below; edited with `lazymkv-dev labels --subtitles set`, `unset` and `check`) with the subtitle text rule of 8.7 over the OCR text given with `--text` (8.7's classifier for a stream the text rule sets aside), with section 14's default subtitle thresholds (`--subtitles` takes no `--set`). It counts the labels the owner made by reading or watching the track (D23) and is sure of against the kinds section 17 row 14 requires, never a label on one of the two discs row 14 names as fitting discs; prints the costly verdicts row 14 defines (a dialogue track dropped; SDH placed as regular, or regular as SDH; a track forced wrongly, or a forced track placed as dialogue; a commentary, trivia or lyrics track kept; each without a review); and exits 1 on any of them, 2 when a subtitle labels file does not validate, and 3 when there is no label or a labelled track could not be judged.
+and `retune` depends on the tuning evidence in the same way. `lazymkv-dev retune --subtitles [--text DIR]` judges every English or no-language subtitle track the owner labelled in a recording's `subtitle-labels.json` (below; edited with `lazymkv-dev labels --subtitles set`, `unset` and `check`) with the subtitle text rule of 8.7 over the OCR text given with `--text` (8.7's classifier for a stream the text rule sets aside), with section 14's default subtitle thresholds (`--subtitles` takes no `--set`). It counts the labels the owner made by reading or watching the track (D23), is sure of and gave before seeing the verdict (`saw_verdict` false), against the kinds section 17 row 14 requires (the UK-style SDH track from a counted `sdh` label whose `style` is `uk`), never a label on one of the two discs row 14 names as fitting discs; prints the costly verdicts row 14 defines (a dialogue track dropped; SDH placed as regular, or regular as SDH; a track forced wrongly, or a forced track placed as dialogue; a commentary, trivia or lyrics track kept; each without a review); and exits 1 on any of them, 2 when a subtitle labels file does not validate, and 3 when there is no label or a labelled track could not be judged.
 ```
 
 Edit 8g, the Recordings list. Find:
@@ -60419,7 +61086,7 @@ the owner's `notes.md` and audio labels (`audio-labels.json`, D16), and, for the
 Replace with:
 
 ```markdown
-the owner's `notes.md`, audio labels (`audio-labels.json`, D16) and subtitle labels (`subtitle-labels.json`, format `lazymkv subtitle labels v1`, phase 1: per track the rip label, the stream, the kind, how the owner knows it, whether the owner is sure, the date and a note), and, for the whole corpus, `audio-fitted.json` and the harness's baseline `audio-dataset.json`.
+the owner's `notes.md`, audio labels (`audio-labels.json`, D16) and subtitle labels (`subtitle-labels.json`, format `lazymkv subtitle labels v1`, phase 1: per track the rip label, the stream, the kind, how the owner knows it, whether the owner is sure, the date, whether the owner saw the rule's verdict first (`saw_verdict`; such a label never counts), a note, and the style (`uk` for a UK-style SDH track, else null)), and, for the whole corpus, `audio-fitted.json` and the harness's baseline `audio-dataset.json`.
 ```
 
 Edit 8h, the Recordings paragraph's last sentence. Find:
@@ -60478,7 +61145,7 @@ LC_ALL=C grep -c $'\xe2\x80\x94' README.md
 scripts/box.sh cargo test -p lazymkv-dev --locked test_the_repositorys_spec_names_the_office_disc
 ```
 
-Expected: `1`; `2` (Status and the `crates/` bullet); `0`; `1 file changed, 22 insertions(+), 11 deletions(-)`; then `1`, `1`, `1`, `1`, `1`, `1` and `0` (the 8.6 sentence replaced); `0` (no row 13 or row 14 line in the diff); `1 file changed, 5 insertions(+), 5 deletions(-)` (the spec's paragraphs are single lines: 8e and 8f change the one line of the `retune` bullet, and 8g, 8h, 8i and 8j one line each); `0` (the README had no em-dash before and has none now); and `test cmd::labels::tests::spec::test_the_repositorys_spec_names_the_office_disc ... ok` with `test result: ok. 1 passed` (row 13 still parses from the edited spec; Task 18's row 14 test runs in Step 9's full run).
+Expected: `1`; `2` (Status and the `crates/` bullet); `0`; `1 file changed, 22 insertions(+), 11 deletions(-)`; then `1`, `1`, `1`, `1`, `1`, `1` and `0` (the 8.6 sentence replaced); `0` (no row 13 or row 14 line in the diff); `1 file changed, 5 insertions(+), 5 deletions(-)` (the spec's paragraphs are single lines: 8e and 8f change the one line of the `retune` bullet, and 8g, 8h, 8i and 8j one line each); `0` (the README had no em-dash before and has none now); and, from the test run (cargo runs every test binary of the package), one `test cmd::labels::tests::spec::test_the_repositorys_spec_names_the_office_disc ... ok` line, one `test result: ok. 1 passed` line (the lib's unit tests), and `test result: ok. 0 passed; ... filtered out` lines for the other test binaries (row 13 still parses from the edited spec; Task 18's row 14 test runs in Step 9's full run).
 
 - [ ] **Step 9: Run the whole workspace and the repository checks**
 
