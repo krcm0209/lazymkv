@@ -120,6 +120,15 @@ describes, so that the open experiments continue as the owner's discs come throu
 engine work next, with that developer mode. Unsure discs and failures (whole-disc copy mode, failure classes,
 watchdogs, resume) follow in phase 3, editions and TV in phase 4, and the GPUI desktop app in phase 5.
 
+Phase 1 began with the Rust port of phase 0's analysers (pull request krcm0209/lazymkv#2,
+`docs/superpowers/specs/2026-10-13-rust-port-design.md`): the Python under `scripts/phase0/` that this report and
+the experiment reports name (the scan summary, the reconciler, the audio content rule with its tuning harness and
+labels, the subtitle text and alignment rules, and the readers of experiments 2, 3, 5, 8, 10 and 11 and of the
+ocrs trial) is now `crates/core` and the `lazymkv-dev` binary, one command per script with the same arguments,
+checked against goldens the Python wrote (kept in the evidence repository). The Python test count below records
+the phase 0 close-out run (202 tests at that commit). The last commit with the Python is `d3a754d`, which held 213
+tests; `docs/phase1/rust-port-tests.md` lists them and maps each one to its Rust port.
+
 ## Closing checks, and what was left behind
 
 - Stand-in replay (Task 17 Step 1): `fake-tool` replayed Disc A's online scan (`corpus/scenarios/disc-a-scan/`) with `LAZYMKV_FAKE_SPEED=0.001`; `fc /b` against the original recording on the mini PC: `FC: no differences encountered` (2026-10-06; checked before the machine user name in lines 2 and 47 of the scenario's `scan.txt` was scrubbed to `USER` for the public repository, and before the drive's serial number in its line 9 was replaced by `SERIAL` on 2026-10-13).

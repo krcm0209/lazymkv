@@ -6,6 +6,7 @@
   commentary (Step 7a) has not been supplied yet.
 - MakeMKV version: MakeMKV v2.0.0 win(x64-release) (the `MSG:1005` line of both rips)
 - Spec reference: section 17, row 11
+- Tools: the Python this report names was deleted by the Rust port (pull request krcm0209/lazymkv#2); `compare_tracks.py` is now `lazymkv-dev reconcile` and `exp11_tracks.py` is `lazymkv-dev exp11`, with the same arguments and lines. The commands below are as they were run; the scripts as they last were are `git show d3a754d:scripts/phase0/<file>`.
 
 ## Question
 

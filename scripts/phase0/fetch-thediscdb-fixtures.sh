@@ -5,7 +5,7 @@ COMMIT=b54d1922080fb1947912500db126cf95dcdfaa45
 BASE="https://raw.githubusercontent.com/TheDiscDb/data/$COMMIT"
 DEST="$(git rev-parse --show-toplevel)/corpus/thediscdb"
 
-urlencode() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+urlencode() { jq -rn --arg s "$1" '$s | split("/") | map(@uri) | join("/")'; }
 
 # fetch <release folder under data/> <disc name>...
 fetch() {
@@ -30,8 +30,8 @@ curl -fsS -m 60 "$BASE/LICENSE" -o "$DEST/LICENSE"
 API="$(git rev-parse --show-toplevel)/corpus/thediscdb-api"
 mkdir -p "$API"
 find "$DEST" -name 'disc*.json' | while read -r json; do
-  hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("ContentHash") or "")' "$json")"
-  id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("GlobalDiscId") or "")' "$json")"
+  hash="$(jq -r '.ContentHash // ""' "$json")"
+  id="$(jq -r '.GlobalDiscId // ""' "$json")"
   [ -n "$hash" ] && curl -fsS -m 60 "https://thediscdb.com/api/dischash/$hash" -o "$API/dischash-$hash.json"
   [ -n "$id" ] && curl -fsS -m 60 "https://thediscdb.com/api/discid/$id" -o "$API/discid-$id.json"
   sleep 1

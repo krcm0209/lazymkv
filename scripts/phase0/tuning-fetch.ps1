@@ -41,7 +41,7 @@ try {
         $src = "$src\subs-ocr"
         $files = @(Get-ChildItem -LiteralPath $src -Filter '*.ocr.jsonl' -File -ErrorAction SilentlyContinue)
         if ($files.Count -eq 0) { throw "$src holds no OCR text (sub-<n>.ocr.jsonl; run ocr-subs.ps1 first)" }
-        # ocrs's text of the same frames (ocrs-trial.ps1), when there is any, for scripts/phase0/ocr_compare.py; the
+        # ocrs's text of the same frames (ocrs-trial.ps1), when there is any, for lazymkv-dev ocr-compare; the
         # pattern takes the full-frame ocrs-s<n>.jsonl and the cropped ocrs-s<n>-crop<pad>.jsonl alike.
         $files += @(Get-ChildItem -LiteralPath $src -Filter 'ocrs-s*.jsonl' -File -ErrorAction SilentlyContinue)
     } else {

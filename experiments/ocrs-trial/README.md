@@ -38,7 +38,7 @@ the image and its connected components). `detect_ms` and `rec_ms` show where the
 
 Standard output carries progress and timing only, never recognised text. Exit status: 0 done, 1 failed, 2 bad
 arguments. The phase 0 job `scripts/phase0/ocrs-trial.ps1` runs it on one subtitle stream of the tuning dataset, and
-`scripts/phase0/ocr_compare.py` compares its output with Tesseract's.
+`lazymkv-dev ocr-compare` compares its output with Tesseract's.
 
 Build on the mini PC (release only: debug builds of rten are extremely slow):
 

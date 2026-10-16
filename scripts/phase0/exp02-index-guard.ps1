@@ -2,7 +2,7 @@
 # under the index that was asked for, and before saving begins (MSG:5014)?
 # For each tested title this script starts "mkv disc:<index> <title> <dir>" with the scan's flags, reads
 # MakeMKV's output until the MSG:5014 line, stops the call there and keeps the output in
-# $Recordings\<Slug>\exp02\title-<title>.txt, which exp02_check.py reads on the Mac.
+# $Recordings\<Slug>\exp02\title-<title>.txt, which lazymkv-dev exp02 reads on the Mac.
 #   -MaxTitles n  test at most n of the scan's titles, evenly spaced, the first and the last always included
 #   -Redo 3,7     test exactly these titles; an earlier title-N.txt is moved to exp02\superseded\<time>\
 #   -Plan         check the recording, the disc and MakeMKV, print the titles to test, start nothing

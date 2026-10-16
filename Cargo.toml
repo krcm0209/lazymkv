@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/capture", "crates/fake-tools"]
+members = ["crates/core", "crates/capture", "crates/fake-tools", "crates/dev"]
 
 [workspace.package]
 edition = "2021"
@@ -11,4 +11,9 @@ publish = false
 md-5 = "0.10"
 sha1 = "0.10"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: serde_json::Map keeps insertion order, as a Python dict does (json.dumps writes it in that order).
+# float_roundtrip: every float parses to the exact f64 Python's repr wrote.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+regex = "1"
+fancy-regex = "0.14"
+unicode-normalization = "0.1"

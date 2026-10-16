@@ -2,6 +2,7 @@
 
 - Date: 2026-10-05
 - Status: design for the owner and the controller. Committed copy; the scratch folders it names were temporary and are not kept. Nothing in the spec, the plan or the scripts is changed by this file; section 6 gives the script contents and section 7 the plan steps.
+- Since the Rust port (pull request krcm0209/lazymkv#2): the Python this design installed (`audio_similarity.py`, `audio_dataset.py`, `audio_labels.py`, `proxy_levels.py` and their tests) is deleted. The rule is `core::audio` (`lazymkv-dev audio-report` and `titles`), the harness and the labels are `lazymkv-dev retune`, `levels-args` and `labels`, and the proxy reader is `lazymkv-dev levels-from-proxy`, with the same arguments and verdicts. The listings of section 6, the script changes of section 9.7 and the plan steps of sections 7 and 9.8 are history; the scripts as they last were are `git show d3a754d:scripts/phase0/<file>`.
 - Built from three independent proposals (the "relation", "content" and "requirements" lenses), the adversarial attack on each, and a re-computation, by the synthesis, of every number quoted below: the two real tracks and 153 constructed runs, 155 runs in all. Scratch (a session folder, not kept; no reader can open it): `/private/tmp/claude-502/-Users-USER-code-lazymkv/d9f40c13-92fa-4abc-ab12-bdb22c67ac55/scratchpad/exp13-work/synth/` (`synth.py` the measures, `cases.py` the 127 pairs, `extra.py` 28 variants, `sweep.py` the sensitivity runs, `out-final.json`, `extra.json`, `sweep.log`, `repo/` the three proposed files).
 
 **The owner's question: should stereo width be a requirement for calling a track non-essential? No.** Nothing in the rule below reads stereo width, and no candidate's codec, channel count or position is read to judge it. The only other uses are: the reference is the track that spec 8.6 step 3 ranks first (channels, fidelity, then position); the reference's centre channel is the dialogue curve when its layout has one; and, only if the owner approves question 10, row 3(f) refuses to judge when the reference is not the first track of its language (position used only to keep). Width fails both ways, as the owner said. Side minus mid, whole file, re-measured here:
@@ -745,6 +746,8 @@ try {
 
 ### `scripts/phase0/audio_similarity.py`
 
+History: the script as this design installed it, deleted by the Rust port; its last version is `git show d3a754d:scripts/phase0/audio_similarity.py`, and the rule is now `core::audio`.
+
 ```python
 """Experiment 13: is an extra audio track a commentary? Judged from its content against the main track.
 
@@ -1261,6 +1264,8 @@ if __name__ == "__main__":
 Listing refreshed on 2026-10-13 after the DVD change (cdf2cfc): from `segments()` to the end, it is the current text of `scripts/phase0/audio_similarity.py` (new: `dvd_scan()`, which makes `titles_report()` skip the shared-segment check on a DVD scan; also the `<- wanted` mark of section 9.1, which uses `ISO639` and `NO_LANGUAGE`, defined elsewhere in the script). The text above `segments()` is the design-time listing.
 
 ### `scripts/phase0/test_audio_similarity.py`
+
+History: the tests as this design installed them, deleted by the Rust port; their Rust ports are listed in `docs/phase1/rust-port-tests.md`.
 
 ```python
 import contextlib

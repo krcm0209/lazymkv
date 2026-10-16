@@ -42,9 +42,10 @@
 - Commit commands take the form `git commit -m "<message>"`.
 - The saving message is `MSG:5014`, or `MSG:5015` when a profile is in use. Found on 2026-10-05, on the first real rip: with `--profile`, MakeMKV 2.0.0 prints `MSG:5015` ("Saving %1 titles into directory %2 using profile '%3' from file '%4'") and no `MSG:5014`. Every rip in this plan uses a profile. Wherever a task says `MSG:5014`, read "`MSG:5014` or `MSG:5015`"; the scripts accept both, and their labels (`5014=`, `saw_5014`, `stopped-at-5014`, `added-before-5014`) keep their names and are true for either code. A `codes=` list then ends in 5015. The profile named in the `MSG:5015` line is the proof that MakeMKV used the job profile.
 - Decision D16 (owner, 2026-10-05): every MakeMKV call runs with `--debug` (`Get-MkFlags` adds it) and its debug log, which MakeMKV 2.0.0 always writes to `%USERPROFILE%\MakeMKV_log.txt`, is kept beside the call's output as `<output>.makemkv-debug.txt` by `Save-MkDebugLog`. With `--debug` the robot output also carries `MSG:1004` and `MSG:1003` lines. Every rip also keeps `system.csv` (CPU load, free RAM and bytes written every 5 s) and `system-events.json` (Windows warnings and errors about storage, USB and the network during the rip). A script that calls MakeMKV without `Get-MkFlags` adds `--debug` and calls `Save-MkDebugLog` itself. Exceptions: env.ps1's Get-DiscIndex drive listing runs without --debug (its log would be overwritten by the call that follows); scan-copy.ps1's nodebug/plain diagnosis modes leave it out on purpose; backup-disc.ps1 and extract-from-copy.ps1 keep the debug log and system events but not the free-RAM/CPU sampler.
-- Tuning dataset (decision D16): every rip that ends `RESULT ok` is added to the audio tuning dataset after its probe and pull, while the rip is still in staging, and at the latest before its task's commit. `python3 scripts/phase0/audio_dataset.py args corpus/owner/<slug> <label>` prints one job line and its `wait.sh` line for the title's programme reference against every other stream in a wanted language (or the reference alone), then one per language that is not wanted and has two or more streams (dataset only). Run each pair, then `scripts/phase0/pull-recording.sh <slug>`, `python3 scripts/phase0/audio_labels.py auto corpus/owner/<slug>` and `python3 scripts/phase0/audio_dataset.py`. audio-levels.ps1 writes, besides its level folder, a compact copy of every audio stream (`audio-proxy.mka`: FLAC, 8 kHz, mono, 24 bit) and a copy of the level folder to `$TuningData\<slug>\<label>\` (`\\unas-pro\media\lazymkv-tuning`); it writes `audio-proxy.json` into the level folder last, so a level folder without it is from a run that did not finish. The harness's last list names every successful rip not yet in the dataset. A rip in staging is deleted only once that list no longer names it. Nothing under `$TuningData` is deleted without the owner's say. The one exception to writing large files only to the share (never to `C:`): a proxy may be copied to C:\lazymkv\phase0\tmp\tuning-fetch for the minutes an scp takes, at most 2 GB, deleted right after. `scripts/phase0/tuning-fetch.ps1 -Slug <slug> -Label <label>` (a job) makes that copy of one title's dataset folder, refuses more than 2 GB or a second copy while one is still there, and prints the size, the `scp` command and the clean-up command; the Mac runs the clean-up command immediately after the `scp`. It is needed only when a future measure needs the proxies on the Mac, never in this routine. The owner's label for each measured track is asked for without showing any verdict and is recorded only with `audio_labels.py set` or `unset` (never by editing the JSON); whether a label counts for experiment 13 is worked out by the harness, never stored. `audio_dataset.py` exits 1 when a track the owner labelled as programme audio gets a drop verdict, when a level folder is measured against the wrong reference, when a reference is labelled as unwanted audio, when a labelled programme track gets `commentary-cross-language`, or when a labelled candidate, taken as the reference, would give the programme the commentary verdict (`swapped reference`) (stop and report); 2 when a labels file does not validate; 3 when something could not be checked (level files missing, a label with no measurement, a measured track gone).
-- MakeMKV removes a forced-only subtitle track that turns out to be empty and says so with `MSG:4047` ("Forced subtitles track #N turned out to be empty and was removed from output file", after `MSG:4007`). Found on the same rip. N counts the title's SELECTED streams in scan order (the output file's tracks before the removal), not the scan's stream numbers: on Disc A's eng-only rip "#3" was scan stream 5 (Task 13 Step 6, 2026-10-06); compare_tracks.py maps it accordingly. A ripped file can therefore hold fewer tracks than the scan lists; such a difference is explained, not a failure, when a `MSG:4047` line names the missing stream.
+- Tuning dataset (decision D16): every rip that ends `RESULT ok` is added to the audio tuning dataset after its probe and pull, while the rip is still in staging, and at the latest before its task's commit. `target/release/lazymkv-dev levels-args <slug> <label>` prints one job line and its `wait.sh` line for the title's programme reference against every other stream in a wanted language (or the reference alone), then one per language that is not wanted and has two or more streams (dataset only). Run each pair, then `scripts/phase0/pull-recording.sh <slug>`, `target/release/lazymkv-dev labels auto corpus/owner/<slug>` and `target/release/lazymkv-dev retune`. audio-levels.ps1 writes, besides its level folder, a compact copy of every audio stream (`audio-proxy.mka`: FLAC, 8 kHz, mono, 24 bit) and a copy of the level folder to `$TuningData\<slug>\<label>\` (`\\unas-pro\media\lazymkv-tuning`); it writes `audio-proxy.json` into the level folder last, so a level folder without it is from a run that did not finish. The harness's last list names every successful rip not yet in the dataset. A rip in staging is deleted only once that list no longer names it. Nothing under `$TuningData` is deleted without the owner's say. The one exception to writing large files only to the share (never to `C:`): a proxy may be copied to C:\lazymkv\phase0\tmp\tuning-fetch for the minutes an scp takes, at most 2 GB, deleted right after. `scripts/phase0/tuning-fetch.ps1 -Slug <slug> -Label <label>` (a job) makes that copy of one title's dataset folder, refuses more than 2 GB or a second copy while one is still there, and prints the size, the `scp` command and the clean-up command; the Mac runs the clean-up command immediately after the `scp`. It is needed only when a future measure needs the proxies on the Mac, never in this routine. The owner's label for each measured track is asked for without showing any verdict and is recorded only with `lazymkv-dev labels set` or `unset` (never by editing the JSON); whether a label counts for experiment 13 is worked out by the harness, never stored. `lazymkv-dev retune` exits 1 when a track the owner labelled as programme audio gets a drop verdict, when a level folder is measured against the wrong reference, when a reference is labelled as unwanted audio, when a labelled programme track gets `commentary-cross-language`, or when a labelled candidate, taken as the reference, would give the programme the commentary verdict (`swapped reference`) (stop and report); 2 when a labels file does not validate; 3 when something could not be checked (level files missing, a label with no measurement, a measured track gone).
+- MakeMKV removes a forced-only subtitle track that turns out to be empty and says so with `MSG:4047` ("Forced subtitles track #N turned out to be empty and was removed from output file", after `MSG:4007`). Found on the same rip. N counts the title's SELECTED streams in scan order (the output file's tracks before the removal), not the scan's stream numbers: on Disc A's eng-only rip "#3" was scan stream 5 (Task 13 Step 6, 2026-10-06); the reconciler (`lazymkv-dev reconcile`) maps it accordingly. A ripped file can therefore hold fewer tracks than the scan lists; such a difference is explained, not a failure, when a `MSG:4047` line names the missing stream.
 - Since 2026-10-13, `corpus/owner/` is the private repository `lazymkv-evidence` (https://github.com/krcm0209/lazymkv-evidence), cloned in place and ignored by this repository (`corpus/README.md`): recordings are committed there, never here. The tasks' `git add` commands that name `corpus/owner/...` are historical: today that part runs inside the clone (`git -C corpus/owner add <slug> && git -C corpus/owner commit`), and the rest of each command in this repository.
+- Since the Rust port of the analysers (pull request krcm0209/lazymkv#2; design `docs/superpowers/specs/2026-10-13-rust-port-design.md`), the Python of `scripts/phase0/` is deleted: its rules are in `crates/core` and its commands are the `lazymkv-dev` binary (`crates/dev`). Build it with `cargo build -q --release -p lazymkv-dev` from the repository root (once per checkout, and again after a change under `crates/`); every step below runs it as `target/release/lazymkv-dev <command>` from there. The commands that replaced the scripts: `summarize_scan.py <dir>` is `scan <slug|dir>` (with `--title N` the listing of Task 12 Step 5, with `--label L` the listing of Task 12 Step 15); `compare_tracks.py` is `reconcile`, with the same arguments; `audio_similarity.py <folder>` is `audio-report <folder>`, and `audio_similarity.py --titles corpus/owner/<slug>` is `titles <slug>`; `audio_dataset.py [corpus/owner]` is `retune [--evidence DIR]`, and `audio_dataset.py args corpus/owner/<slug> <label>` is `levels-args <slug> <label>`; `audio_labels.py <sub-command> ...` is `labels <sub-command> ...`, with the same arguments; `subtitle_text.py` is `subs`, `subtitle_alignment.py` is `align`, `proxy_levels.py` is `levels-from-proxy`, `exp02_check.py` is `exp02`, `check_encoding.py` is `encoding`, `hit_rate.py` is `hit-rate`, `exp11_tracks.py` is `exp11`, `compare_scans.py` is `compare-scans` and `ocr_compare.py` is `ocr-compare`; the unit tests are `cargo test --workspace`. The last commit that had the Python is `d3a754d` (`git show d3a754d:scripts/phase0/<file>`). The steps this plan still runs (Task 8 Steps 6 and 7, Task 10 Step 6, Task 11 Step 11, Task 12 Steps 5, 6, 15 to 20, 24 and 27, Task 13, Task 15 Steps 1 to 6, and the check of the tuning dataset in Task 17 Step 6) call `lazymkv-dev`, or `jq`, `awk` and `grep` where they read a file directly (`jq` 1.7, as macOS ships it, strips the byte-order mark PowerShell writes only from a file it reads on its own, so the steps hand it the run files one at a time and never slurp several; the bash blocks also run in zsh, the Mac's login shell, so no loop variable is named `path`, which zsh ties to `PATH`); every other `python3` line, heredoc and listing in this plan is historical and is marked so where it stands. The port was built and tested on the mini PC (Windows) during the port; the CI workflow (`.github/workflows/ci.yml`) then built and tested it on Linux, macOS and Windows runners, all green (run 38910414789 on cec66c1), so the cfg(unix) code (runner.rs's signal exit status, audio_report.rs's symlink test, the `date` clock path, the Unix-only assertions in align.rs, ocr_compare.rs and labels/tests.rs) has compiled and run; a Mac checkout should still pass `cargo test --workspace` before these steps are run on it.
 
 ## Owner inputs needed during execution
 
@@ -72,7 +73,7 @@
 | `crates/fake-tools/src/main.rs`, `scenario.rs` | Stand-in executable replaying a recording |
 | `scripts/box.sh` | Sync the repository to the mini PC and run a command there |
 | `scripts/phase0/*.ps1` | Procedures run on the mini PC |
-| `scripts/phase0/*.py` | Analysis run on the Mac |
+| `crates/dev` (`lazymkv-dev`) | Analysis run on the Mac (the Python of `scripts/phase0/` until the Rust port) |
 | `corpus/thediscdb/` | Pinned public scan logs (MIT) |
 | `corpus/owner/<slug>/` | Recordings of the owner's discs |
 | `docs/phase0/environment.md` | Installed versions and machine facts |
@@ -1504,6 +1505,8 @@ Background: TheDiscDB publishes its data at `github.com/TheDiscDb/data` under th
 
 - [ ] **Step 1: Write the fetch script**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): `scripts/phase0/fetch-thediscdb-fixtures.sh` now encodes the URL and reads the two JSON fields with `jq`; the three `python3 -c` lines of this listing are its first version and are not run again.
+
 `scripts/phase0/fetch-thediscdb-fixtures.sh`:
 
 ```bash
@@ -1655,6 +1658,8 @@ git commit -m "Pin TheDiscDB scan logs and check the fingerprint against them"
 ---
 
 ### Task 6: Analysis scripts
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this task wrote the first versions of the Python analysers, which were deleted after `d3a754d`; no step of it is run again. The last version of each file is `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 **Files:**
 - Create: `scripts/phase0/robot.py`, `scripts/phase0/summarize_scan.py`, `scripts/phase0/compare_tracks.py`, `scripts/phase0/compare_scans.py`, `scripts/phase0/exp02_check.py`, `scripts/phase0/subtitle_alignment.py`, `scripts/phase0/hit_rate.py`, `scripts/phase0/check_encoding.py`
@@ -2453,7 +2458,7 @@ git commit -m "Set up the mini PC for phase 0 and record its environment"
 - Modify: `docs/phase0/environment.md` (new section `## Fingerprint check (Task 8)`).
 
 **Interfaces:**
-- Consumes: from `env.ps1`: `$P0`, `$Recordings`, `$CAP`, `$MK`, `$Drive`, `$AllTracksProfile`, `Get-MkFlags`, `Get-DiscIndex`, `Assert-Slug`, `Assert-DiscIs`, `Assert-EmptyDir`, `Get-InsertedDisc` (prerequisite item 4). From the capture tool: `lazymkv-capture disc --root <path> --label <text> --out <dir>` (exit 0, or 2 on failure) and `lazymkv-capture record --out <file> -- <command...>`. Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/summarize_scan.py <recording dir>`, `scripts/phase0/hit_rate.py <corpus dir>`.
+- Consumes: from `env.ps1`: `$P0`, `$Recordings`, `$CAP`, `$MK`, `$Drive`, `$AllTracksProfile`, `Get-MkFlags`, `Get-DiscIndex`, `Assert-Slug`, `Assert-DiscIs`, `Assert-EmptyDir`, `Get-InsertedDisc` (prerequisite item 4). From the capture tool: `lazymkv-capture disc --root <path> --label <text> --out <dir>` (exit 0, or 2 on failure) and `lazymkv-capture record --out <file> -- <command...>`. Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `lazymkv-dev scan <slug|dir>` and `lazymkv-dev hit-rate <corpus dir>` (Global Constraints: the Rust port).
 - Produces:
   - `record-disc.ps1 -Slug <slug> [-NoScan] [-ScanName <name>] [-ScanMayFail] [-Force]`. Run it as a job (`scripts/phase0/job.sh record-disc.ps1 <log> -Slug <slug> ...`) when it scans, or over plain ssh with `-NoScan`. It writes `$Recordings\<slug>\`, which is `C:\lazymkv\phase0\recordings\<slug>\`:
     - A new slug (no `meta.json` yet) gets a snapshot and lookups:
@@ -2491,7 +2496,7 @@ Placeholders:
 - In the environment.md section of Step 7:
   - FORMAT: `meta.json`'s `format`;
   - DISCID_STATE: one of `yes`, `none: Unit_Key_RO.inf listed but unreadable`, `none: Unit_Key_RO.inf not listed`, `n/a (DVD)`, from Step 4;
-  - HASH_RESULT and DISCID_RESULT: `hit_rate.py`'s `hash=` and `discid=` values for the disc;
+  - HASH_RESULT and DISCID_RESULT: `lazymkv-dev hit-rate`'s `hash=` and `discid=` values for the disc;
   - CH_RESULT: `MATCH`, `DIFFERENT` or `none`, from the `thediscdb-discid.json` lines of the check in Step 7;
   - GID_RESULT: `MATCH`, `DIFFERENT` or `not compared`, from the `thediscdb-hash.json` line;
   - OUTCOME: one of the three sentences given in Step 7;
@@ -2737,6 +2742,8 @@ Expected:
 
 - [ ] **Step 4: Record a disc without a scan**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: the disc SLUG, chosen by the owner, never Disc A. The owner's description of it is compared with DISC_A before it goes in, and TheDiscDB's answer is compared after the pull below. For a repeat from Step 7 it must also be a disc not recorded before; the fingerprint list below checks that.
 
 Before the first disc, ask the owner: "Which film is Disc A (title and year)? Please keep it apart until Task 9 asks for it." Write the answer down as DISC_A, and report it with this task's results, so that Task 9 Step 3 can confirm it with the owner.
@@ -2862,10 +2869,11 @@ PHASE0-DONE status=ok exit=<n>
 
 ```bash
 scripts/phase0/pull-recording.sh FIRST_SLUG
-python3 scripts/phase0/summarize_scan.py corpus/owner/FIRST_SLUG
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev scan FIRST_SLUG
 ```
 
-Expected: the summary starts `MakeMKV: MakeMKV v2.0.0 win(x64-release)`, and its title table has as many rows as `titles=` in the log. A Python traceback is a defect: stop and report.
+Expected: the summary starts `MakeMKV: MakeMKV v2.0.0 win(x64-release)`, and its title table has as many rows as `titles=` in the log. An exit code other than 0 (2 means the scan could not be read) is a defect: stop and report.
 
 Now prove that the guard keeps an existing scan. Start the same job again under a second log name:
 
@@ -2889,39 +2897,35 @@ Write down REHEARSAL_ANSWER: `RESULT ok, <titles> titles, scan took <elapsed_ms 
 Which disc is in the drive: the disc SLUG, the one recorded last in Step 4. It must still be in the drive if its lookups have to be retried (rule 3 below).
 
 ```bash
-python3 scripts/phase0/hit_rate.py corpus/owner
-python3 - SLUG <<'EOF'
-import json, pathlib, sys
-d = pathlib.Path("corpus/owner") / sys.argv[1]
-meta = json.loads((d / "meta.json").read_text(encoding="utf-8-sig"))
-fp = (meta.get("fingerprint") or "").upper()
-did = (meta.get("disc_id") or "").upper()
-print("ours: fingerprint", fp or "NONE", "disc_id", did or "NONE")
-for name in ("thediscdb-hash.json", "thediscdb-discid.json"):
-    path = d / name
-    if not path.exists():
-        print(name, "absent (lookup not made)")
-        continue
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except ValueError:
-        print(name, "is not JSON (see lookup-status.txt for the HTTP code)")
-        continue
-    records = [r for r in (data if isinstance(data, list) else [data]) if isinstance(r, dict) and r.get("content_hash")]
-    if not records:
-        print(name, "holds no disc record")
-    for rec in records:
-        theirs = str(rec["content_hash"]).upper()
-        gid = str(rec.get("global_disc_id") or "").upper()
-        ch = "MATCH" if fp and theirs == fp else "DIFFERENT"
-        gd = ("MATCH" if gid == did else "DIFFERENT") if did and gid else "not compared"
-        print(f"{name}: content_hash {theirs} {ch}; global_disc_id {gid or 'none'} {gd}")
-EOF
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev hit-rate corpus/owner
+d=corpus/owner/SLUG
+fp="$(jq -r '(.fingerprint // "") | ascii_upcase' "$d/meta.json")"
+did="$(jq -r '(.disc_id // "") | ascii_upcase' "$d/meta.json")"
+echo "ours: fingerprint ${fp:-NONE} disc_id ${did:-NONE}"
+for name in thediscdb-hash.json thediscdb-discid.json; do
+  if [ ! -e "$d/$name" ]; then echo "$name absent (lookup not made)"; continue; fi
+  if ! jq -e -s 'length == 1' "$d/$name" >/dev/null 2>&1; then
+    echo "$name is not JSON (see lookup-status.txt for the HTTP code)"; continue
+  fi
+  jq -r --arg name "$name" --arg fp "$fp" --arg did "$did" '
+    def truthy: . != null and . != false and . != 0 and . != "" and . != [] and . != {};
+    def text: if type == "string" then . else tojson end;
+    [(if type == "array" then .[] else . end) | select(type == "object" and (.content_hash | truthy))] as $records
+    | if ($records | length) == 0 then "\($name) holds no disc record" else empty end,
+      ($records[]
+       | (.content_hash | text | ascii_upcase) as $theirs
+       | (if (.global_disc_id | truthy) then (.global_disc_id | text) else "" end | ascii_upcase) as $gid
+       | (if $fp != "" and $theirs == $fp then "MATCH" else "DIFFERENT" end) as $ch
+       | (if $did != "" and $gid != "" then (if $gid == $did then "MATCH" else "DIFFERENT" end) else "not compared" end) as $gd
+       | "\($name): content_hash \($theirs) \($ch); global_disc_id \(if $gid == "" then "none" else $gid end) \($gd)")
+  ' "$d/$name"
+done
 ```
 
 Expected:
-- `hit_rate.py` prints one row per recorded disc (`<slug> <format> hash=<hit|miss|failed|n/a> discid=<hit|miss|failed|n/a>`) and its summary lines. It exits 1 when a fingerprint lookup did not get an answer or a disc-ID lookup failed. That exit code is not an error here: read the rows. `discid=n/a` means no disc-ID lookup was made, as for a DVD.
-- The check prints our fingerprint and disc ID, then one line per TheDiscDB record. Here SLUG is a command-line argument; nothing inside the heredoc needs editing.
+- `hit-rate` prints one row per recorded disc (`<slug> <format> hash=<hit|miss|failed|n/a> discid=<hit|miss|failed|n/a>`) and its summary lines. It exits 1 when a fingerprint lookup did not get an answer or a disc-ID lookup failed. That exit code is not an error here: read the rows. `discid=n/a` means no disc-ID lookup was made, as for a DVD.
+- The check prints our fingerprint and disc ID, then one line per TheDiscDB record. SLUG appears once in the check, in its first line `d=corpus/owner/SLUG`.
 
 Read SLUG's row and the check's lines with these rules:
 
@@ -2954,7 +2958,7 @@ Then append this section to the end of `docs/phase0/environment.md`, with one ta
 ## Fingerprint check (Task 8)
 
 The fingerprint and AACS disc ID computed on this machine by `scripts/phase0/record-disc.ps1`
-(drive D:), compared with TheDiscDB (`scripts/phase0/hit_rate.py` and the check in Task 8 Step 7).
+(drive D:), compared with TheDiscDB (`lazymkv-dev hit-rate` and the check in Task 8 Step 7).
 A dischash hit proves the fingerprint; the content_hash of a discid record is an independent check
 of it, and the global_disc_id of a dischash record checks the disc ID.
 
@@ -3006,7 +3010,7 @@ Expected:
   - from `env.ps1`: `$Recordings`, `$CAP`, `$MK`, `$Drive`, `Assert-Slug`, `Assert-DiscIs` (which uses `Get-InsertedDisc`); through `record-disc.ps1` also `Assert-EmptyDir`, `Get-DiscIndex` and `Get-MkFlags`.
   - `record-disc.ps1 -Slug <slug> [-NoScan] [-ScanName <name>] [-ScanMayFail]` (Task 8's final version): with `-NoScan` over plain ssh (Step 5: lazymkv-capture and curl only, never MakeMKV), otherwise as a job. Its output lines are `disc: ...`, `lookups: ...`, `scan: <ScanName>.txt exit.json=... version_banner=... titles=...` (not with `-NoScan`), then `RESULT ok` or `RESULT FAILED: <reason>`. On a recording that already has a `meta.json` it runs `Assert-DiscIs <slug>` before anything else touches the disc.
   - `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/pull-recording.sh <slug>`.
-  - `scripts/phase0/summarize_scan.py <recording dir>` (reads `scan.txt`); `scripts/phase0/compare_scans.py <scan A> <scan B>` (exits 1 when the title lists differ or one is empty); `robot.parse` and `robot.split_fields` from `scripts/phase0/robot.py`.
+  - `lazymkv-dev scan <slug|dir>` (reads `scan.txt`); `lazymkv-dev compare-scans <scan A> <scan B>` (exits 1 when the title lists differ or one is empty); `parse` and `split_fields` of `core::robot` (Global Constraints: the Rust port).
   - `lazymkv-capture record --out <file> -- <command...>`.
 - Produces:
   - `scripts/phase0/exp05-evidence.ps1 -Slug <slug> -Listing <name> [-DriveList <name>] [-Force]`. Run it over plain ssh: it needs C: and the drive, never the share. It writes into `$Recordings\<slug>\`:
@@ -3295,6 +3299,8 @@ Anything else means stop: no rule, two rules, `Action: Allow`, another program p
 
 - [ ] **Step 5: First sight of Disc A: the snapshot, then the drive listing, offline**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: none at first. Disc A is inserted in this step. Disc A's snapshot is taken first (no MakeMKV), so record-disc.ps1's Assert-DiscIs proves the disc before the offline scan (Step 6) and the online scan (Step 8). The snapshot's `meta.json` also makes exp05-evidence.ps1 run `Assert-DiscIs SLUG_A` before the offline drive listing below and the online one (Step 8). So every MakeMKV run on Disc A is preceded by a fingerprint check; Step 9's label comparison is only a cross-check.
 
 MakeMKV's GUI must not see Disc A before the recorded runs do: spec 10.4 notes that the GUI holds the drive. Before the disc goes in:
@@ -3493,6 +3499,8 @@ Expected: `listing: makemkv-data-4-after-scan-online.txt ...`, `RESULT ok`, `exi
 
 - [ ] **Step 9: Pull the recording and compare the offline and online runs**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: Disc A. It stays in for Tasks 10 to 14; this step does not touch it.
 
 Run these one after another, not chained with `&&`. Several of them exit 1 when their answer is "different", and that is a result, not an error. A Python traceback is an error: stop and report.
@@ -3591,6 +3599,8 @@ Expected:
 
 - [ ] **Step 10: Write the experiment 5 report**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: Disc A (not used).
 
 Create `docs/phase0/experiments/EXP-05-offline-and-unit-key.md` from `docs/phase0/experiments/TEMPLATE.md`. Fill in the header:
@@ -3653,6 +3663,8 @@ Under "Consequence for the spec":
 
 - [ ] **Step 11: Write the experiment 12 report**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: Disc A (not used).
 
 Create `docs/phase0/experiments/EXP-12-java-labels.md` from `docs/phase0/experiments/TEMPLATE.md`, with `Disc(s): SLUG_A, UHD, drive 1 (D:)`, the MakeMKV version and `Spec reference: section 17, row 12`. Use the online summary from Step 9 (`summarize_scan.py`, which reads `scan.txt`).
@@ -3702,7 +3714,7 @@ Expected:
   - Scripts:
     - `scripts/box.sh`, `scripts/phase0/job.sh` and `scripts/phase0/wait.sh`.
     - `scripts/phase0/pull-recording.sh <slug>`, Task 8's version: it copies over `corpus/owner/<slug>/` and never deletes anything.
-    - `scripts/phase0/exp02_check.py <recording dir>`: it reads only `exp02/title-[0-9]*.txt`, and exits 0 when its last line is `EXPERIMENT 2: yes` and 1 when it is `EXPERIMENT 2: no`.
+    - `lazymkv-dev exp02 <recording dir>`: it reads only `exp02/title-[0-9]*.txt`, and exits 0 when its last line is `EXPERIMENT 2: yes` and 1 when it is `EXPERIMENT 2: no`.
 - Produces:
   - `scripts/phase0/exp02-index-guard.ps1 -Slug <slug> [-MaxTitles <n>] [-Redo <n,n,...>] [-Plan]`
     - Parameters:
@@ -3751,6 +3763,8 @@ Placeholders:
 - WRITTEN_MAX: the largest `written_bytes` of a call stopped at `MSG:5014`, from the run summary in Step 6.
 
 - [ ] **Step 1: Write the script**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: none needed.
 
@@ -4242,26 +4256,31 @@ Run this only when the last job of Steps 4 and 5 ended with wait.sh exit 0, or w
 ```bash
 scripts/phase0/pull-recording.sh SLUG
 diff <(ssh USER@makemkv-box "dir /b C:\lazymkv\phase0\recordings\SLUG\exp02\title-*.txt" | tr -d '\r' | sort) <(cd corpus/owner/SLUG/exp02 && ls title-*.txt | sort); echo "diff=$?"
-python3 scripts/phase0/exp02_check.py corpus/owner/SLUG; echo "check=$?"
-python3 - SLUG <<'EOF'
-import json, pathlib, sys
-d = pathlib.Path("corpus/owner") / sys.argv[1] / "exp02"
-paths = sorted(d.glob("run-*.json"))
-if not paths:
-    sys.exit(f"no run-*.json in {d}")
-largest = 0
-for path in paths:
-    run = json.loads(path.read_text(encoding="utf-8-sig"))
-    results = run.get("results") or []
-    if isinstance(results, dict):
-        results = [results]
-    print(f"{path.name}: result={run.get('result')} time_limit_s={run.get('time_limit_s')}")
-    for r in results:
-        print(f"  title {r['title']}: 5014={r['saw_5014']} ended={r['ended']} written_bytes={r['written_bytes']} seconds={r['seconds']} codes={r['msg_codes']}")
-        if r["saw_5014"]:
-            largest = max(largest, int(r["written_bytes"]))
-print("largest written_bytes of a call stopped at MSG:5014:", largest)
-EOF
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev exp02 corpus/owner/SLUG; echo "check=$?"
+d=corpus/owner/SLUG/exp02
+if ! ls "$d"/run-*.json >/dev/null 2>&1; then
+  echo "no run-*.json in $d"
+else
+  for run in "$d"/run-*.json; do
+    jq -r --arg name "${run##*/}" '
+      def truthy: . != null and . != false and . != 0 and . != "" and . != [] and . != {};
+      def py: if type == "boolean" then (if . then "True" else "False" end) elif . == null then "None"
+              elif type == "string" then ([39] | implode) + . + ([39] | implode) elif type == "array" then "[" + (map(py) | join(", ")) + "]"
+              else tojson end;
+      def pystr: if type == "string" then . else py end;
+      (.results | if truthy then (if type == "object" then [.] else . end) else [] end) as $results
+      | "\($name): result=\(.result | pystr) time_limit_s=\(.time_limit_s | pystr)",
+        ($results[] | "  title \(.title | pystr): 5014=\(.saw_5014 | pystr) ended=\(.ended | pystr) written_bytes=\(.written_bytes | pystr) seconds=\(.seconds | pystr) codes=\(.msg_codes | pystr)")
+    ' "$run"
+  done
+  for run in "$d"/run-*.json; do jq -c . "$run"; done | jq -rs '
+    def truthy: . != null and . != false and . != 0 and . != "" and . != [] and . != {};
+    [.[] | .results | if truthy then (if type == "object" then [.] else . end) else [] end | .[]
+     | select(.saw_5014 | truthy) | .written_bytes | tonumber] as $w
+    | "largest written_bytes of a call stopped at MSG:5014: \([0] + $w | max)"
+  '
+fi
 grep -l '^MSG:1009,' corpus/owner/SLUG/exp02/title-*.txt
 ```
 
@@ -4279,7 +4298,7 @@ How to read the checker:
 - **`5014=NO` on a title that Step 5 set aside**: this is not an answer, and Step 7 reports the title as not tested. There is one exception: if its `rip #T=` names a file and that file differs from `scan source=`, MakeMKV numbered the title differently. That is a finding even without `MSG:5014`.
 - **`match=NO` or `added-before-5014=NO` on a title with `5014=yes`**: this is a finding, and the answer is no. Note that title's `scan source=` and `rip #T=` values.
 - **Probe for an open question** (how a `MSG:3308` line is laid out): if any line shows `3308-lines=` above 0, run `grep -h '^MSG:3308,' corpus/owner/SLUG/exp02/title-*.txt | head -5`.
-  - exp02_check.py takes the first quoted parameter after the two message texts as the file, and the last parameter as the title number.
+  - `lazymkv-dev exp02` takes the first quoted parameter after the two message texts as the file, and the last parameter as the title number.
   - If the last parameter is not the title number (for example, it is an angle number), the checker misreads angle titles. Stop and report to the controller with those lines before Step 7.
 
 - [ ] **Step 7: Write the report**
@@ -4353,9 +4372,9 @@ Expected:
 - Consumes:
   - From `env.ps1`: `$P0`, `$Recordings`, `$Staging`, `$Drive`, `$CAP`, `$MK`, `$MKVMERGE`, `$FFPROBE`, `$MEDIAINFO`, `$AllTracksProfile`, `Get-MkFlags -Profile <path> -CacheMb <n>`, `Get-DiscIndex`, `Get-FreeRamGB`, `Assert-Slug`, `Assert-DiscIs`, `Assert-EmptyDir`.
   - `lazymkv-capture record --out <file> -- <command...>`: writes `<file>` (the command's standard output), `<file>.timing.jsonl` (one `{"n":<line>,"t_ms":<ms since start>}` per line), `<file>.stderr` and, when the command has ended, `<file>.exit.json` (`exit_code`, `elapsed_ms`, `lines`). Its own exit code is the command's, or 2 when the tool itself fails.
-  - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/pull-recording.sh <slug>` (Task 8: never deletes on the Mac), `scripts/phase0/setup-check.ps1` (Task 7), `scripts/phase0/summarize_scan.py <recording dir>`, `scripts/phase0/compare_tracks.py <scan> <title> <mkvmerge json> [--selection all|eng]` (exits 1 when any verdict is no), `scripts/phase0/robot.py` (`parse`).
+  - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/pull-recording.sh <slug>` (Task 8: never deletes on the Mac), `scripts/phase0/setup-check.ps1` (Task 7), `lazymkv-dev scan <slug|dir>`, `lazymkv-dev reconcile <scan> <title> <mkvmerge json> [--selection all|eng]` (exits 1 when any verdict is no), `core::robot` (`parse`).
   - Disc A's recording from Task 9: `C:\lazymkv\phase0\recordings\SLUG\` and `corpus/owner/SLUG/`, with `meta.json` and `scan.txt` (the online scan, made with `Get-MkFlags`' defaults: the all-tracks profile and `--cache=1024`).
-  - Prerequisite D16, applied by the controller before this task: `scripts/phase0/audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]` (a job), `scripts/phase0/audio_dataset.py [args corpus/owner/<slug> <label>]`, `scripts/phase0/audio_labels.py` (`auto`, `set`, `unset`, `title`, `kinds`, `check`), and `$TuningData` from env.ps1.
+  - Prerequisite D16, applied by the controller before this task: `scripts/phase0/audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]` (a job), `lazymkv-dev retune` and `lazymkv-dev levels-args <slug> <label>`, `lazymkv-dev labels` (`auto`, `set`, `unset`, `title`, `kinds`, `check`), and `$TuningData` from env.ps1.
 - Produces:
   - `scripts/phase0/rip-title.ps1 -Slug <slug> -Title <n> -Label <name> [-Profile <path>] [-CacheMb <n>] [-Force]`. Run it as a job: `scripts/phase0/job.sh rip-title.ps1 <log> -Slug <slug> -Title <n> -Label <name> ...`. A `-Profile` path typed in the Mac shell must be in single quotes there (`-Profile 'C:\lazymkv\phase0\profiles\eng-only.mmcp.xml'`), or bash deletes its backslashes; job.sh receives it without quotes. `-Profile` defaults to `$AllTracksProfile`, `-CacheMb` to 1024.
     - It refuses before anything is created or deleted in the recording or on the share (only Assert-DiscIs's own `$P0\tmp\disc-check` is written), when:
@@ -4396,7 +4415,7 @@ Expected:
 
 Placeholders:
 - SLUG: Disc A's slug, chosen in Task 9 and written at the top of EXP-05 and EXP-12.
-- N: the main feature's title number, chosen in Step 4 from `summarize_scan.py`'s table.
+- N: the main feature's title number, chosen in Step 4 from `lazymkv-dev scan`'s table.
 - K: the rehearsal title's number, chosen in Step 4.
 - M: the share-drop title's number, chosen in Step 8.
 - DROP: the share-drop label: `share-drop` the first time, `share-drop-2` for the one repeat with a five-minute outage (Step 8).
@@ -4811,6 +4830,8 @@ Expected, in order:
 
 - [ ] **Step 4: Rehearse on a short title**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: Disc A (SLUG). rip-title.ps1 checks this itself with Assert-DiscIs before MakeMKV starts.
 
 Both scripts run here for the first time, on a short title, so that a defect shows before the hour-long rip. Choose N and K first:
@@ -4981,6 +5002,8 @@ Expected (exit 0):
 
 - [ ] **Step 6: Probe the rip and compare it with the scan**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: Disc A stays in. The probe reads only the share.
 
 ```bash
@@ -5067,6 +5090,8 @@ Answer yes only if 1 to 4 hold. Consequences:
 - 8 confirms or corrects the 2-second rule of spec 6.2 step 7.
 
 - [ ] **Step 8: Run the share-drop test**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: Disc A (SLUG). rip-title.ps1 checks this itself with Assert-DiscIs.
 
@@ -5305,16 +5330,17 @@ Which disc is in the drive: Disc A stays in (not used). The jobs read only the s
 List the rips still to add:
 
 ```bash
-python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev retune | grep '^Titles whose audio'
 ```
 
 Expected: one line `Titles whose audio is in the tuning dataset (audio-proxy.json): <a> of <b> ...; missing: ...`. Every SLUG/LABEL it names under `missing` is a rip of this task that ended `RESULT ok` (normally `rehearsal` and `all-tracks`, and any `share-drop`, `share-drop-2`, `all-tracks-512` or `all-tracks-256` that succeeded), or a title of an earlier task. Do the following for each SLUG/LABEL named, one title at a time.
 
 ```bash
-python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL
+target/release/lazymkv-dev levels-args SLUG LABEL
 ```
 
-Expected: `SLUG/LABEL: <n> audio streams (from <source>); original language <...>`, one `stream <n>: <codec> ... lang=<code>` line per audio stream, a `programme reference: ...` line (and possibly `note: ...` and `dataset only: ...` lines), then one or more pairs of lines `scripts/phase0/job.sh audio-levels.ps1 audio-levels-SLUG-LABEL[-M] -Slug SLUG -Label LABEL -Main M[ -Cand C,...]` and `scripts/phase0/wait.sh audio-levels-SLUG-LABEL[-M]`. `<source>` is `ffprobe-streams.json`, or for a rip Steps 8 and 9 did not probe, `<other label>/ffprobe-streams.json: a rip of the same title <t> with the same size, <b> bytes`. When neither exists, `args` exits 2 and prints instead the two lines `scripts/phase0/job.sh probe-title.ps1 probe-LABEL -Slug SLUG -Label LABEL -SkipRemux` and its `wait.sh` line: run them (with Step 6's exit-code handling), pull, and run `args` again. Run the printed audio-levels pairs in order, one job at a time.
+Expected: `SLUG/LABEL: <n> audio streams (from <source>); original language <...>`, one `stream <n>: <codec> ... lang=<code>` line per audio stream, a `programme reference: ...` line (and possibly `note: ...` and `dataset only: ...` lines), then one or more pairs of lines `scripts/phase0/job.sh audio-levels.ps1 audio-levels-SLUG-LABEL[-M] -Slug SLUG -Label LABEL -Main M[ -Cand C,...]` and `scripts/phase0/wait.sh audio-levels-SLUG-LABEL[-M]`. `<source>` is `ffprobe-streams.json`, or for a rip Steps 8 and 9 did not probe, `<other label>/ffprobe-streams.json: a rip of the same title <t> with the same size, <b> bytes`. When neither exists, `levels-args` exits 2 and prints instead the two lines `scripts/phase0/job.sh probe-title.ps1 probe-LABEL -Slug SLUG -Label LABEL -SkipRemux` and its `wait.sh` line: run them (with Step 6's exit-code handling), pull, and run `levels-args` again. Run the printed audio-levels pairs in order, one job at a time.
 
 What wait.sh's exit codes mean for these jobs:
 - **0**: check the log against the Expected below.
@@ -5342,35 +5368,36 @@ When every pair of the title has ended `RESULT ok`:
 
 ```bash
 scripts/phase0/pull-recording.sh SLUG
-python3 scripts/phase0/audio_labels.py auto corpus/owner/SLUG
-python3 scripts/phase0/audio_dataset.py; echo "exit=$?"
+target/release/lazymkv-dev labels auto corpus/owner/SLUG
+target/release/lazymkv-dev retune; echo "exit=$?"
 ```
 
 Expected:
 - `pulled corpus/owner/SLUG (...)`.
-- `auto` prints a line `labelled LABEL stream <n>: duplicate (md5), counts=False (a duplicate track never counts)` or `... derived-core (flag), counts=False ('flag' is an observation, not a check of the track's content (row 13, D23))` for each such track, or `nothing to label automatically`. A line `LABEL: derived cores not labelled: the file has <a> audio streams and the scan's title <t> has <b>` means the streams could not be matched by position. Label the cores by hand from Step 6's compare_tracks table (`audio_labels.py set ... derived-core --how flag --saw-verdict no`).
+- `auto` prints a line `labelled LABEL stream <n>: duplicate (md5), counts=False (a duplicate track never counts)` or `... derived-core (flag), counts=False ('flag' is an observation, not a check of the track's content (row 13, D23))` for each such track, or `nothing to label automatically`. A line `LABEL: derived cores not labelled: the file has <a> audio streams and the scan's title <t> has <b>` means the streams could not be matched by position. Label the cores by hand from Step 6's reconcile table (`lazymkv-dev labels set ... derived-core --how flag --saw-verdict no`).
 - The harness prints its sections, then `RESULT ok` and `exit=0`. LABEL is no longer under `missing` in its last list. A note `... takes its label from <label> stream <n> (same packets)` is normal for a title ripped twice. A note `<slug>/<label>/<folder>: the reference, stream M, is not the first <lang> stream of the file ...` is not a failure: name it in the report.
 - `exit=1` with `RESULT FAILED: ...`: read its `FAIL` lines and stop and report with them.
   - `labelled <kind> (programme audio), verdict <commentary|commentary-cross-language|duplicate>`: a track the owner labelled as programme audio got a drop verdict (`commentary`, `duplicate`) or the commentary pattern against a reference in another language (`commentary-cross-language`: kept, but a false verdict). On a counted track this is experiment 13's answer "no" in the making; otherwise it may be a wrong label.
   - `wrong reference: measured against stream <M> ..., but the top-ranked <lang> stream is <X> (...), the title's programme reference (placed first in ...)`: that level folder was measured with another `-Main` than `args` prints. Its tracks are left out.
   - `the reference is labelled <kind> (unwanted audio)`: a label is on the wrong stream, or the reference is not what its ranking says.
   - `swapped reference: labelled <kind> ...`: stop and report with the track's measures (EXP-13 addendum 9.3).
-- `exit=2`: a labels file (or `corpus/owner/audio-fitted.json`) does not validate, or the spec's row 13 can no longer be read. The message names the file and the problem. Repair it only with `audio_labels.py set` or `unset` (each repairs one entry and prints the problems left), and run again.
+- `exit=2`: a labels file (or `corpus/owner/audio-fitted.json`) does not validate, or the spec's row 13 can no longer be read. The message names the file and the problem. Repair it only with `lazymkv-dev labels set` or `unset` (each repairs one entry and prints the problems left), and run again.
 - `exit=3` with `RESULT FAILED: not everything was checked: ...`: read `Folders that cannot be read`, `Labels without a measurement` and the `gone:` line.
   - `its level files are not here`: pull the recording again (`pull-recording.sh SLUG`); if it is still missing, stop and report.
-  - A label without a measurement whose stream number is wrong: `python3 scripts/phase0/audio_labels.py unset corpus/owner/SLUG LABEL <stream> --note "<why>"`, then label the right stream.
+  - A label without a measurement whose stream number is wrong: `target/release/lazymkv-dev labels unset corpus/owner/SLUG LABEL <stream> --note "<why>"`, then label the right stream.
   - `gone: ...`: tracks of the last committed snapshot are no longer measured. Stop and report. The baseline snapshot is not replaced by such a run.
 
 The owner's labels: the harness's `To label` list names every measured track without a label, with its position in a player and its track name (and `they disagree` when two rips with the same packets were labelled differently). When the owner has time (this does not hold up the next step), ask what each track is, as Task 12 Step 18 describes, without showing any verdict. Then record each answer, and once per title its kind:
 
 ```bash
-python3 scripts/phase0/audio_labels.py kinds
-python3 scripts/phase0/audio_labels.py set corpus/owner/SLUG LABEL STREAM KIND --how HOW --saw-verdict no [--sure no] --note "<the owner's words>"
-python3 scripts/phase0/audio_labels.py title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
-python3 scripts/phase0/audio_dataset.py; echo "exit=$?"
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev labels kinds
+target/release/lazymkv-dev labels set corpus/owner/SLUG LABEL STREAM KIND --how HOW --saw-verdict no [--sure no] --note "<the owner's words>"
+target/release/lazymkv-dev labels title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
+target/release/lazymkv-dev retune; echo "exit=$?"
 ```
 
-Placeholders in these two lines: STREAM is the ffprobe stream number from the harness's To-label line; KIND one of the kinds `python3 scripts/phase0/audio_labels.py kinds` lists; HOW one of listened, packaging, menu, flag, thediscdb or md5; TITLE_KIND one of feature, episode, extra or other; DIALOGUE one of yes, no or unknown.
+Placeholders in these two lines: STREAM is the ffprobe stream number from the harness's To-label line; KIND one of the kinds `target/release/lazymkv-dev labels kinds` lists; HOW one of listened, packaging, menu, flag, thediscdb or md5; TITLE_KIND one of feature, episode, extra or other; DIALOGUE one of yes, no or unknown.
 
 Add `--film-audible yes` or `no` for a commentary (is the film clearly audible under the voices?). Add `--sure no` when the owner is guessing ("probably"); the label is kept and does not count. Use `--saw-verdict yes` if the owner had seen a verdict for that track: the label is then kept but does not count for experiment 13. Expected: `labelled LABEL stream <n>: <kind> (<how>, <date>, saw verdict no, sure yes), counts=True`, or `counts=False (<why>)` for a duplicate, an `inferred` or unsure label, or a disc or track the thresholds were fitted on; `title LABEL: <kind>, dialogue_heavy=<...>`; and the harness as above. A label given again replaces the old one, which is kept in its history (`replaces 1 earlier label(s)`). The same title ripped again under another label (a cache repeat) takes its labels from identical packets and needs none.
 
@@ -5397,6 +5424,8 @@ Expected:
 
 ### Task 12: Audio profiles and subtitle classification (experiment 6)
 
+> **Rust port** (pull request krcm0209/lazymkv#2): the Python files this task's Files and Interfaces name as created or prerequisite were deleted after `d3a754d` (read one with `git show d3a754d:scripts/phase0/<file>`); Global Constraints names the `lazymkv-dev` command that replaced each one.
+
 **Files:**
 - Create: `scripts/phase0/probe-audio.ps1`
 - Create: `docs/phase0/experiments/EXP-06-audio-profiles-and-subtitles.md`
@@ -5414,7 +5443,7 @@ Expected:
   - `lazymkv-capture record --out <file> -- <command...>`: writes `<file>` (the command's standard output), `<file>.timing.jsonl`, `<file>.stderr` and, when the command has ended, `<file>.exit.json`. Its own exit code is the command's, or 2 when the tool itself fails.
   - Task 8: `record-disc.ps1 -Slug <slug>` run as a job (a new slug gets snapshot, lookups and `scan.txt`; a slug recorded without a scan keeps its snapshot and gains `scan.txt`; last line `RESULT ok` or `RESULT FAILED: <reason>`), and `scripts/phase0/pull-recording.sh <slug>` (never deletes on the Mac; exit 2 bad slug, 1 failed copy).
   - Task 11: `rip-title.ps1 -Slug <slug> -Title <n> -Label <name> [-Force]` (writes `$Recordings\<slug>\<label>\rip-summary.json` and the rip to `$Staging\<slug>\<label>\`; checks the disc with Assert-DiscIs), and `probe-title.ps1 -Slug <slug> -Label <name> -SkipRemux [-Force]` (writes `mkvmerge.json`, `ffprobe-streams.json`, `mediainfo.json`, `subs\index.json`, `subs\sub-<n>.packets.json`, `probe-summary.json`).
-  - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/setup-check.ps1`, `scripts/phase0/summarize_scan.py <recording dir>`, `scripts/phase0/robot.py` (`parse`), `scripts/phase0/subtitle_alignment.py --subs-dir <subs dir> [--clear-max-bytes <n>] [--tolerance-ms <n>]` (prerequisite above; exit 2 when the folder has no `index.json` or no English stream).
+  - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/setup-check.ps1`, `lazymkv-dev scan <slug|dir> [--title N | --label L]`, `core::robot` (`parse`), `lazymkv-dev align --subs-dir <subs dir> [--clear-max-bytes <n>] [--tolerance-ms <n>]` (prerequisite above; exit 2 when the folder has no `index.json` or no English stream).
   - Disc A's recording from Tasks 9 and 11: `corpus/owner/SLUG_A/scan.txt`, `corpus/owner/SLUG_A/all-tracks/` (`rip-summary.json`, `probe-summary.json`, `ffprobe-streams.json`, `mediainfo.json`, `subs/`), and the ripped file in `$Staging\SLUG_A\all-tracks\` (`\\unas-pro\media\lazymkv-staging\SLUG_A\all-tracks\`).
 - Produces:
   - `scripts/phase0/probe-audio.ps1 -Slug <slug> -Label <name> [-Force]`, run as a job: `scripts/phase0/job.sh probe-audio.ps1 <log> -Slug <slug> -Label <name>`.
@@ -5431,7 +5460,7 @@ Placeholders:
 - SLUG: in Steps 3 to 5, the disc being measured. It is SLUG_A the first time; when Step 8 repeats Steps 3 to 5, it is NEW. In Step 10 it stands for each measured disc in turn (SLUG_A and every NEW that was ripped): run the command once for each.
 - NEW: in Steps 6 to 8, the disc being added. It is a new slug chosen in Step 6 from the title, year and format the owner gives, using lowercase letters, digits and hyphens only and not already shown by `ls corpus/owner`, for example `heat-1995-bluray`. If Step 6's fingerprint check finds the disc already recorded (in Task 8) under a slug S, NEW is S. NEW is never SLUG_A.
 - FINGERPRINT: the 32 hexadecimal characters printed by the first command of Step 6.
-- M: NEW's main feature title number, chosen in Step 6 from `summarize_scan.py`'s table.
+- M: NEW's main feature title number, chosen in Step 6 from `lazymkv-dev scan`'s table.
 - CLEAR: the `sub_clear_max_bytes` value chosen in Step 10 (0, 32, 64, 128 or 256).
 - The kinds of disc asked for in Step 6: (a) a disc with a commentary subtitle track; (b) a DVD with closed captions; (c) a disc with an Atmos or a DTS:X track, only while one of the two formats has no owner-confirmed stream; (d) one more disc with two or more English subtitle tracks, only while fewer than three measured discs qualify (Step 9). One disc may serve several kinds.
 - Disc A: the UHD film of Tasks 9 to 11. It is in the drive when this task starts (Task 11 left it in) and stays there until Step 6. Task 13 starts by asking the owner to put it back.
@@ -5524,6 +5553,8 @@ The script does not set `$ErrorActionPreference = 'Stop'`: inside a job, that wo
 
 - [ ] **Step 2: Check the prerequisites, the new script and Disc A's evidence**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: does not matter (Disc A stays in). Nothing here reads the drive. Run this step only when no phase 0 job is running: `box.sh` replaces `C:\lazymkv\src`, from which jobs run.
 
 ```bash
@@ -5596,6 +5627,8 @@ Expected: `pulled corpus/owner/SLUG (...)`. If it fails, nothing on the Mac chan
 
 - [ ] **Step 4: List the audio profiles and ask the owner which tracks are Atmos or DTS:X**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: does not matter (this runs on the Mac).
 
 ```bash
@@ -5647,39 +5680,13 @@ Write `- none named by the owner` when the owner names no such track.
 
 Which disc is in the drive: does not matter (this runs on the Mac).
 
-First list the title's subtitle streams as the scan describes them. The title number comes from `all-tracks/rip-summary.json`; Step 6 runs the same command before a rip, with the title number as a second argument.
+First list the title's subtitle streams as the scan describes them. The title number comes from `all-tracks/rip-summary.json` (the `jq` in the command reads it); Step 6 runs the same listing before a rip, with the title number given.
 
 ```bash
 cat corpus/owner/SLUG/all-tracks/subs/index.json
-python3 - SLUG <<'EOF'
-import json, pathlib, sys
-sys.path.insert(0, "scripts/phase0")
-from robot import parse
-d = pathlib.Path("corpus/owner") / sys.argv[1]
-if len(sys.argv) > 2:
-    title = int(sys.argv[2])
-else:
-    title = json.loads((d / "all-tracks" / "rip-summary.json").read_text(encoding="utf-8-sig"))["title"]
-scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
-print(f"{d.name} title {title}: subtitle streams in scan order; s<k> in subtitle_alignment.py is line s<k>")
-k = counted = 0
-for (t, s), a in sorted(scan.streams.items()):
-    if t != title or a.get(1) != "Subtitles":
-        continue
-    flags = int(a.get(22, "0") or 0)
-    lang = a.get(3) or "und"
-    derived_forced = bool(flags & 4096 and flags & 2048)
-    counted += lang in ("eng", "und") and not derived_forced
-    note = "  derived forced-only: set aside, not counted" if derived_forced else ""
-    print(f"s{k:<3} stream {s:>2}  lang={lang:<4} codec={a.get(6, ''):<10} flags={flags:<5} conversion={a.get(42, '')}{note}")
-    k += 1
-print("English or no-language subtitle streams, derived forced-only streams not counted:", counted)
-probe = d / "all-tracks" / "probe-summary.json"
-if probe.exists():
-    in_file = json.loads(probe.read_text(encoding="utf-8-sig")).get("subtitle_tracks")
-    print(f"subtitle streams in the scan: {k}; subtitle tracks in the ripped file (probe-summary.json): {in_file}")
-EOF
-python3 scripts/phase0/subtitle_alignment.py --subs-dir corpus/owner/SLUG/all-tracks/subs --clear-max-bytes 64
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev scan SLUG --title "$(jq .title corpus/owner/SLUG/all-tracks/rip-summary.json)"
+target/release/lazymkv-dev align --subs-dir corpus/owner/SLUG/all-tracks/subs --clear-max-bytes 64
 ```
 
 Expected:
@@ -5717,21 +5724,19 @@ Ask the owner to insert the disc and to say when the drive's light has stopped b
 
 ```bash
 ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \". C:\lazymkv\src\scripts\phase0\env.ps1; (Get-InsertedDisc).fingerprint\""; echo "exit=$?"
-python3 - FINGERPRINT <<'EOF'
-import json, pathlib, sys
-fp = sys.argv[1].strip().upper()
-owner = pathlib.Path("corpus/owner")
-hits = [p.parent.name for p in sorted(owner.glob("*/meta.json"))
-        if (json.loads(p.read_text(encoding="utf-8-sig")).get("fingerprint") or "").upper() == fp]
-if not hits:
-    print("not recorded yet: a new disc")
-for slug in hits:
-    print(f"already recorded as {slug}; scan.txt {'present' if (owner / slug / 'scan.txt').exists() else 'absent'}; "
-          f"all-tracks rip {'present' if (owner / slug / 'all-tracks').exists() else 'absent'}")
-EOF
+export LC_ALL=C
+fp="$(printf '%s' 'FINGERPRINT' | tr -d ' \t\r\n' | tr 'a-z' 'A-Z')"
+found=0
+for meta in corpus/owner/*/meta.json; do
+  [ "$(jq -r '(.fingerprint // "") | ascii_upcase' "$meta")" = "$fp" ] || continue
+  d="${meta%/meta.json}"
+  found=1
+  echo "already recorded as ${d##*/}; scan.txt $([ -e "$d/scan.txt" ] && echo present || echo absent); all-tracks rip $([ -e "$d/all-tracks" ] && echo present || echo absent)"
+done
+[ "$found" = 1 ] || echo "not recorded yet: a new disc"
 ```
 
-Expected: the ssh command's last line is the disc's fingerprint, 32 hexadecimal characters (FINGERPRINT), and `exit=0`. An error saying that no disc is mounted means the disc is not ready: wait half a minute and run it again. Any other error: stop and report. The Python check then prints one of:
+Expected: the ssh command's last line is the disc's fingerprint, 32 hexadecimal characters (FINGERPRINT), and `exit=0`. An error saying that no disc is mounted means the disc is not ready: wait half a minute and run it again. Any other error: stop and report. The check then prints one of:
 - `not recorded yet: a new disc`: choose NEW (see Placeholders) and record the disc below.
 - `already recorded as <S>; ... all-tracks rip present`: this disc was measured already (it is Disc A, or a disc from an earlier pass of this step). Ask the owner for another disc.
 - `already recorded as <S>; scan.txt present; all-tracks rip absent`: Task 8 recorded and scanned it. NEW is S. Skip the recording job and go on with the pull below.
@@ -5765,14 +5770,15 @@ Copy the recording to the Mac and choose the title:
 
 ```bash
 scripts/phase0/pull-recording.sh NEW
-python3 scripts/phase0/summarize_scan.py corpus/owner/NEW
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev scan NEW
 ```
 
 Expected: `pulled corpus/owner/NEW (...)`, then the summary, starting `MakeMKV: MakeMKV v2.0.0 win(x64-release)`, with its title table. Choose M, the main feature:
 - on a disc whose titles carry labels (the comment column), the title whose comment starts `FPL_MainFeature`;
 - otherwise the feature-length title; if more than one remains, the longest. On a DVD this is the longest title.
 
-List M's subtitle streams: run Step 5's listing command (the `python3 - SLUG <<'EOF'` block) with `NEW M` in place of `SLUG`, so that its first line is `python3 - NEW M <<'EOF'`.
+List M's subtitle streams with Step 5's listing, the title given: `target/release/lazymkv-dev scan NEW --title M`.
 
 Expected: the listing and its count of English or no-language subtitle streams. There is no `subtitle tracks in the ripped file` line yet. For a disc asked for as (a), (b) or (d), the count must be 2 or more: the closed-caption stream counts, and derived forced-only streams do not. With fewer, tell the owner what the scan shows and ask for another disc of that kind. This disc's recording stays in `corpus/owner` (Task 15 counts it with the others). Do not rip it unless it was also asked for as (c). A disc asked for only as (c) needs no subtitle count.
 
@@ -5853,6 +5859,8 @@ Then go back to Step 6 for the next disc on the list. When every disc asked for 
 
 - [ ] **Step 9: Coverage check**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: does not matter.
 
 Use the rules below for every measured disc: SLUG_A, and each NEW that was ripped. Take the numbers from each disc's Step 5 output and the classifications from its `notes.md`.
@@ -5898,6 +5906,8 @@ If the owner has such a disc, run Steps 6 to 8 for it and then this step again. 
 
 - [ ] **Step 10: Choose `sub_clear_max_bytes` and measure again at it**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: does not matter.
 
 Choose CLEAR from the packet-size buckets of the image streams only (the `-image` lines of every measured disc's Step 5 output). Text streams always count every packet as an event (spec 8.7), so their buckets play no part.
@@ -5940,6 +5950,8 @@ Judge the decisive pairs labelled same-content or different-content, without the
 `sub_clear_max_bytes` is CLEAR from Step 10.
 
 - [ ] **Step 12: Write the report**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: does not matter.
 
@@ -5999,6 +6011,8 @@ Put the `## Coverage` section from Step 9 (the one made again in Step 11 when CL
 
 These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by Step 32 below (experiment 14's Steps 22 to 31 come before it). In them, "the design" is `docs/phase0/experiments/EXP-13-design.md` (this file, committed there by the controller before Task 12 runs). Task 12's header gains:
 
+> **Rust port** (pull request krcm0209/lazymkv#2): the Python files named below were deleted after `d3a754d` (`git show d3a754d:scripts/phase0/<file>`); Steps 15 to 20 call `lazymkv-dev audio-report`, `titles`, `retune`, `levels-args` and `labels` (Global Constraints).
+
 - **Files:**
   - Prerequisite, committed by the controller before this task: `docs/phase0/experiments/EXP-13-design.md` (the design).
   - Already applied by the controller, not changed by this task: `scripts/phase0/audio-levels.ps1`, `scripts/phase0/audio_similarity.py` and `scripts/phase0/test_audio_similarity.py` (EXP-13 commit 5508e79, then the D16 prerequisite, which also added `audio_dataset.py`, `audio_labels.py`, `proxy_levels.py`, `test_audio_dataset.py` and `tuning-fetch.ps1`; then the EXP-13 addendum's `final/` (EXP-13-design.md section 9: the five Python scripts and the comment-only `audio-levels.ps1`), applied in one commit that also recorded Pan's Labyrinth's commentary as fitted (Step 13)). EXP-13-design.md section 6 holds the pre-D16 versions: never copy them over the scripts.
@@ -6007,16 +6021,18 @@ These steps go after Step 12 of Task 12. The old Step 13 (Commit) is replaced by
   - Create (on the Mac): `corpus/owner/<slug>/<label>/audio-content-20ms-<M>-<C...>.txt`.
   - Append to (on the Mac only): a `## Experiment 13 (Task 12)` section in `corpus/owner/<slug>/notes.md` for every disc measured.
   - Create or modify: `corpus/owner/<slug>/audio-labels.json` for every disc measured, and `corpus/owner/audio-dataset.json`.
-- **Produces:** `audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]`, run as a job. Its log lines are possibly `dataset: created ...` and `dataset: removed ...`, then `levels: <file> main=<M> cand=<C,... or nothing> centre=<True|False> ffmpeg_exit=<n> seconds=<s> folder=<folder>`, one `stream <n>: <codec> <channels> ch <layout> <language> frames=<n> md5=<hash>[ (layout guessed by ffmpeg: <name>)]` line per measured stream, `proxy: <path> tracks=<k> bytes=<b> (<stream> <mix|fc|side>, ...)` or `proxy: kept <path> ...`, `dataset: <path>`, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1. `audio_dataset.py` (the harness, `args`) and `audio_labels.py` as in the Global Constraints.
+- **Produces:** `audio-levels.ps1 -Slug <slug> -Label <label> -Main <stream> [-Cand <stream>[,<stream>...]] [-Force]`, run as a job. Its log lines are possibly `dataset: created ...` and `dataset: removed ...`, then `levels: <file> main=<M> cand=<C,... or nothing> centre=<True|False> ffmpeg_exit=<n> seconds=<s> folder=<folder>`, one `stream <n>: <codec> <channels> ch <layout> <language> frames=<n> md5=<hash>[ (layout guessed by ffmpeg: <name>)]` line per measured stream, `proxy: <path> tracks=<k> bytes=<b> (<stream> <mix|fc|side>, ...)` or `proxy: kept <path> ...`, `dataset: <path>`, then `RESULT ok` or `RESULT FAILED: <reason>`. After a failure the script throws, so wait.sh exits 1. `lazymkv-dev retune`, `levels-args` and `labels` as in the Global Constraints.
 
 Placeholders for Steps 15 to 18:
-- **TITLES** is fixed when Step 15 starts, and written at the top of this task's report: every (SLUG, LABEL) pair that `python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'` lists as missing at that moment, plus the pairs of the old list below that are not in it (already in the dataset, for example the Office titles after the D16 backfill; for them Step 16 says `already exists`, and Steps 17 and 18 still run), plus each pair ripped in Step 19 as it is ripped. A title with no other audio stream in a wanted language (English, the original language) or with no language code is measured with its reference alone (no `-Cand`), for the dataset only; `audio_dataset.py args` prints the job. The old list: `the-office-2005-s3d3-bluray` with `e16-stereo`, `rehearsal` and `t3-all-tracks`; SLUG_A with `all-tracks` (Task 11); each NEW with `all-tracks` from Steps 6 to 8.
+- **TITLES** is fixed when Step 15 starts, and written at the top of this task's report: every (SLUG, LABEL) pair that `target/release/lazymkv-dev retune | grep '^Titles whose audio'` lists as missing at that moment, plus the pairs of the old list below that are not in it (already in the dataset, for example the Office titles after the D16 backfill; for them Step 16 says `already exists`, and Steps 17 and 18 still run), plus each pair ripped in Step 19 as it is ripped. A title with no other audio stream in a wanted language (English, the original language) or with no language code is measured with its reference alone (no `-Cand`), for the dataset only; `lazymkv-dev levels-args` prints the job. The old list: `the-office-2005-s3d3-bluray` with `e16-stereo`, `rehearsal` and `t3-all-tracks`; SLUG_A with `all-tracks` (Task 11); each NEW with `all-tracks` from Steps 6 to 8.
 - **M** is the reference stream number and **C** the candidate list, both chosen in Step 15. **CS** is C with hyphens in place of commas.
-- **LOG** is `audio-levels-SLUG-LABEL`, with `-M` appended when `audio_dataset.py args` prints more than one job for the label (it then does so itself: the programme reference's job and a dataset-only job per language that is not wanted), and `-2`, `-3` and so on appended on a repeat.
+- **LOG** is `audio-levels-SLUG-LABEL`, with `-M` appended when `lazymkv-dev levels-args` prints more than one job for the label (it then does so itself: the programme reference's job and a dataset-only job per language that is not wanted), and `-2`, `-3` and so on appended on a repeat.
 
 When `-Force` is right for `audio-levels.ps1`: only to repeat a measurement that failed after its folders were created: a `RESULT FAILED:` reason beginning `ffprobe failed`, `ffmpeg failed`, `streamhash.txt holds`, `ffmpeg wrote no raw-`, `<series>.txt holds no level`, `proxy check failed` or `the copy of ... in the dataset differs`, once the cause has been dealt with, and a refusal saying `is from a run that did not finish ...: repeat with -Force`. A refusal before that (among them `ffmpeg -layouts printed no table of channel layouts`, `cannot reach the staging share` and `expected one .mkv`) wrote nothing and is repeated without `-Force`. Never over a folder whose run ended `RESULT ok` (it says `already exists and is kept as evidence`), except in the D16 prerequisite's backfill.
 
 - [ ] **Step 13: Write and test the measurement scripts**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: does not matter (this runs on the Mac).
 
@@ -6067,31 +6083,13 @@ Which disc is in the drive: does not matter (this runs on the Mac).
 For each (SLUG, LABEL) in TITLES (the Office pairs and SLUG_A first; the recordings must have been pulled with `ffprobe-streams.json` in them):
 
 ```bash
-python3 scripts/phase0/audio_dataset.py args corpus/owner/SLUG LABEL
-python3 - SLUG LABEL <<'EOF'
-import json, pathlib, sys
-sys.path.insert(0, "scripts/phase0")
-from robot import parse
-slug, label = sys.argv[1], sys.argv[2]
-d = pathlib.Path("corpus/owner") / slug
-rip = json.loads((d / label / "rip-summary.json").read_text(encoding="utf-8-sig"))
-probe = json.loads((d / label / "ffprobe-streams.json").read_text(encoding="utf-8-sig"))
-scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
-flags = [int(a.get(22, "0") or 0) for (t, s), a in sorted(scan.streams.items()) if t == rip["title"] and a.get(1) == "Audio"]
-audio = [s for s in probe["streams"] if s.get("codec_type") == "audio"]
-print(f"{slug}/{label}: title {rip['title']}, {len(audio)} audio streams in the file, {len(flags)} in the scan")
-for k, s in enumerate(audio):
-    tags = s.get("tags", {})
-    f = flags[k] if k < len(flags) else None
-    marks = [m for bit, m in ((1, "director-comments"), (2, "alt-director-comments"), (4, "visually-impaired"),
-                              (512, "secondary"), (2048, "derived")) if f is not None and f & bit]
-    print(f"  stream {s['index']}: {s.get('codec_name')} profile={s.get('profile')} {s.get('channels')} ch "
-          f"{s.get('channel_layout')} lang={tags.get('language', 'und')} title={tags.get('title')!r} scan_flags={f} {' '.join(marks)}")
-EOF
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev levels-args SLUG LABEL
+target/release/lazymkv-dev scan SLUG --label LABEL
 ```
 
 Expected:
-- From `args`:
+- From `levels-args`:
   - a first line `SLUG/LABEL: <n> audio streams (from <source>); original language <codes> (TMDb <xx>)`, or `original language English (TMDb en)`, or `original language none (TMDb xx: ...)`, or `original language unknown (<why>)`;
   - one `stream <n>: ... lang=<code>` line per audio stream;
   - the line `  programme reference: stream M (<codec ...>), placed first in <the original language | English | any language (no stream is in a wanted language)> (spec 8.6 steps 3 and 4); candidates: every other stream in <eng[, xxx]> or with no language, whatever its language`;
@@ -6101,7 +6099,7 @@ Expected:
 - M is the stream that spec 8.6 places first in the work's original language (most channels, then lossless, then the earlier stream; a lossy stream of two channels or fewer comes neither before a lossless one nor before the language's first stream when that has fewer channels), else in English. C is every other stream in English, in the original language or with no language. An English commentary or an English dub on a foreign film is a candidate against the original-language main track (EXP-13 addendum 9.1); content never drops it (row 4b). Keep derived cores (`derived`) and flagged streams in C: a core is a real lossy companion of the reference, and a flag is a free label.
 - From the listing: one line per audio stream with ffprobe's stream number, codec, profile, channels, layout, language, track name, the scan's flags for that stream (k-th audio stream of the file against the k-th of the scan), and the names of the flags that are set.
 - For the Office disc (original language English): `-Main 1 -Cand 2,3` (e16-stereo and t3-all-tracks) and `-Main 1 -Cand 2,3,4` (rehearsal), no note. For Disc A (Pan's Labyrinth, original language Spanish): `-Main 1 -Cand 2,3` for `all-tracks`, no note; `-Main 1` with the no-original-language note for `eng-only`. Their folders `audio-levels-20ms-1-2-3` and `audio-levels-20ms-1` already exist: Step 16 then says `already exists`, and Step 17 analyses them again.
-- If `args` says `original language unknown (TMDb '<xx>' is not in audio_similarity.ISO639)`, stop and report: the table needs that code before the title is measured. If it says `no readable tmdb.json`, the title was not identified on TMDb; English is the reference language. Note the title for the report and go on. `original language unknown (tmdb.json gives none)` is handled like `no readable tmdb.json`.
+- If `levels-args` says `original language unknown (TMDb '<xx>' is not in audio_similarity.ISO639)`, stop and report: the table needs that code before the title is measured. If it says `no readable tmdb.json`, the title was not identified on TMDb; English is the reference language. Note the title for the report and go on. `original language unknown (tmdb.json gives none)` is handled like `no readable tmdb.json`.
 
 If the two counts of audio streams differ, match the streams by codec, channels and language by hand, and say so in the report.
 
@@ -6147,7 +6145,8 @@ Which disc is in the drive: does not matter (this runs on the Mac).
 
 ```bash
 scripts/phase0/pull-recording.sh SLUG
-python3 scripts/phase0/audio_similarity.py corpus/owner/SLUG/LABEL/audio-levels-20ms-M-CS | tee corpus/owner/SLUG/LABEL/audio-content-20ms-M-CS.txt
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev audio-report corpus/owner/SLUG/LABEL/audio-levels-20ms-M-CS | tee corpus/owner/SLUG/LABEL/audio-content-20ms-M-CS.txt
 ```
 
 Expected:
@@ -6177,7 +6176,7 @@ Expected:
 
   Its earlier output said `reference-unclear`: replace `audio-content-20ms-1-2-3.txt` with the new output (`tee`), and say so in the report.
 - For Disc A, `eng-only/audio-levels-20ms-1`: `no candidate stream: nothing to judge (measured for the tuning dataset only)`.
-- If audio_similarity.py prints instead one line ending `measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>` (on standard error; it exits 1 and prints no number), the folder was not written completely by the new script: check the path, delete the empty `audio-content-20ms-M-CS.txt` that `tee` created, and go back to Step 16 for this title.
+- If `audio-report` prints instead one line ending `measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>` (on standard error; it exits 1 and prints no number), the folder was not written completely by the new script: check the path, delete the empty `audio-content-20ms-M-CS.txt` that `tee` created, and go back to Step 16 for this title.
 
 - [ ] **Step 18: Ask the owner what each measured track is, and record it**
 
@@ -6197,7 +6196,7 @@ Which disc is in the drive: does not matter.
 ## Experiment 13 (Task 12)
 
 Extra audio tracks measured against the title's programme reference (the track spec 8.6 places first in the original
-language, else English; EXP-13 addendum 9.1) (`scripts/phase0/audio_similarity.py`; full output in
+language, else English; EXP-13 addendum 9.1) (`lazymkv-dev audio-report`; full output in
 `<label>/audio-content-20ms-<M>-<C>.txt`). The owner named each track before seeing the measures.
 Reference streams: <label> stream <M> (<codec> <channels> ch <language>), ...
 
@@ -6211,14 +6210,15 @@ Reference streams: <label> stream <M> (<codec> <channels> ch <language>), ...
 5. Record every answer in the disc's labels file as well, never by editing it:
 
    ```bash
-   python3 scripts/phase0/audio_labels.py auto corpus/owner/SLUG
-   python3 scripts/phase0/audio_labels.py set corpus/owner/SLUG LABEL STREAM KIND --how HOW --saw-verdict no [--sure no] [--film-audible yes|no] --note "<the owner's words>"
-   python3 scripts/phase0/audio_labels.py title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
+   cargo build -q --release -p lazymkv-dev
+   target/release/lazymkv-dev labels auto corpus/owner/SLUG
+   target/release/lazymkv-dev labels set corpus/owner/SLUG LABEL STREAM KIND --how HOW --saw-verdict no [--sure no] [--film-audible yes|no] --note "<the owner's words>"
+   target/release/lazymkv-dev labels title corpus/owner/SLUG LABEL --title-kind TITLE_KIND --dialogue-heavy DIALOGUE
    ```
 
-   Placeholders in these two lines: STREAM is the ffprobe stream number from the harness's To-label line; KIND one of the kinds `python3 scripts/phase0/audio_labels.py kinds` lists; HOW one of listened, packaging, menu, flag, thediscdb or md5; TITLE_KIND one of feature, episode, extra or other; DIALOGUE one of yes, no or unknown.
+   Placeholders in these two lines: STREAM is the ffprobe stream number from the harness's To-label line; KIND one of the kinds `target/release/lazymkv-dev labels kinds` lists; HOW one of listened, packaging, menu, flag, thediscdb or md5; TITLE_KIND one of feature, episode, extra or other; DIALOGUE one of yes, no or unknown.
 
-   Expected: one `labelled ...` line per track, and `title LABEL: ...`. The kinds (`audio_labels.py kinds`) are those of item 1: `main`, `lossy-companion`, `derived-core`, `alternate-mix`, `isolated-score`, `music-effects`, `same-language-dub`, `dub`, `foreign-dub`, `alternate-narration`, `commentary`, `partial-commentary`, `audio-description`, `other-speech`, `laugh-track-version`, `sing-along`, `unknown`, plus `duplicate`. An answer the owner is not sure of ("probably") gets `--sure no`. The Office disc's labels are already recorded, and its tracks never count.
+   Expected: one `labelled ...` line per track, and `title LABEL: ...`. The kinds (`lazymkv-dev labels kinds`) are those of item 1: `main`, `lossy-companion`, `derived-core`, `alternate-mix`, `isolated-score`, `music-effects`, `same-language-dub`, `dub`, `foreign-dub`, `alternate-narration`, `commentary`, `partial-commentary`, `audio-description`, `other-speech`, `laugh-track-version`, `sing-along`, `unknown`, plus `duplicate`. An answer the owner is not sure of ("probably") gets `--sure no`. The Office disc's labels are already recorded, and its tracks never count.
 
 - [ ] **Step 19: Add discs until the experiment's kinds are covered**
 
@@ -6234,14 +6234,15 @@ Which disc is in the drive: the disc being added, which the owner inserts.
    - dubs in a wanted language (row 13's floor: 3 from 2 discs, 1 on a dialogue-heavy title; they gate only row 4b).
 2. Ask the owner, once per missing kind, for a disc that has it (the design's question 12). Also ask for a foreign-language film with an English dub (and, if any, an English 2.0 companion of the dub), the one kind no stand-in can replace (EXP-13 addendum 9.2), and a mono or 2.0 film with an isolated score (9.3). Also ask for the Office disc again (the design's question 13): its title 3 should carry a second commentary, and titles 2, 5 and 6 duplicates. Its tracks are measured and reported like any other, and a programme track of it with the commentary verdict still makes the answer no, but they count towards no total (point 1).
 3. For each disc the owner provides:
-   - Run Step 6 (fingerprint, record if new, pull, `summarize_scan.py`). For a disc already recorded (the Office disc), skip the recording.
+   - Run Step 6 (fingerprint, record if new, pull, `lazymkv-dev scan`). For a disc already recorded (the Office disc), skip the recording.
    - List the disc's titles with their audio streams by language, derived streams (scan flag 2048, MakeMKV's cores) left out:
 
      ```bash
-     python3 scripts/phase0/audio_similarity.py --titles corpus/owner/NEW
+     cargo build -q --release -p lazymkv-dev
+     target/release/lazymkv-dev titles NEW
      ```
 
-     Expected: a first line `NEW: <n> titles, longest first; TMDb original language: <code or unknown>`, a line `audio: scan stream numbers by language, ...`, then one line per title: its number, running time, segments and `audio <language> <stream numbers>; ...`, and at the end `<- <language> x<n>` when one language has two or more streams, `<- wanted x<n> (<lang> <k>, ...)` when no wanted language has two streams but the wanted languages and no-language streams have two or more together, `ripped as <label>` for a title ripped before, and, on a Blu-ray, `shares segments with title <t>` for overlapping playlists. On a DVD the segment numbers restart in every title, so the script looks for no shared segments: it adds a line `segments: a DVD's are the cells of each title's own program chain, ...` after the `audio:` line and marks no title with `shares segments with`.
+     Expected: a first line `NEW: <n> titles, longest first; TMDb original language: <code or unknown>`, a line `audio: scan stream numbers by language, ...`, then one line per title: its number, running time, segments and `audio <language> <stream numbers>; ...`, and at the end `<- <language> x<n>` when one language has two or more streams, `<- wanted x<n> (<lang> <k>, ...)` when no wanted language has two streams but the wanted languages and no-language streams have two or more together, `ripped as <label>` for a title ripped before, and, on a Blu-ray, `shares segments with title <t>` for overlapping playlists. On a DVD the segment numbers restart in every title, so `titles` looks for no shared segments: it adds a line `segments: a DVD's are the cells of each title's own program chain, ...` after the `audio:` line and marks no title with `shares segments with`.
    - Choose at most 4 titles of the disc, going down the list (longest first) and taking a title only when all of these hold:
      - its `<-` mark names `eng` or the original language of the first line (TMDb gives two letters; the scan uses the three-letter code, for example `fr` is `fra` or `fre`), or is `<- wanted x<n> (...)` (one stream in each wanted language, such as an English commentary on a foreign film);
      - it is a feature or an episode, not an extra (when unsure, ask the owner);
@@ -6257,8 +6258,8 @@ Which disc is in the drive: the disc being added, which the owner inserts.
 
 Which disc is in the drive: does not matter.
 
-1. Run `python3 scripts/phase0/audio_dataset.py; echo "exit=$?"` with no `--set`. Its experiment-13 section is the coverage table's source: the counts against row 13, `false verdicts`, `as it stands`, and `not counted`. Its kind-against-verdict table and the notes.md sections give the track table. No threshold is changed. `exit=1` with a `FAIL ... (programme audio), verdict commentary` or `FAIL ... (programme audio), verdict commentary-cross-language` line is a false verdict (for `FAIL ... swapped reference`, see the bullet below); `exit=3` means not every track was checked: deal with it as Task 11 Step 11 says before judging. The coverage table and every total leave out each track of the Office disc (`the-office-2005-s3d3-bluray`), whose S03E16 commentary and S03E15 duplicate the thresholds were fitted on; the track table lists them, marked "fitting disc, not counted".
-   - **False verdict:** a track with the verdict `commentary` or `commentary-cross-language` that the owner labelled as programme audio (`main`, `lossy-companion`, `alternate-mix`, `laugh-track-version`, `derived-core`, `dub`), or as a kind the owner has decided to keep in answer to the design's questions 3 to 6 (`audio_labels.py` then lists that kind as programme audio, so the harness gives it a `FAIL`). An isolated score or M&E track is not programme audio (D14: not wanted); one with the commentary verdict is a note, `dropped as a commentary`. This includes the tracks of the Office disc.
+1. Run `cargo build -q --release -p lazymkv-dev`, then `target/release/lazymkv-dev retune; echo "exit=$?"` with no `--set`. Its experiment-13 section is the coverage table's source: the counts against row 13, `false verdicts`, `as it stands`, and `not counted`. Its kind-against-verdict table and the notes.md sections give the track table. No threshold is changed. `exit=1` with a `FAIL ... (programme audio), verdict commentary` or `FAIL ... (programme audio), verdict commentary-cross-language` line is a false verdict (for `FAIL ... swapped reference`, see the bullet below); `exit=3` means not every track was checked: deal with it as Task 11 Step 11 says before judging. The coverage table and every total leave out each track of the Office disc (`the-office-2005-s3d3-bluray`), whose S03E16 commentary and S03E15 duplicate the thresholds were fitted on; the track table lists them, marked "fitting disc, not counted".
+   - **False verdict:** a track with the verdict `commentary` or `commentary-cross-language` that the owner labelled as programme audio (`main`, `lossy-companion`, `alternate-mix`, `laugh-track-version`, `derived-core`, `dub`), or as a kind the owner has decided to keep in answer to the design's questions 3 to 6 (`core::audio::labels` then lists that kind as programme audio, so the harness gives it a `FAIL`). An isolated score or M&E track is not programme audio (D14: not wanted); one with the commentary verdict is a note, `dropped as a commentary`. This includes the tracks of the Office disc.
    - **Answer yes:** every kind in the row is covered without any track of the Office disc, there is no false verdict, and at least one commentary got the verdict on each of at least 3 different discs other than the Office disc. The yes covers candidates in the reference's language only: `commentary-cross-language` is never dropped, and it does not count towards the 3 discs with a commentary verdict (the harness counts `commentary` only).
    - **Answer no:** any false verdict, on any disc, whatever the coverage. Also no when coverage is met but fewer than 3 discs other than the Office disc had a commentary verdict.
    - **Not answered:** coverage is not met and there is no false verdict.
@@ -6291,7 +6292,7 @@ Which disc is in the drive: does not matter.
    - **What was run:**
      - for each title, the rip label, M and C, the `audio-levels.ps1` command and log name;
      - the `seconds=` of each run, with the title's running time and file size: the J4125's cost per minute of running time for an episode and for a feature;
-     - the `audio_similarity.py` command.
+     - the `lazymkv-dev audio-report` command.
    - **What was observed:**
      - one table row per measured track: file, track, DC, AG, tenths, SMI, LS, ADL, reverse, cross-language, peer, swapped (the harness snapshot's `cross_language`, `peer` and `swapped_verdict`), verdict, the owner's label, and whether the two agree;
      - the harness's `cross-language`, `dubs` and `swapped references` lines, and every first-of-language note;
@@ -6312,6 +6313,8 @@ Which disc is in the drive: does not matter.
 
 - [ ] **Step 21: Add the remaining rips of this task to the tuning dataset (decision D16)**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: does not matter. The jobs read only the share.
 
 ```bash
@@ -6323,6 +6326,8 @@ Expected: the line `Titles whose audio is in the tuning dataset ...`. Every SLUG
 **Experiment 14 (added 2026-10-06).** The owner asked whether code can tell regular, SDH, forced and commentary subtitle tracks apart by their content, with OCR of the text (decision D15). Steps 22 to 31 measure it on every English and no-language subtitle stream of the titles this task rips. The proof of concept read the Office's S03E16 track and Pan's Labyrinth's two tracks on 2026-10-06; their text is in the tuning dataset, and the thresholds were fitted on them.
 
 These steps go after Step 21 of Task 12. Experiment 13's commit step (the old Step 22, which replaced the old Step 13) is replaced by Step 32 below. In them, "the design" is `docs/phase0/experiments/EXP-14-design.md` (committed by the controller, with the scripts it describes, before these steps run). Task 12's header gains:
+
+> **Rust port** (pull request krcm0209/lazymkv#2): the Python files named below were deleted after `d3a754d` (`git show d3a754d:scripts/phase0/<file>`); Steps 24 and 27 call `lazymkv-dev subs` (Global Constraints).
 
 - **Files:**
   - Prerequisite, committed by the controller with the design: `docs/phase0/experiments/EXP-14-design.md`, `scripts/phase0/subtitle_text.py`, `scripts/phase0/test_subtitle_text.py` and the changes to `scripts/phase0/ocr-subs.ps1` (the design, section 6), and the Global Constraints' sentence on reading every rip's subtitle text (in force from Step 31 on). This task does not change them.
@@ -6342,6 +6347,8 @@ Placeholders for Steps 24 to 29:
 When `-Force` is right for `ocr-subs.ps1`: only to repeat a reading that failed after its folders were created (a `RESULT FAILED:` reason beginning `ffmpeg exited`, `ffmpeg wrote no frame`, `ffmpeg gave`, `tesseract exited`, `tesseract returned` or `the copy of`), once the cause has been dealt with. Never over a folder whose run ended `RESULT ok` (it says `already exists and is kept as evidence`); a second reading of such a title uses `-Folder` with a new name instead.
 
 - [ ] **Step 22: Check the scripts, take the example lines out of the corpus, add the .gitignore lines**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: does not matter (this runs on the Mac).
 
@@ -6430,7 +6437,8 @@ Then, on the Mac, with the scp line the log printed (DEST = TEXTDIR):
 mkdir -p "$HOME/lazymkv-text"
 scp -q -r -o BatchMode=yes USER@makemkv-box:C:/lazymkv/phase0/tmp/tuning-fetch/SLUG/LABEL/subs-ocr "$HOME/lazymkv-text/SLUG-LABEL"
 ssh USER@makemkv-box "rmdir /s /q C:\lazymkv\phase0\tmp\tuning-fetch"
-python3 scripts/phase0/subtitle_text.py --rec corpus/owner/SLUG/LABEL --text "$HOME/lazymkv-text/SLUG-LABEL" --orig-lang ORIG | tee corpus/owner/SLUG/LABEL/subtitle-text.txt
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev subs --rec corpus/owner/SLUG/LABEL --text "$HOME/lazymkv-text/SLUG-LABEL" --orig-lang ORIG | tee corpus/owner/SLUG/LABEL/subtitle-text.txt
 rm -rf "$HOME/lazymkv-text/SLUG-LABEL"
 ```
 
@@ -6439,7 +6447,7 @@ ORIG is `en` for the Office and `es` for Pan's. Expected:
 - For Pan's: `stream s0 eng: events=887 ... M=0 ... class=regular`, `stream s1 spa: events=884 ... lang=es (en=0.000 es=0.326 ...)`, `pair s0 s1: aligned=0.995/0.999 timing=same CB=0.002/0.002 content=different ...`, and rows `| s0 | eng | 887 | regular | regular | - | - | regular | regular |` and `| s1 | spa | 884 | regular | drop | - | not English (tag spa) | drop | drop |`.
 - The last column, `Before yes`, was added by the design's review fixes after this step ran on 2026-10-06: the two `subtitle-text.txt` files committed then end at `8.7 today`. A repeat prints the column; every other line is unchanged.
 
-Any other number means the chain differs from the design's: stop and report with both outputs. Do not change a threshold. `subtitle-text.txt` holds numbers only (the script never prints subtitle text).
+Any other number means the chain differs from the design's: stop and report with both outputs. Do not change a threshold. `subtitle-text.txt` holds numbers only (`lazymkv-dev subs` never prints subtitle text).
 
 - [ ] **Step 25: Time the render modes on one title**
 
@@ -6489,9 +6497,11 @@ Exit codes and Expected as in Step 25 (one `stream` line per bitmap stream whose
 
 Which disc is in the drive: does not matter.
 
-For each (SLUG, LABEL) read in Steps 25 and 26: Step 24's commands, with ORIG the TMDb original language from `corpus/owner/SLUG/tmdb.json` (leave `--orig-lang` out to let the script read it). Expected: one `stream` line per stream read, with `[text by order, ...]` (or `[text by time, <n> frames with text, <k> unmatched]`: write down k, which must be 0 or the report names the events), the `pair` lines, the verdict table and one `row:` line per stream; a closed-caption stream prints `stream s<n> eng: set aside (closed captions: ...)` and another language's stream that was not read prints `stream s<n> <tag>: not read (no OCR text), ...` (it serves T4's timing only). Exit 2 with `stream s<n> <tag>: no OCR text ...` means an English or no-language bitmap stream of the title has no text in the tuning dataset (Step 26's reading should have read it): stop and report; never analyse the title without it. `rm -rf "$HOME/lazymkv-text/SLUG-LABEL"` ends the step for each title: no subtitle text stays on the Mac, and none enters the repository: `find . -name '*.ocr.jsonl' -not -path './.git/*' | grep -c .` prints 0.
+For each (SLUG, LABEL) read in Steps 25 and 26: Step 24's commands, with ORIG the TMDb original language from `corpus/owner/SLUG/tmdb.json` (leave `--orig-lang` out to let `lazymkv-dev subs` read it). Expected: one `stream` line per stream read, with `[text by order, ...]` (or `[text by time, <n> frames with text, <k> unmatched]`: write down k, which must be 0 or the report names the events), the `pair` lines, the verdict table and one `row:` line per stream; a closed-caption stream prints `stream s<n> eng: set aside (closed captions: ...)` and another language's stream that was not read prints `stream s<n> <tag>: not read (no OCR text), ...` (it serves T4's timing only). Exit 2 with `stream s<n> <tag>: no OCR text ...` means an English or no-language bitmap stream of the title has no text in the tuning dataset (Step 26's reading should have read it): stop and report; never analyse the title without it. `rm -rf "$HOME/lazymkv-text/SLUG-LABEL"` ends the step for each title: no subtitle text stays on the Mac, and none enters the repository: `find . -name '*.ocr.jsonl' -not -path './.git/*' | grep -c .` prints 0.
 
 - [ ] **Step 28: Ask the owner what each English subtitle stream is, and record it**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: does not matter.
 
@@ -6522,6 +6532,8 @@ Which disc is in the drive: the disc being added, which the owner inserts.
 4. Stop when every kind is covered, or when the owner has no disc left of a missing kind; write each such kind down as "not available: <kind>".
 
 - [ ] **Step 30: Judge the experiment and write the report**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: does not matter.
 
@@ -6567,6 +6579,8 @@ From now on this is part of the routine after every rip (the Global Constraints'
 
 - [ ] **Step 32: Commit** (replaces the old Step 13, and experiment 13's commit step, the old Step 22)
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: does not matter. Disc A is needed again in Task 13, which starts by asking the owner to put it back.
 
 ```bash
@@ -6595,6 +6609,8 @@ Expected:
 
 ### Task 13: Selection by language (experiment 11)
 
+> **Rust port** (pull request krcm0209/lazymkv#2): the Python files this task's Files and Interfaces name as created or prerequisite were deleted after `d3a754d` (read one with `git show d3a754d:scripts/phase0/<file>`); Global Constraints names the `lazymkv-dev` command that replaced each one.
+
 **Files:**
 - Create: `scripts/phase0/exp11_tracks.py`, `scripts/phase0/test_exp11_tracks.py`
 - Create: `docs/phase0/experiments/EXP-11-language-selection.md`
@@ -6609,8 +6625,8 @@ Expected:
     - It writes `$Recordings\<slug>\<label>\`: `rip.txt` (with `.timing.jsonl`, `.stderr` and `.exit.json`), `free-ram.csv`, and `rip-summary.json`. The summary's fields include `ok`, `result`, `title`, `profile`, `files`, `bytes`, `success_message`, `fail_codes`, `profile_errors`, `scan_source_file` and `rip_source_file`.
   - Task 11: `scripts/phase0/probe-title.ps1 -Slug <slug> -Label <name> [-SkipRemux] [-Force]`. It writes `mkvmerge.json`, `ffprobe-streams.json`, `mediainfo.json`, `subs\`, `evidence-mkvmerge.txt` and `probe-summary.json` (`ok`, `result`, `file`, `subtitle_tracks`, `remux_skipped`, ...).
   - Task 8: `scripts/phase0/record-disc.ps1 -Slug <slug> [-NoScan] [-ScanName <name>] [-ScanMayFail] [-Force]`, run as a job; without `-NoScan` it adds MakeMKV's scan `scan.txt`. Also `scripts/phase0/pull-recording.sh <slug>`, which never deletes on the Mac and exits 2 for a bad slug, 1 when the copy fails.
-  - `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh` and `scripts/phase0/summarize_scan.py <recording dir>`.
-  - `scripts/phase0/compare_tracks.py <scan> <title> <mkvmerge json> [--selection all|eng]`, which exits 1 when any verdict is no. It exports `expected_rows`, `file_rows` and `same_track`. Also `scripts/phase0/robot.py` (`parse`, `duration_seconds`).
+  - `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh` and `lazymkv-dev scan <slug|dir>`.
+  - `lazymkv-dev reconcile <scan> <title> <mkvmerge json> [--selection all|eng]`, which exits 1 when any verdict is no; `core::reconcile` has `expected_rows`, `file_rows` and `same_track`. Also `core::robot` (`parse`, `duration_seconds`).
   - Task 7:
     - the profile `C:\lazymkv\phase0\profiles\eng-only.mmcp.xml`, whose `defaultSelection` is `-sel:all,+sel:video,+sel:(audio*(eng|nolang)),+sel:(subtitle*eng),-sel:mvcvideo,-sel:core,-sel:special,=100:all`;
     - MakeMKV's `default.mmcp.xml` in the same folder;
@@ -6618,7 +6634,7 @@ Expected:
   - Disc A's recording (Task 9) and its all-tracks rip (Task 11): `corpus/owner/SLUG_A/meta.json`, `scan.txt`, `all-tracks/rip-summary.json` and `all-tracks/mkvmerge.json`.
   - Every other recording in `corpus/owner` that has a `scan.txt` (from Tasks 8, 10 and 12).
 - Produces:
-  - `scripts/phase0/exp11_tracks.py`, run on the Mac from the repository root:
+  - `target/release/lazymkv-dev exp11`, run on the Mac from the repository root:
     - `coverage <recording dir or scan file>[@<title>] ...`.
       - With `@<title>`, it prints every stream of that title: `attr3`, `attr28`, codec, channels, flags and `predicted: keep|drop`. Then comes `COVERAGE <where> title <t>: audio-lang=<n> nolang=<n> sub-lang=<n> core=<n> special=<n> sub-flagged=<n> audio-512=<n>`.
       - Without it, it prints one such `COVERAGE` line, with the duration, for each title of 20 minutes or more.
@@ -6627,7 +6643,7 @@ Expected:
       - It prints one line per file track and per missing predicted stream, tagged `predicted`, `EXTRA`, `MISSING` or `UNMATCHED`, then `DIFFERENCES missing=<n> extra=<n> unmatched=<n>`.
       - Then it lists the label's tracks, and the all-tracks rip's tracks when `<dir>/all-tracks` is a rip of the same title, for checking by eye.
     - Both exit 0 unless their input is missing or broken.
-  - `scripts/phase0/test_exp11_tracks.py`: five tests, run with the others.
+  - its five tests, Rust tests since the port (`docs/phase1/rust-port-tests.md`), run by `cargo test --workspace`.
   - `corpus/owner/SLUG_A/eng-only/`, and `corpus/owner/SLUG_D/eng-only/` when Step 7 runs: the evidence of the eng-only rip and its probe. On the share, `\\unas-pro\media\lazymkv-staging\<slug>\eng-only\` holds the ripped `.mkv` and `evidence.mks`.
   - `docs/phase0/experiments/EXP-11-language-selection.md`: whether the later fast path (spec section 16, item 1) can be built.
 
@@ -6648,7 +6664,7 @@ When `-Force` is right (decision D3):
 - `probe-title.ps1 ... -Force`: only to repeat a probe whose `probe-summary.json` is missing or says `"ok": false`, once its cause has been dealt with.
 - `record-disc.ps1 ... -Force`: never in this task.
 
-The prediction is the rule of `compare_tracks.py --selection eng`, applied to the scan:
+The prediction is the rule of `lazymkv-dev reconcile --selection eng`, applied to the scan:
 - every video stream that is not 3D;
 - every audio stream whose language (attribute 3) is English or absent (empty or `und`), except derived cores (flag 256) and flagged commentary or visually-impaired streams (flags 1, 2, 4);
 - every English subtitle stream, whatever its flags.
@@ -6663,6 +6679,8 @@ A part of the selection is tested only where the title has streams it acts on:
 Step 3 counts these before anything is ripped.
 
 - [ ] **Step 1: Write the analysis script**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): the two files this step writes were deleted after `d3a754d` (`git show d3a754d:scripts/phase0/exp11_tracks.py`); the analysis is `target/release/lazymkv-dev exp11 coverage|match`, with the same arguments and lines, and its five tests are Rust tests (`docs/phase1/rust-port-tests.md`). This step is not run again.
 
 Which disc is in the drive: none needed.
 
@@ -6932,7 +6950,7 @@ Which disc is in the drive: none needed; nothing in this step reads the drive.
 
 ```bash
 grep -E '^(function (Assert-Slug|Assert-DiscIs|Assert-EmptyDir|Get-InsertedDisc)|\$Recordings)' scripts/phase0/env.ps1
-grep -n 'if kind == "video" else None' scripts/phase0/compare_tracks.py
+cargo test -q -p lazymkv-core reconcile::tests::a_stream_without_a_language_code_is_und_not_the_metadata_language
 ls scripts/phase0/rip-title.ps1 scripts/phase0/probe-title.ps1 corpus/owner/SLUG_A/scan.txt corpus/owner/SLUG_A/all-tracks/mkvmerge.json
 scripts/box.sh
 ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Command C:\lazymkv\src\scripts\phase0\rip-title.ps1).Parameters.Keys\""
@@ -6941,7 +6959,7 @@ ssh USER@makemkv-box "findstr /c:defaultSelection C:\lazymkv\phase0\profiles\eng
 ```
 
 Expected:
-- The first `grep` prints five lines: the `$Recordings` assignment and the four D1 helper functions. The second prints the one `lang_raw = ...` line of the prerequisite. With anything else, the prerequisites are missing: stop and report.
+- The first `grep` prints five lines: the `$Recordings` assignment and the four D1 helper functions. The test run prints `test result: ok. 1 passed` (the reconciler reads a stream's language from attribute 3). With anything else, the prerequisites are missing: stop and report.
 - `ls` lists all four paths. A missing one means Task 11, or Disc A's recording, is not done: stop.
 - `box.sh` syncs the tree and exits 0.
 - The parameter lists begin `Slug`, `Title`, `Label`, `Profile`, `CacheMb`, `Force` and `Slug`, `Label`, `SkipRemux`, `Force`. PowerShell's common parameters follow.
@@ -6955,16 +6973,17 @@ Expected:
 Which disc is in the drive: none needed (Mac only).
 
 ```bash
-python3 -c "import json; print('N =', json.load(open('corpus/owner/SLUG_A/all-tracks/rip-summary.json', encoding='utf-8-sig'))['title'])"
-python3 scripts/phase0/compare_tracks.py corpus/owner/SLUG_A/scan.txt N corpus/owner/SLUG_A/all-tracks/mkvmerge.json | grep -E '^(TRACK COUNT|ORDER MATCH|CHAPTERS|DURATION|VERDICT)'
-python3 scripts/phase0/exp11_tracks.py coverage corpus/owner/SLUG_A@N corpus/owner/*/
+cargo build -q --release -p lazymkv-dev
+jq -r '"N = \(.title)"' corpus/owner/SLUG_A/all-tracks/rip-summary.json
+target/release/lazymkv-dev reconcile corpus/owner/SLUG_A/scan.txt N corpus/owner/SLUG_A/all-tracks/mkvmerge.json | grep -E '^(TRACK COUNT|ORDER MATCH|CHAPTERS|DURATION|VERDICT)'
+target/release/lazymkv-dev exp11 coverage corpus/owner/SLUG_A@N corpus/owner/*/
 ```
 
 Expected:
 - `N = <number>`: Disc A's main feature, the title of Task 11's all-tracks rip. Use it as N from here on.
-- The all-tracks comparison, re-read with the corrected language rule. Note the `VERDICT` line. With `count=yes order=yes`, the `scan` column that `exp11_tracks.py match` prints beside the all-tracks tracks is reliable. A `chapters=no` or `duration=no` here is EXP-01's finding, and Step 6 will show it again; it is not a language-selection matter.
+- The all-tracks comparison, re-read with the corrected language rule. Note the `VERDICT` line. With `count=yes order=yes`, the `scan` column that `exp11 match` prints beside the all-tracks tracks is reliable. A `chapters=no` or `duration=no` here is EXP-01's finding, and Step 6 will show it again; it is not a language-selection matter.
 - Disc A's streams and its line `COVERAGE corpus/owner/SLUG_A title N: audio-lang=... nolang=... sub-lang=... core=... special=... sub-flagged=... audio-512=...`. Copy both into the report. The `attr3` column also answers an open question: how MakeMKV 2.0.0 writes a stream with no language. It may be `''` (empty), `'und'` or `None` (absent). Note which, or "no such stream on this title".
-- Then one `COVERAGE` line for every title of 20 minutes or more in every recording that has a scan (Disc A's own titles among them), and `<folder>: no scan.txt` for recordings made with `-NoScan`.
+- Then one `COVERAGE` line for every title of 20 minutes or more in every recording that has a scan (Disc A's own titles among them), and `<folder>: no scan.txt` for recordings made with `-NoScan` and for `corpus/owner/golden/`, the folder of the goldens.
 
 Decide with these rules, and write the decision down for the report:
 1. The five parts of the selection are counted by `audio-lang`, `nolang`, `sub-lang`, `core` and `special`. A part whose count on Disc A's line is 0 is not tested by Disc A.
@@ -7119,15 +7138,16 @@ Expected (exit 0), in the log:
 - the summary JSON, with `ok` true, `remux_skipped` true and `subtitle_tracks` the number of subtitle tracks in the file;
 - `RESULT ok`, then `PHASE0-DONE status=ok exit=<n>`.
 
-Then copy everything to the Mac and read it. Run the commands one at a time, not joined with `&&` and not under `set -e`: compare_tracks.py exits 1 when any verdict is no, which is a finding here, not a failure.
+Then copy everything to the Mac and read it. Run the commands one at a time, not joined with `&&` and not under `set -e`: `lazymkv-dev reconcile` exits 1 when any verdict is no, which is a finding here, not a failure.
 
 ```bash
 scripts/phase0/pull-recording.sh SLUG_A
 cat corpus/owner/SLUG_A/eng-only/rip-summary.json corpus/owner/SLUG_A/eng-only/probe-summary.json
 grep -E '^MSG:' corpus/owner/SLUG_A/eng-only/rip.txt | cut -d, -f1,4 | sort | uniq -c
-python3 scripts/phase0/compare_tracks.py corpus/owner/SLUG_A/scan.txt N corpus/owner/SLUG_A/eng-only/mkvmerge.json --selection eng; echo "compare_tracks exit=$?"
-python3 scripts/phase0/exp11_tracks.py match corpus/owner/SLUG_A N eng-only
-python3 -c "import json; r = lambda l: json.load(open('corpus/owner/SLUG_A/' + l + '/rip-summary.json', encoding='utf-8-sig')); print('bytes: all-tracks', r('all-tracks')['bytes'], 'eng-only', r('eng-only')['bytes'])"
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev reconcile corpus/owner/SLUG_A/scan.txt N corpus/owner/SLUG_A/eng-only/mkvmerge.json --selection eng; echo "reconcile exit=$?"
+target/release/lazymkv-dev exp11 match corpus/owner/SLUG_A N eng-only
+echo "bytes: all-tracks $(jq .bytes corpus/owner/SLUG_A/all-tracks/rip-summary.json) eng-only $(jq .bytes corpus/owner/SLUG_A/eng-only/rip-summary.json)"
 ```
 
 Expected:
@@ -7136,10 +7156,10 @@ Expected:
 - The message list holds every distinct message of the rip with its count:
   - a success summary (`5005` or `5036`), none of `5003`, `5004` or `5037`, and no `1009`;
   - read every message. One that mentions the profile and reads as an error is handled as in "If MakeMKV rejected the profile" (Step 5).
-- compare_tracks prints the side-by-side table, then `TRACK COUNT`, `ORDER MATCH`, `CHAPTERS`, `DURATION`, `VIDEO TRACKS`, `STATISTICS TAGS`, a `VERDICT` line and the codec reminder.
+- `reconcile` prints the side-by-side table, then `TRACK COUNT`, `ORDER MATCH`, `CHAPTERS`, `DURATION`, `VIDEO TRACKS`, `STATISTICS TAGS`, a `VERDICT` line and the codec reminder.
   - For this experiment, read `count=` and `order=` on the `VERDICT` line.
   - The exit code is 0 only if chapters and duration also match. A `chapters=no` or `duration=no` that Step 3's all-tracks `VERDICT` also showed is not a failure of the language selection. One that the all-tracks rip did not show is noted in the report.
-- `exp11_tracks.py match` prints:
+- `exp11 match` prints:
   - one line per file track (`predicted` or `EXTRA`, with the scan stream it was paired with), a `MISSING` line for each predicted stream the file lacks, and an `UNMATCHED` line for a file track that no later scan stream can be;
   - then `DIFFERENCES missing=<n> extra=<n> unmatched=<n>`;
   - then the eng-only tracks and the all-tracks tracks of title N, each with its codec, `forced`, `bytes` (MakeMKV's statistics tag, when present) and `name`.
@@ -7180,9 +7200,10 @@ Then:
 
 ```bash
 scripts/phase0/pull-recording.sh SLUG_D
-python3 -c "import json,pathlib; [print(p.parent.name, json.loads(p.read_text(encoding='utf-8-sig')).get('fingerprint')) for p in sorted(pathlib.Path('corpus/owner').glob('*/meta.json'))]"
-python3 scripts/phase0/summarize_scan.py corpus/owner/SLUG_D
-python3 scripts/phase0/exp11_tracks.py coverage corpus/owner/SLUG_D
+cargo build -q --release -p lazymkv-dev
+for m in corpus/owner/*/meta.json; do d="${m%/meta.json}"; echo "${d##*/} $(jq -r '.fingerprint | if . == null then "None" else tostring end' "$m")"; done
+target/release/lazymkv-dev scan SLUG_D
+target/release/lazymkv-dev exp11 coverage corpus/owner/SLUG_D
 ```
 
 Expected:
@@ -7197,7 +7218,7 @@ Expected:
 ```bash
 ssh USER@makemkv-box "tasklist | findstr /i makemkv"
 ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \". C:\lazymkv\src\scripts\phase0\env.ps1; Assert-DiscIs SLUG_D; 'disc ok: SLUG_D'\""; echo "exit=$?"
-python3 scripts/phase0/exp11_tracks.py coverage corpus/owner/SLUG_D@T_D
+target/release/lazymkv-dev exp11 coverage corpus/owner/SLUG_D@T_D
 ```
 
 Expected:
@@ -7242,8 +7263,8 @@ Then, one command at a time:
 scripts/phase0/pull-recording.sh SLUG_D
 cat corpus/owner/SLUG_D/eng-only/rip-summary.json corpus/owner/SLUG_D/eng-only/probe-summary.json
 grep -E '^MSG:' corpus/owner/SLUG_D/eng-only/rip.txt | cut -d, -f1,4 | sort | uniq -c
-python3 scripts/phase0/compare_tracks.py corpus/owner/SLUG_D/scan.txt T_D corpus/owner/SLUG_D/eng-only/mkvmerge.json --selection eng; echo "compare_tracks exit=$?"
-python3 scripts/phase0/exp11_tracks.py match corpus/owner/SLUG_D T_D eng-only
+target/release/lazymkv-dev reconcile corpus/owner/SLUG_D/scan.txt T_D corpus/owner/SLUG_D/eng-only/mkvmerge.json --selection eng; echo "reconcile exit=$?"
+target/release/lazymkv-dev exp11 match corpus/owner/SLUG_D T_D eng-only
 ```
 
 Expected: as in Step 6. On a DVD, a `chapters=no` from MakeMKV's `insertFirstChapter00IfMissing` is not a language-selection matter either. `match` prints `no all-tracks rip of this title to compare with` unless SLUG_D's `all-tracks` rip (Task 12) is of title T_D.
@@ -7255,8 +7276,8 @@ Expected: as in Step 6. On a DVD, a `chapters=no` from MakeMKV's `insertFirstCha
 Which disc is in the drive: does not matter.
 
 First check every `MISSING`, `EXTRA` and `UNMATCHED` line from Steps 6 and 7 by eye, against the track lists printed under it.
-- The pairing uses only type, language and audio channels, as compare_tracks does. Where two streams share these (two English PGS tracks, say), it may name the wrong one of them.
-- Where both lists show `bytes`, a track of the eng-only rip is the all-tracks track with the same `bytes`. The all-tracks track's `scan` number is its stream when the all-tracks rip's `VERDICT` was `count=yes order=yes`. For Disc A that is Step 3's `VERDICT`. For SLUG_D, when `match` listed an all-tracks rip, get it with `python3 scripts/phase0/compare_tracks.py corpus/owner/SLUG_D/scan.txt T_D corpus/owner/SLUG_D/all-tracks/mkvmerge.json | grep VERDICT`.
+- The pairing uses only type, language and audio channels, as `lazymkv-dev reconcile` does. Where two streams share these (two English PGS tracks, say), it may name the wrong one of them.
+- Where both lists show `bytes`, a track of the eng-only rip is the all-tracks track with the same `bytes`. The all-tracks track's `scan` number is its stream when the all-tracks rip's `VERDICT` was `count=yes order=yes`. For Disc A that is Step 3's `VERDICT`. For SLUG_D, when `match` listed an all-tracks rip, get it with `target/release/lazymkv-dev reconcile corpus/owner/SLUG_D/scan.txt T_D corpus/owner/SLUG_D/all-tracks/mkvmerge.json | grep VERDICT`.
 - Otherwise compare codec, `forced` and `name`.
 - Correct any line that names the wrong stream, and say so in the report.
 
@@ -7269,11 +7290,11 @@ Then read each line with these rules. A "difference" means that MakeMKV did not 
 - `MISSING` English audio without flags 1, 2, 4, 256 or 512: the language filter dropped it. Difference, `audio*(eng|nolang)`.
 - `MISSING` audio with flag 512 (secondary audio): the selection drops it, as spec 8.6 does anyway. Observation.
 - `MISSING` English subtitles with flag 1, 2 or 4: `special` also drops flagged subtitles. Spec 8.7 drops DVD subtitles flagged 1 or 2 anyway. Observation; for flag 4, report it to the controller.
-- `MISSING` English subtitles of any other kind, forced-only (6144) included: `subtitle*eng` dropped them. Difference, `subtitle*eng`. Exception (Global Constraints, `MSG:4047`): a forced-only stream that the rip log says MakeMKV removed as empty, with the message's index mapped through the selected streams (compare_tracks' `REMOVED` line), was selected and is not a difference; `match` does not read the rip log, so such a stream shows as `MISSING` there and the all-tracks listing shows `scan ?`. Likewise, `match` pairs greedily by type, language and channels: a dropped commentary can appear as an `EXTRA` plus a `MISSING` pair; the check by eye (bytes, codec, name) settles it.
+- `MISSING` English subtitles of any other kind, forced-only (6144) included: `subtitle*eng` dropped them. Difference, `subtitle*eng`. Exception (Global Constraints, `MSG:4047`): a forced-only stream that the rip log says MakeMKV removed as empty, with the message's index mapped through the selected streams (`reconcile`'s `REMOVED` line), was selected and is not a difference; `match` does not read the rip log, so such a stream shows as `MISSING` there and the all-tracks listing shows `scan ?`. Likewise, `match` pairs greedily by type, language and channels: a dropped commentary can appear as an `EXTRA` plus a `MISSING` pair; the check by eye (bytes, codec, name) settles it.
 - `MISSING` video: difference.
 - `UNMATCHED`: a file track out of scan order, or one the scan does not explain. An `UNMATCHED` video track is most likely 3D video that `-sel:mvcvideo` should have dropped. Difference, order (or `mvcvideo` for video). Exception (found on short-circuit-2-1988-dvd, 2026-10-12): a track out of scan order is a difference only when the all-tracks rip of the same title has it in scan order; MakeMKV writes a converted closed-caption text track before every VobSub track whatever the selection, so compare both rips' orders before calling it a difference.
 
-The order is the scan order when no `UNMATCHED` line remains after the check by eye, because the pairing only moves forward through the scan. When the rip has no difference, compare_tracks' `order=yes` says the same.
+The order is the scan order when no `UNMATCHED` line remains after the check by eye, because the pairing only moves forward through the scan. When the rip has no difference, `reconcile`'s `order=yes` says the same.
 
 Create `docs/phase0/experiments/EXP-11-language-selection.md` from `docs/phase0/experiments/TEMPLATE.md`. Fill in:
 - `Disc(s):` SLUG_A (UHD, drive D:) and, if Step 7 ran, SLUG_D with its format.
@@ -7286,7 +7307,7 @@ It must state:
   - for each disc: the title (N, T_D), the label, and `ok`, `elapsed_s` and `bytes` from `rip-summary.json`, against the all-tracks rip's `bytes` where one exists;
   - Step 3's choice of second disc and why, or why there was none.
 - Under "What was observed":
-  1. For each title ripped: its stream table and `COVERAGE` line (Steps 3 and 7b), compare_tracks' table and `VERDICT` line, and the `match` lines after the check by eye.
+  1. For each title ripped: its stream table and `COVERAGE` line (Steps 3 and 7b), `reconcile`'s table and `VERDICT` line, and the `match` lines after the check by eye.
   2. Every predicted stream that is missing and every unpredicted stream that is present, each with its scan stream number, type, language, codec and flags. Write "none" when there are none.
   3. A table with one row per part of the selection:
 
@@ -7323,10 +7344,11 @@ It must state:
 Which disc is in the drive: does not matter (Disc A should be back in for Task 14, as Step 7 says). The jobs read only the share.
 
 ```bash
-python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev retune | grep '^Titles whose audio'
 ```
 
-Expected: the line `Titles whose audio is in the tuning dataset ...`, naming under `missing` `SLUG_A/eng-only` (or `eng-only-2`), and `SLUG_D/eng-only` when Step 7 ran. A rip that MakeMKV made with its default selection after rejecting the profile is still a rip: add it too. For each SLUG/LABEL named, run Task 11 Step 11 from `audio_dataset.py args` onwards, with its exit codes and its Expected. The eng-only rip of SLUG_A is the title Task 11 ripped as `all-tracks`. Its streams have the same packets (the `md5=` of its `stream` lines equals those of `corpus/owner/SLUG_A/all-tracks/audio-levels-20ms-*/manifest.txt`). It needs no new labels: its one stream is the title's reference, so the harness lists the title as in the dataset without a label line (a label is asked for candidate streams only) and adds nothing to experiment 13's counts. A packet MD5 that differs from the all-tracks rip's for the same stream is a finding for EXP-11: note it.
+Expected: the line `Titles whose audio is in the tuning dataset ...`, naming under `missing` `SLUG_A/eng-only` (or `eng-only-2`), and `SLUG_D/eng-only` when Step 7 ran. A rip that MakeMKV made with its default selection after rejecting the profile is still a rip: add it too. For each SLUG/LABEL named, run Task 11 Step 11 from `lazymkv-dev levels-args` onwards, with its exit codes and its Expected. The eng-only rip of SLUG_A is the title Task 11 ripped as `all-tracks`. Its streams have the same packets (the `md5=` of its `stream` lines equals those of `corpus/owner/SLUG_A/all-tracks/audio-levels-20ms-*/manifest.txt`). It needs no new labels: its one stream is the title's reference, so the harness lists the title as in the dataset without a label line (a label is asked for candidate streams only) and adds nothing to experiment 13's counts. A packet MD5 that differs from the all-tracks rip's for the same stream is a finding for EXP-11: note it.
 
 In Step 10 (Commit), `git status --short` also lists the new level folders' `streams.json`, `proxy-check.json` and `audio-proxy.json`, and `corpus/owner/audio-dataset.json`.
 
@@ -7337,22 +7359,21 @@ Which disc is in the drive: does not matter. Disc A should be back in for Task 1
 ```bash
 find corpus/owner -iname '*unit_key*'
 grep -rIlE 'eyJhbGciOi[A-Za-z0-9_-]{20,}' corpus/owner
-python3 -m unittest discover -s scripts/phase0 -p 'test_*.py' 2>&1 | tail -1
-git add scripts/phase0/exp11_tracks.py scripts/phase0/test_exp11_tracks.py corpus/owner docs/phase0/experiments
+cargo test -q --workspace; echo "cargo test exit=$?"
+git add docs/phase0/experiments
 git status --short
 git commit -m "Run experiment 11: selection by language"
 ```
 
 Expected:
 - `find` and `grep` print nothing: no AACS unit-key file, and no JSON Web Token in any recording (the TMDb read access token is one, and it starts with that text). If either prints a path, stop and do not commit.
-- The tests end `OK`.
+- `cargo test exit=0`.
 - `git status --short` lists:
-  - the two new scripts;
   - the new files under `corpus/owner/SLUG_A/eng-only/`, plus `eng-only-2/` or `eng-only-failed-<n>/` if they exist;
   - the files under `corpus/owner/SLUG_D/`, if Step 7 ran;
   - `docs/phase0/experiments/EXP-11-language-selection.md`.
 
-  `compare_tracks.py` and `test_decisions.py` are not listed: the controller committed them as prerequisites.
+  The recordings under `corpus/owner/` are committed in the evidence repository (Global Constraints), not here.
 - The commit succeeds.
 
 ---
@@ -7373,7 +7394,7 @@ Expected:
     - `lazymkv-capture record --out <file> -- <command...>`: writes `<file>` (the command's standard output), `<file>.timing.jsonl`, `<file>.stderr` and, when the command has ended, `<file>.exit.json` (`exit_code`, `elapsed_ms`, `lines`).
     - `lazymkv-capture disc --root <path> --label <text> --out <dir>`: writes `meta.json`, `files.json` and `nav\`; exit 0, or 2 on failure.
     - `lazymkv-capture eject --drive <letter>`: prints `lock=..., dismount=..., allow-removal=..., eject=...` (each `ok` or `error N`) and exits 0 when the eject step succeeded. Otherwise it prints that report, or `cannot open drive X: (error N)`, or `X: is not an optical drive`, to standard error and exits 2.
-  - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/pull-recording.sh <slug>` (Task 8: never deletes on the Mac), `scripts/phase0/setup-check.ps1` (Task 7), `scripts/phase0/compare_scans.py <scan A> <scan B>` (exits 1 when a title is in only one scan or a scan is empty), `scripts/phase0/compare_tracks.py <scan> <title> <mkvmerge json>` (exits 1 when any verdict is no), `parse` from `scripts/phase0/robot.py`.
+  - Scripts: `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`, `scripts/phase0/pull-recording.sh <slug>` (Task 8: never deletes on the Mac), `scripts/phase0/setup-check.ps1` (Task 7), `lazymkv-dev compare-scans <scan A> <scan B>` (exits 1 when a title is in only one scan or a scan is empty), `lazymkv-dev reconcile <scan> <title> <mkvmerge json>` (exits 1 when any verdict is no), `parse` of `core::robot`.
   - Disc A's recording: `meta.json`, `files.json` and `scan.txt` from Task 9, and `all-tracks/mkvmerge.json` (the direct rip of title N) from Task 11. It is at `C:\lazymkv\phase0\recordings\SLUG_A\` on the mini PC and at `corpus/owner/SLUG_A/` on the Mac.
 - Produces:
   - `scripts/phase0/backup-disc.ps1 -Slug <slug> [-Force]`. Run it as a job: `scripts/phase0/job.sh backup-disc.ps1 <log> -Slug <slug> [-Force]`.
@@ -7885,6 +7906,8 @@ Expected, in order:
 
 - [ ] **Step 5: Copy Disc A to the share and scan the copy**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: Disc A (SLUG_A) in drive 1 (`D:`). backup-disc.ps1 checks this itself with Assert-DiscIs before MakeMKV starts. Disc A stays in until Step 8, in case the copy has to be repeated.
 
 Ask the owner: "Please make sure Disc A is in the drive and that you stay logged in at the mini PC. The copy reads the whole disc and takes one to two hours." Then check that the share is reachable and has room for the copy and, later, the extracted feature:
@@ -8010,6 +8033,8 @@ Expected:
 - For each scan, the title count, whether `MSG:3344` (Java in use) appears, and every title with a comment (attribute 49), with its source file.
 
 - [ ] **Step 6: Extract the main feature from the copy**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: Disc A stays in drive 1 (`D:`). It is not used: the extraction reads only the copy on the share.
 
@@ -8172,6 +8197,8 @@ Expected:
 Ask the owner: "Did drive 1's tray open?" Write down EJECT1 (the printed line and `exit=`) and TRAY1 (the owner's answer).
 
 - [ ] **Step 9: Test the second drive**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: Disc A, moved by the owner from drive 1 to drive 2 in this step. second-drive.ps1 checks that the disc in drive 2 has Disc A's fingerprint before it keeps anything.
 
@@ -8346,6 +8373,8 @@ If drive 2 was not run, its line reads `- Drive 2: not tested in Task 14 (<reaso
 
 - [ ] **Step 12: Add the extracted title to the tuning dataset (decision D16)**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: none (Disc A is with the owner). The job reads only the share.
 
 Skip this step if Step 6 did not end `RESULT ok`. The extraction is a rip of title N made from the disc copy. Its recording has `mkvmerge.json` but no `ffprobe-streams.json`, so `args` reads the `ffprobe-streams.json` of a rip of the same title with the same size if there is one, and otherwise mkvmerge.json's track IDs, which for a Matroska file are ffprobe's stream numbers:
@@ -8406,8 +8435,8 @@ Then tell the owner: "Task 14 is committed. You can put Disc A away; phase 0 doe
     - it waits up to 120 s for a readable disc; a new slug gets a snapshot (`meta.json`, `files.json`, `nav\`) and lookups (`thediscdb-hash.json`, `thediscdb-discid.json` when the disc has a disc ID, `lookup-status.txt` with lines `dischash <code>` and `discid <code>`); a slug already recorded is checked with Assert-DiscIs and keeps its snapshot and lookups, unless `-Force` replaces them with new ones of the same disc;
     - output lines `disc: ...`, `lookups: ...`, with a scan also `scan: scan.txt exit.json=... version_banner=... titles=...`, then `RESULT ok` or `RESULT FAILED: <reason>`; after a failure it throws, so wait.sh exits 1 and an ssh run exits 1.
   - Task 8's `scripts/phase0/pull-recording.sh <slug>`: copies the recording over `corpus/owner/<slug>/`, keeps files that exist only on the Mac (such as `notes.md`), never deletes anything, and changes nothing when the copy fails.
-  - Task 10's `exp02-index-guard.ps1 -Slug <slug> [-MaxTitles <n>] [-Redo <n,n,...>] [-Plan]` and Task 10 Steps 3 to 6, which run it, pull the results and check them with `scripts/phase0/exp02_check.py <recording dir>`.
-  - On the Mac: `scripts/phase0/summarize_scan.py <recording dir>`; `scripts/phase0/check_encoding.py` (its `main(path)`); `scripts/phase0/hit_rate.py <folder>` (one row per subfolder with a `meta.json`; exits 1 when a fingerprint lookup got no answer or a disc-ID lookup failed) and its functions `statuses(dir)` and `lookup(path, status)`; `parse` from `scripts/phase0/robot.py`.
+  - Task 10's `exp02-index-guard.ps1 -Slug <slug> [-MaxTitles <n>] [-Redo <n,n,...>] [-Plan]` and Task 10 Steps 3 to 6, which run it, pull the results and check them with `lazymkv-dev exp02 <recording dir>`.
+  - On the Mac, `target/release/lazymkv-dev` (Global Constraints): `scan <slug|dir>`; `encoding <file>`; `hit-rate <folder>` (one row per subfolder with a `meta.json`; exits 1 when a fingerprint lookup got no answer or a disc-ID lookup failed). The checks that read files directly use `jq`, `awk` and `grep`; the ones that read a scan carry the field splitting of spec 9.4 (`core::robot::split_fields`) as an `awk` function.
   - `scripts/box.sh`, `scripts/phase0/job.sh`, `scripts/phase0/wait.sh`.
   - The recordings of Tasks 8 to 14 in `corpus/owner/`, Disc A's (SLUG_A) among them, and the reports `EXP-02-index-guard.md` (Task 10), `EXP-03-whole-disc-copy.md` (Task 14) and `EXP-12-java-labels.md` (Task 9).
 - Produces:
@@ -8445,7 +8474,7 @@ grep -E '^(function (Assert-Slug|Assert-DiscIs|Assert-EmptyDir|Get-InsertedDisc)
 grep -n 'switch]\$ScanMayFail' scripts/phase0/record-disc.ps1
 grep -n 'ever deleted' scripts/phase0/pull-recording.sh
 git ls-files scripts/phase0/exp02-index-guard.ps1
-python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
+cargo test -q --workspace; echo "cargo test exit=$?"
 scripts/box.sh cargo build --release -p lazymkv-capture
 ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Command C:\lazymkv\src\scripts\phase0\record-disc.ps1).Parameters.Keys\""
 ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Command C:\lazymkv\src\scripts\phase0\exp02-index-guard.ps1).Parameters.Keys\""
@@ -8456,7 +8485,7 @@ Expected:
 - The first `grep` prints five lines: the `$Recordings` assignment and the four D1 helper functions.
 - The second prints `[switch]$ScanMayFail,` (Task 8's final record-disc.ps1). The third prints `# Nothing in corpus/owner is ever deleted: ...` (Task 8's pull-recording.sh, which keeps `notes.md` on every pull).
 - `git ls-files` prints `scripts/phase0/exp02-index-guard.ps1` (Task 10).
-- The unit tests end `Ran 34 tests` (or more, if other tasks added some) and `OK`.
+- The tests end with `cargo test exit=0`.
 - `box.sh` syncs the tree and cargo ends with ``Finished `release` profile [optimized] target(s) in ...``.
 - The parameter lists begin `Slug`, `NoScan`, `ScanName`, `ScanMayFail`, `Force` and `Slug`, `MaxTitles`, `Redo`, `Plan`, with no parse error.
 - `tasklist | findstr` prints nothing: no MakeMKV program is running. If it prints a row, ask the owner to close the MakeMKV window, and check again.
@@ -8466,17 +8495,18 @@ Anything else: stop and report. The prerequisites of Tasks 8 and 10 are missing.
 Then look at what is recorded already, and at the answers that decide parts of this task:
 
 ```bash
-python3 - <<'EOF'
-import json, pathlib
-for meta_path in sorted(pathlib.Path("corpus/owner").glob("*/meta.json")):
-    d = meta_path.parent
-    meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
-    notes = d / "notes.md"
-    text = notes.read_text(encoding="utf-8-sig", errors="replace") if notes.exists() else ""
-    heads = [line[3:].strip() for line in text.splitlines() if line.startswith("## ")]
-    print(f"{d.name:<36} {str(meta.get('format')):<6} fingerprint={str(meta.get('fingerprint'))[:8]} "
-          f"scan={'yes' if (d / 'scan.txt').exists() else 'no'} notes: {'; '.join(heads) or '-'}")
-EOF
+export LC_ALL=C
+for meta in corpus/owner/*/meta.json; do
+  d="${meta%/meta.json}"
+  heads=""
+  if [ -e "$d/notes.md" ]; then
+    heads="$(tr -d '\r' < "$d/notes.md" | sed -n 's/^## //p' | awk '{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); printf "%s%s", (NR > 1 ? "; " : ""), $0 }')"
+  fi
+  printf '%-36s %-6s fingerprint=%s scan=%s notes: %s\n' "${d##*/}" \
+    "$(jq -r '.format | if . == null then "None" else tostring end' "$meta")" \
+    "$(jq -r '.fingerprint | if . == null then "None" else tostring end' "$meta" | cut -c1-8)" \
+    "$([ -e "$d/scan.txt" ] && echo yes || echo no)" "${heads:--}"
+done
 for f in EXP-02-index-guard EXP-03-whole-disc-copy EXP-12-java-labels; do echo "== $f"; sed -n '/^## Answer/,/^## Consequence/p' "docs/phase0/experiments/$f.md"; done
 ```
 
@@ -8520,19 +8550,21 @@ Ask the owner to say when the drive's light has stopped blinking. Then run these
 
 ```bash
 FP="$(ssh USER@makemkv-box "powershell -NoProfile -ExecutionPolicy Bypass -Command \". C:\lazymkv\src\scripts\phase0\env.ps1; (Get-InsertedDisc).fingerprint\"" | tr -d '\r' | tail -1)"
-python3 - "$FP" <<'EOF'
-import json, pathlib, re, sys
-fp = sys.argv[1].strip().upper()
-if not re.fullmatch(r"[0-9A-F]{32}", fp):
-    sys.exit(f"NO FINGERPRINT: the mini PC printed {sys.argv[1]!r}; its error, if any, is above")
-hits = [p.parent for p in sorted(pathlib.Path("corpus/owner").glob("*/meta.json"))
-        if (json.loads(p.read_text(encoding="utf-8-sig")).get("fingerprint") or "").upper() == fp]
-print("fingerprint", fp)
-if not hits:
-    print("not recorded yet: a new disc")
-for d in hits:
-    print(f"already recorded as {d.name}; scan.txt {'present' if (d / 'scan.txt').exists() else 'absent'}")
-EOF
+export LC_ALL=C
+fp="$(printf '%s' "$FP" | tr -d ' \t\r\n' | tr 'a-z' 'A-Z')"
+if ! printf '%s\n' "$fp" | grep -Eqx '[0-9A-F]{32}'; then
+  echo "NO FINGERPRINT: the mini PC printed '$FP'; its error, if any, is above"
+else
+  echo "fingerprint $fp"
+  found=0
+  for meta in corpus/owner/*/meta.json; do
+    [ "$(jq -r '(.fingerprint // "") | ascii_upcase' "$meta")" = "$fp" ] || continue
+    d="${meta%/meta.json}"
+    found=1
+    echo "already recorded as ${d##*/}; scan.txt $([ -e "$d/scan.txt" ] && echo present || echo absent)"
+  done
+  [ "$found" = 1 ] || echo "not recorded yet: a new disc"
+fi
 ```
 
 What it prints, and what to do:
@@ -8595,23 +8627,54 @@ Which disc is in the drive: SLUG's disc, if part 1c had it inserted. It stays in
 
 ```bash
 scripts/phase0/pull-recording.sh SLUG
-python3 scripts/phase0/summarize_scan.py corpus/owner/SLUG
-python3 - SLUG <<'EOF'
-import collections, json, pathlib, sys
-sys.path.insert(0, "scripts/phase0")
-from robot import parse
-d = pathlib.Path("corpus/owner") / sys.argv[1]
-meta = json.loads((d / "meta.json").read_text(encoding="utf-8-sig"))
-scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
-codes = collections.Counter(code for code, _, _ in scan.messages)
-durations = collections.Counter(a.get(9) for a in scan.titles.values())
-common, shared = durations.most_common(1)[0] if durations else ("-", 0)
-print(f"{d.name}: format={meta.get('format')} titles={len(scan.titles)} MSG:3308 lines={codes[3308]} "
-      f"MSG:3309 lines={codes[3309]}; the most common duration, {common}, is shared by {shared} titles")
-EOF
+cargo build -q --release -p lazymkv-dev
+target/release/lazymkv-dev scan SLUG
+export LC_ALL=C
+d=corpus/owner/SLUG
+awk -v name="${d##*/}" -v format="$(jq -r '.format | if . == null then "None" else tostring end' "$d/meta.json")" '
+function isint(s) { return s ~ /^[ \t\n\v\f\r]*[-+]?[0-9]+[ \t\n\v\f\r]*$/ }
+function fields(text, F,    n, i, c, cur, quoted, len) {
+  n = 0; cur = ""; quoted = 0; len = length(text); i = 1
+  while (i <= len) {
+    c = substr(text, i, 1)
+    if (quoted) {
+      if (c == "\\" && i < len) { cur = cur substr(text, i + 1, 1); i += 2; continue }
+      if (c == "\"") {
+        if (i < len && substr(text, i + 1, 1) == "\"") { cur = cur "\""; i += 2; continue }
+        quoted = 0
+      } else cur = cur c
+    } else if (c == "\"") quoted = 1
+    else if (c == ",") { F[++n] = cur; cur = "" }
+    else cur = cur c
+    i++
+  }
+  F[++n] = cur
+  return n
+}
+{
+  line = $0; sub(/\r+$/, "", line); sub(/^(\357\273\277)+/, "", line)
+  p = index(line, ":"); if (p == 0) next
+  kind = substr(line, 1, p - 1); split("", F); n = fields(substr(line, p + 1), F)
+  if (kind == "MSG" && n >= 4 && isint(F[1])) codes[F[1] + 0]++
+  if (kind == "TINFO" && n >= 4 && isint(F[1])) {
+    t = F[1] + 0
+    if (!(t in seen)) { seen[t] = 1; order[++k] = t }
+    if (isint(F[2])) attr[t, F[2] + 0] = F[4]
+  }
+}
+END {
+  for (i = 1; i <= k; i++) {
+    v = ((order[i], 9) in attr) ? attr[order[i], 9] : "None"
+    if (!(v in count)) seen_d[++dk] = v
+    count[v]++
+  }
+  best = "-"; most = 0
+  for (i = 1; i <= dk; i++) if (count[seen_d[i]] > most) { most = count[seen_d[i]]; best = seen_d[i] }
+  printf "%s: format=%s titles=%d MSG:3308 lines=%d MSG:3309 lines=%d; the most common duration, %s, is shared by %d titles\n", name, format, k, codes[3308], codes[3309], best, most
+}' "$d/scan.txt"
 ```
 
-SLUG is a command-line argument of the heredoc, so nothing inside it needs editing.
+SLUG appears in the `scan` line and once in the check, in its line `d=corpus/owner/SLUG`.
 
 Expected:
 - `pulled corpus/owner/SLUG (<n> files copied, <m> files there now)`. If the pull fails, nothing on the Mac changed: run it again.
@@ -8662,7 +8725,7 @@ Which disc is in the drive: unchanged from part 1e.
 
 EXP2_SLUG is chosen once, by these rules:
 - If EXP2_SLUG is not chosen yet, SLUG is not SLUG_A, `corpus/owner/SLUG/exp02` does not exist, SLUG's format is `bluray` (a Blu-ray or a UHD), and part 1e counted a `MSG:3308` or `MSG:3309` line, then EXP2_SLUG is SLUG. Do Step 2 now, while the disc is in the drive; a recorded disc that was reused without inserting it must be inserted first. Then come back here for the next disc of part 1b.
-- A DVD is never EXP2_SLUG: a DVD scan has no source file names (attribute 16) for exp02_check.py to compare, so every title would read `match=NO`.
+- A DVD is never EXP2_SLUG: a DVD scan has no source file names (attribute 16) for `lazymkv-dev exp02` to compare, so every title would read `match=NO`.
 - Disc A (SLUG_A) is never EXP2_SLUG, and neither is any recording that has an `exp02` folder: experiment 2 already ran on it in Task 10, and a second run would count the same disc twice. If Disc A showed a `MSG:3308` or `MSG:3309` line, the condition is already met on it, and Step 2's Answer rules use that.
 - When every disc of part 1b has been handled and no EXP2_SLUG was chosen, EXP2_SLUG is the disc of kind (a), if it is a Blu-ray or a UHD, is not SLUG_A and has no `exp02` folder. Step 2 then runs on it; the owner puts it back in the drive, and Step 2 checks that it is the right disc. If there is no such disc (the owner has none, or the disc of kind (a) is Disc A), Step 2 records that experiment 2 was not repeated.
 
@@ -8744,36 +8807,77 @@ Which disc is in the drive: does not matter. This step reads DVD_SLUG's recordin
 DVD_SLUG is the DVD of kind (d) from Step 1. If the owner had no DVD at all, skip this step, and tell the controller that the two DVD items in spec 8.7 stay unverified.
 
 ```bash
-python3 - DVD_SLUG <<'EOF'
-import collections, pathlib, sys
-sys.path.insert(0, "scripts/phase0")
-from robot import parse
-d = pathlib.Path("corpus/owner") / sys.argv[1]
-scan = parse((d / "scan.txt").read_text(encoding="utf-8-sig", errors="replace"))
-print(f"{d.name}: {scan.disc.get(1)}, {len(scan.titles)} titles")
-print("audio and subtitle streams with flags, or with a conversion other than lossless:")
-kinds = collections.Counter()
-shown = 0
-for (t, s), a in sorted(scan.streams.items()):
-    if a.get(1) not in ("Audio", "Subtitles"):
-        continue
-    flags = int(a.get(22, "0") or 0)
-    conversion = a.get(42, "")
-    kinds[(a.get(1), a.get(6, ""), a.get(7, ""), conversion)] += 1
-    if flags or (conversion and "lossless" not in conversion.lower()):
-        bits = [b for b in (1, 2, 4, 256, 512, 1024, 2048, 4096) if flags & b]
-        print(f"  title {t} stream {s}: {a.get(1)} lang={a.get(3, '')} codec={a.get(6, '')} / {a.get(7, '')} "
-              f"flags={flags} {bits} conversion={conversion} tree={a.get(30, '')}")
-        shown += 1
-if not shown:
-    print("  none")
-print("all audio and subtitle streams, by type, codec and conversion:")
-for (kind, short, full, conversion), n in sorted(kinds.items()):
-    print(f"  {n:>4} x {kind} codec={short} / {full} conversion={conversion}")
-EOF
+export LC_ALL=C
+d=corpus/owner/DVD_SLUG
+awk -v name="${d##*/}" '
+function isint(s) { return s ~ /^[ \t\n\v\f\r]*[-+]?[0-9]+[ \t\n\v\f\r]*$/ }
+function fields(text, F,    n, i, c, cur, quoted, len) {
+  n = 0; cur = ""; quoted = 0; len = length(text); i = 1
+  while (i <= len) {
+    c = substr(text, i, 1)
+    if (quoted) {
+      if (c == "\\" && i < len) { cur = cur substr(text, i + 1, 1); i += 2; continue }
+      if (c == "\"") {
+        if (i < len && substr(text, i + 1, 1) == "\"") { cur = cur "\""; i += 2; continue }
+        quoted = 0
+      } else cur = cur c
+    } else if (c == "\"") quoted = 1
+    else if (c == ",") { F[++n] = cur; cur = "" }
+    else cur = cur c
+    i++
+  }
+  F[++n] = cur
+  return n
+}
+function get(t, s, k, dflt) { return ((t SUBSEP s SUBSEP k) in A) ? A[t, s, k] : dflt }
+{
+  line = $0; sub(/\r+$/, "", line); sub(/^(\357\273\277)+/, "", line)
+  p = index(line, ":"); if (p == 0) next
+  kind = substr(line, 1, p - 1); split("", F); n = fields(substr(line, p + 1), F)
+  if (kind == "CINFO" && n >= 3 && isint(F[1])) disc[F[1] + 0] = F[3]
+  if (kind == "TINFO" && n >= 4 && isint(F[1])) titles[F[1] + 0] = 1
+  if (kind == "SINFO" && n >= 5 && isint(F[1]) && isint(F[2])) {
+    t = F[1] + 0; s = F[2] + 0
+    if (!((t SUBSEP s) in S)) { S[t, s] = 1; nk++; key[nk] = sprintf("%012d %012d", t, s); kt[nk] = t; ks[nk] = s }
+    if (isint(F[3])) A[t, s, F[3] + 0] = F[5]
+  }
+}
+END {
+  nt = 0; for (t in titles) nt++
+  printf "%s: %s, %d titles\n", name, ((1 in disc) ? disc[1] : "None"), nt
+  print "audio and subtitle streams with flags, or with a conversion other than lossless:"
+  for (i = 2; i <= nk; i++) for (j = i; j > 1 && key[j - 1] > key[j]; j--) {
+    x = key[j]; key[j] = key[j - 1]; key[j - 1] = x
+    x = kt[j]; kt[j] = kt[j - 1]; kt[j - 1] = x
+    x = ks[j]; ks[j] = ks[j - 1]; ks[j - 1] = x
+  }
+  shown = 0; nc = 0
+  for (i = 1; i <= nk; i++) {
+    t = kt[i]; s = ks[i]
+    type = get(t, s, 1, "None"); if (type != "Audio" && type != "Subtitles") continue
+    f22 = get(t, s, 22, "0"); flags = (f22 == "") ? 0 : f22 + 0
+    conversion = get(t, s, 42, "")
+    c = type "\001" get(t, s, 6, "") "\001" get(t, s, 7, "") "\001" conversion
+    if (!(c in count)) combo[++nc] = c
+    count[c]++
+    if (flags || (conversion != "" && index(tolower(conversion), "lossless") == 0)) {
+      bits = ""; split("1 2 4 256 512 1024 2048 4096", B, " ")
+      for (b = 1; b <= 8; b++) if (int(flags / B[b]) % 2 == 1) bits = bits (bits == "" ? "" : ", ") B[b]
+      printf "  title %d stream %d: %s lang=%s codec=%s / %s flags=%d [%s] conversion=%s tree=%s\n", t, s, type, get(t, s, 3, ""), get(t, s, 6, ""), get(t, s, 7, ""), flags, bits, conversion, get(t, s, 30, "")
+      shown++
+    }
+  }
+  if (!shown) print "  none"
+  print "all audio and subtitle streams, by type, codec and conversion:"
+  for (i = 2; i <= nc; i++) for (j = i; j > 1 && combo[j - 1] > combo[j]; j--) { x = combo[j]; combo[j] = combo[j - 1]; combo[j - 1] = x }
+  for (i = 1; i <= nc; i++) {
+    split(combo[i], P, "\001")
+    printf "  %4d x %s codec=%s / %s conversion=%s\n", count[combo[i]], P[1], P[2], P[3], P[4]
+  }
+}' "$d/scan.txt"
 ```
 
-DVD_SLUG is a command-line argument, so nothing inside the heredoc needs editing.
+DVD_SLUG appears once, in the check's line `d=corpus/owner/DVD_SLUG`.
 
 Expected:
 - A first line with the disc type and the title count.
@@ -8801,33 +8905,30 @@ Which disc is in the drive: does not matter. This step reads the pulled recordin
 Every `scan*.txt` file in a recording is `lazymkv-capture record`'s byte-for-byte copy of MakeMKV's standard output, so the bytes are MakeMKV's own. Job logs and terminal output are not: PowerShell decodes them with the OEM code page. Use only the pulled scan files. This check runs over every scan recorded, NONASCII_SLUG's among them:
 
 ```bash
-python3 - <<'EOF'
-import pathlib, re, sys
-sys.path.insert(0, "scripts/phase0")
-import check_encoding
-owner = pathlib.Path("corpus/owner")
-paths = sorted(set(owner.glob("*/scan*.txt")) | set(owner.glob("*/*/scan*.txt")))
-QUOTES = {
-    "backslash-escaped": r'\\"',
-    "doubled": r'(?<=[^,:"])""(?=[^,"\r\n])',
-    "bare, unescaped": r'(?<=[^,:"\\])"(?=[^,"\r\n])',
-}
-for path in paths:
-    print("==", path)
-    check_encoding.main(path)
-    lines = path.read_bytes().decode("utf-8", "replace").splitlines()
-    for kind, pattern in QUOTES.items():
-        hits = [line for line in lines if re.search(pattern, line)]
-        print(f"{kind} quotes inside a field: {len(hits)}")
-        for line in hits[:2]:
-            print("  ", line[:160])
-print(len(paths), "scan files checked")
-EOF
+cargo build -q --release -p lazymkv-dev
+export LC_ALL=C
+cr="$(printf '\r')"
+n=0
+for scan in $(find corpus/owner -mindepth 2 -maxdepth 3 -type f -name 'scan*.txt' -not -path '*/.git/*' | sort); do
+  echo "== $scan"
+  target/release/lazymkv-dev encoding "$scan"
+  for kind in "backslash-escaped" "doubled" "bare, unescaped"; do
+    case "$kind" in
+      backslash-escaped) pattern='\\"' ;;
+      doubled) pattern="[^,:\"]\"\"[^,\"$cr]" ;;
+      *) pattern="[^,:\"\\\\]\"[^,\"$cr]" ;;
+    esac
+    echo "$kind quotes inside a field: $(grep -a -c -E -e "$pattern" "$scan")"
+    grep -a -E -e "$pattern" "$scan" | head -2 | tr -d '\r' | cut -c1-160 | sed 's/^/   /'
+  done
+  n=$((n + 1))
+done
+echo "$n scan files checked"
 ```
 
 Expected, for each scan file (`scan.txt`, Disc A's `scan-offline.txt`, and the scan of Task 14's whole-disc copy):
 - `== <path>`;
-- check_encoding.py's lines: `valid UTF-8: yes` or `valid UTF-8: NO (...)`; then, for up to five lines with non-ASCII bytes, the line decoded as UTF-8 (`utf-8 :`) and as Windows-1252 (`cp1252:`); then `lines with non-ASCII bytes shown: <n>`, and its own count of backslash-escaped quotes;
+- `lazymkv-dev encoding`'s lines: `valid UTF-8: yes` or `valid UTF-8: NO (...)`; then, for up to five lines with non-ASCII bytes, the line decoded as UTF-8 (`utf-8 :`) and as Windows-1252 (`cp1252:`); then `lines with non-ASCII bytes shown: <n>`, and its own count of backslash-escaped quotes;
 - three counts of quotes inside a field, each with up to two example lines. A quote that opens or closes a field (after `,` or `:`, before `,` or the end of the line) is not counted.
 
 The last line is `<n> scan files checked`.
@@ -8864,7 +8965,7 @@ Create `docs/phase0/experiments/EXP-08-encoding.md` from `docs/phase0/experiment
   - yes: spec 9.4 states that robot output is UTF-8 (verified on MakeMKV 2.0.0), and names the quote forms seen. The parser keeps tolerating both backslash-escaped and doubled quotes.
   - no: spec 9.4 decodes robot output in the encoding observed.
   - not run: row 8's fallback stays ("decode as UTF-8, replacing invalid bytes; MakeMKV text is display-only already"), marked "not yet verified".
-  - A bare, unescaped quote inside a field breaks the field splitting of spec 9.4 and of `robot.py`'s `split_fields`. If one was seen, say so and tell the controller.
+  - A bare, unescaped quote inside a field breaks the field splitting of spec 9.4 and of `core::robot::split_fields`. If one was seen, say so and tell the controller.
 
 - [ ] **Step 5: Experiment 10, TheDiscDB hit rate**
 
@@ -8873,7 +8974,7 @@ Which disc is in the drive: each further disc in turn, inserted by the owner. Fo
 First count the distinct discs recorded so far:
 
 ```bash
-python3 -c "import json,pathlib; fps={(json.loads(p.read_text(encoding='utf-8-sig')).get('fingerprint') or '').upper() for p in pathlib.Path('corpus/owner').glob('*/meta.json')}; fps.discard(''); print(len(fps), 'distinct discs recorded')"
+for m in corpus/owner/*/meta.json; do jq -r '(.fingerprint // "") | ascii_upcase' "$m"; done | awk '$0 != ""' | sort -u | awk 'END { print NR, "distinct discs recorded" }'
 ```
 
 Expected: `<n> distinct discs recorded`. Ask the owner for 20 minus n further discs (more is fine). They should be a sample of the owner's collection, not chosen by whether TheDiscDB might know them, with UHDs, Blu-rays and DVDs as the collection has them. If n is already 20 or more, go straight to the count below.
@@ -8917,72 +9018,73 @@ scripts/phase0/pull-recording.sh SLUG
 
 Expected: `pulled corpus/owner/SLUG (<n> files copied, <n> files there now)`. If it fails, nothing on the Mac changed: run it again.
 
-When the discs are recorded, count them and look them up. A disc recorded under two slugs (by different tasks) is counted once: the count below links one recording per distinct fingerprint into a fresh temporary folder and runs `hit_rate.py` on that folder. No recording is deleted for this. Run these commands together, in one shell:
+When the discs are recorded, count them and look them up. A disc recorded under two slugs (by different tasks) is counted once: the count below links one recording per distinct fingerprint into a fresh temporary folder and runs `lazymkv-dev hit-rate` on that folder. No recording is deleted for this. Run these commands together, in one shell:
 
 ```bash
 HR="$(mktemp -d "${TMPDIR:-/tmp}/lazymkv-hit-rate.XXXXXX")"
-python3 - "$HR" <<'EOF'
-import collections, json, os, pathlib, sys
-sys.path.insert(0, "scripts/phase0")
-from hit_rate import lookup, statuses
-
-out = pathlib.Path(sys.argv[1])
-SUFFIX = {"uhd": "UHD", "bluray": "Blu-ray", "dvd": "DVD"}
-
-def kind(d, meta):
-    """UHD, Blu-ray or DVD, and what says so."""
-    if meta.get("format") == "dvd":
-        return "DVD", "meta.json"
-    nav = d / "nav"
-    for p in (nav.rglob("*") if nav.is_dir() else []):
-        if p.name.lower() == "index.bdmv" and p.parent.name.upper() == "BDMV":
-            version = p.read_bytes()[4:8].decode("ascii", "replace")
-            if version == "0300":
-                return "UHD", "index.bdmv 0300"
-            if version in ("0100", "0200", "0240"):
-                return "Blu-ray", "index.bdmv " + version
-    suffix = d.name.rsplit("-", 1)[-1]
-    if suffix in SUFFIX:
-        return SUFFIX[suffix], "slug suffix"
-    return "unknown", "no index.bdmv and no format suffix"
-
-by_fp = collections.defaultdict(list)
-for meta_path in sorted(pathlib.Path("corpus/owner").glob("*/meta.json")):
-    meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
-    by_fp[(meta.get("fingerprint") or "").upper()].append((meta_path.parent, meta))
-
-rows = []
-for fp, recs in sorted(by_fp.items(), key=lambda item: item[1][0][0].name):
-    if not fp:
-        print("NO FINGERPRINT, not counted:", [d.name for d, _ in recs])
-        continue
-    answered = [r for r in recs if statuses(r[0]).get("dischash") in ("200", "404")]
-    d, meta = (answered or recs)[0]
-    if len(recs) > 1:
-        print("one disc under several slugs:", [r[0].name for r in recs], "- counted once, as", d.name)
-    os.symlink(d.resolve(), out / d.name)
-    k, source = kind(d, meta)
-    suffix = d.name.rsplit("-", 1)[-1]
-    if suffix in SUFFIX and SUFFIX[suffix] != k:
-        print(f"CHECK: {d.name} ends in -{suffix}, but {source} says {k}: ask the owner")
-    status = statuses(d)
-    rows.append((d.name, k, source, lookup(d / "thediscdb-hash.json", status.get("dischash")),
-                 lookup(d / "thediscdb-discid.json", status.get("discid"))))
-print()
-for name, k, source, by_hash, by_id in rows:
-    print(f"{name:<40} {k:<8} ({source}) hash={by_hash:<6} discid={by_id}")
-print()
-print(len(rows), "distinct discs")
-for k in ("UHD", "Blu-ray", "DVD", "unknown"):
-    mine = [r for r in rows if r[1] == k]
-    if mine:
-        answered = [r for r in mine if r[3] in ("hit", "miss")]
-        hits = sum(1 for r in answered if r[3] == "hit")
-        either = sum(1 for r in mine if "hit" in (r[3], r[4]))
-        print(f"{k}: {len(mine)} discs; known by fingerprint: {hits} of {len(answered)} answered; "
-              f"by fingerprint or disc ID: {either} of {len(mine)}")
-EOF
-python3 scripts/phase0/hit_rate.py "$HR"; echo "hit_rate exit=$?"
+cargo build -q --release -p lazymkv-dev
+export LC_ALL=C
+status_of() {   # status_of <recording> <lookup>: the last code lookup-status.txt gives for it, or nothing
+  [ -f "$1/lookup-status.txt" ] || return 0
+  tr -d '\r' < "$1/lookup-status.txt" | awk -v key="$2" 'NR == 1 { sub(/^\357\273\277/, "") } NF >= 2 && $1 == key { code = $NF } END { printf "%s", code }'
+}
+lookup() {      # lookup <answer file> <code>: hit, miss, failed or n/a (as hit_rate does)
+  if [ -z "$2" ]; then echo n/a; elif [ "$2" = 404 ]; then echo miss; elif [ "$2" != 200 ]; then echo failed
+  elif ! jq -e -s 'length == 1' "$1" >/dev/null 2>&1; then echo failed
+  else jq -r 'if type == "array" then (if length > 0 then "hit" else "miss" end)
+              elif type == "object" and ((.titles // null) | . != null and . != false and . != 0 and . != "" and . != [] and . != {}) then "hit"
+              else "failed" end' "$1"
+  fi
+}
+kind_of() {     # kind_of <recording> <format>: "<kind>|<what says so>"
+  if [ "$2" = dvd ]; then echo "DVD|meta.json"; return; fi
+  if [ -d "$1/nav" ]; then
+    for p in $(find "$1/nav" -iname index.bdmv); do
+      parent="${p%/*}"; parent="${parent##*/}"
+      [ "$(printf '%s' "$parent" | tr 'a-z' 'A-Z')" = BDMV ] || continue
+      v="$(head -c 8 "$p" | tail -c 4)"
+      case "$v" in 0300) echo "UHD|index.bdmv 0300"; return ;; 0100|0200|0240) echo "Blu-ray|index.bdmv $v"; return ;; esac
+    done
+  fi
+  case "${1##*-}" in uhd) echo "UHD|slug suffix" ;; bluray) echo "Blu-ray|slug suffix" ;; dvd) echo "DVD|slug suffix" ;; *) echo "unknown|no index.bdmv and no format suffix" ;; esac
+}
+table="$(for meta in corpus/owner/*/meta.json; do
+  d="${meta%/meta.json}"
+  printf '%s\t%s\t%s\t%s\n' "$(jq -r '(.fingerprint // "") | ascii_upcase' "$meta")" "${d##*/}" "$(status_of "$d" dischash)" "$(jq -r '.format | if . == null then "None" else tostring end' "$meta")"
+done)"
+groups="$(printf '%s\n' "$table" | awk -F'\t' '
+  { if (!($1 in n)) order[++k] = $1; n[$1]++; slugs[$1] = slugs[$1] (n[$1] > 1 ? "\t" : "") $2
+    if (!($1 in pick) && ($3 == "200" || $3 == "404")) pick[$1] = $2
+    if (!($1 in first)) first[$1] = $2 }
+  END { for (i = 1; i <= k; i++) { f = order[i]; print f "|" ((f in pick) ? pick[f] : first[f]) "|" slugs[f] } }')"
+rows=""
+while IFS='|' read -r fp chosen all; do
+  names="$(printf '%s' "$all" | awk -F'\t' '{ for (i = 1; i <= NF; i++) printf "%s\047%s\047", (i > 1 ? ", " : "["), $i; print "]" }')"
+  if [ -z "$fp" ]; then echo "NO FINGERPRINT, not counted: $names"; continue; fi
+  [ "$(printf '%s' "$all" | awk -F'\t' '{ print NF }')" -gt 1 ] && echo "one disc under several slugs: $names - counted once, as $chosen"
+  d="corpus/owner/$chosen"
+  ln -s "$(cd "$d" && pwd -P)" "$HR/$chosen"
+  format="$(printf '%s\n' "$table" | awk -F'\t' -v s="$chosen" '$2 == s { print $4 }')"
+  k="$(kind_of "$d" "$format")"; kind="${k%%|*}"; source="${k#*|}"
+  suffix="${chosen##*-}"
+  case "$suffix" in uhd) want=UHD ;; bluray) want=Blu-ray ;; dvd) want=DVD ;; *) want="" ;; esac
+  [ -n "$want" ] && [ "$want" != "$kind" ] && echo "CHECK: $chosen ends in -$suffix, but $source says $kind: ask the owner"
+  by_hash="$(lookup "$d/thediscdb-hash.json" "$(status_of "$d" dischash)")"
+  by_id="$(lookup "$d/thediscdb-discid.json" "$(status_of "$d" discid)")"
+  rows="$rows$chosen|$kind|$source|$by_hash|$by_id
+"
+done <<GROUPS
+$groups
+GROUPS
+echo
+printf '%s' "$rows" | awk -F'|' 'NF { printf "%-40s %-8s (%s) hash=%-6s discid=%s\n", $1, $2, $3, $4, $5 }'
+echo
+printf '%s' "$rows" | awk -F'|' '
+  NF { n++; c[$2]++; if ($4 == "hit" || $4 == "miss") a[$2]++; if ($4 == "hit") h[$2]++; if ($4 == "hit" || $5 == "hit") e[$2]++ }
+  END { print n + 0, "distinct discs"
+        split("UHD Blu-ray DVD unknown", K, " ")
+        for (i = 1; i <= 4; i++) if (c[K[i]]) printf "%s: %d discs; known by fingerprint: %d of %d answered; by fingerprint or disc ID: %d of %d\n", K[i], c[K[i]], h[K[i]], a[K[i]], e[K[i]], c[K[i]] }'
+target/release/lazymkv-dev hit-rate "$HR"; echo "hit_rate exit=$?"
 ```
 
 Expected from the first command:
@@ -8994,7 +9096,7 @@ Expected from the first command:
 - A `CHECK:` line means that the suffix and `index.bdmv` disagree. Ask the owner what the disc is, use the answer in the split, and say so in the report.
 - `<n> distinct discs`, then one line per kind: how many discs, how many of the answered fingerprint lookups were hits, and how many discs are known by fingerprint or disc ID.
 
-Expected from hit_rate.py:
+Expected from `hit-rate`:
 - one row per distinct disc (`<slug> <format> hash=<hit|miss|failed|n/a> discid=<hit|miss|failed|n/a>`);
 - `TheDiscDB knows <x> of <y> discs by fingerprint` and `by fingerprint or disc ID: <z> of <n> discs`, with a note when lookups failed;
 - `hit_rate exit=0` or `hit_rate exit=1`.
@@ -9005,7 +9107,7 @@ Expected from hit_rate.py:
 3. Run the record line above for that row's slug with `-Force` added.
 4. Pull it.
 
-Then run the count again (all three commands, so that a new temporary folder is made). Report the share from a run that exited 0. If a lookup still gets no answer, report how many stayed unanswered, and say that the share is computed without them.
+Then run the count again (the whole block, so that a new temporary folder is made). Report the share from a run that exited 0. If a lookup still gets no answer, report how many stayed unanswered, and say that the share is computed without them.
 
 Create `docs/phase0/experiments/EXP-10-thediscdb-hit-rate.md` from `docs/phase0/experiments/TEMPLATE.md`:
 - Header:
@@ -9016,12 +9118,12 @@ Create `docs/phase0/experiments/EXP-10-thediscdb-hit-rate.md` from `docs/phase0/
 - Under "What was run":
   - `record-disc.ps1 -NoScan` over ssh for the discs of this step, and the recordings of Tasks 8 to 14 and of Step 1 of this task;
   - the lookups, which record-disc.ps1 makes against TheDiscDB's dischash and discid endpoints;
-  - the de-duplicating count and `hit_rate.py`;
+  - the de-duplicating count and `lazymkv-dev hit-rate`;
   - every repeat with `-Force`, with its slug;
   - discs left out because they could not be read, with their titles, and how often a disc was not yet readable when the script started.
 - Under "What was observed":
   - the first command's output (duplicates, `CHECK:` lines, the table with kinds and the split by kind);
-  - hit_rate.py's table, its summary lines and its exit code;
+  - `hit-rate`'s table, its summary lines and its exit code;
   - the lookups that stayed unanswered.
 - Under "Answer":
   - `TheDiscDB knows <x> of <y> of the owner's discs by fingerprint (<x/y as a percentage>)`, from the de-duplicated run. Also give the figure by fingerprint or disc ID, and the split by UHD, Blu-ray and DVD.
@@ -9038,28 +9140,61 @@ If part 1a found that EXP-12's answer is already yes (Disc A answered it), skip 
 Otherwise list every Blu-ray or UHD recording that has a scan:
 
 ```bash
-python3 - <<'EOF'
-import json, pathlib, sys
-sys.path.insert(0, "scripts/phase0")
-from robot import parse
-for scan_path in sorted(pathlib.Path("corpus/owner").glob("*/scan.txt")):
-    d = scan_path.parent
-    if json.loads((d / "meta.json").read_text(encoding="utf-8-sig")).get("format") != "bluray":
-        continue
-    files = json.loads((d / "files.json").read_text(encoding="utf-8-sig"))
-    jar = sum(1 for f in files if f["path"].upper().startswith("BDMV/JAR/"))
-    version = "none"
-    nav = d / "nav"
-    for p in (nav.rglob("*") if nav.is_dir() else []):
-        if p.name.lower() == "index.bdmv" and p.parent.name.upper() == "BDMV":
-            version = p.read_bytes()[4:8].decode("ascii", "replace")
-    scan = parse(scan_path.read_text(encoding="utf-8-sig", errors="replace"))
-    java = any(code == 3344 for code, _, _ in scan.messages)
-    labelled = [(t, a[49]) for t, a in sorted(scan.titles.items()) if a.get(49)]
-    main = [t for t, comment in labelled if comment.startswith("FPL_MainFeature")]
-    print(f"{d.name:<36} index.bdmv={version} BDMV/JAR files={jar} java_in_use(3344)={java} "
-          f"labelled titles={len(labelled)} FPL_MainFeature titles={main}")
-EOF
+export LC_ALL=C
+for scan in corpus/owner/*/scan.txt; do
+  d="${scan%/scan.txt}"
+  [ "$(jq -r '.format' "$d/meta.json")" = bluray ] || continue
+  jar="$(jq '[.[] | select(.path | ascii_upcase | startswith("BDMV/JAR/"))] | length' "$d/files.json")"
+  version=none
+  if [ -d "$d/nav" ]; then
+    for p in $(find "$d/nav" -type f -iname index.bdmv); do
+      parent="${p%/*}"; parent="${parent##*/}"
+      [ "$(printf '%s' "$parent" | tr 'a-z' 'A-Z')" = BDMV ] && version="$(head -c 8 "$p" | tail -c 4)"
+    done
+  fi
+  awk -v name="${d##*/}" -v version="$version" -v jar="$jar" '
+function isint(s) { return s ~ /^[ \t\n\v\f\r]*[-+]?[0-9]+[ \t\n\v\f\r]*$/ }
+function fields(text, F,    n, i, c, cur, quoted, len) {
+  n = 0; cur = ""; quoted = 0; len = length(text); i = 1
+  while (i <= len) {
+    c = substr(text, i, 1)
+    if (quoted) {
+      if (c == "\\" && i < len) { cur = cur substr(text, i + 1, 1); i += 2; continue }
+      if (c == "\"") {
+        if (i < len && substr(text, i + 1, 1) == "\"") { cur = cur "\""; i += 2; continue }
+        quoted = 0
+      } else cur = cur c
+    } else if (c == "\"") quoted = 1
+    else if (c == ",") { F[++n] = cur; cur = "" }
+    else cur = cur c
+    i++
+  }
+  F[++n] = cur
+  return n
+}
+{
+  line = $0; sub(/\r+$/, "", line); sub(/^(\357\273\277)+/, "", line)
+  p = index(line, ":"); if (p == 0) next
+  kind = substr(line, 1, p - 1); split("", F); n = fields(substr(line, p + 1), F)
+  if (kind == "MSG" && n >= 4 && isint(F[1]) && F[1] + 0 == 3344) java = 1
+  if (kind == "TINFO" && n >= 4 && isint(F[1])) {
+    t = F[1] + 0; titles[t] = 1
+    if (isint(F[2])) attr[t, F[2] + 0] = F[4]
+  }
+}
+END {
+  nt = 0; for (t in titles) list[++nt] = t + 0
+  for (i = 2; i <= nt; i++) for (j = i; j > 1 && list[j - 1] > list[j]; j--) { x = list[j]; list[j] = list[j - 1]; list[j - 1] = x }
+  labelled = 0; main = ""
+  for (i = 1; i <= nt; i++) {
+    t = list[i]
+    if (!((t, 49) in attr) || attr[t, 49] == "") continue
+    labelled++
+    if (index(attr[t, 49], "FPL_MainFeature") == 1) main = main (main == "" ? "" : ", ") t
+  }
+  printf "%-36s index.bdmv=%s BDMV/JAR files=%d java_in_use(3344)=%s labelled titles=%d FPL_MainFeature titles=[%s]\n", name, version, jar, (java ? "True" : "False"), labelled, main
+}' "$scan"
+done
 ```
 
 Expected: one line per Blu-ray or UHD recording with a scan, Disc A's among them. Each line gives:
@@ -9523,8 +9658,8 @@ Expected:
   - Disc A's recording from Task 9: `corpus/owner/SLUG_A/scan.txt` and `scan.txt.timing.jsonl` (the online scan, made with `Get-MkFlags`), and on the mini PC the original `C:\lazymkv\phase0\recordings\SLUG_A\scan.txt`.
   - The stand-in: `cargo build --release -p fake-tools` writes `C:\lazymkv\target\release\fake-tool.exe`. It takes the tool's name from its own file name (`makemkvcon64.exe` reads `makemkvcon64.json` in the folder named by the environment variable `LAZYMKV_FAKE_DIR`), prints the file named by the first response whose `args_contain` strings all occur in its arguments, and, when `LAZYMKV_FAKE_SPEED` is above 0, waits that fraction of each line's recorded arrival time before printing it.
   - From `env.ps1`: `$P0`, `$Recordings`, `$Staging`, `$TestLibrary`, `$TuningData`.
-  - Scripts: `scripts/box.sh [command...]`, `scripts/phase0/job.sh <script.ps1> <log name>`, `scripts/phase0/wait.sh <log name>`, `scripts/phase0/summarize_scan.py <recording dir>`.
-  - `scripts/phase0/audio_dataset.py` (its last list: the titles not yet in the tuning dataset).
+  - Scripts: `scripts/box.sh [command...]`, `scripts/phase0/job.sh <script.ps1> <log name>`, `scripts/phase0/wait.sh <log name>`, `lazymkv-dev scan <slug|dir>`.
+  - `lazymkv-dev retune` (its last list: the titles not yet in the tuning dataset).
 - Produces:
   - `corpus/scenarios/disc-a-scan/`: a stand-in scenario made from a real scan: `makemkvcon64.json` (one response: arguments containing `info` and `disc:0` print `scan.txt` with the timing of `scan.txt.timing.jsonl`), `scan.txt` and `scan.txt.timing.jsonl`. Phase 1's tests point `LAZYMKV_FAKE_DIR` at this folder.
   - `scripts/phase0/list-leftovers.ps1` (no parameters; read-only). Run it as a job: `scripts/phase0/job.sh list-leftovers.ps1 <log name>`. It prints:
@@ -9549,6 +9684,8 @@ Placeholders:
 Decision D3 does not need a `-Force` here: the one script of this task writes nothing, and the scenario folder holds copies of evidence whose originals stay in `corpus/owner/SLUG_A/`.
 
 - [ ] **Step 1: Replay a real recording through the stand-in**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: none needed. The check runs the stand-in, not MakeMKV, and does not touch the drive. No job is running at this point (the last one ended in Task 16), so `scripts/box.sh` may replace `C:\lazymkv\src`.
 
@@ -9598,6 +9735,8 @@ What the other results mean:
 - `exit=255`: ssh could not reach the mini PC. Run the line again once it can.
 
 - [ ] **Step 2: Update the spec from the reports**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: none needed. Nothing in this step touches the mini PC.
 
@@ -9810,6 +9949,8 @@ Expected:
 
 - [ ] **Step 3: Write the phase report**
 
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
+
 Which disc is in the drive: none needed. Nothing in this step touches the mini PC.
 
 Create `docs/phase0/REPORT.md` from this skeleton. Every capitalised fill-in is replaced as described below the skeleton, and nothing else in the skeleton changes:
@@ -9917,6 +10058,8 @@ The fill-ins:
 - **INSTALLS**: the installs made on the mini PC. Copy the table under `## Installed for phase 0` in `docs/phase0/environment.md`, with any row added to it since. Then add these bullets: the scheduled task `lazymkv-phase0` (registered by `scripts/phase0/run-interactive.ps1` for every job); the firewall rule `lazymkv-exp05` (added and removed by the owner in Task 9); the folders `C:\lazymkv\src`, `C:\lazymkv\target` and `C:\lazymkv\phase0` with `config.ps1` and the job profiles; the staging folder on the share; and the test library folder the owner made for experiment 9.
 
 - [ ] **Step 4: Run every test once more**
+
+> **Historical since the Rust port** (pull request krcm0209/lazymkv#2): this step's `python3` lines are not run again. A script they name is read with `git show d3a754d:scripts/phase0/<file>`; Global Constraints names the `lazymkv-dev` command that replaced it.
 
 Which disc is in the drive: does not matter. No test touches the drive. No job is running, so `scripts/box.sh` may replace `C:\lazymkv\src`.
 
@@ -10080,7 +10223,7 @@ Which disc is in the drive: does not matter.
 
 The staging folders `STAGING\<slug>\` (rips, the whole-disc copy, extractions, evidence files), the test library folder, the scheduled task `lazymkv-phase0` and `C:\lazymkv\phase0\tmp` are all created by this plan. The rips may be wanted as inputs for phase 2, and a whole-disc copy of a UHD can be tens of gigabytes. The decision is the owner's, and so is the deletion: the agent deletes nothing (the owner's rules reserve permanent deletion to the owner, and changing the firewall or other system settings too). No `Remove-Item`, `rmdir`, `del` or firewall command is run by the agent here.
 
-Before offering any staging folder for deletion, run `python3 scripts/phase0/audio_dataset.py | grep '^Titles whose audio'`. A rip it names under `missing` is not offered: its audio is not in the tuning dataset yet (decision D16); add it first with Task 11 Step 11, or ask the owner to keep it. Never write a command for `$TuningData` or anything under it: the dataset is kept until the owner decides otherwise, separately from this clean-up.
+Before offering any staging folder for deletion, run `cargo build -q --release -p lazymkv-dev` and `target/release/lazymkv-dev retune | grep '^Titles whose audio'`. A rip it names under `missing` is not offered: its audio is not in the tuning dataset yet (decision D16); add it first with Task 11 Step 11, or ask the owner to keep it. Never write a command for `$TuningData` or anything under it: the dataset is kept until the owner decides otherwise, separately from this clean-up.
 
 Show the owner the `final-list` log and ask, item by item, what to keep and what to delete. Group the questions by what the data is good for, and give the sizes from the log. For each item the owner agrees to delete, write out the exact command below, with the real names copied from the log, and ask the owner to run it in an administrator PowerShell at the mini PC's desktop and to say when it is done. One named folder per command. Before sending a command, check that its path appears, character for character, as a folder line in the log:
 

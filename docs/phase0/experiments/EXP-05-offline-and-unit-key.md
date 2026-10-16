@@ -4,6 +4,7 @@
 - Disc(s): pans-labyrinth-2006-uhd, UHD (meta.json format bluray; `BDMV/index.bdmv` header `INDX0300`), drive 1 (D:, HL-DT-ST BD-RE BU40N 1.03) and drive 2 (D:, BD-RE PIONEER BD-RW  BDR-XS07U 1.01)
 - MakeMKV version: MakeMKV v2.0.0 win(x64-release)
 - Spec reference: section 17, row 5
+- Tools: the Python this report names was deleted by the Rust port (pull request krcm0209/lazymkv#2); `compare_scans.py` is now `lazymkv-dev compare-scans` (which writes its tuples as `(a, b, c)`), with the same arguments and lines. The commands below are as they were run; the scripts as they last were are `git show d3a754d:scripts/phase0/<file>`.
 
 ## Question
 

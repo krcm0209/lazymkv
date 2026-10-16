@@ -29,12 +29,13 @@ The recordings carry:
 
 ## Working with it
 
-With access, clone it in place: `git clone https://github.com/krcm0209/lazymkv-evidence corpus/owner`. The phase 0
-scripts use it there: `scripts/phase0/audio_dataset.py` (the audio tuning harness, whose corpus folder defaults to
-`corpus/owner`) and `scripts/phase0/audio_labels.py` (the owner's audio labels, given `corpus/owner/<slug>` paths)
-read and write it, and `scripts/phase0/pull-recording.sh <slug>` copies a recording from the mini PC into it.
-Without the clone, a harness run of `audio_dataset.py` says so and exits 3, and `pull-recording.sh` stops before it touches the mini
-PC. A pulled recording is committed in the evidence repository
+With access, clone it in place: `git clone https://github.com/krcm0209/lazymkv-evidence corpus/owner`. The tools
+use it there: `lazymkv-dev retune` (the audio tuning harness; `--evidence DIR` or `LAZYMKV_EVIDENCE` names another
+folder) and `lazymkv-dev labels` (the owner's audio labels, given `corpus/owner/<slug>` paths) read and write it,
+the other `lazymkv-dev` commands that take a slug and the golden tests of `cargo test --workspace` read it, and
+`scripts/phase0/pull-recording.sh <slug>` copies a recording from the mini PC into it. Without the clone, a
+`lazymkv-dev` command given a slug says so and exits 3, the golden tests print `skipped: ...` and pass, and
+`pull-recording.sh` stops before it touches the mini PC. A pulled recording is committed in the evidence repository
 (`git -C corpus/owner add <slug> && git -C corpus/owner commit`), never here.
 
 Contributors without access record their own discs with the developer mode (`keep_tuning_evidence`, decision D16) and

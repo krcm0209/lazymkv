@@ -1,4 +1,4 @@
-# Experiment 13 and decision D16. Measures a ripped title's audio streams so that audio_similarity.py can tell a
+# Experiment 13 and decision D16. Measures a ripped title's audio streams so that lazymkv-dev audio-report can tell a
 # commentary, an exact duplicate or programme audio apart by content, and adds the title to the tuning dataset: a
 # compact copy of every audio stream, from which later measures can be computed without the disc or the rip.
 # One ffmpeg pass over the one .mkv in $Staging\<Slug>\<Label>\ (one read of the file) writes:
@@ -7,14 +7,14 @@
 #   manifest.txt   first line "# lazymkv audio-levels v2 (experiment 13)"; then the file, the run time and
 #                  frame_ms=20; then one line per measured stream: number, codec, channels, layout (and
 #                  layout_guessed=<name> when ffprobe could not name it), language, frames, MD5 of its packets
-#                  (identical MD5 = exact duplicate). audio_similarity.py refuses a folder without it, so the first
+#                  (identical MD5 = exact duplicate). lazymkv-dev audio-report refuses a folder without it, so the first
 #                  measurement's folders (audio-levels-<Main>-<Cand>, 100 ms) are never read.
 #   main-mix.txt   the main stream mixed down to mono: a header line "# lazymkv audio levels v2: frame_ms=20 ...",
 #                  then one level in dB per line, 0.1 dB steps, -100 = silence
 #   main-fc.txt    the main stream's centre channel (dialogue); only when its layout has one besides other channels
 #   cand-<n>.txt   candidate stream <n> mixed down to mono. Without -Cand (a title with one audio stream, or with no
 #                  other stream in a wanted language) only the main stream's files are written: the proxy is still
-#                  made, nothing is judged. audio_dataset.py args chooses -Main and -Cand (EXP-13 addendum 9.1)
+#                  made, nothing is judged. lazymkv-dev levels-args chooses -Main and -Cand (EXP-13 addendum 9.1)
 #   streams.json   ffprobe's list of the file's streams, with all tags, dispositions, start times, and the duration
 #   ffprobe.txt    ffprobe's messages
 #   streamhash.txt ffmpeg's MD5 of the packets of every audio stream of the file, in file order
@@ -24,7 +24,7 @@
 #   proxy-check.json  ffprobe's view of the proxy written by this run (only when this run wrote it)
 #   audio-proxy.json  a copy of the dataset's manifest of the title's proxy (below). It is written LAST, once the
 #                  proxy, its manifest and the copy of this folder are all in the dataset: a folder without it is
-#                  from a run that did not finish (or from before D16), and audio_dataset.py counts the title as in
+#                  from a run that did not finish (or from before D16), and lazymkv-dev retune counts the title as in
 #                  the dataset only when one of its level folders holds it. probe-title.ps1 does not take it for
 #                  probe evidence.
 # In $TuningData\<Slug>\<Label>\ (the tuning dataset on the share; the folder $TuningData is created when missing):
@@ -36,8 +36,8 @@
 #                     so the two give the stereo width). Each track is tagged LAZYMKV_SOURCE_STREAM=<ffprobe's stream
 #                     number in the rip>, LAZYMKV_SERIES=mix, fc or side, and the stream's language. All tracks share
 #                     the rip's timeline. A reader adds the 18 dB back in float and measures in the source stream's
-#                     decoded sample format (proxy_levels.py). A track that peaks within 0.1 dB of full scale before
-#                     it is stored as integers may be clipped: the run then fails.
+#                     decoded sample format (lazymkv-dev levels-from-proxy). A track that peaks within 0.1 dB of full
+#                     scale before it is stored as integers may be clipped: the run then fails.
 #   audio-proxy.json  what was kept and from what: the source file, each track with its source stream's facts, packet
 #                     MD5 and peak, the encoding, the time. Written after the proxy: a proxy without it is incomplete.
 #   audio-levels-20ms-<Main>[-<Cand>...]\   a copy of the level folder above, with audio-proxy.json in it
@@ -435,7 +435,7 @@ try {
                 fc = 'pan=mono|c0=FC, for every stream whose layout has FC besides other channels'
                 side = 'pan=mono|c0=0.5*c0-0.5*c1, for every two-channel stream (the mix is 0.5*c0+0.5*c1)'
                 chain = "aresample=$ProxyRate,volume=-${ProxyHeadroomDb}dB,aformat=sample_fmts=s32"
-                read = "add $ProxyHeadroomDb dB in float, convert to the source stream's sample_fmt, then measure (proxy_levels.py)"
+                read = "add $ProxyHeadroomDb dB in float, convert to the source stream's sample_fmt, then measure (lazymkv-dev levels-from-proxy)"
             }
             proxy = [ordered]@{ file = 'audio-proxy.mka'; bytes = $proxyBytes; tracks = $tracks.Count }
             not_kept = 'video and subtitle streams; channels other than the mixdown, the centre and a stereo pair''s side signal; sound above 4 kHz; object-audio metadata; the packets themselves (their MD5 is kept)'
@@ -462,7 +462,7 @@ try {
     Rename-Item -LiteralPath $copy -NewName $name -ErrorAction Stop
     $partials.Clear()
     Set-Content -LiteralPath "$tuneLevels\audio-proxy.json" -Value $json -Encoding UTF8 -ErrorAction Stop
-    # Last: this file marks the title as complete in the dataset (audio_dataset.py, and the refusal above).
+    # Last: this file marks the title as complete in the dataset (lazymkv-dev retune, and the refusal above).
     Set-Content -LiteralPath "$out\audio-proxy.json" -Value $json -Encoding UTF8 -ErrorAction Stop
 
     "levels: $($mkv[0].Name) main=$Main cand=$($Cand -join ',') centre=$mainFc ffmpeg_exit=$ffmpegExit seconds=$seconds folder=$name"
