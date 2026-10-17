@@ -4,6 +4,8 @@
 //! `pub mod subtitle;` and `pub mod layout;`. Written from the spec (RP20); `SubtitleRole` is used by Tasks 6, 10,
 //! 11, 13 and 18.
 
+pub mod audio;
+
 /// The role of a kept English subtitle track (spec 8.7 "Regular and SDH" and "Forced"). The derived order is 8.10's
 /// output order: forced, regular, then SDH (subtitles for the deaf and hard of hearing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
