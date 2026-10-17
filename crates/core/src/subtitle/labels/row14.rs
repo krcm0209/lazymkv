@@ -9,6 +9,10 @@ use regex::Regex;
 use crate::audio::labels::is_slug;
 use crate::codec::Family;
 use crate::disc::{disc, Disc, StreamKind, Title};
+use crate::lookup::discdb::{parse_dischash, parse_discid, DiscDbRecord};
+use crate::lookup::name::disc_name;
+use crate::lookup::Kind;
+use crate::plan::kind::{candidate_filter, disc_kind, groups, KindSource};
 use crate::recording::files::{rip_label, MkvmergeIdent, Tmdb};
 use crate::recording::{read_json, read_text, Encoding, Errors, PathKey, Tree};
 use crate::reconcile::RIP_LOG_NAMES;
@@ -19,7 +23,7 @@ use crate::subtitle::text::{subs_run, Decision, Role};
 use crate::tracks::subtitle::{decide_subtitles, english_or_none, SubtitleDecision, SubtitleFacts};
 use crate::tracks::SubtitleRole;
 use crate::verify::{
-    by_scan_stream, removed_scan_streams, selected_streams, stream_of_track, subs_index, subs_streams,
+    by_scan_stream, removed_scan_streams, rip_title, selected_streams, stream_of_track, subs_index, subs_streams,
     subtitle_events, verify_rip, VerifyReport,
 };
 
@@ -252,13 +256,19 @@ const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 /// The width the count block pads its names to.
 const COLUMN: usize = 22;
 
-/// What a recording's tmdb.json says it is, for row 14's "1 feature film and 1 TV episode".
+/// What a recording is, for row 14's "1 feature film and 1 TV episode" (`media`): a feature film, a TV episode, or
+/// unknown when neither tmdb.json, TheDiscDB's answer nor the scan can be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Media {
     Film,
     Tv,
     Unknown,
 }
+
+/// Where `media` read a recording's kind, as the count block names it.
+const FROM_TMDB: &str = "tmdb.json";
+const FROM_DISCDB: &str = "TheDiscDB";
+const FROM_STRUCTURE: &str = "structure (8.2)";
 
 /// What one rip label gives every labelled track of it.
 struct Rip {
@@ -303,6 +313,8 @@ enum Place {
 struct Judged {
     slug: String,
     media: Media,
+    /// Where `media` was read (FROM_TMDB, FROM_DISCDB or FROM_STRUCTURE; empty for Media::Unknown).
+    media_source: &'static str,
     entry: SubtitleLabel,
     place: Place,
 }
@@ -409,17 +421,48 @@ pub fn harness(evidence: &dyn Tree, text: Option<&dyn Tree>, row14: &Row14, sett
     report(&shown, files.len(), &judged, row14, settings)
 }
 
-/// TMDb's kind of the recording from its tmdb.json: `name` a show, `title` a film, else (or unreadable) unknown.
-fn media(evidence: &dyn Tree, dir: &PathKey) -> Media {
+/// The recording's kind and where it was read: TMDb's from its tmdb.json (`name` a show, `title` a film); else spec
+/// 8.2's decision (`plan::kind::disc_kind`) over the typed scan, which takes TheDiscDB's kind from the recorded answer
+/// (thediscdb-hash.json, else the first record of thediscdb-discid.json that has titles; an answer that does not
+/// parse or is no hit gives none) and otherwise decides by structure (three or more episode-length groups within 15%
+/// of each other, or a season marker in the scan's volume label; a movie by default); Unknown only when the scan cannot
+/// be read either. Recordings of discs TheDiscDB does not know have no tmdb.json, and 8.2 still knows their kind, so
+/// their titles count towards row 14's "1 feature film and 1 TV episode". Spec 17 row 14 (a), 8.2.
+fn media(evidence: &dyn Tree, dir: &PathKey, typed: Option<&Disc>, settings: &Settings) -> (Media, &'static str) {
     let path = dir.join("tmdb.json");
-    if !evidence.is_file(&path) {
-        return Media::Unknown;
+    if evidence.is_file(&path) {
+        match read_json::<Tmdb>(evidence, &path) {
+            Ok(tmdb) if tmdb.name.is_some() => return (Media::Tv, FROM_TMDB),
+            Ok(tmdb) if tmdb.title.is_some() => return (Media::Film, FROM_TMDB),
+            _ => {}
+        }
     }
-    match read_json::<Tmdb>(evidence, &path) {
-        Ok(tmdb) if tmdb.name.is_some() => Media::Tv,
-        Ok(tmdb) if tmdb.title.is_some() => Media::Film,
-        _ => Media::Unknown,
-    }
+    let Some(typed) = typed else {
+        return (Media::Unknown, "");
+    };
+    let record = recorded_discdb(evidence, dir);
+    let name = disc_name(None, typed.volume_label.as_deref());
+    let (kind, source) = disc_kind(record.as_ref(), &groups(typed, &candidate_filter(typed, settings)), name.as_ref());
+    let media = match kind {
+        Kind::Movie => Media::Film,
+        Kind::Tv => Media::Tv,
+    };
+    (media, if source == KindSource::Discdb { FROM_DISCDB } else { FROM_STRUCTURE })
+}
+
+/// The recording's TheDiscDB answer as `lookup::discdb` parses it: thediscdb-hash.json's record, else the first record
+/// of thediscdb-discid.json that has titles; None when neither file is there, parses or is a hit. Spec 8.1.
+fn recorded_discdb(evidence: &dyn Tree, dir: &PathKey) -> Option<DiscDbRecord> {
+    let read = |name: &str| {
+        let path = dir.join(name);
+        evidence.is_file(&path).then(|| read_text(evidence, &path, Encoding::Utf8Sig, Errors::Replace).ok()).flatten()
+    };
+    let by_hash = read("thediscdb-hash.json").and_then(|text| parse_dischash(&text, "thediscdb-hash.json").ok().flatten());
+    by_hash.or_else(|| {
+        read("thediscdb-discid.json")
+            .and_then(|text| parse_discid(&text, "thediscdb-discid.json").ok())
+            .and_then(|records| records.into_iter().find(|record| !record.titles.is_empty()))
+    })
 }
 
 /// Every label of one recording: its scan once, then each rip label once for the labels on it.
@@ -431,11 +474,17 @@ fn judge_recording(
     settings: &Settings,
 ) -> Vec<Judged> {
     let slug = dir.name().to_string();
-    let media = media(evidence, dir);
-    let judged = |entry: &SubtitleLabel, place: Place| Judged { slug: slug.clone(), media, entry: entry.clone(), place };
     let scanned = read_text(evidence, &dir.join("scan.txt"), Encoding::Utf8Sig, Errors::Replace)
         .map(|log| parse(&log))
         .and_then(|scan| disc(&scan).map(|typed| (scan, typed)));
+    let (media, media_source) = media(evidence, dir, scanned.as_ref().ok().map(|(_, typed)| typed), settings);
+    let judged = |entry: &SubtitleLabel, place: Place| Judged {
+        slug: slug.clone(),
+        media,
+        media_source,
+        entry: entry.clone(),
+        place,
+    };
     let (scan, typed) = match scanned {
         Ok(found) => found,
         Err(why) => return entries.iter().map(|entry| judged(entry, Place::Unreadable(why.clone()))).collect(),
@@ -457,11 +506,13 @@ fn judge_recording(
 /// One rip label as 6.4 step 10 and 8.7 read it: rip_label's title and selection, the rip verified against the scan
 /// (`verify_rip` over `selected_streams`, with its rip log), the events of subs/ keyed by scan stream, MSG:4047's
 /// removals mapped to scan streams (`verify::removed_scan_streams`), the text rule's decisions when the OCR text is
-/// there, and `decide_subtitles` with them. `decide_subtitles` gets the text only where the app reads it (6.4 step 10,
-/// 8.7 "Text"): a file holding two or more English or no-language subtitle streams; a title with one keeps it as
-/// "English" without the text (row 14 (b)'s fallback), so the 8.7 column shows what the app decides. The text rule's
-/// decisions are still judged for every title (row 14 (a) judges the text rule). Err when a file cannot be read or the
-/// rip does not verify (its file tracks could not be mapped).
+/// there, and `decide_subtitles` with them over the title as the rip's file holds it (`verify::rip_title`, the one
+/// narrowing `lazymkv-dev decide` applies too), so the 8.7 column is what decide files for the same rip. The text is
+/// passed unchanged: `decide_subtitles` uses it only where the app reads it (6.4 step 10, 8.7 "Text": a file holding two
+/// or more English or no-language subtitle streams, `tracks::subtitle::step10_runs`), and a title with one keeps it as
+/// "English" without the text (row 14 (b)'s fallback). The text rule's decisions are still judged for every title (row
+/// 14 (a) judges the text rule). Err when a file cannot be read or the rip does not verify (its file tracks could not
+/// be mapped).
 fn read_rip(
     evidence: &dyn Tree,
     text: Option<&dyn Tree>,
@@ -488,27 +539,17 @@ fn read_rip(
     }
     let events = subtitle_events(evidence, &folder.join("subs"), &report, settings.sub_clear_max_bytes)?;
     let removed = removed_scan_streams(rip_log.as_deref(), &selection);
-    let english_in_file = title
-        .streams
-        .iter()
-        .filter(|s| {
-            s.kind == StreamKind::Subtitles
-                && selection.contains(&s.number)
-                && !removed.contains(&s.number)
-                && english_or_none(s.language.as_deref())
-        })
-        .count();
     let text = text_decisions(evidence, text, dir, label, &report, settings);
     let decision = {
         let facts = SubtitleFacts {
             events: events.clone(),
             removed,
             discdb: None,
-            text: if english_in_file >= 2 { text.as_ref().ok() } else { None },
+            text: text.as_ref().ok(),
             remembered: None,
             reviewed: None,
         };
-        decide_subtitles(&title, &facts, settings)
+        decide_subtitles(&rip_title(&title, &selection), &facts, settings)
     };
     Ok(Rip { title, report, events, decision, text })
 }
@@ -705,6 +746,7 @@ fn report(shown: &str, recordings: usize, judged: &[Judged], row14: &Row14, sett
     let pair_titles = pairs.len() as u32;
     let pair_discs = pairs.iter().map(|(slug, _)| slug.as_str()).collect::<BTreeSet<&str>>().len() as u32;
     let media_of = |slug: &str| judged.iter().find(|j| j.slug == slug).map_or(Media::Unknown, |j| j.media);
+    let source_of = |slug: &str| judged.iter().find(|j| j.slug == slug).map_or("", |j| j.media_source);
     let pair_features = pairs.iter().filter(|(slug, _)| media_of(slug) == Media::Film).count() as u32;
     let pair_tv = pairs.iter().filter(|(slug, _)| media_of(slug) == Media::Tv).count() as u32;
     let dvd_vobsub = counted
@@ -807,6 +849,16 @@ fn report(shown: &str, recordings: usize, judged: &[Judged], row14: &Row14, sett
             row14.pair_titles, row14.pair_discs, row14.pair_features, row14.pair_tv
         ),
     ));
+    // The kind each recording with such a title counts as, and where it was read (tmdb.json, TheDiscDB or 8.2's
+    // structure), so a disc counted as neither is visible.
+    for slug in pairs.iter().map(|(slug, _)| slug.as_str()).collect::<BTreeSet<&str>>() {
+        let kind = match media_of(slug) {
+            Media::Film => format!("feature film (from {})", source_of(slug)),
+            Media::Tv => format!("TV episode (from {})", source_of(slug)),
+            Media::Unknown => "kind unknown (no tmdb.json, TheDiscDB answer or readable scan)".to_string(),
+        };
+        lines.push(format!("    {slug}: {kind}"));
+    }
     lines.push(column("DVD VobSub", &format!("{dvd_vobsub} of {} DVDs with a counted English VobSub track", row14.dvd_vobsub)));
     // Row 14's UK-style SDH track, counted from the labels' style (RP25); never among the missing kinds, since row 14
     // asks for it only if the owner has a UK disc, which the harness cannot know.

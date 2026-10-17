@@ -36,7 +36,9 @@ pub struct SubtitleFacts<'a> {
     /// TheDiscDB's title when it reconciles (8.7 "the one TheDiscDB describes as subtitles or SDH").
     pub discdb: Option<&'a DiscDbTitle>,
     /// The text rule's decisions (`crate::subtitle::text::Decision`, from `text::decide`) keyed by scan stream, when OCR
-    /// text was read.
+    /// text was read. A caller passes the text it has; `decide_subtitles` uses it only where 6.4 step 10 runs
+    /// (`step10_runs`: two or more English or no-language subtitle streams in the file), so a title with one English
+    /// track keeps it as "English" without the text (8.7 "Text").
     pub text: Option<&'a BTreeMap<u32, Decision>>,
     /// The remembered overrides for this fingerprint (spec 5).
     pub remembered: Option<&'a [SubtitleOverrideEntry]>,
@@ -185,6 +187,24 @@ pub fn parent_of(streams: &[&Stream], forced_only: u32) -> Option<u32> {
 /// English ("eng" or "en") or no language (lang::is_no_language): the streams 8.7 counts. Spec 8.7, 8.6 "Languages".
 pub(crate) fn english_or_none(language: Option<&str>) -> bool {
     is_no_language(language) || language.is_some_and(is_english)
+}
+
+/// Whether 6.4 step 10 runs for `title` as its file holds it: true when the title has two or more English or
+/// no-language subtitle streams (`english_or_none`) that are not in `removed` (MakeMKV's `MSG:4047` removals mapped to
+/// scan streams). Every such stream counts, the derived forced-only streams and the closed captions included; streams
+/// in another language never do. `title` is the title as the rip's file holds it (narrowed to the rip's selection,
+/// `verify::rip_title`), so a stream the rip left out is not counted. Step 10 measures the subtitle evidence and reads
+/// the text only where this holds; a title with exactly one English subtitle stream skips it and keeps that track as
+/// "English" without the text (8.7 "Text"). The one copy of the rule: `decide_subtitles` uses the text rule's decisions
+/// only where it holds, and phase 2's engine asks it whether to run step 10. Spec 6.4 step 10, 8.7 "Text". Def: final
+/// review (E2, I1, X1). Use: `decide_subtitles`, `lazymkv-dev decide`, phase 2.
+pub fn step10_runs(title: &Title, removed: &BTreeSet<u32>) -> bool {
+    title
+        .streams_of(StreamKind::Subtitles)
+        .iter()
+        .filter(|stream| english_or_none(stream.language.as_deref()) && !removed.contains(&stream.number))
+        .count()
+        >= 2
 }
 
 /// Two attribute 3 codes name the same language: both no language; both English ("eng" or "en"); or equal through
@@ -370,8 +390,8 @@ mod roles {
     use crate::tracks::SubtitleRole;
 
     use super::{
-        alignment_groups, band, dialogue_group, english_or_none, is_full, set_aside, Band, DialoguePick, SubtitleDrop,
-        SubtitleFacts, FORCED_MAX_EVENTS,
+        alignment_groups, band, dialogue_group, english_or_none, is_full, set_aside, step10_runs, Band, DialoguePick,
+        SubtitleDrop, SubtitleFacts, FORCED_MAX_EVENTS,
     };
 
     // ------------------------------------------------------------------ the confidence table
@@ -662,7 +682,9 @@ mod roles {
     /// stream flagged forced; then a separately authored track that is not full with fewer than FORCED_MAX_EVENTS
     /// events); other not-full tracks with FORCED_MAX_EVENTS or more events dropped with partial_subtitle_dropped,
     /// those with no events dropped NoEvents; `text_disagreements` (subtitle_ambiguous and one subtitle_text_disagrees
-    /// note per stream); the confidence case; remembered then review overrides applied last (decided_by "remembered" or
+    /// note per stream), only where 6.4 step 10 runs (`step10_runs`: the text rule's decisions are used only when the
+    /// file holds two or more English or no-language subtitle streams, 8.7 "Text"; otherwise `facts.text` is ignored);
+    /// the confidence case; remembered then review overrides applied last (decided_by "remembered" or
     /// "reviewed"; an override naming a stream that is not an English or no-language subtitle stream is ignored), with
     /// confidence lookup::REMEMBERED_CONFIDENCE (1.00) and subtitle_ambiguous cleared when every English and
     /// no-language subtitle stream of the title still in the file (not in facts.removed) has an override
@@ -735,9 +757,16 @@ mod roles {
         // The streams in the file left to judge by counts, flags and timing.
         let left_to_judge: Vec<u32> = present.iter().copied().filter(|stream| !commentary.contains(stream)).collect();
 
-        // "Events": a track is full with at least 10% as many events as the largest English track.
+        // "Events": a track is full with at least 10% as many events as the largest English track. A stream described as
+        // commentary is set aside above, and set-aside streams take no part in counting (8.7 "Set aside first"), so it
+        // never sets the largest.
         let count = |stream: u32| events_of(facts, stream).len();
-        let largest = counted.iter().map(|&stream| count(stream)).max().unwrap_or(0);
+        let largest = counted
+            .iter()
+            .filter(|stream| !commentary.contains(stream))
+            .map(|&stream| count(stream))
+            .max()
+            .unwrap_or(0);
         // A stream flagged forced (4096 without 2048) is never full: its flag makes it a forced source ("Forced"; the
         // confidence table's first row lets flags decide), so it never joins a dialogue group. Nor is a stream
         // described as commentary.
@@ -973,8 +1002,10 @@ mod roles {
         let overrides = overrides_of(title, facts, &english);
 
         // 8.7 "Text": where the text's verdict differs from the counts and timing, subtitle_ambiguous and one
-        // subtitle_text_disagrees note per stream; the text never changes a role, a drop or a flag (D20).
-        if let Some(text) = facts.text {
+        // subtitle_text_disagrees note per stream; the text never changes a role, a drop or a flag (D20). The text is
+        // read only where 6.4 step 10 runs (two or more English or no-language subtitle streams in the file): a title
+        // with one English track keeps it as "English" without the flag.
+        if let Some(text) = facts.text.filter(|_| step10_runs(title, &facts.removed)) {
             for (stream, read, role) in disagreements(&kept, &dropped, text) {
                 if overrides.contains_key(&stream) {
                     continue;

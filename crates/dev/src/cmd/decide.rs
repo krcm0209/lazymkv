@@ -30,7 +30,7 @@ use lazymkv_core::audio::levels::{parse_proxy, read_manifest};
 use lazymkv_core::audio::measures::Constants;
 use lazymkv_core::audio::report::{folder_json, FolderJson};
 use lazymkv_core::audio::rule::{results, Plain, Rule as AudioRule, Verdict};
-use lazymkv_core::decision::{decide as file_decision, DecisionInputs, FileDecision};
+use lazymkv_core::decision::{decide as file_decision, same_path_reviews, DecisionInputs, FileDecision};
 use lazymkv_core::disc::{self, Disc};
 use lazymkv_core::lookup::discdb::{match_titles, DiscDbRecord, DiscDbTitle};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbRecord};
@@ -42,10 +42,10 @@ use lazymkv_core::reconcile::{reconcile, Report, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::settings::Settings;
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Decision as TextDecision, Rule as TextRule, SubsJson};
 use lazymkv_core::tracks::audio::AudioFacts;
-use lazymkv_core::tracks::subtitle::SubtitleFacts;
+use lazymkv_core::tracks::subtitle::{step10_runs, SubtitleFacts};
 use lazymkv_core::verify::{
-    by_scan_stream, failure_reviews, selected_streams, stream_of_track, subs_index, subs_streams, subtitle_events,
-    verify_rip, VerifyReport,
+    by_scan_stream, failure_reviews, rip_title, selected_streams, stream_of_track, subs_index, subs_streams,
+    subtitle_events, verify_rip, VerifyReport,
 };
 
 use crate::cmd::plan::{plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource};
@@ -183,7 +183,9 @@ pub struct FactsSummary {
     pub verdict_streams: Vec<u32>,
     /// The stream those verdicts were measured against (the level folder's `main=`).
     pub verdict_reference: Option<u32>,
-    /// Streams with a text-rule decision from the subtitles section (8.7 "Text").
+    /// Streams with a text-rule decision from the subtitles section that the decision used (8.7 "Text"): empty where 6.4
+    /// step 10 does not run (`tracks::subtitle::step10_runs`: fewer than two English or no-language subtitle streams in
+    /// the file), since `decide_subtitles` then leaves the text out.
     pub text_streams: Vec<u32>,
     /// Selected streams MakeMKV removed from the file (`MSG:4047`, 6.2 step 7).
     pub removed: Vec<u32>,
@@ -489,18 +491,20 @@ struct ContentVerdicts {
 /// label's title (`doc.reconcile.title`, with the selection decide used) must be one of `plan`'s titles (Err "the plan
 /// does not include title <n> (planned: <titles>)"). <slug>/scan.txt is typed (`disc::disc`) and the rip's
 /// mkvmerge.json is verified against the scan's title with the rip log (`verify::verify_rip`, spec 6.2 step 7), whose
-/// pairs map every file track onto its scan stream. The title is narrowed to the selected streams, so a rip with the
-/// eng selection is decided over the streams it holds. The facts: every level folder's manifest.txt and
+/// pairs map every file track onto its scan stream. The title is narrowed to the selected streams (`verify::rip_title`,
+/// the one copy `retune --subtitles` shares), so a rip with the eng selection is decided over the streams it holds. The facts: every level folder's manifest.txt and
 /// audio-proxy.json give the packet MD5s (6.4 step 10a, D13), ffprobe-streams.json the audio profiles (6.4 step 9),
 /// subs/ the event start times at `plan.settings.sub_clear_max_bytes` (`verify::subtitle_events`, 8.7), decide's
 /// reconcile section the streams MakeMKV removed (its `dropped` rows, `MSG:4047`), decide's audio section the content
 /// rule's verdicts against their `main=` stream (RP7), decide's subtitles section the text rule's decisions (8.7
-/// "Text"), and the lookup answers as the plan section parsed them (`cmd::plan::recorded_answers`) TheDiscDB's matched
+/// "Text", passed through unchanged: `decide_subtitles` uses them only where 6.4 step 10 runs), and the lookup answers as the plan section parsed them (`cmd::plan::recorded_answers`) TheDiscDB's matched
 /// title (`lookup::discdb::match_titles`) and the TMDb record that names the file when it is the plan's identity
 /// (8.9); the rip's read errors and `verify::failure_reviews(&report, !report.ok)` are carried in (the recorded rip is
 /// the last attempt there will be, so a rip that fails verification raises verify_failed, as 6.2 step 7's second
 /// failure does). The settings are the plan's; `LibraryFacts` are the defaults (phase 2 reads the library, RP18).
-/// `decision::decide` then gives the FileDecision. Err with the sentence of an input that cannot be read, or decide's.
+/// `decision::decide` then gives the FileDecision, and `decision::same_path_reviews` runs over the job's decisions as
+/// phase 2's engine runs it (decide holds one title, so it adds nothing here). Err with the sentence of an input that
+/// cannot be read, or decide's.
 /// `_ctx` is not read: every input is under the recording's tree.
 pub fn decision_doc(
     _ctx: &Ctx,
@@ -520,8 +524,7 @@ pub fn decision_doc(
     let ident = read_ident(tree, &label_dir.join("mkvmerge.json"))?;
     let rip_text = read_rip_log(tree, &label_dir)?.map(|(_, text)| text);
     let report = verify_rip(scanned, &ident, &selection, rip_text.as_deref(), typed.is_dvd);
-    let mut title = scanned.clone();
-    title.streams.retain(|stream| selection.contains(&stream.number));
+    let title = rip_title(scanned, &selection);
     let settings = &plan.settings;
     // MSG:4047's removals as decide's own reconcile section counted them (6.2 step 7): not computed a second time.
     let removed: BTreeSet<u32> = doc.reconcile.dropped.iter().map(|row| row.stream).collect();
@@ -546,7 +549,7 @@ pub fn decision_doc(
         event_streams: events.keys().copied().collect(),
         verdict_streams: verdicts.by_stream.keys().copied().collect(),
         verdict_reference: verdicts.reference,
-        text_streams: text.keys().copied().collect(),
+        text_streams: if step10_runs(&title, &removed) { text.keys().copied().collect() } else { Vec::new() },
         removed: removed.iter().copied().collect(),
     };
     let library = LibraryFacts::default();
@@ -580,7 +583,10 @@ pub fn decision_doc(
         overrides: None,
         settings,
     };
-    let decision = file_decision(&inputs)?;
+    // The job-level step after every title is decided (spec 7, 8.9): decide holds one title, so it never raises here.
+    let mut decisions = [file_decision(&inputs)?];
+    same_path_reviews(&mut decisions);
+    let [decision] = decisions;
     Ok(DecisionDoc { title_key: planned.key.clone(), verify: report, facts, decision })
 }
 
@@ -1612,19 +1618,27 @@ SINFO:0,4,6,0,"PGS"
         )
     }
 
-    /// The label's subs/: index.json with one English PGS stream, n 0 = file track `track_id`, and its 40 events 3 s
-    /// apart, each a 3000-byte packet followed by a 30-byte clear packet.
-    fn subs_b(label: &Path, track_id: i64) {
-        let index = json!([{"n": 0, "track_id": track_id, "language": "eng", "codec": "HDMV PGS", "track_name": null,
-                            "forced": false, "default": false}]);
-        write(&label.join("subs/index.json"), index.to_string());
+    /// The label's subs/: index.json with one English PGS stream per file track of `track_ids`, n 0, 1 and on in that
+    /// order, and each stream's 40 events 3 s apart, each a 3000-byte packet followed by a 30-byte clear packet.
+    fn subs_b(label: &Path, track_ids: &[i64]) {
+        let index: Vec<Value> = track_ids
+            .iter()
+            .enumerate()
+            .map(|(n, track_id)| {
+                json!({"n": n, "track_id": track_id, "language": "eng", "codec": "HDMV PGS", "track_name": null,
+                       "forced": false, "default": false})
+            })
+            .collect();
+        write(&label.join("subs/index.json"), Value::Array(index).to_string());
         let mut packets = Vec::new();
         for k in 0..40_i64 {
             let t = 10.0 + 3.0 * k as f64;
             packets.push(json!({"pts_time": format!("{:.6}", t), "duration_time": "2.000000", "size": "3000"}));
             packets.push(json!({"pts_time": format!("{:.6}", t + 2.0), "duration_time": "N/A", "size": "30"}));
         }
-        write(&label.join("subs/sub-0.packets.json"), json!({"packets": packets}).to_string());
+        for n in 0..track_ids.len() {
+            write(&label.join(format!("subs/sub-{n}.packets.json")), json!({"packets": packets}).to_string());
+        }
     }
 
     /// recs/disc-b under `root`: scan.txt and the rip labels all-tracks (title 0, every stream), eng-only (title 0, the
@@ -1649,7 +1663,7 @@ SINFO:0,4,6,0,"PGS"
             &all.join("audio-levels-20ms-1-2-3-4/manifest.txt"),
             manifest_b(&[("main", 1, TWIN_A), ("cand", 2, TWIN_B), ("cand", 3, TWIN_A), ("cand", 4, TWIN_B)]),
         );
-        subs_b(&all, 5);
+        subs_b(&all, &[5]);
 
         let eng = rec.join("eng-only");
         write(&eng.join("rip-summary.json"), summary(0, "eng-only.mmcp.xml"));
@@ -1657,12 +1671,38 @@ SINFO:0,4,6,0,"PGS"
         write(&eng.join("rip.txt"), removal(4));
         write(&eng.join("ffprobe-streams.json"), ffprobe_b(&["DTS-HD MA", "DTS-HD MA"], 1));
         write(&eng.join("audio-levels-20ms-1-2/manifest.txt"), manifest_b(&[("main", 1, TWIN_A), ("cand", 2, TWIN_A)]));
-        subs_b(&eng, 3);
+        subs_b(&eng, &[3]);
 
         let extra = rec.join("extra");
         write(&extra.join("rip-summary.json"), summary(1, "all-tracks.mmcp.xml"));
         write(&extra.join("mkvmerge.json"), ident_b(&[video, ("audio", "AC-3", Some(2))], 1, 180_200_000_000));
         write(&extra.join("rip.txt"), RIP);
+    }
+
+    /// recs/disc-b's rip label forced-kept under `root` (title 0, every stream): MakeMKV kept the derived forced-only
+    /// stream 6, so the file holds two English subtitle streams (file tracks 5 and 6, both with events) and 6.4 step 10
+    /// runs (`step10_runs`).
+    fn forced_kept(root: &Path) {
+        let label = root.join("recs/disc-b/forced-kept");
+        let summary = json!({"ok": true, "title": 0, "profile": "C:\\made-up\\all-tracks.mmcp.xml"}).to_string();
+        write(&label.join("rip-summary.json"), summary);
+        let tracks = [
+            ("video", "AVC/H.264/MPEG-4p10", None),
+            ("audio", "DTS-HD Master Audio", Some(6)),
+            ("audio", "DTS", Some(6)),
+            ("audio", "DTS-HD Master Audio", Some(6)),
+            ("audio", "DTS", Some(6)),
+            ("subtitles", "HDMV PGS", None),
+            ("subtitles", "HDMV PGS", None),
+        ];
+        write(&label.join("mkvmerge.json"), ident_b(&tracks, 5, 3_000_500_000_000));
+        write(&label.join("rip.txt"), RIP);
+        write(&label.join("ffprobe-streams.json"), ffprobe_b(&["DTS-HD MA", "DTS", "DTS-HD MA", "DTS"], 2));
+        write(
+            &label.join("audio-levels-20ms-1-2-3-4/manifest.txt"),
+            manifest_b(&[("main", 1, TWIN_A), ("cand", 2, TWIN_B), ("cand", 3, TWIN_A), ("cand", 4, TWIN_B)]),
+        );
+        subs_b(&label, &[5, 6]);
     }
 
     /// decide_doc over recs/disc-b (named by its path) with cwd `root`, no OCR text, the profile's selection and no
@@ -2060,32 +2100,59 @@ SINFO:0,4,6,0,"PGS"
         decided.decision.subtitles.notes.iter().map(|noted| (noted.note, noted.stream)).collect()
     }
 
+    /// The kept subtitle tracks of forced-kept: the derived forced-only stream 6 forced (its parent 5 is the regular
+    /// track), then stream 5 as "English", each with `events` events.
+    fn forced_kept_tracks(events: usize) -> [(u32, SubtitleRole, Option<usize>); 2] {
+        [(6, SubtitleRole::Forced, Some(events)), (5, SubtitleRole::Regular, Some(events))]
+    }
+
     #[test]
     fn the_text_decisions_come_from_the_subtitles_section_through_subs_index_json() {
         let tmp = Scratch::new("decision-text");
         let root = tmp.0.clone();
         disc_b(&root);
-        // n 0 is file track 5, scan stream 5; n 1 is in no index entry and is left out.
-        let disagree = decided_with(&root, "all-tracks", |_, doc| {
-            with_text(doc, &[(0, Some(Role::Sdh)), (1, Some(Role::Regular))]);
+        forced_kept(&root);
+        // n 0 is file track 5, scan stream 5; n 1 is file track 6, scan stream 6; n 2 is in no index entry and is left
+        // out. The file holds two English subtitle streams, so 6.4 step 10 runs and the text is read.
+        let disagree = decided_with(&root, "forced-kept", |_, doc| {
+            with_text(doc, &[(0, Some(Role::Sdh)), (1, Some(Role::Forced)), (2, Some(Role::Regular))]);
         })
         .unwrap();
-        assert_eq!(disagree.facts.text_streams, vec![5]);
+        assert_eq!(disagree.facts.text_streams, vec![5, 6]);
         // The text never changes a track: the counts keep stream 5 as "English".
-        assert_eq!(kept_subtitles(&disagree.decision), [(5, SubtitleRole::Regular, Some(40))]);
+        assert_eq!(kept_subtitles(&disagree.decision), forced_kept_tracks(40));
         assert_eq!(disagree.decision.subtitles.reviews, [ReviewReason::SubtitleAmbiguous]);
         assert_eq!(subtitle_notes(&disagree), [(Note::SubtitleTextDisagrees, Some(5))]);
         assert_eq!(disagree.decision.reviews, [ReviewReason::IdentityUnknown, ReviewReason::SubtitleAmbiguous]);
         assert_eq!(disagree.decision.confidences.track, 0.60);
         // A text verdict that agrees adds nothing.
-        let agree = decided_with(&root, "all-tracks", |_, doc| with_text(doc, &[(0, Some(Role::Regular))])).unwrap();
+        let agree = decided_with(&root, "forced-kept", |_, doc| with_text(doc, &[(0, Some(Role::Regular))])).unwrap();
         assert_eq!(agree.facts.text_streams, vec![5]);
         assert_eq!(agree.decision.subtitles.reviews, Vec::<ReviewReason>::new());
         assert_eq!(subtitle_notes(&agree), Vec::<(Note, Option<u32>)>::new());
         assert_eq!(agree.decision.confidences.track, 0.90);
         // A stream the text rule did not decide gives no text decision.
-        let undecided = decided_with(&root, "all-tracks", |_, doc| with_text(doc, &[(0, None)])).unwrap();
+        let undecided = decided_with(&root, "forced-kept", |_, doc| with_text(doc, &[(0, None)])).unwrap();
         assert_eq!(undecided.facts.text_streams, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn a_title_with_one_english_stream_in_the_file_keeps_it_as_english_whatever_the_text_reads() {
+        // all-tracks holds one English PGS stream: MakeMKV removed its derived forced-only stream 6 (MSG:4047). 6.4 step
+        // 10 does not run (8.7 "Text": the text is read only with two or more English subtitle streams), so a text verdict
+        // reading stream 5 as SDH adds no review and no note, and the decision is the one retune --subtitles' 8.7 column
+        // gives (section 17 row 14 (b)'s fallback).
+        let tmp = Scratch::new("decision-one-english");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        let decided = decided_with(&root, "all-tracks", |_, doc| with_text(doc, &[(0, Some(Role::Sdh))])).unwrap();
+        assert_eq!(decided.facts.removed, vec![6]);
+        assert_eq!(decided.facts.text_streams, Vec::<u32>::new());
+        assert_eq!(kept_subtitles(&decided.decision), [(5, SubtitleRole::Regular, Some(40))]);
+        assert_eq!(decided.decision.subtitles.reviews, Vec::<ReviewReason>::new());
+        assert_eq!(subtitle_notes(&decided), Vec::<(Note, Option<u32>)>::new());
+        assert_eq!(decided.decision.reviews, [ReviewReason::IdentityUnknown]);
+        assert_eq!(decided.decision.confidences.track, 0.90);
     }
 
     #[test]
@@ -2093,28 +2160,29 @@ SINFO:0,4,6,0,"PGS"
         let tmp = Scratch::new("decision-subtitle-settings");
         let root = tmp.0.clone();
         disc_b(&root);
+        forced_kept(&root);
         assert_eq!(Settings::default().text_rule(), TextRule::default());
         // Defaults: 64-byte clear packets are not events; the text rule is the section's.
-        let default = decided_with(&root, "all-tracks", |_, doc| with_text(doc, &[(0, Some(Role::Sdh))])).unwrap();
-        assert_eq!(kept_subtitles(&default.decision), [(5, SubtitleRole::Regular, Some(40))]);
+        let default = decided_with(&root, "forced-kept", |_, doc| with_text(doc, &[(0, Some(Role::Sdh))])).unwrap();
+        assert_eq!(kept_subtitles(&default.decision), forced_kept_tracks(40));
         assert_eq!(default.facts.text_streams, vec![5]);
         assert_eq!(default.decision.subtitles.reviews, [ReviewReason::SubtitleAmbiguous]);
         // sub_clear_max_bytes 0: every packet is an event, and the text rule differs from the section's.
-        let zero = decided_with(&root, "all-tracks", |plan, doc| {
+        let zero = decided_with(&root, "forced-kept", |plan, doc| {
             plan.settings.sub_clear_max_bytes = 0;
             with_text(doc, &[(0, Some(Role::Sdh))]);
         })
         .unwrap();
-        assert_eq!(kept_subtitles(&zero.decision), [(5, SubtitleRole::Regular, Some(80))]);
+        assert_eq!(kept_subtitles(&zero.decision), forced_kept_tracks(80));
         assert_eq!(zero.facts.text_streams, Vec::<u32>::new());
         assert_eq!(zero.decision.subtitles.reviews, Vec::<ReviewReason>::new());
         // subs_same_min 0.8: the events are the default's, the text is left out.
-        let stricter = decided_with(&root, "all-tracks", |plan, doc| {
+        let stricter = decided_with(&root, "forced-kept", |plan, doc| {
             plan.settings.subs_same_min = 0.8;
             with_text(doc, &[(0, Some(Role::Sdh))]);
         })
         .unwrap();
-        assert_eq!(kept_subtitles(&stricter.decision), [(5, SubtitleRole::Regular, Some(40))]);
+        assert_eq!(kept_subtitles(&stricter.decision), forced_kept_tracks(40));
         assert_eq!(stricter.facts.text_streams, Vec::<u32>::new());
         assert_eq!(stricter.decision.confidences.track, 0.90);
     }

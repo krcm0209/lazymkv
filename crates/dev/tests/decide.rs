@@ -702,8 +702,10 @@ fn check_decision(
     let levels = !doc.audio.is_empty();
     // A level folder whose level series are absent was skipped: no verdict.
     let measured = levels && doc.audio.iter().all(|entry| matches!(entry, AudioEntry::Results(_)));
-    // OCR text was read: the text may add subtitle_ambiguous (8.7 "Text").
-    let text_read = matches!(doc.subtitles, SubtitleEntry::Results(_));
+    // OCR text was read and the decision used it: the text may add subtitle_ambiguous (8.7 "Text"). The decision uses it
+    // only where 6.4 step 10 runs (two or more English or no-language subtitle streams in the file), and the facts
+    // section lists the text streams only then, so a title with one English track is compared with OCR text too.
+    let text_used = !got.facts.text_streams.is_empty();
     // Without the verdicts, the review reasons they raise are left out of both sides.
     let judged = |reasons: &[ReviewReason]| -> Vec<ReviewReason> {
         reasons.iter().copied().filter(|reason| measured || !VERDICT_REVIEWS.contains(reason)).collect()
@@ -754,14 +756,13 @@ fn check_decision(
             rec.slug, label
         ));
     }
-    if text_read {
+    if text_used {
         skip(&format!(
-            "{}/{}: decision's track confidence, reviews and disposition not compared: OCR text was read, and the \
-             text can add subtitle_ambiguous (8.7 \"Text\")",
+            "{}/{}: decision's track confidence, reviews and disposition not compared: the decision used OCR text, \
+             and the text can add subtitle_ambiguous (8.7 \"Text\")",
             rec.slug, label
         ));
     } else {
-        same(failures, &format!("{at}: text streams"), got.facts.text_streams.clone(), Vec::new());
         same(failures, &format!("{at}: track confidence"), decision.confidences.track, want.confidences.2);
         same(failures, &format!("{at}: reviews"), judged(&decision.reviews), judged(&want.reviews));
     }
@@ -775,7 +776,7 @@ fn check_decision(
         Ok(found) => {
             let path = found.decision.path.as_ref().map(|named| named.path.clone());
             same(failures, &format!("{at}: final path"), path, want.path.clone());
-            if measured && !text_read {
+            if measured && !text_used {
                 same(failures, &format!("{at}: disposition"), found.decision.disposition, want.disposition);
             }
         }

@@ -599,6 +599,7 @@ mod runs {
                 "  closed-captions       1 (with its DVD's VobSub tracks)",
                 "  other                 0",
                 "  regular and SDH       1 of 3 titles, from 1 of 2 discs; feature films 0 of 1, TV episodes 1 of 1",
+                "    disc-b: TV episode (from tmdb.json)",
                 "  DVD VobSub            1 of 1 DVDs with a counted English VobSub track",
                 "  UK-style SDH          0 of 1 counted SDH tracks labelled style uk (only if the owner has a UK disc)",
                 "  placed, no review     3 of 5 judged tracks (row 14 (a) asks for at least half)",
@@ -1077,5 +1078,84 @@ mod runs {
                 "  disc-3/eng-only stream 3 (scan stream 3, 44 events): labelled sdh (read); 8.7 sdh; text not read; not judged",
             ]
         );
+    }
+
+    /// disc-b's two English PGS streams with regular and SDH labels (both counted), as `slug` with no tmdb.json and a
+    /// scan whose disc attributes are `disc`.
+    fn pair_without_tmdb(slug: &'static str, disc: &[(u32, &str)]) -> Rec {
+        let at = starts(40, 10.0, 3.0);
+        let subs = [("eng", at.clone(), false, true), ("eng", at, true, true)];
+        let labels = vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "watched", true)];
+        let mut rec = bluray(slug, None, "eng-only", ENG_ONLY, &subs, labels);
+        rec.scan = scan_of(disc, BD_TITLE, &[AVC.to_vec(), pgs_attrs("eng"), pgs_attrs("eng")]);
+        rec
+    }
+
+    /// TheDiscDB's dischash answer of the API's shape for a disc of `media_type` ("Movie" or "Series"), one title.
+    fn discdb_answer(media_type: &str) -> String {
+        json!({"media": {"title": "Made Up", "year": 2001, "type": media_type, "external_ids": {}},
+               "titles": [{"index": 0, "source_file": "00001.mpls", "duration": "0:10:00"}]})
+        .to_string()
+    }
+
+    #[test]
+    fn a_title_on_a_disc_without_tmdb_json_counts_by_its_thediscdb_kind() {
+        let (mut evidence, text) = trees(&[pair_without_tmdb("disc-m", &[(1, "Blu-ray disc")])]);
+        evidence.insert_file("disc-m/thediscdb-hash.json", discdb_answer("Movie"));
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            line(&h, "  regular and SDH "),
+            "  regular and SDH       1 of 3 titles, from 1 of 2 discs; feature films 1 of 1, TV episodes 0 of 1"
+        );
+        assert_eq!(line(&h, "    disc-m: "), "    disc-m: feature film (from TheDiscDB)");
+        // A series by its disc ID answer when the hash answer is not a hit.
+        let (mut evidence, text) = trees(&[pair_without_tmdb("disc-s", &[(1, "Blu-ray disc")])]);
+        evidence.insert_file("disc-s/thediscdb-hash.json", "");
+        evidence.insert_file("disc-s/thediscdb-discid.json", format!("[{}]", discdb_answer("Series")));
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(line(&h, "    disc-s: "), "    disc-s: TV episode (from TheDiscDB)");
+        assert!(line(&h, "  regular and SDH ").ends_with("feature films 0 of 1, TV episodes 1 of 1"));
+    }
+
+    #[test]
+    fn a_title_on_a_disc_unknown_to_thediscdb_counts_by_its_structural_kind() {
+        // No tmdb.json and no TheDiscDB answer (both Short Circuit recordings' case): 8.2 decides from the scan. One
+        // ten-minute group and a plain volume label make a movie.
+        let (evidence, text) = trees(&[pair_without_tmdb("disc-f", &[(1, "Blu-ray disc"), (32, "MADE_UP_FILM")])]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(line(&h, "    disc-f: "), "    disc-f: feature film (from structure (8.2))");
+        assert!(line(&h, "  regular and SDH ").ends_with("feature films 1 of 1, TV episodes 0 of 1"));
+        // A season marker in the volume label makes it TV (8.2).
+        let (evidence, text) = trees(&[pair_without_tmdb("disc-t", &[(1, "Blu-ray disc"), (32, "MADE UP SHOW S1D1")])]);
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(line(&h, "    disc-t: "), "    disc-t: TV episode (from structure (8.2))");
+        assert!(line(&h, "  regular and SDH ").ends_with("feature films 0 of 1, TV episodes 1 of 1"));
+    }
+
+    #[test]
+    fn tmdb_json_still_names_the_kind_first() {
+        // disc-b's tmdb.json names a show; a TheDiscDB answer calling it a movie does not change that.
+        let (mut evidence, text) =
+            trees(&[disc_b(vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "watched", true)], true)]);
+        evidence.insert_file("disc-b/thediscdb-hash.json", discdb_answer("Movie"));
+        let h = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(line(&h, "    disc-b: "), "    disc-b: TV episode (from tmdb.json)");
+    }
+
+    #[test]
+    fn an_eng_only_rip_is_decided_over_its_selected_streams_as_decide_decides_it() {
+        // The scan's title 0 has an English PGS stream (1, ripped) and a no-language one (2) that the eng selection
+        // leaves out, so the file holds one English subtitle stream. 8.7 is decided over the rip's streams only
+        // (verify::rip_title, as lazymkv-dev decide does): 6.4 step 10 does not run, the text is not used, and the
+        // track is kept as "English" with no review whatever the (cued) text reads.
+        let at = starts(40, 10.0, 3.0);
+        let mut rec =
+            bluray("disc-u", film(), "eng-only", ENG_ONLY, &[("eng", at, true, true)], vec![("eng-only", 1, "sdh", "read", true)]);
+        rec.scan = scan_of(&[(1, "Blu-ray disc")], BD_TITLE, &[AVC.to_vec(), pgs_attrs("eng"), pgs_attrs("und")]);
+        let (evidence, text) = trees(&[rec]);
+        let h = judge(&evidence, Some(&text), &met_row14(), &Settings::default());
+        let tracks = section(&h, "Tracks (");
+        assert_eq!(tracks.len(), 1, "{tracks:?}");
+        assert!(tracks[0].contains("; 8.7 regular; text "), "{}", tracks[0]);
     }
 }
