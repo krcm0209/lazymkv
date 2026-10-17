@@ -22,7 +22,7 @@ use crate::lookup::discdb::{match_titles, DiscDbRecord};
 use crate::lookup::name::DiscName;
 use crate::lookup::tmdb::{TmdbIdentity, TmdbKind, TmdbRecord};
 use crate::lookup::{identify, Identity, IdentityStep, LookupInputs, RuntimeFacts, REMEMBERED_CONFIDENCE};
-use crate::plan::movie::{Feature, LibraryFacts, MoviePlan, StructureOutcome, TitleRule, THEATRICAL_CUT};
+use crate::plan::movie::{is_theatrical, Feature, LibraryFacts, MoviePlan, StructureOutcome, TitleRule};
 use crate::plan::tv::{Episode, EpisodeTitle, Found, SeasonSession, TvPlan};
 use crate::remembered::{Overrides, Remembered, TitleRole};
 use crate::review::{sorted_unique, Note, Noted, ReviewReason};
@@ -500,6 +500,25 @@ fn assigned_roles(inputs: &PlanInputs<'_>, sentences: &mut Vec<String>) -> Optio
     Some(roles.into_iter().map(|(number, role)| (number, role.clone())).collect())
 }
 
+/// Spec 11's Assign titles as a feature for 8.4's `edition_names`: `Feature` is the theatrical or main cut (no edition),
+/// `Cut { edition }` a feature with the owner's name, theatrical when `movie::is_theatrical` says the name names the
+/// theatrical cut (Task 5's one test of "theatrical"); None for episodes and Ignored. The one copy of this mapping: the
+/// re-plan's `assigned_entries` and the decision (`decision::decide` and its `job_features`) both call it, so a job
+/// approved at the disposition gate is filed as a re-plan would plan it (Open point 32). Spec 11, 8.4. Def: T13.
+/// Use: T13 (`decision::decide`, `job_features`, and Task 7's `assigned_entries` as Task 13 rewrites it).
+pub(crate) fn assigned_feature(number: u32, role: &TitleRole) -> Option<Feature> {
+    match role {
+        TitleRole::Feature => Some(Feature { title: number, edition: None, theatrical: true, siblings: Vec::new() }),
+        TitleRole::Cut { edition } => Some(Feature {
+            title: number,
+            edition: Some(edition.clone()),
+            theatrical: is_theatrical(Some(edition.as_str())),
+            siblings: Vec::new(),
+        }),
+        TitleRole::Episodes { .. } | TitleRole::Ignored => None,
+    }
+}
+
 /// The assigned titles as plan entries and the kind they make: features and cuts in title order with 8.4's edition names
 /// (a Cut keeps the owner's name; a Feature is the theatrical or main cut), then episodes by (season, first episode); an
 /// Ignored title or a title the scan lacks is left out. Only episodes make the disc TV, only features a movie; a mix, or
@@ -519,15 +538,7 @@ fn assigned_entries(
             continue;
         }
         match role {
-            TitleRole::Feature => {
-                features.push(Feature { title: number, edition: None, theatrical: true, siblings: Vec::new() });
-            }
-            TitleRole::Cut { edition } => features.push(Feature {
-                title: number,
-                edition: Some(edition.clone()),
-                theatrical: edition.as_str() == THEATRICAL_CUT,
-                siblings: Vec::new(),
-            }),
+            TitleRole::Feature | TitleRole::Cut { .. } => features.extend(assigned_feature(number, role)),
             TitleRole::Episodes { season, episodes: numbers } => episodes.push((
                 number,
                 Episode { season: Some(*season), episodes: numbers.clone(), name: None },
