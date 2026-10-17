@@ -344,5 +344,762 @@ fn only_group(groups: &[Vec<u32>], holds: impl Fn(u32) -> bool) -> Option<usize>
     }
 }
 
+pub use roles::{
+    confidence, decide_subtitles, text_disagreements, SubtitleCase, SubtitleDecision, SubtitleTrack,
+    SUBTITLE_ALIGNMENT_CONFIDENCE, SUBTITLE_AMBIGUOUS_CONFIDENCE, SUBTITLE_FLAGS_CONFIDENCE, SUBTITLE_ONE_FULL_CONFIDENCE,
+};
+
+mod roles {
+    //! Spec 8.7 from "Regular and SDH" to the confidence table, and 8.7 "Text" (D20, D23, section 17 row 14's
+    //! fallback): the roles of the kept English subtitle tracks, the forced track, the drops of every other subtitle
+    //! stream, the confidence of the subtitle decision and the reviews the text rule adds; then the remembered and
+    //! review overrides of spec 5 and 11. Built on the evidence half of this file (8.7 "Set aside first" to "Dialogue
+    //! group": `set_aside`, `is_full`, `band`, `alignment_groups`, `dialogue_group`). A private module with its own
+    //! `use` lines, so that its names never meet those of the evidence half; the `pub use` line above it re-exports its
+    //! public items as `tracks::subtitle::*`. Written from the spec (RP20). Used by Tasks 11, 13, 16 and 18.
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use crate::disc::{Flags, StreamKind, Title};
+    use crate::lookup::{DescriptionKind, REMEMBERED_CONFIDENCE};
+    use crate::remembered::{apply_subtitles, SubtitleOverride};
+    use crate::review::{sorted_unique, Note, Noted, ReviewReason};
+    use crate::settings::Settings;
+    use crate::subtitle::text::{Decision, Role};
+    use crate::tracks::audio::descriptions;
+    use crate::tracks::SubtitleRole;
+
+    use super::{
+        alignment_groups, band, dialogue_group, english_or_none, is_full, set_aside, Band, DialoguePick, SubtitleDrop,
+        SubtitleFacts, FORCED_MAX_EVENTS,
+    };
+
+    // ------------------------------------------------------------------ the confidence table
+
+    /// Spec 8.7's confidence table, first row: flags or database descriptions decide every track, or the title has no
+    /// English subtitle stream. Def: T10. Use: T10, T13.
+    pub const SUBTITLE_FLAGS_CONFIDENCE: f64 = 0.95;
+    /// Second row: exactly one full English track. Def: T10. Use: T10, T13.
+    pub const SUBTITLE_ONE_FULL_CONFIDENCE: f64 = 0.90;
+    /// Third row: alignment decides between two or more full tracks, with every pair outside the in-between band.
+    /// Def: T10. Use: T10, T13.
+    pub const SUBTITLE_ALIGNMENT_CONFIDENCE: f64 = 0.85;
+    /// Fourth row: subtitle_ambiguous was raised. Def: T10. Use: T10, T13.
+    pub const SUBTITLE_AMBIGUOUS_CONFIDENCE: f64 = 0.60;
+
+    /// The confidence rows of 8.7's table. The first row has two cases: flags or descriptions decided (no English or
+    /// no-language stream was left to counting and timing, or every counted one was kept by its flag or by its
+    /// TheDiscDB description), and no English subtitle stream at all. Spec 8.7. Def: T10. Use: T10, T13.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SubtitleCase {
+        /// Row 1: flags or database descriptions decide every track.
+        FlagsOrDescriptions,
+        /// Row 1: the title has no English or no-language subtitle stream.
+        NoEnglish,
+        /// Row 2: exactly one full English track, and the one-stream fallback of section 17 row 14 (b).
+        OneFull,
+        /// Row 3: alignment decided between two or more full tracks.
+        Alignment,
+        /// Row 4: subtitle_ambiguous was raised.
+        Ambiguous,
+    }
+
+    impl SubtitleCase {
+        /// Every case, in the table's order. Spec 8.7.
+        pub const ALL: [SubtitleCase; 5] = [
+            SubtitleCase::FlagsOrDescriptions,
+            SubtitleCase::NoEnglish,
+            SubtitleCase::OneFull,
+            SubtitleCase::Alignment,
+            SubtitleCase::Ambiguous,
+        ];
+
+        /// The snake_case spelling, as serde writes it. Spec 8.7.
+        pub fn as_str(self) -> &'static str {
+            match self {
+                SubtitleCase::FlagsOrDescriptions => "flags_or_descriptions",
+                SubtitleCase::NoEnglish => "no_english",
+                SubtitleCase::OneFull => "one_full",
+                SubtitleCase::Alignment => "alignment",
+                SubtitleCase::Ambiguous => "ambiguous",
+            }
+        }
+    }
+
+    impl std::str::FromStr for SubtitleCase {
+        type Err = String;
+
+        /// Only the `as_str` spellings.
+        fn from_str(text: &str) -> Result<SubtitleCase, String> {
+            SubtitleCase::ALL
+                .into_iter()
+                .find(|case| case.as_str() == text)
+                .ok_or_else(|| format!("not a subtitle confidence case: {text}"))
+        }
+    }
+
+    /// The table's value for a case (FlagsOrDescriptions and NoEnglish 0.95, OneFull 0.90, Alignment 0.85, Ambiguous
+    /// 0.60). Spec 8.7. Def: T10. Use: T10.
+    pub fn confidence(case: SubtitleCase) -> f64 {
+        match case {
+            SubtitleCase::FlagsOrDescriptions | SubtitleCase::NoEnglish => SUBTITLE_FLAGS_CONFIDENCE,
+            SubtitleCase::OneFull => SUBTITLE_ONE_FULL_CONFIDENCE,
+            SubtitleCase::Alignment => SUBTITLE_ALIGNMENT_CONFIDENCE,
+            SubtitleCase::Ambiguous => SUBTITLE_AMBIGUOUS_CONFIDENCE,
+        }
+    }
+
+    // ------------------------------------------------------------------ the decision and the text's disagreements
+
+    /// A kept subtitle track. Spec 8.7 ("Regular and SDH", "Forced") and 8.10 (its name and flags). Def: T10. Use: T11,
+    /// T13, T16.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct SubtitleTrack {
+        /// The scan's stream number.
+        pub stream: u32,
+        /// Forced, regular or SDH (8.10's order).
+        pub role: SubtitleRole,
+        /// `role.name()`: "English (Forced)", "English" or "English (SDH)" (8.7).
+        pub name: String,
+        /// True for the forced role (8.7 "Flag it forced").
+        pub forced: bool,
+        /// True for the SDH role (8.7 "hearing-impaired flag"; the closed-caption stream is SDH by type).
+        pub hearing_impaired: bool,
+        /// Always false in the SubtitleDecision; the file's default subtitle is the Layout's OutputTrack.default (8.10,
+        /// `tracks::layout::default_subtitle`).
+        pub default: bool,
+        /// The stream's event count from 6.4 step 10; None when the step measured nothing for it.
+        pub events: Option<usize>,
+        /// True for the DVD closed-caption stream.
+        pub closed_captions: bool,
+        /// For a forced-only stream, its parent.
+        pub parent: Option<u32>,
+        /// How this track was decided: "flag", "description", "count", "alignment", "closed_captions", "single",
+        /// "remembered", "reviewed".
+        pub decided_by: String,
+    }
+
+    /// One title's subtitle decision. Spec 8.7. Def: T10. Use: T11, T13, T16, T18.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct SubtitleDecision {
+        /// In order forced, regular, SDH (8.10); within one role by stream number.
+        pub kept: Vec<SubtitleTrack>,
+        /// Every subtitle stream that is not kept, with why, by stream number (8.7's first sentence).
+        pub dropped: Vec<(u32, SubtitleDrop)>,
+        /// Set aside (8.7): derived forced-only streams with their parents, flagged DVD streams, the closed-caption
+        /// stream, the streams TheDiscDB describes as commentary (R6); each with a sentence; by stream number.
+        pub set_aside: Vec<(u32, String)>,
+        /// The full English and no-language tracks (8.7 "Events"), in scan order.
+        pub full: Vec<u32>,
+        /// `alignment_groups` over the full tracks.
+        pub groups: Vec<Vec<u32>>,
+        /// The index in `groups` of the dialogue group. When groups exist and no rule of 8.7 picks one (two largest
+        /// groups of equal size included), the first group stands in for the regular and SDH roles, `dialogue_pick` is
+        /// None and subtitle_ambiguous is raised; the full tracks of the other groups are then kept as regular, not
+        /// dropped (D15, D20).
+        pub dialogue_group: Option<usize>,
+        /// Which rule picked the dialogue group.
+        pub dialogue_pick: Option<DialoguePick>,
+        /// Every pair of full tracks in scan order, with the larger aligned share and its band (8.7 "Alignment").
+        pub pairs: Vec<(u32, u32, f64, Band)>,
+        /// The row of 8.7's confidence table.
+        pub case: SubtitleCase,
+        /// `confidence(case)`, or 1.00 when remembered or review overrides cover every English and no-language
+        /// subtitle stream of the title still in the file (spec 5, 8.8).
+        pub confidence: f64,
+        /// partial_subtitle_dropped and subtitle_text_disagrees, each naming its stream, in the order raised.
+        pub notes: Vec<Noted>,
+        /// subtitle_ambiguous, or nothing (sorted and unique).
+        pub reviews: Vec<ReviewReason>,
+    }
+
+    /// The streams where the text rule's verdict differs from the decision's, with the text's role and the kept role
+    /// (None when the decision drops the stream), in stream order. A stream of `text` is compared when the decision
+    /// keeps it or drops it for any reason but another language (an English or no-language stream). SetAside never
+    /// differs; Keep always differs (`text::decide` writes Keep only with its own review: the text asks for a review
+    /// 8.7 did not raise); Drop differs from any kept role; Regular, Sdh and Forced differ from a drop and from another
+    /// kept role; and any verdict but SetAside that carries the text rule's review differs (`text::before_yes` reads a
+    /// review that 8.7 does not raise as a disagreement). Spec 8.7 "Text", Open point 13, D20.
+    fn disagreements(
+        kept: &[SubtitleTrack],
+        dropped: &BTreeMap<u32, SubtitleDrop>,
+        text: &BTreeMap<u32, Decision>,
+    ) -> Vec<(u32, Role, Option<SubtitleRole>)> {
+        let mut out = Vec::new();
+        for (&stream, verdict) in text {
+            let role = kept.iter().find(|track| track.stream == stream).map(|track| track.role);
+            let why = dropped.get(&stream);
+            if role.is_none() && why.is_none() {
+                continue;
+            }
+            if matches!(why, Some(SubtitleDrop::OtherLanguage)) {
+                continue;
+            }
+            // A review as text::before_yes reads one: present and not empty.
+            let reviewed = verdict.review.as_deref().is_some_and(|review| !review.is_empty());
+            let differs = match verdict.role {
+                Role::SetAside => false,
+                // text::decide writes Keep only with its own review: the text asks for a review 8.7 did not raise.
+                Role::Keep => true,
+                Role::Drop => role.is_some(),
+                Role::Regular => role != Some(SubtitleRole::Regular),
+                Role::Sdh => role != Some(SubtitleRole::Sdh),
+                Role::Forced => role != Some(SubtitleRole::Forced),
+            } || (verdict.role != Role::SetAside && reviewed);
+            if differs {
+                out.push((stream, verdict.role, role));
+            }
+        }
+        out
+    }
+
+    /// 8.7 "Text": the streams where a text decision differs from the counts, for any English or no-language stream:
+    /// its role (Regular, Sdh, Forced, Drop) differs from the kept role (or kept against a Drop, or dropped against a
+    /// kept role). SetAside never disagrees; Keep, and any verdict carrying the text rule's review, always disagree
+    /// (text::before_yes's reading: text::decide writes Keep only with its own review). Streams dropped as another
+    /// language's, and streams the decision does not list, are not compared. In stream order. The public form of the
+    /// rule's text check, kept for phase 2's review view. Def: T10. Use: T10.
+    pub fn text_disagreements(decision: &SubtitleDecision, text: &BTreeMap<u32, Decision>) -> Vec<u32> {
+        let dropped: BTreeMap<u32, SubtitleDrop> = decision.dropped.iter().cloned().collect();
+        disagreements(&decision.kept, &dropped, text).into_iter().map(|(stream, _, _)| stream).collect()
+    }
+
+    // ------------------------------------------------------------------ the rule
+
+    /// How a kept track was decided (`SubtitleTrack.decided_by`): by its flags (a derived forced-only stream, a DVD stream
+    /// flagged forced), by TheDiscDB's description, by event counts (the one full track, a separately authored forced
+    /// track), by alignment (two or more full tracks), by the closed-caption type, or as the one English stream.
+    const BY_FLAG: &str = "flag";
+    const BY_DESCRIPTION: &str = "description";
+    const BY_COUNT: &str = "count";
+    const BY_ALIGNMENT: &str = "alignment";
+    const BY_CLOSED_CAPTIONS: &str = "closed_captions";
+    const BY_SINGLE: &str = "single";
+
+    /// The set-aside sentence of a DVD stream flagged director's comments.
+    const DIRECTORS_COMMENTS_LINE: &str = "DVD stream flagged director's comments (flags 1 or 2; 8.7 \"Set aside first\")";
+    /// The set-aside sentence of the DVD closed-caption stream.
+    const CLOSED_CAPTIONS_LINE: &str = "DVD closed-caption stream (codec CC; 8.7 \"Set aside first\")";
+    /// The set-aside sentence of a counted stream TheDiscDB describes as commentary (R6, D15). It is dropped as
+    /// OutsideDialogueGroup: Task 9's `SubtitleDrop` has no variant for a described drop.
+    const DESCRIBED_COMMENTARY_LINE: &str = "described as commentary by TheDiscDB (R6)";
+
+    /// The set-aside sentence of a derived forced-only stream.
+    fn forced_only_line(parent: Option<u32>) -> String {
+        match parent {
+            Some(parent) => {
+                format!("derived forced-only stream of stream {parent} (flags 4096 and 2048; 8.7 \"Set aside first\")")
+            }
+            None => "derived forced-only stream with no preceding stream of its language (flags 4096 and 2048; 8.7 \
+                     \"Set aside first\")"
+                .to_string(),
+        }
+    }
+
+    /// The detail of a partial_subtitle_dropped note.
+    fn partial_line(stream: u32, events: usize, largest: usize) -> String {
+        format!(
+            "stream {stream}: {events} events, not full (the largest English track has {largest}) and \
+             {FORCED_MAX_EVENTS} or more (8.7 \"Other tracks\")"
+        )
+    }
+
+    /// The event start times 6.4 step 10 gave for `stream`; none for a stream MakeMKV removed as empty (MSG:4047) or one
+    /// the step did not measure.
+    fn events_of<'f>(facts: &'f SubtitleFacts<'_>, stream: u32) -> &'f [f64] {
+        if facts.removed.contains(&stream) {
+            return &[];
+        }
+        facts.events.get(&stream).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Attribute 22 of `stream` (no flags when the title has no such stream).
+    fn flags_of(title: &Title, stream: u32) -> Flags {
+        title
+            .streams
+            .iter()
+            .find(|candidate| candidate.number == stream)
+            .map(|candidate| candidate.flags)
+            .unwrap_or_default()
+    }
+
+    /// A kept track with the name and flags of its role (8.7, 8.10).
+    fn track(
+        facts: &SubtitleFacts<'_>,
+        stream: u32,
+        role: SubtitleRole,
+        decided_by: &str,
+        parent: Option<u32>,
+        closed_captions: bool,
+    ) -> SubtitleTrack {
+        SubtitleTrack {
+            stream,
+            role,
+            name: role.name().to_string(),
+            forced: role == SubtitleRole::Forced,
+            hearing_impaired: role == SubtitleRole::Sdh,
+            default: false,
+            events: facts.events.get(&stream).map(Vec::len),
+            closed_captions,
+            parent,
+            decided_by: decided_by.to_string(),
+        }
+    }
+
+    /// Spec 8.7 in full, in order: `set_aside`; a counted stream in the file that TheDiscDB describes as commentary
+    /// (not as dialogue or SDH) is set aside and dropped (OutsideDialogueGroup; R6, D15); events from `facts.events`;
+    /// full = `is_full` against the largest English track's events (a stream flagged forced, 4096 without 2048, is
+    /// never full: its flag makes it a forced source); `alignment_groups` over the full tracks with the three bands (a
+    /// Between pair raises subtitle_ambiguous); `dialogue_group` with the parents of forced-only streams that have
+    /// events and `tracks::audio::descriptions` (None, two largest groups of equal size included, raises
+    /// subtitle_ambiguous, and the first group stands in for the regular and SDH roles); regular and SDH (up to two:
+    /// more events is SDH, a description saying SDH overrides; the closed-caption stream is SDH when the group has
+    /// none; more than two gives subtitle_ambiguous, and a track described SDH is one of the two kept); full tracks
+    /// outside a picked group dropped (OutsideDialogueGroup; with no pick, or with a Between band against a track of
+    /// the picked group, they are kept as regular under the review, never dropped unconfirmed or by position); forced
+    /// (first: a forced-only stream with events whose parent is the regular track, then the SDH track's; then a DVD
+    /// stream flagged forced; then a separately authored track that is not full with fewer than FORCED_MAX_EVENTS
+    /// events); other not-full tracks with FORCED_MAX_EVENTS or more events dropped with partial_subtitle_dropped,
+    /// those with no events dropped NoEvents; `text_disagreements` (subtitle_ambiguous and one subtitle_text_disagrees
+    /// note per stream); the confidence case; remembered then review overrides applied last (decided_by "remembered" or
+    /// "reviewed"; an override naming a stream that is not an English or no-language subtitle stream is ignored), with
+    /// confidence lookup::REMEMBERED_CONFIDENCE (1.00) and subtitle_ambiguous cleared when every English and
+    /// no-language subtitle stream of the title still in the file (not in facts.removed) has an override
+    /// (other-language streams are dropped by 8.7's first sentence; the case unchanged). A title with one English
+    /// stream and no events keeps it as Regular "English" (row 14 (b) fallback), case OneFull; when that stream is
+    /// flagged forced (4096 without 2048) it is kept as Forced by its flag, case FlagsOrDescriptions.
+    ///
+    /// Where the spec leaves a choice (Task 10's list): `set_aside`'s five lists say which stream is which; a counted
+    /// stream TheDiscDB describes as commentary is set aside and dropped; a stream MakeMKV removed (`facts.removed`)
+    /// has no events and is not kept; with groups but no pick (two equal largest groups included) the first group
+    /// stands in for the regular and SDH roles under subtitle_ambiguous and the other groups' full tracks are kept as
+    /// regular, and so is a full track in the in-between band with a track of a picked group; two dialogue tracks with
+    /// equal event counts raise subtitle_ambiguous (the first in scan order is regular); a description saying SDH makes
+    /// a one-track group SDH and keeps its track among the two of a larger group; every forced source needs at least
+    /// one event but the one English stream in the file flagged forced; a not-full track that is not the forced track
+    /// is dropped as NoEvents with no events and as ExtraForced with fewer than FORCED_MAX_EVENTS. Spec 8.7, D15, D20,
+    /// R5, R6. Def: T10. Use: T13, T16, T18.
+    pub fn decide_subtitles(title: &Title, facts: &SubtitleFacts<'_>, settings: &Settings) -> SubtitleDecision {
+        let aside = set_aside(title);
+        // The English and no-language subtitle streams (Task 9's `english_or_none`, the one copy): the streams 8.7 judges.
+        let english: BTreeSet<u32> = title
+            .streams_of(StreamKind::Subtitles)
+            .iter()
+            .filter(|stream| english_or_none(stream.language.as_deref()))
+            .map(|stream| stream.number)
+            .collect();
+        let mut dropped: BTreeMap<u32, SubtitleDrop> = BTreeMap::new();
+        let mut aside_lines: Vec<(u32, String)> = Vec::new();
+        let mut reviews: Vec<ReviewReason> = Vec::new();
+        let mut notes: Vec<Noted> = Vec::new();
+
+        // 8.7's first sentence: every stream in another language is dropped, forced-only ones included.
+        for &stream in &aside.other_language {
+            dropped.insert(stream, SubtitleDrop::OtherLanguage);
+        }
+        // "Set aside first": a DVD stream flagged director's comments (flags 1 or 2) is dropped.
+        for &stream in &aside.directors_comments {
+            dropped.insert(stream, SubtitleDrop::DirectorsComments);
+            aside_lines.push((stream, DIRECTORS_COMMENTS_LINE.to_string()));
+        }
+        // "Set aside first": the derived forced-only streams with their parents, and the closed-caption stream.
+        let forced_only: &[(u32, Option<u32>)] = &aside.forced_only;
+        for &(stream, parent) in forced_only {
+            aside_lines.push((stream, forced_only_line(parent)));
+        }
+        let closed_captions = aside.closed_captions;
+        if let Some(stream) = closed_captions {
+            aside_lines.push((stream, CLOSED_CAPTIONS_LINE.to_string()));
+        }
+        let counted: &[u32] = &aside.counted;
+        // The counted streams still in the file: MakeMKV removes an empty stream and says so (MSG:4047, 6.2 step 7).
+        let present: Vec<u32> = counted.iter().copied().filter(|stream| !facts.removed.contains(stream)).collect();
+        // R6 and D15: a counted stream in the file that TheDiscDB describes as commentary (and not as dialogue or SDH)
+        // is confirmed commentary. It takes no part in alignment or grouping and is dropped, whatever its count.
+        let (_, described) = descriptions(title, facts.discdb);
+        let commentary: Vec<u32> = present
+            .iter()
+            .copied()
+            .filter(|stream| {
+                described.get(stream).is_some_and(|kinds| {
+                    kinds.contains(&DescriptionKind::Commentary)
+                        && !kinds.iter().any(|kind| matches!(kind, DescriptionKind::Dialogue | DescriptionKind::Sdh))
+                })
+            })
+            .collect();
+        for &stream in &commentary {
+            dropped.insert(stream, SubtitleDrop::OutsideDialogueGroup);
+            aside_lines.push((stream, DESCRIBED_COMMENTARY_LINE.to_string()));
+        }
+        // The streams in the file left to judge by counts, flags and timing.
+        let left_to_judge: Vec<u32> = present.iter().copied().filter(|stream| !commentary.contains(stream)).collect();
+
+        // "Events": a track is full with at least 10% as many events as the largest English track.
+        let count = |stream: u32| events_of(facts, stream).len();
+        let largest = counted.iter().map(|&stream| count(stream)).max().unwrap_or(0);
+        // A stream flagged forced (4096 without 2048) is never full: its flag makes it a forced source ("Forced"; the
+        // confidence table's first row lets flags decide), so it never joins a dialogue group. Nor is a stream
+        // described as commentary.
+        let full: Vec<u32> = counted
+            .iter()
+            .copied()
+            .filter(|&stream| {
+                !commentary.contains(&stream)
+                    && !flags_of(title, stream).forced_authored()
+                    && is_full(count(stream), largest)
+            })
+            .collect();
+
+        // "Alignment": every pair of full tracks with its band; a pair in between raises subtitle_ambiguous.
+        let mut pairs: Vec<(u32, u32, f64, Band)> = Vec::new();
+        for (at, &a) in full.iter().enumerate() {
+            for &b in &full[at + 1..] {
+                let (share, which) = band(events_of(facts, a), events_of(facts, b), settings);
+                pairs.push((a, b, share, which));
+            }
+        }
+        let full_events: Vec<(u32, &[f64])> = full.iter().map(|&stream| (stream, events_of(facts, stream))).collect();
+        let (groups, between) = alignment_groups(&full_events, settings);
+        if between {
+            reviews.push(ReviewReason::SubtitleAmbiguous);
+        }
+
+        // "Dialogue group": with groups and no pick, subtitle_ambiguous, and the first group stands in for the regular
+        // and SDH roles.
+        let forced_parents: Vec<u32> = forced_only
+            .iter()
+            .filter(|(stream, _)| count(*stream) > 0)
+            .filter_map(|(_, parent)| *parent)
+            .collect();
+        // Task 9's dialogue_group picks nothing when two or more groups tie for the largest size (D15): no pick.
+        let (dialogue_index, dialogue_pick) = match dialogue_group(&groups, &forced_parents, &described) {
+            Some((index, pick)) => (Some(index), Some(pick)),
+            None if !groups.is_empty() => {
+                reviews.push(ReviewReason::SubtitleAmbiguous);
+                (Some(0), None)
+            }
+            None => (None, None),
+        };
+        let mut group: Vec<u32> = dialogue_index.map(|index| groups[index].clone()).unwrap_or_default();
+        group.sort_unstable();
+
+        // "Regular and SDH": up to two tracks of the group. More than two raise subtitle_ambiguous; the tracks a
+        // TheDiscDB description calls SDH are kept first ("A TheDiscDB description saying SDH overrides the count"),
+        // then those with the most events (ties by scan order), and the others are dropped.
+        let says_sdh =
+            |stream: u32| described.get(&stream).is_some_and(|kinds| kinds.contains(&DescriptionKind::Sdh));
+        let mut chosen = group.clone();
+        if chosen.len() > 2 {
+            reviews.push(ReviewReason::SubtitleAmbiguous);
+            let mut by_events = chosen.clone();
+            by_events.sort_by(|a, b| says_sdh(*b).cmp(&says_sdh(*a)).then(count(*b).cmp(&count(*a))).then(a.cmp(b)));
+            let keep: BTreeSet<u32> = by_events.iter().take(2).copied().collect();
+            for &stream in &chosen {
+                if !keep.contains(&stream) {
+                    dropped.insert(stream, SubtitleDrop::ExtraDialogueTrack);
+                }
+            }
+            chosen.retain(|stream| keep.contains(stream));
+        }
+        let by_events_rule = if full.len() >= 2 { BY_ALIGNMENT } else { BY_COUNT };
+        let mut regular: Option<(u32, &'static str)> = None;
+        let mut sdh: Option<(u32, &'static str)> = None;
+        match chosen.as_slice() {
+            [one] => {
+                if says_sdh(*one) {
+                    sdh = Some((*one, BY_DESCRIPTION));
+                } else {
+                    regular = Some((*one, by_events_rule));
+                }
+            }
+            [a, b] => match (says_sdh(*a), says_sdh(*b)) {
+                (true, false) => {
+                    sdh = Some((*a, BY_DESCRIPTION));
+                    regular = Some((*b, BY_DESCRIPTION));
+                }
+                (false, true) => {
+                    sdh = Some((*b, BY_DESCRIPTION));
+                    regular = Some((*a, BY_DESCRIPTION));
+                }
+                _ => {
+                    if count(*a) == count(*b) {
+                        reviews.push(ReviewReason::SubtitleAmbiguous);
+                    }
+                    let (fewer, more) = if count(*b) >= count(*a) { (*a, *b) } else { (*b, *a) };
+                    regular = Some((fewer, by_events_rule));
+                    sdh = Some((more, by_events_rule));
+                }
+            },
+            _ => {}
+        }
+        // Section 17 row 14 (b)'s fallback: one English stream and no events (6.4 step 10 is skipped) is kept as
+        // "English", unless it is flagged forced (4096 without 2048): its flag makes it the forced track, below. Two or
+        // more streams in the file and no full track leave no group: subtitle_ambiguous.
+        if groups.is_empty() {
+            match left_to_judge.as_slice() {
+                [only] if count(*only) == 0 && !flags_of(title, *only).forced_authored() => {
+                    regular = Some((*only, BY_SINGLE))
+                }
+                [] | [_] => {}
+                _ => reviews.push(ReviewReason::SubtitleAmbiguous),
+            }
+        }
+
+        // "Commentary or trivia": a full track outside the dialogue group is dropped (R6). With no pick there is no
+        // dialogue group to be outside of and nothing confirms the track as commentary: it is kept as regular under the
+        // review already raised (D20: an unconfirmed one is kept and reviewed; D15: never decided by position). The
+        // same holds with a pick for a track whose band with a track of the group is Between: 8.7 calls that pair
+        // undecided and has raised subtitle_ambiguous for it. Only a track Different from every track of a picked group
+        // is dropped.
+        let mut unconfirmed: Vec<u32> = Vec::new();
+        for &stream in &full {
+            if group.contains(&stream) {
+                continue;
+            }
+            let between_group = pairs.iter().any(|&(a, b, _, which)| {
+                which == Band::Between && ((a == stream && group.contains(&b)) || (b == stream && group.contains(&a)))
+            });
+            if dialogue_pick.is_none() || between_group {
+                unconfirmed.push(stream);
+            } else {
+                dropped.insert(stream, SubtitleDrop::OutsideDialogueGroup);
+            }
+        }
+        // The closed-caption stream is SDH by type, kept when the dialogue group has no SDH track.
+        let mut kept_closed_captions = None;
+        if let Some(stream) = closed_captions {
+            if sdh.is_none() {
+                kept_closed_captions = Some(stream);
+            } else {
+                dropped.insert(stream, SubtitleDrop::ClosedCaptionsUnused);
+            }
+        }
+
+        // "Forced": at most one, in the spec's order; every source needs at least one event but the lone stream
+        // flagged forced below.
+        let regular_stream = regular.map(|(stream, _)| stream);
+        let sdh_stream = sdh.map(|(stream, _)| stream);
+        let mut forced: Option<(u32, Option<u32>, &'static str)> = None;
+        for dialogue in [regular_stream, sdh_stream].into_iter().flatten() {
+            if forced.is_none() {
+                forced = forced_only
+                    .iter()
+                    .find(|(stream, parent)| *parent == Some(dialogue) && count(*stream) > 0)
+                    .map(|&(stream, parent)| (stream, parent, BY_FLAG));
+            }
+        }
+        let rest: Vec<u32> = counted
+            .iter()
+            .copied()
+            .filter(|stream| {
+                !full.contains(stream)
+                    && Some(*stream) != regular_stream
+                    && Some(*stream) != sdh_stream
+                    && !dropped.contains_key(stream)
+            })
+            .collect();
+        // A stream flagged forced needs events, unless it is the only English stream in the file left to judge (6.4
+        // step 10 does not run for one English stream, and a stream flagged forced is never full, so there is no
+        // group): its flag alone makes it forced.
+        if forced.is_none() {
+            forced = rest
+                .iter()
+                .copied()
+                .find(|&stream| {
+                    flags_of(title, stream).forced_authored()
+                        && (count(stream) > 0 || (groups.is_empty() && left_to_judge == [stream]))
+                })
+                .map(|stream| (stream, None, BY_FLAG));
+        }
+        if forced.is_none() {
+            forced = rest
+                .iter()
+                .copied()
+                .find(|&stream| count(stream) > 0 && count(stream) < FORCED_MAX_EVENTS)
+                .map(|stream| (stream, None, BY_COUNT));
+        }
+        let forced_stream = forced.map(|(stream, _, _)| stream);
+        // "Other tracks": not full with FORCED_MAX_EVENTS events or more, dropped with partial_subtitle_dropped; a stream
+        // with no events (MakeMKV removed it, or 6.4 step 10 measured nothing) is dropped NoEvents; the other shorter
+        // ones that are not the forced track are dropped as extra forced candidates.
+        for &stream in &rest {
+            if Some(stream) == forced_stream {
+                continue;
+            }
+            if count(stream) >= FORCED_MAX_EVENTS {
+                dropped.insert(stream, SubtitleDrop::Partial);
+                notes.push(Noted {
+                    note: Note::PartialSubtitleDropped,
+                    stream: Some(stream),
+                    detail: partial_line(stream, count(stream), largest),
+                });
+            } else if count(stream) == 0 {
+                dropped.insert(stream, SubtitleDrop::NoEvents);
+            } else {
+                dropped.insert(stream, SubtitleDrop::ExtraForced);
+            }
+        }
+        for &(stream, _) in forced_only {
+            if Some(stream) != forced_stream {
+                let why = if count(stream) > 0 {
+                    SubtitleDrop::DerivedForcedOnlyUnused
+                } else {
+                    SubtitleDrop::DerivedForcedOnlyEmpty
+                };
+                dropped.insert(stream, why);
+            }
+        }
+
+        let mut kept: Vec<SubtitleTrack> = Vec::new();
+        if let Some((stream, parent, by)) = forced {
+            kept.push(track(facts, stream, SubtitleRole::Forced, by, parent, false));
+        }
+        if let Some((stream, by)) = regular {
+            kept.push(track(facts, stream, SubtitleRole::Regular, by, None, false));
+        }
+        if let Some((stream, by)) = sdh {
+            kept.push(track(facts, stream, SubtitleRole::Sdh, by, None, false));
+        }
+        for &stream in &unconfirmed {
+            kept.push(track(facts, stream, SubtitleRole::Regular, BY_ALIGNMENT, None, false));
+        }
+        if let Some(stream) = kept_closed_captions {
+            kept.push(track(facts, stream, SubtitleRole::Sdh, BY_CLOSED_CAPTIONS, None, true));
+        }
+
+        // Spec 5 and 11: the remembered overrides, then the owner's, which win; they are applied last, below. A stream
+        // with an override is the owner's decision, so the text is not compared on it.
+        let overrides = overrides_of(title, facts, &english);
+
+        // 8.7 "Text": where the text's verdict differs from the counts and timing, subtitle_ambiguous and one
+        // subtitle_text_disagrees note per stream; the text never changes a role, a drop or a flag (D20).
+        if let Some(text) = facts.text {
+            for (stream, read, role) in disagreements(&kept, &dropped, text) {
+                if overrides.contains_key(&stream) {
+                    continue;
+                }
+                reviews.push(ReviewReason::SubtitleAmbiguous);
+                notes.push(Noted {
+                    note: Note::SubtitleTextDisagrees,
+                    stream: Some(stream),
+                    detail: text_line(stream, read, role),
+                });
+            }
+        }
+
+        // The confidence table: a review first; then nothing left to count (no English stream at all, or flags
+        // decided); then every counted stream kept by its flag or its description, or dropped by its description; then
+        // the number of full tracks.
+        let case = if reviews.contains(&ReviewReason::SubtitleAmbiguous) {
+            SubtitleCase::Ambiguous
+        } else if present.is_empty() {
+            if english.is_empty() {
+                SubtitleCase::NoEnglish
+            } else {
+                SubtitleCase::FlagsOrDescriptions
+            }
+        } else if present.iter().all(|stream| {
+            commentary.contains(stream)
+                || kept.iter().any(|kept_track| {
+                    kept_track.stream == *stream && matches!(kept_track.decided_by.as_str(), BY_FLAG | BY_DESCRIPTION)
+                })
+        }) {
+            SubtitleCase::FlagsOrDescriptions
+        } else if full.len() >= 2 {
+            SubtitleCase::Alignment
+        } else {
+            SubtitleCase::OneFull
+        };
+
+        // The overrides, last (decided_by "remembered" or "reviewed"): a drop replaces the rule's outcome, a keep sets
+        // the role (a forced-only stream keeps its parent). When they cover every English and no-language subtitle
+        // stream still in the file the confidence is 1.00 and the review they answer is settled (8.8); the case stays
+        // the rule's. A stream MakeMKV removed (facts.removed) is not in the file, and the owner's Override tracks
+        // choose among the file's tracks, so coverage never waits for it.
+        let judged: Vec<u32> = english.iter().copied().filter(|stream| !facts.removed.contains(stream)).collect();
+        let covered = !judged.is_empty() && judged.iter().all(|stream| overrides.contains_key(stream));
+        for (&stream, (action, by)) in &overrides {
+            kept.retain(|kept_track| kept_track.stream != stream);
+            notes.retain(|noted| noted.stream != Some(stream));
+            match action {
+                SubtitleOverride::Drop => {
+                    let why = if *by == BY_REMEMBERED { SubtitleDrop::Remembered } else { SubtitleDrop::Reviewed };
+                    dropped.insert(stream, why);
+                }
+                SubtitleOverride::Keep { role } => {
+                    dropped.remove(&stream);
+                    let parent =
+                        forced_only.iter().find(|(forced, _)| *forced == stream).and_then(|(_, parent)| *parent);
+                    kept.push(track(facts, stream, *role, by, parent, closed_captions == Some(stream)));
+                }
+            }
+        }
+        if covered {
+            reviews.clear();
+        }
+        let value = if covered { REMEMBERED_CONFIDENCE } else { confidence(case) };
+
+        kept.sort_by_key(|kept_track| (kept_track.role, kept_track.stream));
+        aside_lines.sort_by_key(|(stream, _)| *stream);
+        SubtitleDecision {
+            kept,
+            dropped: dropped.into_iter().collect(),
+            set_aside: aside_lines,
+            full,
+            groups,
+            dialogue_group: dialogue_index,
+            dialogue_pick,
+            pairs,
+            case,
+            confidence: value,
+            notes,
+            reviews: sorted_unique(reviews),
+        }
+    }
+
+    /// The detail of a subtitle_text_disagrees note: what the text reads and what the counts and timing decided.
+    fn text_line(stream: u32, read: Role, kept: Option<SubtitleRole>) -> String {
+        let counts = match kept {
+            Some(role) => format!("keep it as {}", role.as_str()),
+            None => "drop it".to_string(),
+        };
+        format!("stream {stream}: the text reads {}, the counts {counts} (8.7 \"Text\")", read.as_str())
+    }
+
+    /// `decided_by` of a track a remembered decision keeps (spec 5), and of one the owner's Override tracks keeps (spec 11).
+    const BY_REMEMBERED: &str = "remembered";
+    const BY_REVIEWED: &str = "reviewed";
+
+    /// The overrides of the title's English and no-language subtitle streams (`english`, the set `decide_subtitles`
+    /// builds with `english_or_none`), by scan stream: the remembered ones (spec 5, matched by stream signature through
+    /// `remembered::apply_subtitles`), then the owner's (spec 11), which replace a remembered one on the same stream;
+    /// each with the `decided_by` it gives. An override naming a stream that is not one of the title's subtitle streams
+    /// is ignored, and so is one naming another language's stream: 8.7's first sentence drops it, and `SubtitleRole`
+    /// names only English roles (8.7, 8.10).
+    fn overrides_of(
+        title: &Title,
+        facts: &SubtitleFacts<'_>,
+        english: &BTreeSet<u32>,
+    ) -> BTreeMap<u32, (SubtitleOverride, &'static str)> {
+        let mut out = BTreeMap::new();
+        if let Some(entries) = facts.remembered {
+            for (stream, action) in apply_subtitles(entries, &title.streams) {
+                if english.contains(&stream) {
+                    out.insert(stream, (action.clone(), BY_REMEMBERED));
+                }
+            }
+        }
+        if let Some(reviewed) = facts.reviewed {
+            for (stream, action) in reviewed {
+                if english.contains(stream) {
+                    out.insert(*stream, (action.clone(), BY_REVIEWED));
+                }
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests;

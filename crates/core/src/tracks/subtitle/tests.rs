@@ -845,3 +845,1363 @@ fn smiles_forced_only_stream_with_events_picks_its_parents_group() {
     assert_eq!(forced_parents(&aside, &quiet), Vec::<u32>::new());
     assert_eq!(dialogue_group(&groups, &forced_parents(&aside, &quiet), &BTreeMap::new()), None);
 }
+
+/// Task 10: spec 8.7 from "Regular and SDH" to the confidence table, and 8.7 "Text". Every title is made up (Task 9's
+/// `title_of`) or a pinned TheDiscDB log (Task 9's `pinned_title`); every event series is made up, with the counts and
+/// the aligned shares its doc comment names.
+mod roles {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use serde_json::json;
+
+    use super::{pinned_title, title_of, FIREFLY_1, KNOWING, SMILE};
+    use crate::disc::Title;
+    use crate::lookup::discdb::DiscDbTitle;
+    use crate::remembered::{signature, SubtitleOverride, SubtitleOverrideEntry};
+    use crate::review::{Note, Noted, ReviewReason};
+    use crate::settings::Settings;
+    use crate::subtitle::text::{Decision, Role};
+    use crate::tracks::subtitle::{
+        confidence, decide_subtitles, text_disagreements, Band, DialoguePick, SubtitleCase, SubtitleDecision, SubtitleDrop,
+        SubtitleFacts, SubtitleTrack, SUBTITLE_ALIGNMENT_CONFIDENCE, SUBTITLE_AMBIGUOUS_CONFIDENCE, SUBTITLE_FLAGS_CONFIDENCE,
+        SUBTITLE_ONE_FULL_CONFIDENCE,
+    };
+    use crate::tracks::SubtitleRole;
+
+    #[test]
+    fn the_confidence_table_gives_each_case_its_value() {
+        assert_eq!(SUBTITLE_FLAGS_CONFIDENCE, 0.95);
+        assert_eq!(SUBTITLE_ONE_FULL_CONFIDENCE, 0.90);
+        assert_eq!(SUBTITLE_ALIGNMENT_CONFIDENCE, 0.85);
+        assert_eq!(SUBTITLE_AMBIGUOUS_CONFIDENCE, 0.60);
+        assert_eq!(confidence(SubtitleCase::FlagsOrDescriptions), 0.95);
+        assert_eq!(confidence(SubtitleCase::NoEnglish), 0.95);
+        assert_eq!(confidence(SubtitleCase::OneFull), 0.90);
+        assert_eq!(confidence(SubtitleCase::Alignment), 0.85);
+        assert_eq!(confidence(SubtitleCase::Ambiguous), 0.60);
+    }
+
+    #[test]
+    fn the_confidence_cases_are_spelt_in_snake_case_and_read_back_only_so() {
+        let spellings = ["flags_or_descriptions", "no_english", "one_full", "alignment", "ambiguous"];
+        for (case, spelling) in SubtitleCase::ALL.into_iter().zip(spellings) {
+            assert_eq!(case.as_str(), spelling);
+            assert_eq!(serde_json::to_value(case).unwrap(), json!(spelling));
+            assert_eq!(serde_json::from_value::<SubtitleCase>(json!(spelling)).unwrap(), case);
+            assert_eq!(spelling.parse::<SubtitleCase>(), Ok(case));
+        }
+        assert_eq!("one-full".parse::<SubtitleCase>(), Err("not a subtitle confidence case: one-full".to_string()));
+        assert!(serde_json::from_value::<SubtitleCase>(json!("OneFull")).is_err());
+    }
+
+    /// A kept track as `decide_subtitles` builds it: the role's name and flags, not default, not closed captions, no parent.
+    fn track(stream: u32, role: SubtitleRole, events: Option<usize>, decided_by: &str) -> SubtitleTrack {
+        SubtitleTrack {
+            stream,
+            role,
+            name: role.name().to_string(),
+            forced: role == SubtitleRole::Forced,
+            hearing_impaired: role == SubtitleRole::Sdh,
+            default: false,
+            events,
+            closed_captions: false,
+            parent: None,
+            decided_by: decided_by.to_string(),
+        }
+    }
+
+    /// The text rule's decision for one stream, with no review and no note.
+    fn verdict(role: Role) -> Decision {
+        Decision { role, review: None, note: None }
+    }
+
+    /// A decision keeping stream 1 as regular and stream 2 as SDH, dropping stream 3 (a full track outside the dialogue
+    /// group) and stream 4 (Spanish).
+    fn two_kept() -> SubtitleDecision {
+        SubtitleDecision {
+            kept: vec![
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ],
+            dropped: vec![(3, SubtitleDrop::OutsideDialogueGroup), (4, SubtitleDrop::OtherLanguage)],
+            set_aside: vec![],
+            full: vec![1, 2, 3],
+            groups: vec![vec![1, 2], vec![3]],
+            dialogue_group: Some(0),
+            dialogue_pick: Some(DialoguePick::Largest),
+            pairs: vec![(1, 2, 1.0, Band::Same), (1, 3, 0.0, Band::Different), (2, 3, 0.0, Band::Different)],
+            case: SubtitleCase::Alignment,
+            confidence: SUBTITLE_ALIGNMENT_CONFIDENCE,
+            notes: vec![],
+            reviews: vec![],
+        }
+    }
+
+    #[test]
+    fn set_aside_verdicts_never_disagree_and_keep_always_does() {
+        // text::decide writes Keep only with its own review: the text asks for a review that the counts did not raise,
+        // on a kept track (1) and on a dropped one (3) alike. SetAside (2) never disagrees.
+        let decision = two_kept();
+        let text = BTreeMap::from([(1, verdict(Role::Keep)), (2, verdict(Role::SetAside)), (3, verdict(Role::Keep))]);
+        assert_eq!(text_disagreements(&decision, &text), vec![1, 3]);
+        // A verdict carrying the text rule's review disagrees even when its role is the kept one (text::before_yes).
+        let reviewed = BTreeMap::from([(
+            1,
+            Decision { role: Role::Regular, review: Some("subtitle_ambiguous".to_string()), note: None },
+        )]);
+        assert_eq!(text_disagreements(&decision, &reviewed), vec![1]);
+        let set_aside = BTreeMap::from([(
+            2,
+            Decision { role: Role::SetAside, review: Some("subtitle_ambiguous".to_string()), note: None },
+        )]);
+        assert_eq!(text_disagreements(&decision, &set_aside), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn a_text_role_other_than_the_kept_role_disagrees() {
+        let decision = two_kept();
+        let same = BTreeMap::from([(1, verdict(Role::Regular)), (2, verdict(Role::Sdh))]);
+        assert_eq!(text_disagreements(&decision, &same), Vec::<u32>::new());
+        let swapped = BTreeMap::from([(1, verdict(Role::Sdh)), (2, verdict(Role::Regular))]);
+        assert_eq!(text_disagreements(&decision, &swapped), vec![1, 2]);
+        let forced = BTreeMap::from([(1, verdict(Role::Forced)), (2, verdict(Role::Sdh))]);
+        assert_eq!(text_disagreements(&decision, &forced), vec![1]);
+    }
+
+    #[test]
+    fn a_text_drop_disagrees_with_a_kept_track_and_a_text_role_with_a_dropped_one() {
+        let decision = two_kept();
+        let drop_kept = BTreeMap::from([(1, verdict(Role::Drop))]);
+        assert_eq!(text_disagreements(&decision, &drop_kept), vec![1]);
+        let drop_dropped = BTreeMap::from([(3, verdict(Role::Drop))]);
+        assert_eq!(text_disagreements(&decision, &drop_dropped), Vec::<u32>::new());
+        let keep_dropped = BTreeMap::from([(3, verdict(Role::Regular))]);
+        assert_eq!(text_disagreements(&decision, &keep_dropped), vec![3]);
+    }
+
+    #[test]
+    fn streams_in_other_languages_or_outside_the_decision_are_never_compared() {
+        let decision = two_kept();
+        let text = BTreeMap::from([(4, verdict(Role::Regular)), (9, verdict(Role::Sdh))]);
+        assert_eq!(text_disagreements(&decision, &text), Vec::<u32>::new());
+    }
+
+    // Streams as Task 9's `title_of` takes them: (kind, language, flags attribute 22).
+    const VIDEO: (&str, &str, u32) = ("video", "", 0);
+    const ENG_PGS: (&str, &str, u32) = ("pgs", "eng", 0);
+    const ENG_PGS_FORCED_ONLY: (&str, &str, u32) = ("pgs", "eng", 6144);
+    const SPA_PGS: (&str, &str, u32) = ("pgs", "spa", 0);
+    const ENG_VOBSUB: (&str, &str, u32) = ("vobsub", "eng", 0);
+    const ENG_VOBSUB_FORCED: (&str, &str, u32) = ("vobsub", "eng", 4096);
+    const ENG_VOBSUB_FORCED_ONLY: (&str, &str, u32) = ("vobsub", "eng", 6144);
+    const SPA_VOBSUB: (&str, &str, u32) = ("vobsub", "spa", 0);
+    const ENG_CC: (&str, &str, u32) = ("cc", "eng", 0);
+
+    /// Title 0 of a made-up Blu-ray scan holding `streams`, numbered from 0 (Task 9's `title_of`).
+    fn bluray(streams: &[(&str, &str, u32)]) -> Title {
+        title_of(false, streams)
+    }
+
+    /// Title 0 of a made-up DVD scan (attribute 24 "01", no attribute 16) holding `streams`.
+    fn dvd(streams: &[(&str, &str, u32)]) -> Title {
+        title_of(true, streams)
+    }
+
+    /// `count` start times, the first at `first` seconds, one every `step` seconds.
+    fn times(count: usize, first: f64, step: f64) -> Vec<f64> {
+        (0..count).map(|k| first + step * k as f64).collect()
+    }
+
+    /// Two series as one, sorted.
+    fn merged(mut a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+        a.extend(b);
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        a
+    }
+
+    /// 1,000 dialogue events, one every 6 s from 10 s.
+    fn regular_events() -> Vec<f64> {
+        times(1000, 10.0, 6.0)
+    }
+
+    /// The dialogue's 1,000 events and 200 sound cues 3 s after the first 200 of them: 1,200 events. Against
+    /// `regular_events` the larger aligned share is 1.0 (every dialogue event starts at an SDH event).
+    fn sdh_events() -> Vec<f64> {
+        merged(regular_events(), times(200, 13.0, 6.0))
+    }
+
+    /// 800 events, each 2.5 s after a dialogue event: no start within 300 ms of `regular_events`' or `sdh_events`'
+    /// (aligned share 0.0), every start within 3 s of one (aligned share 1.0 under a 3,000 ms tolerance).
+    fn commentary_events() -> Vec<f64> {
+        times(800, 12.5, 6.0)
+    }
+
+    /// 20 events of a forced track, one a minute from 100 s.
+    fn forced_events() -> Vec<f64> {
+        times(20, 100.0, 60.0)
+    }
+
+    /// Two full tracks whose larger aligned share is exactly 0.5: the dialogue's 1,000 events, and 1,100 events whose
+    /// first 500 are the dialogue's first 500 and whose other 600 start 2.5 s off it. aligned(A, B) = 500/1000 = 0.5,
+    /// aligned(B, A) = 500/1100; 0.5 lies between subs_diff_max 0.30 and subs_same_min 0.70.
+    fn between_events() -> (Vec<f64>, Vec<f64>) {
+        (regular_events(), merged(times(500, 10.0, 6.0), times(600, 3012.5, 6.0)))
+    }
+
+    /// Facts with these event series and nothing else.
+    fn facts<'a>(events: Vec<(u32, Vec<f64>)>) -> SubtitleFacts<'a> {
+        SubtitleFacts { events: events.into_iter().collect(), ..SubtitleFacts::default() }
+    }
+
+    /// The set-aside sentence of a derived forced-only stream whose parent is `parent`.
+    fn forced_only_of(parent: u32) -> String {
+        format!("derived forced-only stream of stream {parent} (flags 4096 and 2048; 8.7 \"Set aside first\")")
+    }
+
+    /// (stream, role, decided_by) of every kept track, in the decision's order.
+    fn kept_roles(decision: &SubtitleDecision) -> Vec<(u32, SubtitleRole, String)> {
+        decision.kept.iter().map(|kept| (kept.stream, kept.role, kept.decided_by.clone())).collect()
+    }
+
+    #[test]
+    fn smile_title_14_keeps_the_forced_only_stream_of_the_regular_track_then_regular_and_sdh() {
+        // Smile's main feature (title 14, 00040.mpls) lists English PGS streams 11, 13 and 31, each followed by its
+        // derived forced-only stream (12, 14, 32: flags 6144), and 30 streams in seven other languages (15 to 30 and 33
+        // to 46: German, Spanish, French, Italian, Japanese, Dutch, Turkish). The events are made up: 11 is the
+        // dialogue, 13 the same dialogue with sound cues, 31 a commentary off the dialogue's timing; 12 has 20 events,
+        // MakeMKV removed 14, and 32 has none.
+        let title = pinned_title(SMILE, 14);
+        let evidence = SubtitleFacts {
+            removed: BTreeSet::from([14]),
+            ..facts(vec![(11, regular_events()), (12, forced_events()), (13, sdh_events()), (31, commentary_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        let dropped: Vec<(u32, SubtitleDrop)> = (14..=46)
+            .map(|stream| {
+                let why = match stream {
+                    14 | 32 => SubtitleDrop::DerivedForcedOnlyEmpty,
+                    31 => SubtitleDrop::OutsideDialogueGroup,
+                    _ => SubtitleDrop::OtherLanguage,
+                };
+                (stream, why)
+            })
+            .collect();
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![
+                    SubtitleTrack { parent: Some(11), ..track(12, SubtitleRole::Forced, Some(20), "flag") },
+                    track(11, SubtitleRole::Regular, Some(1000), "alignment"),
+                    track(13, SubtitleRole::Sdh, Some(1200), "alignment"),
+                ],
+                dropped,
+                set_aside: vec![(12, forced_only_of(11)), (14, forced_only_of(13)), (32, forced_only_of(31))],
+                full: vec![11, 13, 31],
+                groups: vec![vec![11, 13], vec![31]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::ForcedParent),
+                pairs: vec![(11, 13, 1.0, Band::Same), (11, 31, 0.0, Band::Different), (13, 31, 0.0, Band::Different)],
+                case: SubtitleCase::Alignment,
+                confidence: 0.85,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn two_aligned_full_tracks_name_the_one_with_more_events_sdh() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        let decision =
+            decide_subtitles(&title, &facts(vec![(1, regular_events()), (2, sdh_events())]), &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![
+                    track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                    track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+                ],
+                dropped: vec![(3, SubtitleDrop::OtherLanguage)],
+                set_aside: vec![],
+                full: vec![1, 2],
+                groups: vec![vec![1, 2]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::Largest),
+                pairs: vec![(1, 2, 1.0, Band::Same)],
+                case: SubtitleCase::Alignment,
+                confidence: 0.85,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+        let regular = &decision.kept[0];
+        assert_eq!((regular.name.as_str(), regular.forced, regular.hearing_impaired), ("English", false, false));
+        let sdh = &decision.kept[1];
+        assert_eq!((sdh.name.as_str(), sdh.forced, sdh.hearing_impaired), ("English (SDH)", false, true));
+        assert!(decision.kept.iter().all(|kept| !kept.default && !kept.closed_captions && kept.parent.is_none()));
+    }
+
+    #[test]
+    fn a_thediscdb_description_saying_sdh_overrides_the_count() {
+        // TheDiscDB lists video and the two non-derived PGS streams (it aligns without the derived stream 2) and
+        // describes stream 1 as "English SDH" (Sdh) and stream 3 as "English" (Dialogue). Stream 1 has fewer events.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS]);
+        let record: DiscDbTitle = serde_json::from_value(json!({
+            "index": 0,
+            "source_file": "00800.mpls",
+            "segment_map": "1",
+            "duration": "1:40:00",
+            "tracks": [
+                {"index": 0, "type": "Video", "name": "Mpeg4 AVC High@L4.1"},
+                {"index": 1, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English SDH"},
+                {"index": 2, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English"}
+            ]
+        }))
+        .unwrap();
+        let evidence = SubtitleFacts { discdb: Some(&record), ..facts(vec![(1, regular_events()), (3, sdh_events())]) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![
+                    track(3, SubtitleRole::Regular, Some(1200), "description"),
+                    track(1, SubtitleRole::Sdh, Some(1000), "description"),
+                ],
+                dropped: vec![(2, SubtitleDrop::DerivedForcedOnlyEmpty)],
+                set_aside: vec![(2, forced_only_of(1))],
+                full: vec![1, 3],
+                groups: vec![vec![1, 3]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::Described),
+                pairs: vec![(1, 3, 1.0, Band::Same)],
+                case: SubtitleCase::FlagsOrDescriptions,
+                confidence: 0.95,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+        // Without the record the count decides: stream 3 has more events.
+        let counted = decide_subtitles(&title, &facts(vec![(1, regular_events()), (3, sdh_events())]), &Settings::default());
+        assert_eq!(
+            kept_roles(&counted),
+            vec![(1, SubtitleRole::Regular, "alignment".to_string()), (3, SubtitleRole::Sdh, "alignment".to_string())]
+        );
+        assert_eq!(counted.dialogue_pick, Some(DialoguePick::Largest));
+        assert_eq!((counted.case, counted.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn a_one_track_group_described_sdh_is_sdh() {
+        // TheDiscDB lists video, the English PGS stream described "English SDH" and the Spanish one described "Spanish".
+        // Stream 1 is the one full track: its description makes it SDH, not the count.
+        let title = bluray(&[VIDEO, ENG_PGS, SPA_PGS]);
+        let record: DiscDbTitle = serde_json::from_value(json!({
+            "index": 0,
+            "source_file": "00800.mpls",
+            "segment_map": "1",
+            "duration": "1:00:00",
+            "tracks": [
+                {"index": 0, "type": "Video", "name": "Mpeg4 AVC High@L4.1"},
+                {"index": 1, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English SDH"},
+                {"index": 2, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "spa",
+                 "language": "Spanish", "description": "Spanish"}
+            ]
+        }))
+        .unwrap();
+        let evidence = SubtitleFacts { discdb: Some(&record), ..facts(vec![(1, regular_events())]) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![track(1, SubtitleRole::Sdh, Some(1000), "description")],
+                dropped: vec![(2, SubtitleDrop::OtherLanguage)],
+                set_aside: vec![],
+                full: vec![1],
+                groups: vec![vec![1]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::OneFull),
+                pairs: vec![],
+                case: SubtitleCase::FlagsOrDescriptions,
+                confidence: 0.95,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+        let sdh = &decision.kept[0];
+        assert_eq!((sdh.name.as_str(), sdh.forced, sdh.hearing_impaired), ("English (SDH)", false, true));
+    }
+
+    #[test]
+    fn a_description_saying_sdh_on_both_tracks_leaves_the_count_to_decide() {
+        // TheDiscDB describes both English PGS streams as "English SDH": the descriptions pick the dialogue group but
+        // cannot tell the two apart, so the one with more events (stream 2) is SDH.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS]);
+        let record: DiscDbTitle = serde_json::from_value(json!({
+            "index": 0,
+            "source_file": "00800.mpls",
+            "segment_map": "1",
+            "duration": "1:00:00",
+            "tracks": [
+                {"index": 0, "type": "Video", "name": "Mpeg4 AVC High@L4.1"},
+                {"index": 1, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English SDH"},
+                {"index": 2, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English SDH"}
+            ]
+        }))
+        .unwrap();
+        let evidence = SubtitleFacts { discdb: Some(&record), ..facts(vec![(1, regular_events()), (2, sdh_events())]) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            kept_roles(&decision),
+            vec![(1, SubtitleRole::Regular, "alignment".to_string()), (2, SubtitleRole::Sdh, "alignment".to_string())]
+        );
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::Described));
+        assert_eq!((decision.case, decision.confidence, decision.reviews.clone()), (SubtitleCase::Alignment, 0.85, vec![]));
+    }
+
+    #[test]
+    fn exactly_one_full_track_is_the_regular_dialogue_track_at_090() {
+        let title = bluray(&[VIDEO, ENG_PGS, SPA_PGS]);
+        let decision = decide_subtitles(&title, &facts(vec![(1, regular_events())]), &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![track(1, SubtitleRole::Regular, Some(1000), "count")],
+                dropped: vec![(2, SubtitleDrop::OtherLanguage)],
+                set_aside: vec![],
+                full: vec![1],
+                groups: vec![vec![1]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::OneFull),
+                pairs: vec![],
+                case: SubtitleCase::OneFull,
+                confidence: 0.90,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn knowing_keeps_its_one_english_stream_as_regular_english_without_events() {
+        // Knowing's main title (title 0, DVD title 01) has English VobSub 4, Spanish 5, and the director's comments in
+        // English (6) and Spanish (7), both flagged 1. 6.4 step 10 does not run for one English stream: no events.
+        let title = pinned_title(KNOWING, 0);
+        let decision = decide_subtitles(&title, &SubtitleFacts::default(), &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![track(4, SubtitleRole::Regular, None, "single")],
+                dropped: vec![
+                    (5, SubtitleDrop::OtherLanguage),
+                    (6, SubtitleDrop::DirectorsComments),
+                    (7, SubtitleDrop::OtherLanguage),
+                ],
+                set_aside: vec![(
+                    6,
+                    "DVD stream flagged director's comments (flags 1 or 2; 8.7 \"Set aside first\")".to_string()
+                )],
+                full: vec![],
+                groups: vec![],
+                dialogue_group: None,
+                dialogue_pick: None,
+                pairs: vec![],
+                case: SubtitleCase::OneFull,
+                confidence: 0.90,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+        assert_eq!(decision.kept[0].name, "English");
+    }
+
+    #[test]
+    fn firefly_keeps_its_one_english_track_and_its_closed_captions_as_sdh() {
+        // Firefly's first DVD, title 0 (DVD title "01"): English VobSub 5, Spanish 6, French 7 and Spanish 8 (both flagged
+        // 4096) and the English closed captions 9 (S_CC608/DVD). One English stream: 6.4 step 10 does not run, no events.
+        let title = pinned_title(FIREFLY_1, 0);
+        let decision = decide_subtitles(&title, &SubtitleFacts::default(), &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![
+                    track(5, SubtitleRole::Regular, None, "single"),
+                    SubtitleTrack { closed_captions: true, ..track(9, SubtitleRole::Sdh, None, "closed_captions") },
+                ],
+                dropped: vec![
+                    (6, SubtitleDrop::OtherLanguage),
+                    (7, SubtitleDrop::OtherLanguage),
+                    (8, SubtitleDrop::OtherLanguage),
+                ],
+                set_aside: vec![(9, "DVD closed-caption stream (codec CC; 8.7 \"Set aside first\")".to_string())],
+                full: vec![],
+                groups: vec![],
+                dialogue_group: None,
+                dialogue_pick: None,
+                pairs: vec![],
+                case: SubtitleCase::OneFull,
+                confidence: 0.90,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn a_single_english_stream_that_makemkv_removed_as_empty_is_not_kept() {
+        let title = bluray(&[VIDEO, ENG_PGS]);
+        let evidence = SubtitleFacts { removed: BTreeSet::from([1]), ..SubtitleFacts::default() };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.kept, vec![]);
+        assert_eq!(decision.dropped, vec![(1, SubtitleDrop::NoEvents)]);
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::FlagsOrDescriptions, 0.95));
+    }
+
+    #[test]
+    fn a_lone_stream_flagged_forced_without_events_is_kept_forced_by_its_flag() {
+        // A DVD title whose one English subtitle stream carries 4096 without 2048. 6.4 step 10 does not run for one
+        // English stream, so it has no events; its flag makes it a forced source (8.7 "Forced"), not the regular track
+        // of row 14 (b)'s fallback (row 14 (a) counts a forced track labelled regular without review as costly).
+        let title = dvd(&[VIDEO, ENG_VOBSUB_FORCED]);
+        let decision = decide_subtitles(&title, &SubtitleFacts::default(), &Settings::default());
+        assert_eq!(decision.kept, vec![track(1, SubtitleRole::Forced, None, "flag")]);
+        assert_eq!(decision.dropped, vec![]);
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::FlagsOrDescriptions, 0.95));
+        let forced = &decision.kept[0];
+        assert_eq!((forced.name.as_str(), forced.forced, forced.parent), ("English (Forced)", true, None));
+    }
+
+    #[test]
+    fn the_closed_caption_stream_is_kept_as_sdh_when_the_dialogue_group_has_none() {
+        let title = dvd(&[VIDEO, ENG_VOBSUB, SPA_VOBSUB, ENG_CC]);
+        let evidence = facts(vec![(1, regular_events()), (3, times(900, 10.1, 6.0))]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![
+                    track(1, SubtitleRole::Regular, Some(1000), "count"),
+                    SubtitleTrack { closed_captions: true, ..track(3, SubtitleRole::Sdh, Some(900), "closed_captions") },
+                ],
+                dropped: vec![(2, SubtitleDrop::OtherLanguage)],
+                set_aside: vec![(3, "DVD closed-caption stream (codec CC; 8.7 \"Set aside first\")".to_string())],
+                full: vec![1],
+                groups: vec![vec![1]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::OneFull),
+                pairs: vec![],
+                case: SubtitleCase::OneFull,
+                confidence: 0.90,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+        let captions = &decision.kept[1];
+        assert_eq!((captions.name.as_str(), captions.hearing_impaired), ("English (SDH)", true));
+    }
+
+    #[test]
+    fn the_closed_caption_stream_is_dropped_when_the_dialogue_group_has_an_sdh_track() {
+        let title = dvd(&[VIDEO, ENG_VOBSUB, ENG_VOBSUB, ENG_CC]);
+        let decision =
+            decide_subtitles(&title, &facts(vec![(1, regular_events()), (2, sdh_events())]), &Settings::default());
+        assert_eq!(
+            kept_roles(&decision),
+            vec![(1, SubtitleRole::Regular, "alignment".to_string()), (2, SubtitleRole::Sdh, "alignment".to_string())]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::ClosedCaptionsUnused)]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn a_closed_caption_stream_without_english_dialogue_tracks_is_kept_by_its_type_at_095() {
+        let title = dvd(&[VIDEO, SPA_VOBSUB, ENG_CC]);
+        let decision = decide_subtitles(&title, &SubtitleFacts::default(), &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![SubtitleTrack { closed_captions: true, ..track(2, SubtitleRole::Sdh, None, "closed_captions") }]
+        );
+        assert_eq!(decision.dropped, vec![(1, SubtitleDrop::OtherLanguage)]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::FlagsOrDescriptions, 0.95));
+        assert_eq!(decision.reviews, vec![]);
+    }
+
+    #[test]
+    fn a_full_track_outside_the_dialogue_group_is_dropped_as_commentary() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let evidence = facts(vec![(1, regular_events()), (2, sdh_events()), (3, commentary_events())]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            kept_roles(&decision),
+            vec![(1, SubtitleRole::Regular, "alignment".to_string()), (2, SubtitleRole::Sdh, "alignment".to_string())]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::OutsideDialogueGroup)]);
+        assert_eq!(decision.groups, vec![vec![1, 2], vec![3]]);
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::Largest));
+        assert_eq!(
+            decision.pairs,
+            vec![(1, 2, 1.0, Band::Same), (1, 3, 0.0, Band::Different), (2, 3, 0.0, Band::Different)]
+        );
+        assert_eq!((decision.case, decision.confidence, decision.reviews.clone()), (SubtitleCase::Alignment, 0.85, vec![]));
+    }
+
+    #[test]
+    fn a_title_without_english_subtitles_is_the_no_english_case_at_095() {
+        let spanish = decide_subtitles(&bluray(&[VIDEO, SPA_PGS]), &SubtitleFacts::default(), &Settings::default());
+        assert_eq!(spanish.kept, vec![]);
+        assert_eq!(spanish.dropped, vec![(1, SubtitleDrop::OtherLanguage)]);
+        assert_eq!((spanish.case, spanish.confidence), (SubtitleCase::NoEnglish, 0.95));
+        let none = decide_subtitles(&bluray(&[VIDEO]), &SubtitleFacts::default(), &Settings::default());
+        assert_eq!((none.kept.len(), none.dropped.len()), (0, 0));
+        assert_eq!((none.case, none.confidence), (SubtitleCase::NoEnglish, 0.95));
+    }
+
+    #[test]
+    fn the_forced_only_stream_of_the_regular_track_comes_before_that_of_the_sdh_track() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS, ENG_PGS_FORCED_ONLY]);
+        let evidence = facts(vec![
+            (1, regular_events()),
+            (2, forced_events()),
+            (3, sdh_events()),
+            (4, times(15, 130.0, 60.0)),
+        ]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                SubtitleTrack { parent: Some(1), ..track(2, SubtitleRole::Forced, Some(20), "flag") },
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(3, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(4, SubtitleDrop::DerivedForcedOnlyUnused)]);
+        assert_eq!(decision.set_aside, vec![(2, forced_only_of(1)), (4, forced_only_of(3))]);
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::ForcedParent));
+        let forced = &decision.kept[0];
+        assert_eq!((forced.name.as_str(), forced.forced, forced.hearing_impaired), ("English (Forced)", true, false));
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn the_forced_only_stream_of_the_sdh_track_is_taken_when_the_regular_tracks_one_is_empty() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS, ENG_PGS_FORCED_ONLY]);
+        let evidence = SubtitleFacts {
+            removed: BTreeSet::from([2]),
+            ..facts(vec![(1, regular_events()), (3, sdh_events()), (4, times(15, 130.0, 60.0))])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                SubtitleTrack { parent: Some(3), ..track(4, SubtitleRole::Forced, Some(15), "flag") },
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(3, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::DerivedForcedOnlyEmpty)]);
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::ForcedParent));
+    }
+
+    #[test]
+    fn a_stream_flagged_forced_comes_after_the_forced_only_streams() {
+        let title = dvd(&[VIDEO, ENG_VOBSUB, ENG_VOBSUB_FORCED_ONLY, ENG_VOBSUB_FORCED]);
+        let forty = times(40, 500.0, 30.0);
+        let with_forced_only = facts(vec![(1, regular_events()), (2, forced_events()), (3, forty.clone())]);
+        let decision = decide_subtitles(&title, &with_forced_only, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                SubtitleTrack { parent: Some(1), ..track(2, SubtitleRole::Forced, Some(20), "flag") },
+                track(1, SubtitleRole::Regular, Some(1000), "count"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::ExtraForced)]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+
+        let flagged_only =
+            SubtitleFacts { removed: BTreeSet::from([2]), ..facts(vec![(1, regular_events()), (3, forty)]) };
+        let decision = decide_subtitles(&title, &flagged_only, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![track(3, SubtitleRole::Forced, Some(40), "flag"), track(1, SubtitleRole::Regular, Some(1000), "count")]
+        );
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::DerivedForcedOnlyEmpty)]);
+    }
+
+    #[test]
+    fn a_separately_authored_short_track_is_the_last_forced_source() {
+        let title = dvd(&[VIDEO, ENG_VOBSUB, ENG_VOBSUB_FORCED, ENG_VOBSUB]);
+        let thirty = times(30, 600.0, 30.0);
+        let flagged = facts(vec![(1, regular_events()), (2, times(40, 500.0, 30.0)), (3, thirty.clone())]);
+        let decision = decide_subtitles(&title, &flagged, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![track(2, SubtitleRole::Forced, Some(40), "flag"), track(1, SubtitleRole::Regular, Some(1000), "count")]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::ExtraForced)]);
+
+        // The flagged stream has no events: the separately authored one is forced, by its count.
+        let empty_flag = facts(vec![(1, regular_events()), (2, vec![]), (3, thirty)]);
+        let decision = decide_subtitles(&title, &empty_flag, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![track(3, SubtitleRole::Forced, Some(30), "count"), track(1, SubtitleRole::Regular, Some(1000), "count")]
+        );
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::NoEvents)]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+    }
+
+    #[test]
+    fn a_stream_flagged_forced_is_never_a_dialogue_track_even_when_full() {
+        // A DVD episode: 300 dialogue events, and a stream flagged forced (4096 without 2048) whose 40 events start with
+        // the dialogue's first 40. 40 is at least 10% of 300, but the flag makes it a forced source (8.7 "Forced"), never
+        // a full track: it neither joins the dialogue group nor turns the dialogue track into SDH.
+        let title = dvd(&[VIDEO, ENG_VOBSUB, ENG_VOBSUB_FORCED]);
+        let evidence = facts(vec![(1, times(300, 10.0, 6.0)), (2, times(40, 10.0, 6.0))]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![track(2, SubtitleRole::Forced, Some(40), "flag"), track(1, SubtitleRole::Regular, Some(300), "count")]
+        );
+        assert_eq!(decision.full, vec![1]);
+        assert_eq!(decision.pairs, vec![]);
+        assert_eq!(decision.dropped, vec![]);
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::OneFull));
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+    }
+
+    #[test]
+    fn a_track_that_is_not_full_with_150_events_or_more_is_dropped_with_a_note() {
+        // 2,000 dialogue events make a track full from 200 events: 149 and 150 are both not full.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let evidence = facts(vec![
+            (1, times(2000, 10.0, 3.0)),
+            (2, times(149, 20.0, 30.0)),
+            (3, times(150, 21.0, 30.0)),
+        ]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![track(2, SubtitleRole::Forced, Some(149), "count"), track(1, SubtitleRole::Regular, Some(2000), "count")]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::Partial)]);
+        assert_eq!(
+            decision.notes,
+            vec![Noted {
+                note: Note::PartialSubtitleDropped,
+                stream: Some(3),
+                detail: "stream 3: 150 events, not full (the largest English track has 2000) and 150 or more (8.7 \
+                         \"Other tracks\")"
+                    .to_string(),
+            }]
+        );
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+    }
+
+    #[test]
+    fn a_forced_only_stream_without_a_parent_never_becomes_the_forced_track() {
+        let title = bluray(&[VIDEO, ENG_PGS_FORCED_ONLY, ENG_PGS]);
+        let decision =
+            decide_subtitles(&title, &facts(vec![(1, forced_events()), (2, regular_events())]), &Settings::default());
+        assert_eq!(decision.kept, vec![track(2, SubtitleRole::Regular, Some(1000), "count")]);
+        assert_eq!(decision.dropped, vec![(1, SubtitleDrop::DerivedForcedOnlyUnused)]);
+        assert_eq!(
+            decision.set_aside,
+            vec![(
+                1,
+                "derived forced-only stream with no preceding stream of its language (flags 4096 and 2048; 8.7 \
+                 \"Set aside first\")"
+                    .to_string()
+            )]
+        );
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+    }
+
+    #[test]
+    fn a_pair_in_the_between_band_raises_subtitle_ambiguous() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS]);
+        let (a, b) = between_events();
+        let decision = decide_subtitles(&title, &facts(vec![(1, a), (2, forced_events()), (3, b)]), &Settings::default());
+        assert_eq!(decision.pairs, vec![(1, 3, 0.5, Band::Between)]);
+        assert_eq!(decision.groups, vec![vec![1], vec![3]]);
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::ForcedParent));
+        // Stream 3 is outside the picked group, but its pair with the group's track 1 is undecided (8.7 "In between"):
+        // nothing confirms it as commentary, so it is kept as regular under the review, not dropped (D20).
+        assert_eq!(
+            decision.kept,
+            vec![
+                SubtitleTrack { parent: Some(1), ..track(2, SubtitleRole::Forced, Some(20), "flag") },
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(3, SubtitleRole::Regular, Some(1100), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![]);
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn two_full_tracks_in_different_groups_with_nothing_to_pick_raise_subtitle_ambiguous() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS]);
+        let decision =
+            decide_subtitles(&title, &facts(vec![(1, regular_events()), (2, commentary_events())]), &Settings::default());
+        assert_eq!(decision.pairs, vec![(1, 2, 0.0, Band::Different)]);
+        assert_eq!(decision.groups, vec![vec![1], vec![2]]);
+        // No rule picks a group: the first stands in for the regular and SDH roles, under review. Nothing confirms the
+        // other group's track as commentary, so it is kept as regular too, not dropped by its position (D15, D20).
+        assert_eq!((decision.dialogue_group, decision.dialogue_pick), (Some(0), None));
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(2, SubtitleRole::Regular, Some(800), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![]);
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn two_largest_groups_of_equal_size_are_no_pick() {
+        // Streams 1 and 2 are the dialogue and its SDH copy; 3 is a commentary (2.5 s off the dialogue) and 4 the same
+        // commentary with 100 more events 2 s after its first 100 (900 events). Two groups of two: neither is the
+        // largest, Task 9's `dialogue_group` picks nothing, and position never decides (D15): subtitle_ambiguous, and
+        // no full track is dropped (D20). The first group stands in for the regular and SDH roles.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let evidence = facts(vec![
+            (1, regular_events()),
+            (2, sdh_events()),
+            (3, commentary_events()),
+            (4, merged(commentary_events(), times(100, 14.5, 6.0))),
+        ]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.groups, vec![vec![1, 2], vec![3, 4]]);
+        assert_eq!(
+            decision.pairs,
+            vec![
+                (1, 2, 1.0, Band::Same),
+                (1, 3, 0.0, Band::Different),
+                (1, 4, 0.0, Band::Different),
+                (2, 3, 0.0, Band::Different),
+                (2, 4, 0.0, Band::Different),
+                (3, 4, 1.0, Band::Same),
+            ]
+        );
+        assert_eq!((decision.dialogue_group, decision.dialogue_pick), (Some(0), None));
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(3, SubtitleRole::Regular, Some(800), "alignment"),
+                track(4, SubtitleRole::Regular, Some(900), "alignment"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![]);
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn more_than_two_tracks_in_the_dialogue_group_raise_subtitle_ambiguous() {
+        // Stream 3 is the dialogue plus 100 cues 4 s after the first 100 dialogue events: 1,100 events, the same group.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let evidence = facts(vec![
+            (1, regular_events()),
+            (2, sdh_events()),
+            (3, merged(regular_events(), times(100, 14.0, 6.0))),
+        ]);
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.groups, vec![vec![1, 2, 3]]);
+        assert_eq!(
+            decision.pairs,
+            vec![(1, 2, 1.0, Band::Same), (1, 3, 1.0, Band::Same), (2, 3, 1000.0 / 1100.0, Band::Same)]
+        );
+        // The two with the most events are kept: 2 (1,200) is SDH, 3 (1,100) regular; 1 (1,000) is dropped.
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(3, SubtitleRole::Regular, Some(1100), "alignment"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(1, SubtitleDrop::ExtraDialogueTrack)]);
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn a_track_described_sdh_is_one_of_the_two_kept_from_a_group_of_three() {
+        // The three aligned tracks of the test above (1,000, 1,200 and 1,100 events). TheDiscDB describes stream 1, the
+        // one with the fewest events, as "English SDH" and the others as "English": a description saying SDH overrides
+        // the count (8.7 "Regular and SDH"), so stream 1 is kept as SDH and the extra track is stream 3.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let record: DiscDbTitle = serde_json::from_value(json!({
+            "index": 0,
+            "source_file": "00800.mpls",
+            "segment_map": "1",
+            "duration": "1:00:00",
+            "tracks": [
+                {"index": 0, "type": "Video", "name": "Mpeg4 AVC High@L4.1"},
+                {"index": 1, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English SDH"},
+                {"index": 2, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English"},
+                {"index": 3, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English"}
+            ]
+        }))
+        .unwrap();
+        let evidence = SubtitleFacts {
+            discdb: Some(&record),
+            ..facts(vec![
+                (1, regular_events()),
+                (2, sdh_events()),
+                (3, merged(regular_events(), times(100, 14.0, 6.0))),
+            ])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.groups, vec![vec![1, 2, 3]]);
+        assert_eq!(decision.dialogue_pick, Some(DialoguePick::Described));
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(2, SubtitleRole::Regular, Some(1200), "description"),
+                track(1, SubtitleRole::Sdh, Some(1000), "description"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::ExtraDialogueTrack)]);
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn a_track_thediscdb_describes_as_commentary_is_dropped_and_never_grouped() {
+        // Stream 3 is timed on the dialogue (the 1,100 events of the tests above), so by timing alone it would be the
+        // third track of the dialogue group and kept as regular. TheDiscDB describes it as "Commentary" (and streams 1
+        // and 2 not at all): a database entry confirms commentary (R6, D15), so it is set aside and dropped, and the
+        // dialogue group is the largest group of the other two.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let record: DiscDbTitle = serde_json::from_value(json!({
+            "index": 0,
+            "source_file": "00800.mpls",
+            "segment_map": "1",
+            "duration": "1:00:00",
+            "tracks": [
+                {"index": 0, "type": "Video", "name": "Mpeg4 AVC High@L4.1"},
+                {"index": 1, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English"},
+                {"index": 2, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English"},
+                {"index": 3, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "Commentary"}
+            ]
+        }))
+        .unwrap();
+        let evidence = SubtitleFacts {
+            discdb: Some(&record),
+            ..facts(vec![
+                (1, regular_events()),
+                (2, sdh_events()),
+                (3, merged(regular_events(), times(100, 14.0, 6.0))),
+            ])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision,
+            SubtitleDecision {
+                kept: vec![
+                    track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                    track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+                ],
+                dropped: vec![(3, SubtitleDrop::OutsideDialogueGroup)],
+                set_aside: vec![(3, "described as commentary by TheDiscDB (R6)".to_string())],
+                full: vec![1, 2],
+                groups: vec![vec![1, 2]],
+                dialogue_group: Some(0),
+                dialogue_pick: Some(DialoguePick::Largest),
+                pairs: vec![(1, 2, 1.0, Band::Same)],
+                case: SubtitleCase::Alignment,
+                confidence: 0.85,
+                notes: vec![],
+                reviews: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn two_dialogue_tracks_with_equal_event_counts_raise_subtitle_ambiguous() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS]);
+        let decision =
+            decide_subtitles(&title, &facts(vec![(1, regular_events()), (2, regular_events())]), &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(2, SubtitleRole::Sdh, Some(1000), "alignment"),
+            ]
+        );
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn two_english_streams_without_events_raise_subtitle_ambiguous() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS]);
+        let decision = decide_subtitles(&title, &SubtitleFacts::default(), &Settings::default());
+        assert_eq!(decision.kept, vec![]);
+        assert_eq!(decision.dropped, vec![(1, SubtitleDrop::NoEvents), (2, SubtitleDrop::NoEvents)]);
+        assert_eq!((decision.full.len(), decision.groups.len(), decision.dialogue_group), (0, 0, None));
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn subs_tolerance_ms_decides_whether_two_tracks_align() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS]);
+        let evidence = facts(vec![(1, regular_events()), (2, commentary_events())]);
+        // 300 ms (the default): 2.5 s apart, different groups, nothing picks one.
+        let strict = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(strict.pairs, vec![(1, 2, 0.0, Band::Different)]);
+        assert_eq!(strict.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        // 3,000 ms: every commentary event starts within 3 s of a dialogue event, one group, the larger track SDH.
+        let loose = decide_subtitles(&title, &evidence, &Settings { subs_tolerance_ms: 3000, ..Settings::default() });
+        assert_eq!(loose.pairs, vec![(1, 2, 1.0, Band::Same)]);
+        assert_eq!(loose.groups, vec![vec![1, 2]]);
+        assert_eq!(
+            kept_roles(&loose),
+            vec![(2, SubtitleRole::Regular, "alignment".to_string()), (1, SubtitleRole::Sdh, "alignment".to_string())]
+        );
+        assert_eq!(loose.reviews, vec![]);
+        assert_eq!((loose.case, loose.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn subs_same_min_is_the_lowest_share_of_the_same_band() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS]);
+        let (a, b) = between_events();
+        let evidence = facts(vec![(1, a), (2, forced_events()), (3, b)]);
+        // 0.70 (the default): 0.5 is between.
+        let default = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(default.pairs, vec![(1, 3, 0.5, Band::Between)]);
+        assert_eq!(default.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        // 0.50: 0.5 is at least subs_same_min, so the two tracks share a group and the larger is SDH.
+        let lowered = decide_subtitles(&title, &evidence, &Settings { subs_same_min: 0.5, ..Settings::default() });
+        assert_eq!(lowered.pairs, vec![(1, 3, 0.5, Band::Same)]);
+        assert_eq!(lowered.groups, vec![vec![1, 3]]);
+        assert_eq!(
+            lowered.kept,
+            vec![
+                SubtitleTrack { parent: Some(1), ..track(2, SubtitleRole::Forced, Some(20), "flag") },
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(3, SubtitleRole::Sdh, Some(1100), "alignment"),
+            ]
+        );
+        assert_eq!(lowered.reviews, vec![]);
+        assert_eq!((lowered.case, lowered.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn subs_diff_max_is_the_highest_share_of_the_different_band() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS]);
+        let (a, b) = between_events();
+        let evidence = facts(vec![(1, a), (2, forced_events()), (3, b)]);
+        // 0.30 (the default): 0.5 is between.
+        let default = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(default.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        // 0.50: 0.5 is at most subs_diff_max, so the tracks are in different groups and the forced parent picks.
+        let raised = decide_subtitles(&title, &evidence, &Settings { subs_diff_max: 0.5, ..Settings::default() });
+        assert_eq!(raised.pairs, vec![(1, 3, 0.5, Band::Different)]);
+        assert_eq!(raised.groups, vec![vec![1], vec![3]]);
+        assert_eq!(raised.dialogue_pick, Some(DialoguePick::ForcedParent));
+        assert_eq!(raised.dropped, vec![(3, SubtitleDrop::OutsideDialogueGroup)]);
+        assert_eq!(raised.reviews, vec![]);
+        assert_eq!((raised.case, raised.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn the_decision_serialises_with_the_spec_spellings_and_reads_back() {
+        let title = bluray(&[VIDEO, ENG_PGS, SPA_PGS]);
+        let decision = decide_subtitles(&title, &facts(vec![(1, regular_events())]), &Settings::default());
+        let value = serde_json::to_value(&decision).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "kept": [{
+                    "stream": 1, "role": "regular", "name": "English", "forced": false, "hearing_impaired": false,
+                    "default": false, "events": 1000, "closed_captions": false, "parent": null, "decided_by": "count"
+                }],
+                "dropped": [[2, {"why": "other_language"}]],
+                "set_aside": [],
+                "full": [1],
+                "groups": [[1]],
+                "dialogue_group": 0,
+                "dialogue_pick": "one_full",
+                "pairs": [],
+                "case": "one_full",
+                "confidence": 0.9,
+                "notes": [],
+                "reviews": []
+            })
+        );
+        assert_eq!(serde_json::from_value::<SubtitleDecision>(value).unwrap(), decision);
+    }
+
+    #[test]
+    fn a_text_verdict_that_differs_raises_subtitle_ambiguous_with_a_note_per_stream() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        // The text reads stream 2, which the counts make SDH, as a regular track; the Spanish drop is not compared.
+        let text = BTreeMap::from([(1, verdict(Role::Regular)), (2, verdict(Role::Regular)), (3, verdict(Role::Drop))]);
+        let evidence = SubtitleFacts { text: Some(&text), ..facts(vec![(1, regular_events()), (2, sdh_events())]) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        // The text never changes a role, a flag or a drop.
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::OtherLanguage)]);
+        assert_eq!(
+            decision.notes,
+            vec![Noted {
+                note: Note::SubtitleTextDisagrees,
+                stream: Some(2),
+                detail: "stream 2: the text reads regular, the counts keep it as sdh (8.7 \"Text\")".to_string(),
+            }]
+        );
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn a_text_verdict_that_agrees_adds_nothing() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        let text = BTreeMap::from([(1, verdict(Role::Regular)), (2, verdict(Role::Sdh)), (3, verdict(Role::Drop))]);
+        let evidence = SubtitleFacts { text: Some(&text), ..facts(vec![(1, regular_events()), (2, sdh_events())]) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!((decision.notes.len(), decision.reviews.len()), (0, 0));
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    #[test]
+    fn a_text_drop_of_a_kept_track_and_a_text_role_for_a_dropped_one_are_both_reviewed() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let text = BTreeMap::from([(1, verdict(Role::Drop)), (2, verdict(Role::Sdh)), (3, verdict(Role::Regular))]);
+        let evidence = SubtitleFacts {
+            text: Some(&text),
+            ..facts(vec![(1, regular_events()), (2, sdh_events()), (3, commentary_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::OutsideDialogueGroup)]);
+        assert_eq!(
+            decision.notes,
+            vec![
+                Noted {
+                    note: Note::SubtitleTextDisagrees,
+                    stream: Some(1),
+                    detail: "stream 1: the text reads drop, the counts keep it as regular (8.7 \"Text\")".to_string(),
+                },
+                Noted {
+                    note: Note::SubtitleTextDisagrees,
+                    stream: Some(3),
+                    detail: "stream 3: the text reads regular, the counts drop it (8.7 \"Text\")".to_string(),
+                },
+            ]
+        );
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn a_text_keep_with_its_review_raises_subtitle_ambiguous_for_a_dropped_track() {
+        // Stream 3 is timed as a commentary, outside the dialogue group of 1 and 2, and the counts drop it. The text
+        // rule keeps it and asks for a review (text::decide writes keep only with subtitle_ambiguous). The text never
+        // changes a drop, so stream 3 stays dropped, but the review and the note are raised (8.7 "Text", D20).
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let text = BTreeMap::from([(
+            3,
+            Decision { role: Role::Keep, review: Some("subtitle_ambiguous".into()), note: None },
+        )]);
+        let evidence = SubtitleFacts {
+            text: Some(&text),
+            ..facts(vec![(1, regular_events()), (2, sdh_events()), (3, commentary_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::OutsideDialogueGroup)]);
+        assert_eq!(
+            decision.notes,
+            vec![Noted {
+                note: Note::SubtitleTextDisagrees,
+                stream: Some(3),
+                detail: "stream 3: the text reads keep, the counts drop it (8.7 \"Text\")".to_string(),
+            }]
+        );
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn remembered_overrides_follow_the_stream_signature_and_cover_the_streams_they_name() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        let events = vec![(1, regular_events()), (2, sdh_events())];
+        // One entry: the second English PGS stream (stream 2) is dropped. Stream 1 has no entry.
+        let drop_second = vec![SubtitleOverrideEntry { signature: signature(&title.streams, 2), action: SubtitleOverride::Drop }];
+        let evidence = SubtitleFacts { remembered: Some(drop_second.as_slice()), ..facts(events.clone()) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.kept, vec![track(1, SubtitleRole::Regular, Some(1000), "alignment")]);
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::Remembered), (3, SubtitleDrop::OtherLanguage)]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+
+        // Both English streams have an entry: the confidence is 1.00, the case is the rule's.
+        let both = vec![
+            SubtitleOverrideEntry {
+                signature: signature(&title.streams, 1),
+                action: SubtitleOverride::Keep { role: SubtitleRole::Sdh },
+            },
+            SubtitleOverrideEntry { signature: signature(&title.streams, 2), action: SubtitleOverride::Drop },
+        ];
+        let evidence = SubtitleFacts { remembered: Some(both.as_slice()), ..facts(events) };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.kept, vec![track(1, SubtitleRole::Sdh, Some(1000), "remembered")]);
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::Remembered), (3, SubtitleDrop::OtherLanguage)]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 1.00));
+    }
+
+    #[test]
+    fn review_overrides_win_over_remembered_ones_and_ignore_other_streams() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS, SPA_PGS]);
+        let remembered =
+            vec![SubtitleOverrideEntry { signature: signature(&title.streams, 1), action: SubtitleOverride::Drop }];
+        let reviewed = BTreeMap::from([
+            // Stream 0 is the video stream: not a subtitle stream, so ignored.
+            (0, SubtitleOverride::Drop),
+            (1, SubtitleOverride::Keep { role: SubtitleRole::Regular }),
+            (2, SubtitleOverride::Keep { role: SubtitleRole::Forced }),
+            // Stream 4 is Spanish: 8.7's first sentence drops it and `SubtitleRole` names only English roles: ignored.
+            (4, SubtitleOverride::Keep { role: SubtitleRole::Regular }),
+        ]);
+        let evidence = SubtitleFacts {
+            remembered: Some(remembered.as_slice()),
+            reviewed: Some(&reviewed),
+            ..facts(vec![(1, regular_events()), (3, sdh_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                SubtitleTrack { parent: Some(1), ..track(2, SubtitleRole::Forced, None, "reviewed") },
+                track(1, SubtitleRole::Regular, Some(1000), "reviewed"),
+                track(3, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(4, SubtitleDrop::OtherLanguage)]);
+        assert!(decision.kept.iter().all(|kept| kept.stream != 4));
+        // Stream 3 has no override: the confidence stays the rule's.
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+        assert_eq!(decision.reviews, vec![]);
+    }
+
+    #[test]
+    fn overrides_on_every_english_stream_set_100_and_settle_the_review() {
+        // Equal event counts raise subtitle_ambiguous; the owner then sets both roles. The text disagrees on stream 2,
+        // which the owner decided, so it is not compared.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS]);
+        let reviewed = BTreeMap::from([
+            (1, SubtitleOverride::Keep { role: SubtitleRole::Regular }),
+            (2, SubtitleOverride::Keep { role: SubtitleRole::Sdh }),
+        ]);
+        let text = BTreeMap::from([(2, verdict(Role::Regular))]);
+        let evidence = SubtitleFacts {
+            reviewed: Some(&reviewed),
+            text: Some(&text),
+            ..facts(vec![(1, regular_events()), (2, regular_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "reviewed"),
+                track(2, SubtitleRole::Sdh, Some(1000), "reviewed"),
+            ]
+        );
+        assert_eq!(decision.notes, vec![]);
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 1.00));
+    }
+
+    #[test]
+    fn an_override_replaces_the_drop_and_the_note_of_its_stream() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let reviewed = BTreeMap::from([(3, SubtitleOverride::Drop)]);
+        let evidence = SubtitleFacts {
+            reviewed: Some(&reviewed),
+            ..facts(vec![(1, times(2000, 10.0, 3.0)), (2, times(149, 20.0, 30.0)), (3, times(150, 21.0, 30.0))])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::Reviewed)]);
+        assert_eq!(decision.notes, vec![]);
+        assert_eq!(
+            decision.kept,
+            vec![track(2, SubtitleRole::Forced, Some(149), "count"), track(1, SubtitleRole::Regular, Some(2000), "count")]
+        );
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+    }
+
+    #[test]
+    fn overrides_need_not_name_a_stream_makemkv_removed() {
+        // A pair in the between band raises subtitle_ambiguous. MakeMKV removed the forced-only stream 2 as empty, so the
+        // owner's Override tracks, which choose among the file's tracks, name only streams 1 and 3: they cover every
+        // English stream in the file, so the confidence is 1.00 and the review they answer is settled.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS_FORCED_ONLY, ENG_PGS]);
+        let (a, b) = between_events();
+        let reviewed = BTreeMap::from([
+            (1, SubtitleOverride::Keep { role: SubtitleRole::Regular }),
+            (3, SubtitleOverride::Keep { role: SubtitleRole::Sdh }),
+        ]);
+        let evidence = SubtitleFacts {
+            removed: BTreeSet::from([2]),
+            reviewed: Some(&reviewed),
+            ..facts(vec![(1, a), (3, b)])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "reviewed"),
+                track(3, SubtitleRole::Sdh, Some(1100), "reviewed"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::DerivedForcedOnlyEmpty)]);
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 1.00));
+    }
+
+    #[test]
+    fn a_keep_override_on_the_closed_captions_keeps_its_type() {
+        // A DVD with one English VobSub stream and the closed captions; the owner keeps the captions as SDH. They stay
+        // closed captions, decided by the review; stream 1 has no override, so the confidence stays the rule's.
+        let title = dvd(&[VIDEO, ENG_VOBSUB, ENG_CC]);
+        let reviewed = BTreeMap::from([(2, SubtitleOverride::Keep { role: SubtitleRole::Sdh })]);
+        let evidence = SubtitleFacts { reviewed: Some(&reviewed), ..SubtitleFacts::default() };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, None, "single"),
+                SubtitleTrack { closed_captions: true, ..track(2, SubtitleRole::Sdh, None, "reviewed") },
+            ]
+        );
+        assert_eq!(decision.dropped, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::OneFull, 0.90));
+    }
+}
