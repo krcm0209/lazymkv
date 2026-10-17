@@ -1057,8 +1057,8 @@ fn tool_missing(state: &State, tool: Tool) -> Option<(State, Vec<Action>)> {
 }
 
 /// The waiting states (10.1, section 7, 10.2): entering each from the states its row names, the hourly retry of a lookup
-/// still pending, and the Return of each when its condition clears; AwaitingLookup's Return starts with RefreshIdentity
-/// (8.1: the answered lookups reach the decision).
+/// still pending, and the Return of each when its condition clears; AwaitingLookup's Return to a file-phase state starts
+/// with RefreshIdentity (8.1: the answered lookups reach the decision).
 fn waits(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     let working = state.is_disc_phase() || state.is_file_phase();
     let here = || Box::new(state.clone());
@@ -1084,10 +1084,13 @@ fn waits(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         | (State::AwaitingNetwork { return_to }, Event::NetworkRetry)
         | (State::AwaitingTool { return_to }, Event::ToolFound { .. }) => Some(back_to(return_to)),
         // 8.1: the answers the job waited for refresh the plan's identity before the file phase's next action, so the
-        // Decide that follows uses them (`plan::refresh_identity`).
+        // Decide that follows uses them (`plan::refresh_identity`). A disc-phase step that waited (a lookup failure
+        // before the plan is fixed) plans with the answers itself.
         (State::AwaitingLookup { return_to }, Event::LookupAnswered) => {
             let (state, mut actions) = back_to(return_to);
-            actions.insert(0, Action::RefreshIdentity);
+            if return_to.is_file_phase() {
+                actions.insert(0, Action::RefreshIdentity);
+            }
             Some((state, actions))
         }
         _ => None,

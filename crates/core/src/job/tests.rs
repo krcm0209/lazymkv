@@ -1885,6 +1885,11 @@ fn an_answered_lookup_refreshes_the_identity_and_returns_to_the_interrupted_stat
     // A lookup still pending at the hourly retry refreshes nothing.
     let waiting = State::AwaitingLookup { return_to: boxed(State::Inspecting) };
     assert_eq!(step(&waiting, &Event::LookupPending), (waiting.clone(), vec![Action::StartTimer { minutes: LOOKUP_RETRY_MIN }]));
+    // A disc-phase step that waited for a lookup has no plan to refresh yet: it plans with the answers itself.
+    assert_eq!(
+        step(&State::AwaitingLookup { return_to: boxed(State::Scanned) }, &Event::LookupAnswered),
+        (State::Scanned, vec![Action::Plan, notify(NotifyEvent::Resumed)])
+    );
 }
 
 #[test]
