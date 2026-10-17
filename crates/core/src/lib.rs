@@ -9,6 +9,7 @@ pub mod profile;
 pub mod recording;
 pub mod robot;
 pub mod reconcile;
+pub mod remembered;
 pub mod review;
 pub mod settings;
 pub mod subtitle;

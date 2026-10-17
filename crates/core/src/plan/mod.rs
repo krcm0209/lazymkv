@@ -4,6 +4,7 @@
 
 pub mod kind;
 pub mod movie;
+pub mod tv;
 
 pub use crate::lookup::Kind;
 pub use kind::{Group, KindSource};
