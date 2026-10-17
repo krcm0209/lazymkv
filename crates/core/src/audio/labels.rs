@@ -377,24 +377,7 @@ pub fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
     let empty = Map::new();
     let m = t.as_object().unwrap_or(&empty);
     let allowed: &[&str] = if strict { &OPTIONAL_KEYS } else { &LOOSE_KEYS };
-    let mut out = Vec::new();
-    let missing: Vec<&str> = TRACK_KEYS.iter().copied().filter(|k| !m.contains_key(*k)).collect();
-    let unknown: Vec<&str> = m.keys().map(String::as_str).filter(|k| !TRACK_KEYS.contains(k) && !allowed.contains(k)).collect();
-    if !missing.is_empty() {
-        out.push(format!("{where_}: missing {}", sorted_list(missing)));
-    }
-    if !unknown.is_empty() {
-        out.push(format!("{where_}: unknown keys {}", sorted_list(unknown)));
-    }
-    if !get(m, "label").as_str().map_or(false, is_slug) {
-        out.push(format!("{where_}: label is not a rip label"));
-    }
-    if !is_stream_number(get(m, "stream")) {
-        out.push(format!("{where_}: stream is not ffprobe's stream number (an integer, 0 or more)"));
-    }
-    if !date_ok(get(m, "date")) {
-        out.push(format!("{where_}: date {} is not YYYY-MM-DD", repr_of(m, "date")));
-    }
+    let mut out = base_entry_problems(m, where_, &TRACK_KEYS, allowed);
     if !strict {
         return out;
     }
@@ -404,7 +387,7 @@ pub fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
         out.push(format!("{where_}: kind {} is not in the vocabulary (lazymkv-dev labels kinds)", repr_of(m, "kind")));
     }
     if !how.map_or(false, |h| HOW.iter().any(|(name, _)| *name == h)) {
-        out.push(format!("{where_}: how {} is not one of {}", repr_of(m, "how"), how_names().join(", ")));
+        out.push(format!("{where_}: how {} is not one of {}", repr_of(m, "how"), names(&HOW).join(", ")));
     }
     if how == Some("md5") && kind != Some("duplicate") {
         out.push(format!("{where_}: how md5 only says that a track is a duplicate"));
@@ -424,22 +407,7 @@ pub fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
             out.push(format!("{where_}: film_audible must be true, false or null"));
         }
     }
-    match m.get("history") {
-        None => {}
-        Some(Value::Array(history)) => {
-            for (k, h) in history.iter().enumerate() {
-                let Some(hm) = h.as_object() else {
-                    out.push(format!("{where_}: history {k} is not an object"));
-                    continue;
-                };
-                out.extend(entry_problems(h, &format!("{where_} history {k}"), false));
-                if !date_ok(get(hm, "replaced")) {
-                    out.push(format!("{where_} history {k}: replaced {} is not YYYY-MM-DD", repr_of(hm, "replaced")));
-                }
-            }
-        }
-        Some(_) => out.push(format!("{where_}: history is not a list")),
-    }
+    out.extend(history_problems(m, where_, |h, w| entry_problems(h, w, false)));
     out
 }
 
@@ -447,24 +415,7 @@ pub fn entry_problems(t: &Value, where_: &str, strict: bool) -> Vec<String> {
 /// the file is in (None: not compared). Py: problems.
 pub fn problems(data: &Value, slug: Option<&str>) -> Vec<String> {
     let Some(d) = data.as_object() else { return vec!["the file is not a JSON object".to_string()] };
-    let mut out = Vec::new();
-    let extra: Vec<&str> = d.keys().map(String::as_str).filter(|k| !TOP_KEYS.contains(k)).collect();
-    if !extra.is_empty() {
-        out.push(format!("unknown top-level keys {}", sorted_list(extra)));
-    }
-    if get(d, "format").as_str() != Some(FORMAT) {
-        out.push(format!("format is {}, not {}", repr_of(d, "format"), py_repr_str(FORMAT)));
-    }
-    match get(d, "slug").as_str() {
-        Some(own) if is_slug(own) => {
-            if let Some(folder) = slug {
-                if own != folder {
-                    out.push(format!("slug is {} but the file is in corpus/owner/{folder}", py_repr_str(own)));
-                }
-            }
-        }
-        _ => out.push(format!("slug {} is not lowercase letters, digits and hyphens", repr_of(d, "slug"))),
-    }
+    let mut out = head_problems(d, &TOP_KEYS, FORMAT, slug);
     let no_titles = Map::new();
     let titles = match d.get("titles") {
         Some(Value::Object(titles)) => titles,
@@ -496,22 +447,7 @@ pub fn problems(data: &Value, slug: Option<&str>) -> Vec<String> {
             out.push(format!("{where_}: note is not text"));
         }
     }
-    match d.get("removed") {
-        None => {}
-        Some(Value::Array(removed)) => {
-            for (k, r) in removed.iter().enumerate() {
-                let Some(rm) = r.as_object() else {
-                    out.push(format!("removed {k}: not an object"));
-                    continue;
-                };
-                out.extend(entry_problems(r, &format!("removed {k}"), false));
-                if !date_ok(get(rm, "removed")) {
-                    out.push(format!("removed {k}: removed {} is not YYYY-MM-DD", repr_of(rm, "removed")));
-                }
-            }
-        }
-        Some(_) => out.push("removed is not a list".to_string()),
-    }
+    out.extend(removed_problems(d, |r, where_| entry_problems(r, where_, false)));
     let Some(tracks) = get(d, "tracks").as_array() else {
         out.push("tracks is not a list".to_string());
         return out;
@@ -912,26 +848,43 @@ pub fn left_lines(left: &[String]) -> Vec<String> {
     }
 }
 
-/// `labels check <root>`'s lines for one root and the number of bad files: root/audio-labels.json when it exists,
-/// else every */audio-labels.json (never one under golden/), then root/audio-fitted.json when it exists.
-/// Py: main's check branch.
-pub fn check_lines(tree: &dyn Tree, root: &PathKey) -> (Vec<String>, usize) {
+/// The labels part of `labels check <root>`, shared with `labels --subtitles check` (RP15): root/<file_name> when it
+/// exists, else every */<file_name> (never one under golden/), each "ok <file> (<what load_count says of it>)" or the
+/// refusal `load_count` gives, which makes the file a bad one; "<root>: no <file_name>" when there is none. Returns
+/// the lines and the number of bad files. Public because the dev crate's subtitle `check` calls it. Py: main's check
+/// branch.
+pub fn labels_check_lines(
+    tree: &dyn Tree,
+    root: &PathKey,
+    file_name: &str,
+    load_count: &dyn Fn(&dyn Tree, &PathKey) -> Result<String, String>,
+) -> (Vec<String>, usize) {
     let mut lines = Vec::new();
     let mut bad = 0;
-    let own = root.join("audio-labels.json");
-    let files = if tree.exists(&own) { vec![own] } else { tree.glob(root, "*/audio-labels.json") };
+    let own = root.join(file_name);
+    let files = if tree.exists(&own) { vec![own] } else { tree.glob(root, &format!("*/{file_name}")) };
     if files.is_empty() {
-        lines.push(format!("{}: no audio-labels.json", tree.display(root)));
+        lines.push(format!("{}: no {file_name}", tree.display(root)));
     }
     for path in &files {
-        match load(tree, path) {
-            Ok(labels) => lines.push(format!("ok {} ({} tracks, {} titles)", tree.display(path), labels.tracks.len(), labels.titles.len())),
+        match load_count(tree, path) {
+            Ok(count) => lines.push(format!("ok {} ({count})", tree.display(path))),
             Err(e) => {
                 lines.push(e);
                 bad += 1;
             }
         }
     }
+    (lines, bad)
+}
+
+/// `labels check <root>`'s lines for one root and the number of bad files: root/audio-labels.json when it exists,
+/// else every */audio-labels.json (never one under golden/), then root/audio-fitted.json when it exists.
+/// Py: main's check branch.
+pub fn check_lines(tree: &dyn Tree, root: &PathKey) -> (Vec<String>, usize) {
+    let (mut lines, mut bad) = labels_check_lines(tree, root, "audio-labels.json", &|tree, path| {
+        load(tree, path).map(|labels| format!("{} tracks, {} titles", labels.tracks.len(), labels.titles.len()))
+    });
     let fitted_path = root.join("audio-fitted.json");
     if tree.exists(&fitted_path) {
         match load_fitted(tree, root, None) {
@@ -1053,7 +1006,7 @@ fn scan_flags_checked(tree: &dyn Tree, slug_dir: &PathKey, label: &str) -> Resul
 
 /// json.loads(path.read_text(encoding="utf-8-sig")): Err(text) where the read failed (Python's OSError, which no
 /// caller catches), Ok(Err(text)) where the bytes are not UTF-8 or not JSON (Python's ValueError, which callers catch).
-fn read_value(tree: &dyn Tree, path: &PathKey) -> Result<Result<Value, String>, String> {
+pub(crate) fn read_value(tree: &dyn Tree, path: &PathKey) -> Result<Result<Value, String>, String> {
     let bytes = tree.read(path).map_err(|e| e.to_string())?;
     Ok(decode_text(&bytes, Encoding::Utf8Sig, Errors::Strict)
         .and_then(|text| serde_json::from_str::<Value>(&text).map_err(|e| e.to_string())))
@@ -1125,12 +1078,12 @@ fn num_eq(a: PyNum, b: PyNum) -> bool {
 static NULL: Value = Value::Null;
 
 /// `m.get(key)`, None (JSON null) when absent.
-fn get<'a>(m: &'a Map<String, Value>, key: &str) -> &'a Value {
+pub(crate) fn get<'a>(m: &'a Map<String, Value>, key: &str) -> &'a Value {
     m.get(key).unwrap_or(&NULL)
 }
 
 /// `{m.get(key)!r}`.
-fn repr_of(m: &Map<String, Value>, key: &str) -> String {
+pub(crate) fn repr_of(m: &Map<String, Value>, key: &str) -> String {
     py_repr(get(m, key))
 }
 
@@ -1166,7 +1119,7 @@ fn absent_or(t: &Value, key: &str) -> Value {
 
 /// save's sort key: (str(label), the stream when isinstance(stream, int), a bool as 0 or 1, else -1); ("", -1) for
 /// an entry that is not an object.
-fn track_sort_key(t: &Value) -> (String, i64) {
+pub(crate) fn track_sort_key(t: &Value) -> (String, i64) {
     match t.as_object() {
         Some(m) => {
             let label = py_str(get(m, "label"));
@@ -1200,9 +1153,107 @@ fn number(text: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("invalid literal for int() with base 10: {}", py_repr_str(text)))
 }
 
-/// The names of HOW, in order.
-fn how_names() -> Vec<&'static str> {
-    HOW.iter().map(|&(name, _)| name).collect()
+/// The names of a (name, meaning) table, in order: the `how` vocabulary of these labels and of the subtitle labels
+/// (`subtitle::labels`, RP15).
+pub(crate) fn names<'a>(table: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    table.iter().map(|&(name, _)| name).collect()
+}
+
+/// The first checks of a labels file, shared with the subtitle labels (RP15): the top-level keys that are not in
+/// `top_keys`, the format line against `format`, and the slug, compared with `folder` when it is given. Py: problems'
+/// first checks.
+pub(crate) fn head_problems(d: &Map<String, Value>, top_keys: &[&str], format: &str, folder: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let extra: Vec<&str> = d.keys().map(String::as_str).filter(|k| !top_keys.contains(k)).collect();
+    if !extra.is_empty() {
+        out.push(format!("unknown top-level keys {}", sorted_list(extra)));
+    }
+    if get(d, "format").as_str() != Some(format) {
+        out.push(format!("format is {}, not {}", repr_of(d, "format"), py_repr_str(format)));
+    }
+    match get(d, "slug").as_str() {
+        Some(own) if is_slug(own) => {
+            if let Some(folder) = folder {
+                if own != folder {
+                    out.push(format!("slug is {} but the file is in corpus/owner/{folder}", py_repr_str(own)));
+                }
+            }
+        }
+        _ => out.push(format!("slug {} is not lowercase letters, digits and hyphens", repr_of(d, "slug"))),
+    }
+    out
+}
+
+/// The problems of a labels file's `removed` list, shared with the subtitle labels (RP15): each entry read with
+/// `loose` (the file's own entry check with strict false) and its `removed` date. Py: problems' removed loop.
+pub(crate) fn removed_problems(d: &Map<String, Value>, loose: impl Fn(&Value, &str) -> Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    match d.get("removed") {
+        None => {}
+        Some(Value::Array(removed)) => {
+            for (k, r) in removed.iter().enumerate() {
+                let Some(rm) = r.as_object() else {
+                    out.push(format!("removed {k}: not an object"));
+                    continue;
+                };
+                out.extend(loose(r, &format!("removed {k}")));
+                if !date_ok(get(rm, "removed")) {
+                    out.push(format!("removed {k}: removed {} is not YYYY-MM-DD", repr_of(rm, "removed")));
+                }
+            }
+        }
+        Some(_) => out.push("removed is not a list".to_string()),
+    }
+    out
+}
+
+/// The checks every entry of a labels file has, strict or not, shared with the subtitle labels (RP15): the keys of
+/// `track_keys` that are missing, the keys in neither `track_keys` nor `allowed`, the label, the stream and the date,
+/// each sentence prefixed with `where_`. Py: entry_problems' first checks.
+pub(crate) fn base_entry_problems(m: &Map<String, Value>, where_: &str, track_keys: &[&str], allowed: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let missing: Vec<&str> = track_keys.iter().copied().filter(|k| !m.contains_key(*k)).collect();
+    let unknown: Vec<&str> = m.keys().map(String::as_str).filter(|k| !track_keys.contains(k) && !allowed.contains(k)).collect();
+    if !missing.is_empty() {
+        out.push(format!("{where_}: missing {}", sorted_list(missing)));
+    }
+    if !unknown.is_empty() {
+        out.push(format!("{where_}: unknown keys {}", sorted_list(unknown)));
+    }
+    if !get(m, "label").as_str().map_or(false, is_slug) {
+        out.push(format!("{where_}: label is not a rip label"));
+    }
+    if !is_stream_number(get(m, "stream")) {
+        out.push(format!("{where_}: stream is not ffprobe's stream number (an integer, 0 or more)"));
+    }
+    if !date_ok(get(m, "date")) {
+        out.push(format!("{where_}: date {} is not YYYY-MM-DD", repr_of(m, "date")));
+    }
+    out
+}
+
+/// The problems of a strict entry's `history` list, shared with the subtitle labels (RP15): each earlier label read
+/// with `loose` (the file's own entry check with strict false) and its `replaced` date. Py: entry_problems' history
+/// loop.
+pub(crate) fn history_problems(m: &Map<String, Value>, where_: &str, loose: impl Fn(&Value, &str) -> Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    match m.get("history") {
+        None => {}
+        Some(Value::Array(history)) => {
+            for (k, h) in history.iter().enumerate() {
+                let Some(hm) = h.as_object() else {
+                    out.push(format!("{where_}: history {k} is not an object"));
+                    continue;
+                };
+                out.extend(loose(h, &format!("{where_} history {k}")));
+                if !date_ok(get(hm, "replaced")) {
+                    out.push(format!("{where_} history {k}: replaced {} is not YYYY-MM-DD", repr_of(hm, "replaced")));
+                }
+            }
+        }
+        Some(_) => out.push(format!("{where_}: history is not a list")),
+    }
+    out
 }
 
 /// str() of an optional manifest value: the text, or "None".

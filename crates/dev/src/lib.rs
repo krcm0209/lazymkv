@@ -29,7 +29,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("levels-args", cmd::levels_args::run as Command, "[--evidence DIR] <slug|dir> <label>"),
     ("titles", cmd::titles::run as Command, "[--evidence DIR] <slug|dir>"),
     ("audio-report", cmd::audio_report::run as Command, "<folder> ..."),
-    ("labels", cmd::labels::run as Command, "[--spec FILE] kinds|check|set|unset|title|auto|fitted ..."),
+    ("labels", cmd::labels::run as Command, "[--spec FILE] [--subtitles] kinds|check|set|unset|title|auto|fitted ..."),
     ("subs", cmd::subs::run as Command, cmd::subs::SYNOPSIS),
     ("align", cmd::align::run as Command, "[name=path ...] [--subs-dir DIR] [--clear-max-bytes N] [--tolerance-ms N]"),
     ("levels-from-proxy", cmd::levels_from_proxy::run as Command, "<audio-proxy.mka> <out> --main N [--cand N,...]"),
