@@ -326,7 +326,8 @@ owner may still overturn any of them.
 - F5. Resolve collision answers a path: `Overrides.collision` lists the plain final paths the owner was shown, each
   with its action, and Keep both or Replace resolves only a decision whose own plain path is one of them (compared
   whole and case-insensitively); any other collision raises `path_collision` again.
-- F6. When a pending lookup answers, the reducer's return from AwaitingLookup starts with `RefreshIdentity`:
+- F6. When a pending lookup answers and the wait returns to a file-phase state (a disc-phase step re-plans with the
+  answers itself), the reducer's return from AwaitingLookup starts with `RefreshIdentity`:
   `plan::refresh_identity` identifies again with the answered lookups and the plan's runtime facts
   (`PlanEvidence.runtime`), keeps the ripped titles, their title confidence and the mode, and refreshes the identity,
   its confidence and review reasons, the wanted languages and the evidence. Phase 2 passes the refreshed plan to Decide.

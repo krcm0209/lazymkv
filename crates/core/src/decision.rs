@@ -22,7 +22,7 @@ use crate::remembered::{
     SubtitleOverride, SubtitleOverrideEntry, TitleRole,
 };
 use crate::review::{sorted_unique, Noted, ReviewReason};
-use crate::settings::{configured_root, path_inside, Settings};
+use crate::settings::{configured_root, same_path, Settings};
 use crate::tracks::audio::{decide_audio, AudioDecision, AudioFacts};
 use crate::tracks::layout::{layout, Layout};
 use crate::tracks::subtitle::{decide_subtitles, SubtitleDecision, SubtitleFacts};
@@ -329,7 +329,7 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
 /// The job-level step after every title of one job is decided (6.4 step 11, before the disposition gate of 6.4 step
 /// 12): each decision whose final path another decision of the same job also builds gets `path_collision` (its reviews
 /// sorted and unique again) and NeedsReview. Paths are compared whole and case-insensitively, separators and a trailing
-/// separator aside (`settings::path_inside` both ways), since the library roots are Windows shares. Applied whatever
+/// separator aside (`settings::same_path`), since the library roots are Windows shares. Applied whatever
 /// `overrides.collision` says: spec 11's Keep both and Replace resolve a collision with a file already in the library,
 /// never two titles of one job; the owner settles a same-job clash with Assign titles (naming the cuts, D2, 8.4), and
 /// the job reducer keeps a job held while `path_collision` is present, approved or not. A decision without a path is
@@ -341,7 +341,6 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
 pub fn same_path_reviews(decisions: &mut [FileDecision]) {
     let paths: Vec<Option<String>> =
         decisions.iter().map(|decision| decision.path.as_ref().map(|named| named.path.clone())).collect();
-    let same = |a: &str, b: &str| path_inside(a, b) && path_inside(b, a);
     for (index, decision) in decisions.iter_mut().enumerate() {
         let Some(path) = paths[index].as_deref() else {
             continue;
@@ -349,7 +348,7 @@ pub fn same_path_reviews(decisions: &mut [FileDecision]) {
         let shared = paths
             .iter()
             .enumerate()
-            .any(|(other, found)| other != index && found.as_deref().is_some_and(|found| same(found, path)));
+            .any(|(other, found)| other != index && found.as_deref().is_some_and(|found| same_path(found, path)));
         if shared {
             let mut reviews = std::mem::take(&mut decision.reviews);
             reviews.push(ReviewReason::PathCollision);

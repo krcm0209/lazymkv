@@ -576,8 +576,9 @@ pub enum Event {
     EngineRestart { disc_present: bool },
 }
 
-/// 10.1's actions, plus Fingerprint and Plan (the main line implies them: 10.1's list omits them), CheckSpace (section 7),
-/// the resume housekeeping of "Resuming after a restart", and ArmRipAgain (6.1 step 2: the engine marks the job so the next
+/// 10.1's actions, plus Fingerprint and Plan (the main line implies them: 10.1's list omits them), RefreshIdentity (8.1:
+/// the answered lookups refresh the plan's identity before a file-phase step), CheckSpace (section 7), the resume
+/// housekeeping of "Resuming after a restart", and ArmRipAgain (6.1 step 2: the engine marks the job so the next
 /// insertion of its fingerprint starts a new job). RunScan also starts 6.1 step 3's database lookups beside the scan.
 /// Def: T14. Use: T14, phase 2.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

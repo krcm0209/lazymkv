@@ -180,6 +180,16 @@ pub fn path_inside(inner: &str, outer: &str) -> bool {
         && outer.iter().zip(&inner).all(|(outer, inner)| outer.eq_ignore_ascii_case(inner))
 }
 
+/// True when `a` and `b` name the same file: each is inside the other under `path_inside`, so the comparison is
+/// lexical, ignores ASCII case, and treats '/' and '\\', repeated separators and a trailing separator alike. A path with
+/// no component is the same as nothing, not even as another blank path. The one equality rule of a final path: the
+/// owner's collision answer and the same-job review both read it. Spec 7 ("Path collisions add `path_collision`"), 8.9
+/// ("A second copy at the same resolution and edition is a `path_collision`"). Use: `decision::same_path_reviews`,
+/// `remembered::Overrides::collision_for`.
+pub fn same_path(a: &str, b: &str) -> bool {
+    path_inside(a, b) && path_inside(b, a)
+}
+
 /// A path's components: split on '/' and '\\', empty ones dropped.
 fn components(path: &str) -> Vec<&str> {
     path.split(|c: char| c == '/' || c == '\\').filter(|component| !component.is_empty()).collect()
@@ -535,6 +545,18 @@ mod tests {
     fn forward_slashes_back_slashes_and_repeated_separators_are_one_separator() {
         assert!(path_inside(r"\\unas-pro/media//Movies\\x", r"\\unas-pro\media\Movies"));
         assert!(path_inside("/srv//media///Movies", "/srv/media/Movies/"));
+    }
+
+    #[test]
+    fn the_same_path_ignores_case_separators_and_a_trailing_separator_but_not_a_different_name() {
+        assert!(same_path(
+            r"\\UNAS-PRO\Media\Movies\Dune (2021)\Dune (2021).mkv",
+            "//unas-pro/media//movies/dune (2021)/dune (2021).mkv/"
+        ));
+        assert!(same_path("/srv/media/Movies", "/srv/media/Movies"));
+        assert!(!same_path("/srv/media/Movies/Dune (2021)", "/srv/media/Movies/Dune (2022)"));
+        assert!(!same_path("/srv/media/Movies", "/srv/media/Movies/Dune"));
+        assert!(!same_path("", ""));
     }
 
     #[test]

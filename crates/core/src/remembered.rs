@@ -13,7 +13,7 @@ use std::str::FromStr;
 use crate::codec::Family;
 use crate::disc::{same_source, segment_maps_agree, title_source, Disc, Stream, StreamKind, Title, DURATION_MATCH_S};
 use crate::lookup::tmdb::TmdbIdentity;
-use crate::settings::path_inside;
+use crate::settings::same_path;
 use crate::tracks::SubtitleRole;
 
 /// A title's role in a remembered or review decision (spec 5; 11 "Assign titles", with an editable edition name). Def: T6. Use: T7, T13.
@@ -338,11 +338,10 @@ impl Overrides {
     }
 
     /// The action the owner confirmed for the colliding final path `path` (compared whole, case-insensitively,
-    /// separators and a trailing separator aside, `settings::path_inside` both ways); None when no answer names it.
+    /// separators and a trailing separator aside, `settings::same_path`); None when no answer names it.
     /// Spec 7, 11. Def: PR #3 review (F5). Use: T13.
     pub fn collision_for(&self, path: &str) -> Option<Collision> {
-        let same = |a: &str, b: &str| path_inside(a, b) && path_inside(b, a);
-        self.collision.iter().find(|answer| same(&answer.path, path)).map(|answer| answer.action)
+        self.collision.iter().find(|answer| same_path(&answer.path, path)).map(|answer| answer.action)
     }
 
     /// The same for subtitles (`SubtitleFacts.reviewed`). Spec 11. Def: T6. Use: T13.
