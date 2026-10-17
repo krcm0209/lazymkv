@@ -2,16 +2,17 @@
 //! performs, as one pure function `reduce(state, event) -> (state, actions)`; the state each waiting state returns to;
 //! and 10.1's "Resuming after a restart" (`resume`). Spec 10.2's failure classes and where each one leads
 //! (`failure_outcome`, `classify_title_failure`); spec 12's notification events; spec 5's job ID (`job_id`) and spec
-//! 6.1 step 2's job lookup (`job_lookup`). Pure (RP19): nothing here persists a state, runs a program or sends a
+//! 6.1 step 2's job lookup (`job_lookup`); and `decision_done`, which combines a job's per-title decisions into its one
+//! `DecisionDone` event (6.4 step 12). Pure (RP19): nothing here persists a state, runs a program or sends a
 //! notification. Phase 2's engine persists every transition before it performs its actions and feeds their results
 //! back as events. Written from the spec (RP20). The tests are in `job/tests.rs`.
 
 use std::str::FromStr;
 
-use crate::decision::Disposition;
+use crate::decision::{Disposition, FileDecision};
 use crate::plan::Mode;
 use crate::remembered::Overrides;
-use crate::review::{Note, ReviewReason};
+use crate::review::{sorted_unique, Note, ReviewReason};
 
 /// Spec 10.1's fixed waits: AwaitingNetwork "retried every 10 minutes", AwaitingLookup "retried hourly". Def: T14. Use: T14.
 pub const NETWORK_RETRY_MIN: u32 = 10;
@@ -499,9 +500,11 @@ pub enum Event {
     ProbeDone,
     /// 6.4 step 9's probe failed, with its 10.2 class.
     ProbeFailed { failure: Failure },
-    /// 6.4 step 11's decision, with 8.8's disposition and review reasons. `has_path` is true when the decision built a
-    /// final path (phase 2 sets it from `FileDecision.path.is_some()`); false is Task 13's Open point 38 case, where
-    /// `decide` gives NeedsReview whenever the path is None.
+    /// 6.4 step 11's decision for the whole job, with 8.8's disposition and review reasons: phase 2's engine builds it
+    /// with `decision_done` over every FileDecision of the job (after `decision::same_path_reviews`), never from one
+    /// title's decision. `has_path` is true only when every title built a final path; false is Task 13's Open point 38
+    /// case, where `decide` gives NeedsReview whenever a path is None, and a job with no final path for a title is never
+    /// filed (it is held at the disposition gate whatever its disposition).
     DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason>, has_path: bool },
     /// 6.4 step 11's decision failed, with its 10.2 class.
     DecisionFailed { failure: Failure },
@@ -549,7 +552,9 @@ pub enum Event {
     /// for this job, as FilePhaseSlot is for a Direct job in Ejected; the job holds the slot until it reaches Filed,
     /// NeedsReview, Failed or Discarded.
     ReviewApproved { overrides: Overrides },
-    /// Spec 11 Discard.
+    /// Spec 11 Discard: accepted from NeedsReview and from Failed of every class (spec 11's Discard deletes the job's
+    /// staging data, 4.5 `discard`, and spec 7 never deletes a held or failed job's data automatically, so a failed job's
+    /// data is freed only this way), to Discarded with DeleteJobData.
     ReviewDiscarded,
     /// Spec 11 Retry, for a failed job. For a job that failed in its file phase, phase 2 delivers it only once spec 6's
     /// file-phase slot is free for this job, as for ReviewApproved.
@@ -677,6 +682,23 @@ pub fn classify_title_failure(
     }
 }
 
+/// The job's `DecisionDone` from the FileDecisions of all its titles (6.4 steps 11 and 12, 8.8: the disposition is
+/// the job's): NeedsReview when any title's disposition is NeedsReview, or when there is no decision at all, else
+/// AutoFile; the reasons are the sorted union of every decision's reviews (`review::sorted_unique`); `has_path` is true
+/// only when there is a decision and every one built a final path. Phase 2's engine builds the event with this function
+/// after `decision::same_path_reviews` has compared the titles' paths, so a multi-title job with one pathless title is
+/// held at the disposition gate, never filed (Open points 38 and 39, Task 13's pointer that the job's disposition is
+/// combined from its titles'). Spec 6.4 step 12 ("A job with any review reason, or any confidence below
+/// `auto_threshold`, enters NeedsReview"). Def: final review (H5). Use: phase 2.
+pub fn decision_done(decisions: &[FileDecision]) -> Event {
+    let held = decisions.is_empty() || decisions.iter().any(|decision| decision.disposition == Disposition::NeedsReview);
+    Event::DecisionDone {
+        disposition: if held { Disposition::NeedsReview } else { Disposition::AutoFile },
+        reasons: sorted_unique(decisions.iter().flat_map(|decision| decision.reviews.iter().copied()).collect()),
+        has_path: !decisions.is_empty() && decisions.iter().all(|decision| decision.path.is_some()),
+    }
+}
+
 /// A new job's first state and actions: (Detected, [Fingerprint]) (6.1 steps 1 and 2; the engine creates it on MediaArrived
 /// when `job_lookup` gives NewJob, or before the fingerprint is known). Def: T14. Use: phase 2.
 pub fn new_job() -> (State, Vec<Action>) {
@@ -688,9 +710,8 @@ pub fn new_job() -> (State, Vec<Action>) {
 /// with Decide pending, after approval or re-finalise; header-only steps simply run again, 10.1, and a job whose decision,
 /// made again, needs review is gated again unless the owner approved it: an approved job is held again only for
 /// `path_collision` or a decision with no final path (`has_path` false), spec 7, 6.4 step 12, Open point 39); Ripping
-/// [EmptyTitleDirectory,
-/// RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle]; Copying [EmptyCopyDirectory, CopyDisc]; RipVerified (either after_copy) [Eject];
-/// Inspecting [Probe]; Remuxing [DeletePartialFile, Remux]; Verified [File]; Ejected nothing (it waits for FilePhaseSlot or
+/// [EmptyTitleDirectory, RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle]; Copying [EmptyCopyDirectory,
+/// CopyDisc]; RipVerified (either after_copy) [Eject]; Inspecting [Probe]; Remuxing [DeletePartialFile, Remux]; Verified [File]; Ejected nothing (it waits for FilePhaseSlot or
 /// HoldForReview); a disc-phase state with `disc_present` false [WaitForDisc]; waiting, held, failed, filed and discarded
 /// states nothing, except AwaitingNetwork [StartTimer { minutes: NETWORK_RETRY_MIN }] and AwaitingLookup
 /// [StartTimer { minutes: LOOKUP_RETRY_MIN }] (10.1's "retried every 10 minutes" and "retried hourly": a restart loses
@@ -789,10 +810,15 @@ fn direct_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         (State::Inspecting, Event::ProbeDone) => {
             (State::Inspecting, vec![Action::ExtractSubtitleEvidence, Action::Decide])
         }
-        (State::Inspecting, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
+        (State::Inspecting, Event::DecisionDone { disposition: Disposition::AutoFile, has_path: true, .. }) => {
             (State::Decided { approved: false }, vec![Action::CheckSpace])
         }
-        (State::Inspecting, Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. }) => (
+        // A decision with no final path is never filed (Open point 38): held at the gate whatever its disposition.
+        (
+            State::Inspecting,
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. }
+            | Event::DecisionDone { has_path: false, reasons, .. },
+        ) => (
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
         ),
@@ -905,9 +931,11 @@ fn copy_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
 /// except that it is held at the disposition gate again, with the same notification, when it raises `path_collision`
 /// (spec 7: the job never overwrites a file it did not create, and a re-finalise whose recorded file no longer matches
 /// raises it) or built no final path (`has_path` false, 6.4 step 12, Open points 38 and 39); a decision made again in an
-/// unapproved job (an auto-filed job after a restart, a Return or a Retry)
-/// goes on only when it files automatically and is otherwise held at the disposition gate (6.4 step 12); Discard
-/// deletes the job's data; Re-finalise takes a filed job back to an approved Decided; Rip again arms a new job for a
+/// unapproved job (an auto-filed job after a restart, a Return or a Retry) goes on only when it files automatically with
+/// a final path and is otherwise held at the disposition gate (6.4 step 12; a job with no final path is never AutoFile);
+/// Discard deletes the job's data, of a held job (10.1's table) or of a failed one of any class (spec 11's Discard, the
+/// 10.1 row extended by the final review's ruling: spec 7 never deletes a failed job's data automatically, so this is
+/// how the owner frees it); Re-finalise takes a filed job back to an approved Decided; Rip again arms a new job for a
 /// filed, held or file-phase job, one that failed in its file phase, or a waiting job returning to a file-phase state
 /// (6.1 step 2 counts each as past the disc phase), and leaves its state.
 fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
@@ -920,9 +948,10 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         {
             (state.clone(), vec![Action::CheckSpace])
         }
-        (State::Decided { approved: false }, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
-            (state.clone(), vec![Action::CheckSpace])
-        }
+        (
+            State::Decided { approved: false },
+            Event::DecisionDone { disposition: Disposition::AutoFile, has_path: true, .. },
+        ) => (state.clone(), vec![Action::CheckSpace]),
         (State::Decided { approved: true }, Event::DecisionDone { reasons, has_path, .. })
             if blocks_filing(reasons, *has_path) =>
         {
@@ -933,12 +962,15 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         }
         (
             State::Decided { approved: false },
-            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. }
+            | Event::DecisionDone { has_path: false, reasons, .. },
         ) => (
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
         ),
-        (State::NeedsReview { .. }, Event::ReviewDiscarded) => (State::Discarded, vec![Action::DeleteJobData]),
+        (State::NeedsReview { .. } | State::Failed { .. }, Event::ReviewDiscarded) => {
+            (State::Discarded, vec![Action::DeleteJobData])
+        }
         (State::Filed, Event::ReFinalise) => (State::Decided { approved: true }, vec![Action::Decide]),
         (State::Filed | State::NeedsReview { .. }, Event::RipAgain) => (state.clone(), vec![Action::ArmRipAgain]),
         (State::Failed { from, .. }, Event::RipAgain) if from.is_file_phase() => {
@@ -1121,10 +1153,12 @@ pub enum JobLookup {
 
 /// Spec 6.1 step 2 over the earlier jobs of this fingerprint as (job id, state, rip again armed); the one with the highest n
 /// decides: Resume when it has not finished its disc phase (a disc-phase state, or a waiting state returning to one) or is
-/// Failed { MediaReadError }; AlreadyRipped when it is past the disc phase (a file-phase state, NeedsReview, Filed, a
-/// waiting state returning to a file-phase state, or Failed with another class from a file-phase state) and not armed;
-/// NewJob otherwise (armed, Discarded, Failed with another class from a disc-phase state, or no earlier job). An ID whose
-/// last part after '-' is not a job number is skipped. Def: T14. Use: phase 2.
+/// Failed { MediaReadError } from a disc-phase state; AlreadyRipped when it is past the disc phase (a file-phase state,
+/// NeedsReview, Filed, a waiting state returning to a file-phase state, or Failed of any class from a file-phase state)
+/// and not armed; NewJob otherwise (armed, so an armed Rip again of a file-phase failure starts a new rip; Discarded;
+/// Failed with another class from a disc-phase state; or no earlier job). A job that failed in its disc phase with
+/// DriveIncapable or Unknown is left for the owner to Retry (Unknown only) or Discard (spec 11): the disc inserted again
+/// starts a new job beside it. An ID whose last part after '-' is not a job number is skipped. Def: T14. Use: phase 2.
 pub fn job_lookup(earlier: &[(String, State, bool)]) -> JobLookup {
     let latest = earlier
         .iter()
@@ -1139,7 +1173,7 @@ pub fn job_lookup(earlier: &[(String, State, bool)]) -> JobLookup {
     let returns_to = waiting_return(state);
     let unfinished = state.is_disc_phase()
         || returns_to.is_some_and(State::is_disc_phase)
-        || matches!(state, State::Failed { class: FailureClass::MediaReadError, .. });
+        || matches!(state, State::Failed { class: FailureClass::MediaReadError, from } if from.is_disc_phase());
     let past = state.is_file_phase()
         || matches!(state, State::NeedsReview { .. } | State::Filed)
         || returns_to.is_some_and(State::is_file_phase)

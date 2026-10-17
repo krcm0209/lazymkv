@@ -926,6 +926,140 @@ fn a_finished_probe_extracts_the_subtitle_evidence_then_decides() {
 }
 
 #[test]
+fn an_auto_file_decision_without_a_final_path_is_held_at_the_gate_whether_first_or_made_again() {
+    // Ruling T14: a job with no final path is never AutoFile. `decide` never pairs AutoFile with no path, but the event
+    // is the job's, combined from its titles (`decision_done`), so the reducer holds it in both unapproved states too.
+    let pathless = Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: false };
+    for state in [State::Inspecting, State::Decided { approved: false }] {
+        assert_eq!(
+            step(&state, &pathless),
+            (
+                State::NeedsReview { held: Held::DispositionGate },
+                vec![notify(NotifyEvent::NeedsReview { reasons: Vec::new() })]
+            ),
+            "{state:?}"
+        );
+    }
+    let reasons = vec![ReviewReason::TvUnmapped];
+    let unmapped = Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: false };
+    assert_eq!(
+        step(&State::Decided { approved: false }, &unmapped),
+        (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
+    );
+}
+
+/// One title's decision of a job: keeping nothing, with this disposition, these reviews and a final path or none
+/// (only these three fields reach `decision_done`).
+fn title_decision(disposition: Disposition, reviews: Vec<ReviewReason>, path: bool) -> FileDecision {
+    use crate::decision::Confidences;
+    use crate::naming::NamedPath;
+    use crate::tracks::audio::AudioDecision;
+    use crate::tracks::layout::Layout;
+    use crate::tracks::subtitle::{SubtitleCase, SubtitleDecision};
+    FileDecision {
+        title_key: "t00-00800".to_string(),
+        audio: AudioDecision {
+            kept: Vec::new(),
+            dropped: Vec::new(),
+            reference: None,
+            verdict_reference: None,
+            notes: Vec::new(),
+            reviews: Vec::new(),
+            confidence: 0.95,
+            description_alignment: None,
+        },
+        subtitles: SubtitleDecision {
+            kept: Vec::new(),
+            dropped: Vec::new(),
+            set_aside: Vec::new(),
+            full: Vec::new(),
+            groups: Vec::new(),
+            dialogue_group: None,
+            dialogue_pick: None,
+            pairs: Vec::new(),
+            case: SubtitleCase::NoEnglish,
+            confidence: 0.95,
+            notes: Vec::new(),
+            reviews: Vec::new(),
+        },
+        layout: Layout { tracks: Vec::new(), chapters_kept: true },
+        resolution: Some("1080p".to_string()),
+        edition: None,
+        path: path.then(|| NamedPath {
+            root: "/library".to_string(),
+            components: vec!["Show".to_string()],
+            path: "/library/Show".to_string(),
+        }),
+        confidences: Confidences { identity: 0.95, title: 0.98, track: 0.95 },
+        reviews,
+        notes: Vec::new(),
+        read_errors: Vec::new(),
+        disposition,
+    }
+}
+
+#[test]
+fn a_job_of_several_titles_needs_review_when_any_title_does_and_has_a_path_only_when_every_title_has_one() {
+    let mut decisions = vec![title_decision(Disposition::AutoFile, Vec::new(), true); 3];
+    decisions.push(title_decision(Disposition::NeedsReview, vec![ReviewReason::TvUnmapped], false));
+    let done = decision_done(&decisions);
+    assert_eq!(
+        done,
+        Event::DecisionDone {
+            disposition: Disposition::NeedsReview,
+            reasons: vec![ReviewReason::TvUnmapped],
+            has_path: false
+        }
+    );
+    // Even an approved job is held: one title has no final path (Open point 38).
+    assert_eq!(
+        step(&State::Decided { approved: true }, &done),
+        (
+            State::NeedsReview { held: Held::DispositionGate },
+            vec![notify(NotifyEvent::NeedsReview { reasons: vec![ReviewReason::TvUnmapped] })]
+        )
+    );
+}
+
+#[test]
+fn every_title_filing_automatically_gives_an_auto_file_job() {
+    let decisions = vec![title_decision(Disposition::AutoFile, Vec::new(), true); 4];
+    assert_eq!(
+        decision_done(&decisions),
+        Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }
+    );
+    assert_eq!(
+        step(&State::Inspecting, &decision_done(&decisions)),
+        (State::Decided { approved: false }, vec![Action::CheckSpace])
+    );
+}
+
+#[test]
+fn reasons_from_several_titles_are_merged_sorted_and_unique() {
+    let decisions = [
+        title_decision(Disposition::NeedsReview, vec![ReviewReason::SubtitleAmbiguous, ReviewReason::PathCollision], true),
+        title_decision(Disposition::NeedsReview, vec![ReviewReason::CommentaryDetected, ReviewReason::PathCollision], true),
+        title_decision(Disposition::AutoFile, Vec::new(), true),
+    ];
+    assert_eq!(
+        decision_done(&decisions),
+        Event::DecisionDone {
+            disposition: Disposition::NeedsReview,
+            reasons: vec![ReviewReason::CommentaryDetected, ReviewReason::SubtitleAmbiguous, ReviewReason::PathCollision],
+            has_path: true
+        }
+    );
+}
+
+#[test]
+fn an_empty_decision_list_is_held_with_no_path() {
+    assert_eq!(
+        decision_done(&[]),
+        Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: Vec::new(), has_path: false }
+    );
+}
+
+#[test]
 fn an_auto_file_decision_checks_space_for_the_remux() {
     assert_eq!(
         step(&State::Inspecting, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }),
@@ -1443,6 +1577,27 @@ fn re_finalise_and_discard_are_rejected_outside_their_states() {
     assert!(rejects(&State::NeedsReview { held: Held::DispositionGate }, &Event::ReFinalise));
     assert!(rejects(&State::Filed, &Event::ReviewDiscarded));
     assert!(rejects(&State::Inspecting, &Event::ReviewApproved { overrides: Overrides::default() }));
+    // A waiting job is neither held nor failed: Discard waits until it is.
+    assert!(rejects(&State::AwaitingSpace { return_to: boxed(State::Copying) }, &Event::ReviewDiscarded));
+    for state in disc_phase_states().into_iter().chain(file_phase_states()) {
+        assert!(rejects(&state, &Event::ReviewDiscarded), "{state:?}");
+    }
+    assert!(rejects(&State::Discarded, &Event::ReviewDiscarded));
+}
+
+#[test]
+fn discarding_a_failed_job_deletes_its_data() {
+    // Spec 11's Discard applies to a failed job too (spec 7 never deletes its data automatically): every class that
+    // fails a job, from a disc-phase and from a file-phase step.
+    for class in [FailureClass::DriveIncapable, FailureClass::MediaReadError, FailureClass::Unknown] {
+        for from in [State::Copying, State::Remuxing] {
+            assert_eq!(
+                step(&State::Failed { class, from: boxed(from.clone()) }, &Event::ReviewDiscarded),
+                (State::Discarded, vec![Action::DeleteJobData]),
+                "{class:?} from {from:?}"
+            );
+        }
+    }
 }
 
 // `reduce`: the waiting states and their returns (10.1, section 7, 10.2's ToolMissing row).
@@ -2064,6 +2219,18 @@ fn a_job_failed_in_its_file_phase_is_already_ripped() {
     let failed = State::Failed { class: FailureClass::Unknown, from: boxed(State::Remuxing) };
     assert_eq!(job_lookup(&[earlier(1, failed.clone(), false)]), JobLookup::AlreadyRipped(format!("{FP}-1")));
     assert_eq!(job_lookup(&[earlier(1, failed, true)]), JobLookup::NewJob);
+}
+
+#[test]
+fn a_media_read_error_in_the_file_phase_is_already_ripped_and_rip_again_starts_a_new_job() {
+    // Rip again is accepted for a job that failed in its file phase; once armed, the disc inserted again starts a new
+    // rip instead of resuming the failed job (only a disc-phase MediaReadError resumes).
+    for from in [State::Extracting, State::Inspecting, State::Remuxing, State::Verified] {
+        let failed = State::Failed { class: FailureClass::MediaReadError, from: boxed(from.clone()) };
+        assert_eq!(step(&failed, &Event::RipAgain), (failed.clone(), vec![Action::ArmRipAgain]), "{from:?}");
+        assert_eq!(job_lookup(&[earlier(1, failed.clone(), true)]), JobLookup::NewJob, "{from:?}");
+        assert_eq!(job_lookup(&[earlier(1, failed, false)]), JobLookup::AlreadyRipped(format!("{FP}-1")), "{from:?}");
+    }
 }
 
 #[test]
