@@ -248,8 +248,9 @@ fn median_of(values: &[f64]) -> Option<f64> {
 /// A TheDiscDB description's meaning (8.1 last bullet, D14, 8.7 "the one TheDiscDB describes as subtitles or SDH"):
 /// "comment" gives Commentary; "audio desc", "descriptive", "DVS", "visually impaired" give AudioDescription; "SDH",
 /// "hearing" give Sdh; "isolated score", "score only" give IsolatedScore; "music and effects", "music & effects", "M&E"
-/// give MusicAndEffects; "subtitle", or a description that after trimming and case-folding equals the track's own
-/// `language` (TheDiscDB's language name: "English"; Knowing's "ENglish" included), gives Dialogue. All
+/// give MusicAndEffects; "subtitle" (unless the text also names commentary: "Commentary subtitles" is Commentary only,
+/// since a commentary description is not a plain one), or a description that after trimming and case-folding equals
+/// the track's own `language` (TheDiscDB's language name: "English"; Knowing's "ENglish" included), gives Dialogue. All
 /// case-insensitive, substring matches, in this order; a text can carry several. IsolatedScore, MusicAndEffects and
 /// Dialogue are provisional: TheDiscDB's wording for them is not yet known (8.1's last bullet names no such word; every
 /// subtitle description in the 18 answers and the pinned files is a bare language name). Def: T4. Use: T8, T9, T10.
@@ -314,7 +315,9 @@ fn mentions(text: &str, phrases: &[&str]) -> bool {
 }
 
 /// The kinds `text` names, in DescriptionKind's order, each once; `language` is the track's own TheDiscDB `language`
-/// ("English"), which a bare-language description equals. Spec 8.1 last bullet, D14, 8.7. Def: T4. Use: T8, T9, T10.
+/// ("English"), which a bare-language description equals. "subtitle" gives Dialogue unless the text also names
+/// commentary (Open point 29: a plain subtitle description is Dialogue, and a commentary description is not plain;
+/// 8.1's last bullet). Spec 8.1 last bullet, D14, 8.7. Def: T4. Use: T8, T9, T10.
 pub fn description_kinds(text: &str, language: Option<&str>) -> Vec<DescriptionKind> {
     let folded = text.trim().to_lowercase();
     let own_language = language.map(|language| language.trim().to_lowercase()).filter(|language| !language.is_empty());
@@ -334,7 +337,8 @@ pub fn description_kinds(text: &str, language: Option<&str>) -> Vec<DescriptionK
     if mentions(&folded, &MUSIC_AND_EFFECTS_PHRASES) {
         kinds.push(DescriptionKind::MusicAndEffects);
     }
-    if mentions(&folded, &DIALOGUE_PHRASES) || own_language.as_deref() == Some(folded.as_str()) {
+    let plain_subtitle = mentions(&folded, &DIALOGUE_PHRASES) && !kinds.contains(&DescriptionKind::Commentary);
+    if plain_subtitle || own_language.as_deref() == Some(folded.as_str()) {
         kinds.push(DescriptionKind::Dialogue);
     }
     kinds

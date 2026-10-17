@@ -169,8 +169,16 @@ pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>) {
 /// from episode `start`: each takes the next episode, or the next two when its duration is within TV_RUNTIME_TOLERANCE of
 /// the sum of the next two episodes' runtimes and not within it of the next one's; an episode without a runtime takes one
 /// title. Returns (title, episode numbers) pairs. An episode is looked up in `episodes` by its `episode_number`; one TMDb
-/// does not list counts as an episode without a runtime. Def: T6. Use: T6.
-pub fn suggest_by_runtime(groups: &[&Group], episodes: &[TmdbEpisode], start: u32) -> Vec<(u32, Vec<u32>)> {
+/// does not list counts as an episode without a runtime. The episodes `session` already assigned are skipped, as
+/// `suggest` skips them (8.5 "Suggestions start at the session's next unassigned episode"): a title takes the next
+/// free episode, and two only when the episode after it is free too (a two-episode title holds two episodes in a
+/// row). Def: T6. Use: T6.
+pub fn suggest_by_runtime(
+    groups: &[&Group],
+    episodes: &[TmdbEpisode],
+    start: u32,
+    session: Option<&SeasonSession>,
+) -> Vec<(u32, Vec<u32>)> {
     let runtime_s = |number: u32| {
         episodes
             .iter()
@@ -180,42 +188,59 @@ pub fn suggest_by_runtime(groups: &[&Group], episodes: &[TmdbEpisode], start: u3
     };
     let mut ordered: Vec<&Group> = groups.iter().copied().filter(|group| !group.titles.is_empty()).collect();
     ordered.sort_by_key(|group| group.titles[0]);
-    let mut next = start;
+    // The first free episode at or after a number (u32::MAX when none is: the numbers saturate).
+    let free = |episode: u32| free_from(session, episode).unwrap_or(u32::MAX);
+    let mut next = free(start);
     let mut out = Vec::with_capacity(ordered.len());
     for group in ordered {
         let seconds = f64::from(group.seconds);
         let after = next.saturating_add(1);
-        let two = match (runtime_s(next), runtime_s(after)) {
-            (Some(first), Some(second)) => {
-                within(seconds, first + second, TV_RUNTIME_TOLERANCE) && !within(seconds, first, TV_RUNTIME_TOLERANCE)
-            }
-            _ => false,
-        };
+        let two = free(after) == after
+            && match (runtime_s(next), runtime_s(after)) {
+                (Some(first), Some(second)) => {
+                    within(seconds, first + second, TV_RUNTIME_TOLERANCE) && !within(seconds, first, TV_RUNTIME_TOLERANCE)
+                }
+                _ => false,
+            };
         if two {
             out.push((group.titles[0], vec![next, after]));
-            next = after.saturating_add(1);
+            next = free(after.saturating_add(1));
         } else {
             out.push((group.titles[0], vec![next]));
-            next = after;
+            next = free(after);
         }
     }
     out
 }
 
+/// The first episode at or after `episode` that `session` has not assigned (`episode` itself without a session); None
+/// when every one up to u32::MAX is assigned. The one copy of 8.5's skip, which `suggest` and `suggest_by_runtime` share.
+fn free_from(session: Option<&SeasonSession>, episode: u32) -> Option<u32> {
+    (episode..=u32::MAX).find(|&candidate| !session.is_some_and(|session| session.get(candidate).is_some()))
+}
+
 /// 8.5 second bullet: 0.60 with tv_unmapped; the episode-length groups' representatives are suggested from `start` (the
 /// session's next unassigned episode, or 1), through `suggest_by_runtime` when `episodes` (the season's TMDb episodes) are
 /// given, else one episode each in title order; `suggested: true`; in `season` (None when no season was parsed and no
-/// session was found). Episode numbers run on from `start` without skipping episodes the session assigned later in the
-/// season; review confirms every suggestion (0.60, tv_unmapped). A suggestion's name is TMDb's episode name, a
+/// session was found). Episode numbers run on from `start`, skipping the episodes `session` (the season session found
+/// for the disc, or None) already assigned, as `suggest` does (8.5 "Suggestions start at the session's next unassigned
+/// episode"), so a suggestion never names an episode another disc holds; review confirms every suggestion (0.60,
+/// tv_unmapped). A suggestion's name is TMDb's episode name, a
 /// two-episode suggestion's names joined with " / ".
 /// The caller passes the groups to suggest: a play-all group (8.3 rule 3.1) is left out by plan::plan, since this
 /// function has no DVD flag to find one. Def: T6. Use: T7.
-pub fn unmapped(groups: &[Group], season: Option<u32>, start: u32, episodes: Option<&TmdbSeason>) -> TvPlan {
+pub fn unmapped(
+    groups: &[Group],
+    season: Option<u32>,
+    start: u32,
+    episodes: Option<&TmdbSeason>,
+    session: Option<&SeasonSession>,
+) -> TvPlan {
     let tmdb: &[TmdbEpisode] = match episodes {
         Some(listed) => &listed.episodes,
         None => &[],
     };
-    let pairs = suggest_by_runtime(&episode_length_groups(groups), tmdb, start);
+    let pairs = suggest_by_runtime(&episode_length_groups(groups), tmdb, start, session);
     let how = if tmdb.is_empty() {
         "one episode each in title order (no TMDb episodes for the season)"
     } else {
@@ -342,17 +367,14 @@ pub fn find<'a>(sessions: &'a [SeasonSession], show_id: i64, season: Option<u32>
 /// `n` episode numbers from the session's next unassigned episode (from 1 without a session), skipping assigned ones.
 /// Spec 8.5 "Suggestions start at the session's next unassigned episode". Def: T6. Use: phase 2 (review's Assign titles).
 pub fn suggest(session: Option<&SeasonSession>, n: usize) -> Vec<u32> {
-    let assigned = |episode: u32| session.map_or(false, |session| session.get(episode).is_some());
     let mut out = Vec::with_capacity(n);
-    let mut episode = session.map_or(1, SeasonSession::next_unassigned);
+    let mut from = Some(session.map_or(1, SeasonSession::next_unassigned));
     while out.len() < n {
-        if !assigned(episode) {
-            out.push(episode);
-        }
-        match episode.checked_add(1) {
-            Some(next) => episode = next,
-            None => break,
-        }
+        let Some(episode) = from.and_then(|from| free_from(session, from)) else {
+            break;
+        };
+        out.push(episode);
+        from = episode.checked_add(1);
     }
     out
 }
@@ -794,7 +816,7 @@ mod tests {
         let groups = [group(1, &[1], 1320), group(2, &[2], 2640), group(3, &[3], 1300)];
         let refs: Vec<&Group> = groups.iter().collect();
         let episodes = [1, 2, 3, 4].map(|number| tmdb_episode(number, Some(22)));
-        assert_eq!(suggest_by_runtime(&refs, &episodes, 1), vec![(1, vec![1]), (2, vec![2, 3]), (3, vec![4])]);
+        assert_eq!(suggest_by_runtime(&refs, &episodes, 1, None), vec![(1, vec![1]), (2, vec![2, 3]), (3, vec![4])]);
     }
 
     #[test]
@@ -804,7 +826,7 @@ mod tests {
         let groups = [group(0, &[1], 5186), group(1, &[2], 2554), group(2, &[3], 2627)];
         let refs: Vec<&Group> = groups.iter().collect();
         let episodes = [tmdb_episode(1, Some(86)), tmdb_episode(2, Some(44)), tmdb_episode(3, Some(44))];
-        assert_eq!(suggest_by_runtime(&refs, &episodes, 1), vec![(0, vec![1]), (1, vec![2]), (2, vec![3])]);
+        assert_eq!(suggest_by_runtime(&refs, &episodes, 1, None), vec![(0, vec![1]), (1, vec![2]), (2, vec![3])]);
     }
 
     #[test]
@@ -813,7 +835,7 @@ mod tests {
         let groups = [group(0, &[1], 2700), group(1, &[2], 2800)];
         let refs: Vec<&Group> = groups.iter().collect();
         let episodes = [1, 2, 3, 4].map(|number| tmdb_episode(number, Some(20)));
-        assert_eq!(suggest_by_runtime(&refs, &episodes, 1), vec![(0, vec![1, 2]), (1, vec![3])]);
+        assert_eq!(suggest_by_runtime(&refs, &episodes, 1, None), vec![(0, vec![1, 2]), (1, vec![3])]);
     }
 
     #[test]
@@ -822,7 +844,7 @@ mod tests {
         let groups = [group(0, &[1], 2450)];
         let refs: Vec<&Group> = groups.iter().collect();
         let episodes = [tmdb_episode(1, Some(40)), tmdb_episode(2, Some(2))];
-        assert_eq!(suggest_by_runtime(&refs, &episodes, 1), vec![(0, vec![1])]);
+        assert_eq!(suggest_by_runtime(&refs, &episodes, 1, None), vec![(0, vec![1])]);
     }
 
     #[test]
@@ -838,7 +860,7 @@ mod tests {
             tmdb_episode(5, Some(22)),
         ];
         assert_eq!(
-            suggest_by_runtime(&refs, &episodes, 1),
+            suggest_by_runtime(&refs, &episodes, 1, None),
             vec![(1, vec![1]), (2, vec![2]), (3, vec![3, 4]), (4, vec![5])]
         );
     }
@@ -847,7 +869,7 @@ mod tests {
     fn suggestions_follow_title_order_from_the_start_episode() {
         let groups = [group(5, &[5], 1320), group(2, &[2], 1320)];
         let refs: Vec<&Group> = groups.iter().collect();
-        assert_eq!(suggest_by_runtime(&refs, &[], 5), vec![(2, vec![5]), (5, vec![6])]);
+        assert_eq!(suggest_by_runtime(&refs, &[], 5, None), vec![(2, vec![5]), (5, vec![6])]);
     }
 
     #[test]
@@ -860,7 +882,7 @@ mod tests {
         // Title 3 lasts 5 minutes: not episode length.
         let groups = vec![group(0, &[1], 1320), group(1, &[2], 2640), group(2, &[3], 1300), group(3, &[4], 300)];
         assert_eq!(
-            unmapped(&groups, Some(1), 1, record.season(1)),
+            unmapped(&groups, Some(1), 1, record.season(1), None),
             TvPlan {
                 mapped: false,
                 episodes: vec![
@@ -887,7 +909,7 @@ mod tests {
     #[test]
     fn without_tmdb_episodes_each_episode_length_title_takes_one_episode_in_title_order() {
         let groups = vec![group(2, &[3], 1300), group(0, &[1], 1320), group(1, &[2], 2640)];
-        let plan = unmapped(&groups, Some(2), 1, None);
+        let plan = unmapped(&groups, Some(2), 1, None, None);
         assert_eq!(
             plan.episodes,
             vec![
@@ -903,13 +925,13 @@ mod tests {
         assert_eq!(plan.evidence[2], "title 0 suggested as S02E01");
         // A season TMDb lists without its episodes gives the same plan.
         let listed = TmdbSeason { season_number: 2, episode_count: Some(10), episodes: vec![] };
-        assert_eq!(unmapped(&groups, Some(2), 1, Some(&listed)), plan);
+        assert_eq!(unmapped(&groups, Some(2), 1, Some(&listed), None), plan);
     }
 
     #[test]
     fn an_unknown_season_stays_none_and_review_asks_for_it() {
         let groups = vec![group(0, &[1], 1320), group(1, &[2], 1320)];
-        let plan = unmapped(&groups, None, 1, None);
+        let plan = unmapped(&groups, None, 1, None, None);
         assert_eq!(plan.episodes, vec![episode_title(0, None, &[1], None, true), episode_title(1, None, &[2], None, true)]);
         assert_eq!(plan.reviews, vec![ReviewReason::TvUnmapped]);
         assert_eq!(
@@ -930,7 +952,7 @@ mod tests {
         // 10 and 130 minutes are outside 8.2's band of 15 to 120 minutes; 15 and 120 minutes are inside it.
         let groups =
             vec![group(0, &[1], 600), group(1, &[2], 1320), group(2, &[3], 7800), group(3, &[4], 900), group(4, &[5], 7200)];
-        let plan = unmapped(&groups, Some(1), 1, None);
+        let plan = unmapped(&groups, Some(1), 1, None, None);
         assert_eq!(
             plan.episodes.iter().map(|e| (e.title, e.episode.episodes.clone())).collect::<Vec<_>>(),
             vec![(1, vec![1]), (3, vec![2]), (4, vec![3])]
@@ -939,7 +961,7 @@ mod tests {
 
     #[test]
     fn a_tv_plan_round_trips_through_json_with_a_null_season() {
-        let plan = unmapped(&[group(0, &[1], 1320)], None, 1, None);
+        let plan = unmapped(&[group(0, &[1], 1320)], None, 1, None, None);
         let text = serde_json::to_string(&plan).unwrap();
         assert!(text.contains(r#""episode":{"season":null,"episodes":[1],"name":null},"suggested":true"#), "{text}");
         assert_eq!(serde_json::from_str::<TvPlan>(&text).unwrap(), plan);
@@ -1096,11 +1118,35 @@ mod tests {
         let mut session = SeasonSession::new(1437, 1, Some(14));
         assign(&mut session, FIREFLY_1_API, &[(1, 0), (2, 1), (3, 2)]);
         let groups = vec![group(0, &[1], 2631), group(1, &[2], 2559)];
-        let plan = unmapped(&groups, Some(1), session.next_unassigned(), None);
+        let plan = unmapped(&groups, Some(1), session.next_unassigned(), None, Some(&session));
         assert_eq!(plan.episodes, vec![episode_title(0, Some(1), &[4], None, true), episode_title(1, Some(1), &[5], None, true)]);
         assert_eq!(
             plan.evidence[1],
             "episode-length titles suggested from episode 4: 2, one episode each in title order (no TMDb episodes for the season)"
+        );
+    }
+
+    #[test]
+    fn unmapped_suggestions_skip_the_episodes_the_session_already_assigned() {
+        // Episodes 1 to 4 and 7 and 8 belong to other discs; four episode-length titles take 5, 6, 9 and 10, never 7 and 8
+        // (8.5: the same rule as `suggest`).
+        let mut session = SeasonSession::new(1437, 1, Some(14));
+        assign(&mut session, FIREFLY_1_API, &[(1, 0), (2, 1), (3, 2), (4, 3), (7, 4), (8, 5)]);
+        assert_eq!(suggest(Some(&session), 4), vec![5, 6, 9, 10]);
+        let groups = vec![group(0, &[1], 1320), group(1, &[2], 1320), group(2, &[3], 1320), group(3, &[4], 1320)];
+        let plan = unmapped(&groups, Some(1), session.next_unassigned(), None, Some(&session));
+        assert_eq!(
+            plan.episodes.iter().map(|e| (e.title, e.episode.episodes.clone())).collect::<Vec<_>>(),
+            vec![(0, vec![5]), (1, vec![6]), (2, vec![9]), (3, vec![10])]
+        );
+        // A double-length title takes two episodes only when both are free: episode 6 is free and 7 is not, so the
+        // second title (two episodes long) takes 6 alone.
+        let episodes = (1..=12).map(|number| tmdb_episode(number, Some(22))).collect::<Vec<TmdbEpisode>>();
+        let doubled = [group(0, &[1], 1320), group(1, &[2], 2640), group(2, &[3], 2640)];
+        let refs: Vec<&Group> = doubled.iter().collect();
+        assert_eq!(
+            suggest_by_runtime(&refs, &episodes, session.next_unassigned(), Some(&session)),
+            vec![(0, vec![5]), (1, vec![6]), (2, vec![9, 10])]
         );
     }
 }

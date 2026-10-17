@@ -277,7 +277,9 @@ fn a_text_can_carry_several_kinds_in_order() {
     use DescriptionKind::{AudioDescription, Commentary, Dialogue, IsolatedScore, MusicAndEffects, Sdh};
     assert_eq!(description_kinds("Commentary with audio description", Some("English")), vec![Commentary, AudioDescription]);
     assert_eq!(description_kinds("SDH subtitles", Some("English")), vec![Sdh, Dialogue]);
-    assert_eq!(description_kinds("Commentary subtitles", Some("English")), vec![Commentary, Dialogue]);
+    // A commentary description is not a plain subtitle description (Open point 29), so it is not Dialogue.
+    assert_eq!(description_kinds("Commentary subtitles", Some("English")), vec![Commentary]);
+    assert_eq!(description_kinds("Commentary Subtitles", Some("English")), vec![Commentary]);
     assert_eq!(description_kinds("Isolated score with music and effects", Some("English")), vec![IsolatedScore, MusicAndEffects]);
 }
 

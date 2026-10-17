@@ -170,9 +170,11 @@ pub struct Plan {
     pub mode: Mode,
     /// `identity.confidence`: fixed here (8.8).
     pub identity_confidence: f64,
-    /// The title rule's confidence after rule 4, or 1.00 for remembered or assigned titles (8.8).
+    /// The title rule's confidence after rule 4, or 1.00 for remembered or assigned titles (8.8); held at 0.60 when a
+    /// search identity's kind contradicts the planned kind (`plan`'s provisional rule).
     pub title_confidence: f64,
-    /// Sorted and unique: the identity's review reason and the title rule's (8.8).
+    /// Sorted and unique: the identity's review reason, the title rule's, and the kind disagreement's
+    /// (identity_ambiguous, with title_ambiguous unless assigned titles cover the titles) (8.8).
     pub reviews: Vec<ReviewReason>,
     pub notes: Vec<Noted>,
     /// `wanted_languages` of the identity's original language (R4, 8.6 "Languages").
@@ -220,7 +222,10 @@ pub struct PlanInputs<'a> {
 /// gives `start` (and the season when none was parsed), and when the identity is confirmed and the season is known,
 /// `Plan.session` is that session or a new one with the disc recorded and no episode assigned (spec 11 Set identity
 /// "attaches the disc to a season session"); None otherwise. A search identity (TmdbOne, TmdbSeveral) whose kind is not
-/// the planned kind adds identity_ambiguous (a provisional rule: the spec leaves this case to the owner). Err only when
+/// the planned kind adds identity_ambiguous and, unless assigned titles cover the titles (8.8: they stay at 1.00), holds
+/// the title confidence at 0.60 with title_ambiguous, so whole-disc copy mode applies and review never needs the disc
+/// again (6.3, 8.8 "Limits of D1"; a provisional rule: the spec leaves this case to the owner, and the final review's
+/// ruling amends the brief's settled point 12). Err only when
 /// the disc has no title at all. Assigned titles replace the planned ones whole (the owner's Assign titles when it names
 /// any title, else the remembered titles when the scan matches every one of them that is not Ignored): their review
 /// reasons go with them, a title they name that the scan lacks is left out, and they make the disc TV when they assign
@@ -347,7 +352,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
         (Some(found), _) => Planned::Movie(found),
         (None, Some(found)) => Planned::Tv(found),
         (None, None) => {
-            let (season, start) = match show.map(|show| tv::find(inputs.sessions, show.id, season_hint)) {
+            let (season, start, found) = match show.map(|show| tv::find(inputs.sessions, show.id, season_hint)) {
                 Some(Found::Session(session)) | Some(Found::SingleOpen(session)) => {
                     sentences.push(format!(
                         "season session {} gives season {} and starts the suggestions at episode {}",
@@ -355,16 +360,16 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
                         session.season,
                         session.next_unassigned()
                     ));
-                    (Some(session.season), session.next_unassigned())
+                    (Some(session.season), session.next_unassigned(), Some(session))
                 }
                 Some(Found::Ambiguous) => {
                     sentences.push("the show has several open season sessions: review asks for the season (8.5)".to_string());
-                    (season_hint, 1)
+                    (season_hint, 1, None)
                 }
-                Some(Found::None) | None => (season_hint, 1),
+                Some(Found::None) | None => (season_hint, 1, None),
             };
             let episodes = record.and_then(|record| season.and_then(|season| record.season(season)));
-            Planned::Tv(tv::unmapped(&episode_groups, season, start, episodes))
+            Planned::Tv(tv::unmapped(&episode_groups, season, start, episodes, found))
         }
     };
     if let Planned::Tv(found) = &mut planned {
@@ -391,7 +396,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
 
     // The titles in plan order (which fixes the keys): assigned titles (spec 5, 11) replace the planned ones at 1.00.
     let assigned = assigned_roles(inputs, &mut sentences);
-    let (entries, title_confidence, title_reviews) = match &assigned {
+    let (entries, mut title_confidence, mut title_reviews) = match &assigned {
         Some(roles) => {
             let (assigned_kind, entries) = assigned_entries(roles, disc, inputs.library, planned_kind, &mut sentences);
             if assigned_kind != planned_kind {
@@ -435,8 +440,18 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     };
 
     // Not settled by the spec (left to the owner): a search identity of the other kind than the planned disc holds it
-    // for review (D1), since its runtime check was its own kind's (8.1).
+    // for review (D1), since its runtime check was its own kind's (8.1). The planned titles may then be the wrong ones
+    // (a TV disc planned as a movie keeps one feature), so they are held at 0.60 with title_ambiguous and the disc is
+    // copied whole (6.3, 8.8 "Limits of D1": review never needs the disc again); assigned titles stay at 1.00.
     let kind_review = kind_disagreement(&identity, planned_kind, &mut sentences);
+    if kind_review.is_some() && assigned.is_none() {
+        title_confidence = title_confidence.min(movie::AMBIGUOUS_TITLE_CONFIDENCE);
+        title_reviews.push(ReviewReason::TitleAmbiguous);
+        sentences.push(format!(
+            "the kind contradiction holds the titles at {title_confidence:.2} with title_ambiguous, for whole-disc copy \
+             mode (6.3, 8.8 Limits of D1)"
+        ));
+    }
 
     // 8.8: identity and title confidence are fixed here; the mode follows the title confidence (6.2, 6.3).
     let reviews = sorted_unique(identity.review.into_iter().chain(title_reviews).chain(kind_review).collect());
@@ -730,11 +745,15 @@ fn input_sentences(inputs: &PlanInputs<'_>) -> Vec<String> {
     sentences
 }
 
-/// Which TheDiscDB record the titles were matched against, and how many matched.
+/// Which TheDiscDB record the titles were matched against, and how many matched; without a record, whether TheDiscDB
+/// gave none or its lookup is pending (8.1 "the lookup is recorded as pending").
 fn discdb_sentence(lookups: &LookupInputs<'_>, matched: usize) -> String {
     match (lookups.discdb_by_fingerprint, lookups.discdb_by_disc_id) {
         (Some(_), _) => format!("TheDiscDB's record by fingerprint is matched against the scan: {matched} titles match"),
         (None, Some(_)) => format!("TheDiscDB's record by disc ID is matched against the scan: {matched} titles match"),
+        (None, None) if lookups.discdb_pending => {
+            "the TheDiscDB lookup is pending: the titles are planned from the scan".to_string()
+        }
         (None, None) => "TheDiscDB gave no record: the titles are planned from the scan".to_string(),
     }
 }
@@ -760,8 +779,10 @@ fn kind_source_words(source: KindSource) -> &'static str {
 
 /// `identity_ambiguous`, with a sentence, when a search identity (8.1 steps 4 and 5) is of the other kind than the
 /// planned disc; None otherwise. The spec does not settle this case (left to the owner): the search's runtime check was
-/// the result's own kind's, so nothing else would hold such a disc (D1). A TheDiscDB, remembered or reviewed identity is
-/// not checked: TheDiscDB states the kind (8.2), and the owner chose the other two.
+/// the result's own kind's, so nothing else would hold such a disc (D1). `plan` then also holds the planned titles at
+/// 0.60 with title_ambiguous (whole-disc copy mode, 6.3, 8.8 "Limits of D1") unless assigned titles cover them; this
+/// provisional rule is flagged for the owner with the first. A TheDiscDB, remembered or reviewed identity is not
+/// checked: TheDiscDB states the kind (8.2), and the owner chose the other two.
 fn kind_disagreement(identity: &Identity, planned_kind: Kind, sentences: &mut Vec<String>) -> Option<ReviewReason> {
     if !matches!(identity.step, IdentityStep::TmdbOne | IdentityStep::TmdbSeveral) {
         return None;
@@ -1574,14 +1595,54 @@ mod tests {
         assert_eq!((plan.identity.tmdb, plan.identity.review), (Some(show_id(99)), None));
         assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
         assert_eq!(plan.titles, vec![planned("t00-00001", 1, feature(None), 6000, 30_000_000_000, Some("00001.mpls"))]);
-        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
-        // Not settled by the spec (left to the owner): the identity's kind contradicts the plan, so D1 holds the disc.
-        assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous]);
+        // Not settled by the spec (left to the owner): the identity's kind contradicts the plan, so D1 holds the disc,
+        // and the planned titles are held at 0.60 so the disc is copied whole (6.3, 8.8 "Limits of D1").
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous, ReviewReason::TitleAmbiguous]);
         assert!(plan
             .evidence
             .sentences
             .contains(&"the TMDb identity is TV but the disc is planned as a movie".to_string()));
+        assert!(plan.evidence.sentences.contains(
+            &"the kind contradiction holds the titles at 0.60 with title_ambiguous, for whole-disc copy mode (6.3, 8.8 \
+              Limits of D1)"
+                .to_string()
+        ));
         assert_eq!(plan.session, None);
+    }
+
+    #[test]
+    fn firefly_disc_1_without_thediscdb_and_a_tv_search_identity_is_copied_whole() {
+        // Firefly disc 1 (DVD) with TheDiscDB unreachable: the double-length pilot defeats 8.2's 15% spread, there is no
+        // season marker and a DVD has no play-all rule, so the disc is a movie and rule 3 keeps the pilot alone at 0.85.
+        // TMDb's one plausible result is the show, whose episodes last about 43 minutes, so its own TV check passes at
+        // step 4. Copy mode keeps every title on staging, so review can assign the episodes without the disc (D1).
+        let log = pinned_log(FIREFLY_1, FIREFLY_1_API);
+        let search = parse_search(&search_json(&[("tv", 1437, "Firefly", "Firefly", "2002-09-20")]), "search.json").unwrap();
+        let episodes: &[(u32, &str, Option<u32>)] =
+            &[(1, "One", Some(86)), (2, "Two", Some(43)), (3, "Three", Some(43)), (4, "Four", Some(43))];
+        let record = parse_tv(&tmdb_tv_json(1437, "Firefly", "2002-09-20", "en", &[(1, episodes)]), "tv.json").unwrap();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let plan = run(&inputs(&log.disc, searched(log.name.as_ref(), &search, Some(&record)), &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.identity.step, IdentityStep::TmdbOne);
+        assert_eq!(plan.identity.tmdb, Some(show_id(1437)));
+        assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous, ReviewReason::TitleAmbiguous]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+    }
+
+    #[test]
+    fn a_search_identity_of_the_planned_kind_keeps_the_structural_plan_in_direct_mode() {
+        // The same disc and search with a movie result: the kinds agree, so rule 3's 0.85 and Direct mode stand.
+        let disc = made_disc(false, "SHOW", &[made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "", ENG)]);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let search = parse_search(&search_json(&[("movie", 99, "Show", "Show", "2010-01-01")]), "search.json").unwrap();
+        let record = parse_movie(&tmdb_movie_json(99, "Show", "Show", "2010-01-01", "en", Some(100)), "movie.json").unwrap();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, Some(&record)), &settings, &library));
+        assert_eq!((plan.identity.step, plan.identity.tmdb), (IdentityStep::TmdbOne, Some(movie_id(99))));
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert_eq!(plan.reviews, Vec::<ReviewReason>::new());
     }
 
     #[test]
@@ -2033,6 +2094,17 @@ mod tests {
         assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
         assert_eq!(plan.titles, vec![planned("t00-00001", 0, feature(None), 6073, 67_757_930_496, Some("00001.mpls"))]);
         assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        // The sentence says the lookup is pending, not that TheDiscDB gave no record.
+        assert!(plan
+            .evidence
+            .sentences
+            .contains(&"the TheDiscDB lookup is pending: the titles are planned from the scan".to_string()));
+        assert!(!plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("TheDiscDB gave no record")));
+        let unanswered = run(&inputs(&log.disc, log.name_only(), &settings, &library));
+        assert!(unanswered
+            .evidence
+            .sentences
+            .contains(&"TheDiscDB gave no record: the titles are planned from the scan".to_string()));
     }
 
     #[test]
