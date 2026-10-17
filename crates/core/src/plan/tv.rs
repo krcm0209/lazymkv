@@ -396,15 +396,12 @@ mod tests {
     use crate::lookup::tmdb::parse_tv;
     use crate::plan::fixtures::{
         api_record, pinned, CHERNOBYL_1, CHERNOBYL_1_API, CHERNOBYL_2, CHERNOBYL_2_API, FIREFLY_1, FIREFLY_1_API, FIREFLY_2,
+        FIREFLY_2_API,
     };
     use crate::plan::kind::{candidate_filter, groups};
     use crate::robot::parse;
     use crate::settings::Settings;
     use crate::testsupport::{scan_text, tmdb_tv_json};
-
-    /// Firefly disc 2's `dischash` answer (its `ContentHash`), which Task 5's `plan::fixtures` does not hold until Task 7
-    /// moves it there; the pinned logs, the other answer hashes, `pinned` and `api_record` are the fixtures' (one copy).
-    const FIREFLY_2_API: &str = "294A3E64C457A1BC9A0833335C090568";
 
     /// The groups the planner builds: 8.2's candidate filter at the default settings, then grouping.
     fn planner_groups(scanned: &Disc) -> Vec<Group> {
