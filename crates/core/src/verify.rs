@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::codec::{codec, mkvmerge_names};
+use crate::codec::{mkvmerge_names, output_codec, Family};
 use crate::disc::{Flags, Stream, StreamKind, Title, DURATION_MATCH_S};
 use crate::lang::norm_lang;
 use crate::reconcile::{expected_rows, removed_streams};
@@ -34,6 +34,20 @@ pub fn selected_streams(scan: &Scan, title: u32, selection: Selection) -> Result
         return Err(format!("the scan lists no title {title}"));
     }
     Ok(expected_rows(scan, title, selection)?.into_iter().map(|row| row.stream).collect())
+}
+
+/// `title` as the rip's file holds it: a copy keeping only the streams in `selection` (`selected_streams`' result for the
+/// rip's selection), in scan order; the title's other facts are unchanged. The one copy of the narrowing that
+/// `lazymkv-dev decide`'s decision section and `retune --subtitles`' 8.7 column both apply before 8.6 and 8.7 decide
+/// (6.4 step 11), so the two judge a rip over the same streams, and `tracks::subtitle::step10_runs` counts only the
+/// streams the rip kept. A stream MakeMKV removed (`MSG:4047`) stays: the caller passes the removals as facts. TheDiscDB's
+/// track descriptions are aligned against the scan's streams as a whole (8.6 step 1), so a title narrowed by an eng
+/// selection aligns no description (a deferred finding of the final review, E5); the product rips every stream but 3D
+/// video (D6, 9.3), so phase 2's file phase decides over the whole title. Spec 6.2 step 7, 6.4 steps 10 and 11.
+pub fn rip_title(title: &Title, selection: &[u32]) -> Title {
+    let mut narrowed = title.clone();
+    narrowed.streams.retain(|stream| selection.contains(&stream.number));
+    narrowed
 }
 
 /// Attribute 41's value on a stream MakeMKV converts to text (a DVD's closed captions). Spec 6.2 step 7.
@@ -65,8 +79,9 @@ pub struct ExpectedTrack {
 /// The title's streams in `selection` (selected_streams' result) without those `removed` (MSG:4047 indices counted over
 /// the selection from 0), with a text-converted subtitle stream (attribute 41 "Text") placed right after the audio
 /// streams (`caption_first`). Codecs: `codec::mkvmerge_names(codec)`, ["SubRip/SRT"] for a text-converted one, and for
-/// any other attribute 41 the names of the codec ID it gives (`codec::codec(attribute 41, "", "")`); attribute 42 alone
-/// changes nothing. Language attribute 3 (None on video); flags carried (9.5's MakeMKV-only flags onto the output
+/// any other attribute 41 (MakeMKV's output codec short name, apdefs.h `ap_iaOutputCodecShort`) the names of the codec
+/// it gives (`codec::output_codec`), or the attribute 41 text itself when the table does not know it; attribute 42
+/// alone changes nothing. Language attribute 3 (None on video); flags carried (9.5's MakeMKV-only flags onto the output
 /// track). A selected stream the title does not hold as a typed stream (no attribute 1) is not expected but keeps its
 /// place in the count. Spec 6.2 step 7.
 pub fn expected_tracks(title: &Title, selection: &[u32], removed: &BTreeSet<i64>) -> Vec<ExpectedTrack> {
@@ -87,7 +102,14 @@ pub fn expected_tracks(title: &Title, selection: &[u32], removed: &BTreeSet<i64>
 fn expected_track(stream: &Stream) -> ExpectedTrack {
     let codecs: Vec<String> = match stream.output_codec.as_deref() {
         Some(TEXT_OUTPUT) => vec![TEXT_CODEC.to_string()],
-        Some(id) => mkvmerge_names(&codec(id, "", "")).iter().map(|name| name.to_string()).collect(),
+        Some(short) => {
+            let output = output_codec(short);
+            if output.family == Family::Unknown {
+                vec![short.to_string()]
+            } else {
+                mkvmerge_names(&output).iter().map(|name| name.to_string()).collect()
+            }
+        }
         None => mkvmerge_names(&stream.codec).iter().map(|name| name.to_string()).collect(),
     };
     ExpectedTrack {
@@ -678,6 +700,16 @@ mod tests {
     }
 
     #[test]
+    fn rip_title_keeps_only_the_selected_streams_in_scan_order() {
+        let title = title_of(&bluray_scan(), 0);
+        let selection = selected_streams(&bluray_scan(), 0, Selection::Eng).unwrap();
+        let narrowed = rip_title(&title, &selection);
+        assert_eq!(narrowed.streams.iter().map(|stream| stream.number).collect::<Vec<u32>>(), vec![0, 3, 4, 5]);
+        assert_eq!((narrowed.number, narrowed.seconds, narrowed.chapters), (title.number, title.seconds, title.chapters));
+        assert_eq!(rip_title(&title, &[0, 1, 2, 3, 4, 5, 6, 7]), title);
+    }
+
+    #[test]
     fn selected_streams_refuse_a_title_the_scan_lacks() {
         assert_eq!(selected_streams(&bluray_scan(), 7, Selection::All), Err("the scan lists no title 7".to_string()));
     }
@@ -780,28 +812,41 @@ mod tests {
     }
 
     #[test]
-    fn another_attribute_41_names_the_output_codec_by_its_codec_id() {
-        // Not seen in a recording: an LPCM stream MakeMKV writes as FLAC (attribute 41 "A_FLAC"), beside the same
-        // stream kept as LPCM.
+    fn an_lpcm_stream_converted_to_flac_expects_a_flac_track() {
+        // Provisional, the spelling not yet seen in a recording: an LPCM stream MakeMKV's default profile writes as FLAC
+        // (attribute 41, the output codec short name, "FLAC"), beside the same stream kept as LPCM, and a third whose
+        // attribute 41 the table does not know (a made-up "Made Up"), which expects the attribute 41 text itself.
         let scan = parse(&scan_text(
             &[(1, "Blu-ray disc")],
             &[(
                 0,
                 &[(8, "1"), (9, "0:10:00")],
                 &[
-                    (0, &[(1, "Audio"), (3, "eng"), (5, "A_PCM/INT/LIT"), (6, "LPCM"), (7, "LPCM"), (14, "6"), (41, "A_FLAC"), (42, LOSSLESS)]),
+                    (0, &[(1, "Audio"), (3, "eng"), (5, "A_PCM/INT/LIT"), (6, "LPCM"), (7, "LPCM"), (14, "6"), (41, "FLAC"), (42, LOSSLESS)]),
                     (1, &[(1, "Audio"), (3, "eng"), (5, "A_PCM/INT/LIT"), (6, "LPCM"), (7, "LPCM"), (14, "6"), (42, LOSSLESS)]),
+                    (2, &[(1, "Audio"), (3, "eng"), (5, "A_PCM/INT/LIT"), (6, "LPCM"), (7, "LPCM"), (14, "6"), (41, "Made Up"), (42, LOSSLESS)]),
                 ],
             )],
         ));
         let title = title_of(&scan, 0);
+        let expected_tracks = expected_tracks(&title, &[0, 1, 2], &BTreeSet::new());
         assert_eq!(
-            expected_tracks(&title, &[0, 1], &BTreeSet::new()),
+            expected_tracks,
             vec![
                 expected(0, StreamKind::Audio, "FLAC", Some("eng"), Some(6), 0),
                 expected(1, StreamKind::Audio, "PCM", Some("eng"), Some(6), 0),
+                expected(2, StreamKind::Audio, "Made Up", Some("eng"), Some(6), 0),
             ]
         );
+        assert_eq!(expected_tracks[0].codecs, ["FLAC"]);
+        let tracks = vec![
+            track(0, "audio", "FLAC", json!({"language": "eng", "audio_channels": 6})),
+            track(1, "audio", "PCM", json!({"language": "eng", "audio_channels": 6})),
+            track(2, "audio", "Made Up", json!({"language": "eng", "audio_channels": 6})),
+        ];
+        let report = verify_rip(&title, &file(tracks, &[1], 600_000_000_000), &[0, 1, 2], None, false);
+        assert_eq!(report.mismatches, Vec::<String>::new());
+        assert!(report.ok);
     }
 
     #[test]

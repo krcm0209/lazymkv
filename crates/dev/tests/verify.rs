@@ -324,7 +324,8 @@ fn the_office_2005_s3d3_bluray() {
     assert_eq!((t3.title.number, t3.selection.clone()), (3, vec![0, 1, 2, 3, 4, 5]));
     assert_verified("t3-all-tracks", &t3.report);
     assert_eq!(t3.report.pairs, pairs(&[0, 1, 2, 3, 4]));
-    assert_eq!(t3.report.expected_seconds, 2564.0);
+    // The docs publish no duration for this title either (ruling RP21): the expected duration is the scan's.
+    assert_eq!(t3.report.expected_seconds, f64::from(t3.title.seconds.unwrap()));
     assert_eq!(subs_map(&rec, "t3-all-tracks", &t3.report), BTreeMap::from([(0, 4)]));
     assert_eq!(event_counts(&rec, "t3-all-tracks", &t3.report, default), BTreeMap::from([(4, 710)]));
     assert_eq!(event_counts(&rec, "t3-all-tracks", &t3.report, 0), BTreeMap::from([(4, 1420)]));

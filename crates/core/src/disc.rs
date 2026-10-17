@@ -217,7 +217,9 @@ pub struct Stream {
     pub tree_info: Option<String>,
     /// Attribute 40 ("stereo", "5.1(side)", "7.1").
     pub layout_name: Option<String>,
-    /// Attribute 41 (only on a converted stream: "Text") and 42 ("( Lossless conversion )", "( Lossy conversion )").
+    /// Attribute 41, MakeMKV's output codec short name (apdefs.h `ap_iaOutputCodecShort`, read by
+    /// `codec::output_codec`; recorded only on a converted stream: "Text"), and 42 ("( Lossless conversion )", "( Lossy
+    /// conversion )").
     pub output_codec: Option<String>,
     pub conversion: Option<String>,
 }

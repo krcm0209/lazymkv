@@ -155,6 +155,48 @@ pub fn codec(id: &str, short: &str, long: &str) -> Codec {
     Codec { family, display, object, lossless: is_lossless(family) }
 }
 
+/// Attribute 41's short names and the family each names. Attribute 41 is MakeMKV's output codec short name (apdefs.h
+/// `ap_iaOutputCodecShort`), written in the spelling of attribute 6: "Text" is the one recorded (a DVD's closed
+/// captions converted to text, 6.2 step 7); the others are the attribute 6 spellings of the recordings and of the rows
+/// above ("DD" and "AC3" both for Dolby Digital), not yet seen in attribute 41.
+const OUTPUT_SHORT_NAMES: [(&str, Family); 17] = [
+    ("Text", Family::ClosedCaptions),
+    ("MpegH", Family::Hevc),
+    ("Mpeg4", Family::Avc),
+    ("Mpeg2", Family::Mpeg2),
+    ("TrueHD", Family::TrueHd),
+    ("DTS-HD MA", Family::DtsHdMa),
+    ("DTS-HD HR", Family::DtsHdHr),
+    ("DTS", Family::Dts),
+    ("DD", Family::Ac3),
+    ("AC3", Family::Ac3),
+    ("E-AC3", Family::Eac3),
+    ("LPCM", Family::Lpcm),
+    ("FLAC", Family::Flac),
+    ("Mpeg", Family::MpegAudio),
+    ("AAC", Family::Aac),
+    ("PGS", Family::Pgs),
+    ("CC", Family::ClosedCaptions),
+];
+
+/// The table row for attribute 41, MakeMKV's output codec short name (apdefs.h `ap_iaOutputCodecShort`): the codec the
+/// output file holds when MakeMKV converts a stream (an LPCM track written as FLAC by MakeMKV's default profile, a DVD's
+/// closed captions written as text). A short name of `OUTPUT_SHORT_NAMES` gives its family, with the family's display
+/// name and no object-based extension; any other value is read as a codec ID through `codec(short, "", "")`, so an
+/// attribute 5 spelling still resolves, and a value neither knows is `Family::Unknown` named by itself. Never fails.
+/// Spec 6.2 step 7 ("compares attribute 41 where present"), 8.6 "Codecs", 9.4.
+pub fn output_codec(short: &str) -> Codec {
+    match OUTPUT_SHORT_NAMES.iter().find(|(name, _)| *name == short) {
+        Some(&(_, family)) => Codec {
+            family,
+            display: display_name(family).unwrap_or(short).to_string(),
+            object: None,
+            lossless: is_lossless(family),
+        },
+        None => codec(short, "", ""),
+    }
+}
+
 /// The family attribute 5 names, with `A_DTS` told apart by attributes 6 and 7.
 fn family_of(id: &str, short: &str, long: &str) -> Family {
     match id {
@@ -843,6 +885,20 @@ mod tests {
         assert_eq!(names(Family::VobSub), ["VobSub"]);
         assert_eq!(names(Family::ClosedCaptions), ["SubRip/SRT"]);
         assert!(names(Family::Unknown).is_empty());
+    }
+
+    #[test]
+    fn attribute_41_short_names_give_the_output_codecs_family() {
+        assert_eq!(output_codec("FLAC").family, Family::Flac);
+        assert_eq!(output_codec("LPCM").family, Family::Lpcm);
+        assert_eq!(output_codec("DD").family, Family::Ac3);
+        assert_eq!(output_codec("E-AC3").family, Family::Eac3);
+        assert_eq!(output_codec("Text").family, Family::ClosedCaptions);
+        assert_eq!(mkvmerge_names(&output_codec("Text")), ["SubRip/SRT"]);
+        assert_eq!(output_codec("FLAC"), known(Family::Flac, "FLAC", None, true));
+        // An attribute 5 spelling still resolves; a value neither knows is Unknown, named by itself.
+        assert_eq!(output_codec("A_FLAC").family, Family::Flac);
+        assert_eq!(output_codec("Made Up"), known(Family::Unknown, "Made Up", None, false));
     }
 
     #[test]
