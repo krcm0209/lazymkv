@@ -130,8 +130,11 @@ pub struct AudioTrack {
     pub language: Option<String>,
     /// The language group (8.6 step 5).
     pub group: LangGroup,
-    /// `codec::codec` of attributes 5, 6 and 7.
+    /// `codec::codec` of attributes 5, 6 and 7: the rank (8.6 steps 3 and 4) reads it.
     pub codec: Codec,
+    /// `disc::Stream.file_codec`: the codec the rip's file holds (attribute 41 when present, an LPCM stream written as
+    /// FLAC being FLAC), which 8.10's name uses.
+    pub file_codec: Codec,
     /// Attribute 14 (0 when absent).
     pub channels: u32,
     /// `codec::tier` of the family and the bit rate (8.6 step 3.2); None for an unknown codec.
@@ -146,7 +149,8 @@ pub struct AudioTrack {
     pub bitrate_kbps: Option<u32>,
     /// Lowest disc position among the language's surviving streams (8.6 "Position": computed after step 1's drops).
     pub first_of_language: bool,
-    /// 8.10: "<display> [Atmos|DTS:X] <layout>", for example "TrueHD Atmos 7.1".
+    /// 8.10: "<display of the file codec> [Atmos|DTS:X] <layout>", for example "TrueHD Atmos 7.1", or "FLAC 5.1" for an
+    /// LPCM stream the rip writes as FLAC.
     pub name: String,
     /// The default flag (8.6 step 5: the very first track).
     pub default: bool,
@@ -549,6 +553,7 @@ fn track_of(stream: &Stream, wanted: &Wanted, facts: &AudioFacts<'_>) -> AudioTr
         language: stream.language.clone(),
         group: group_of(stream.language.as_deref(), wanted),
         codec: stream.codec.clone(),
+        file_codec: stream.file_codec.clone(),
         channels: stream.channels.unwrap_or(0),
         tier: tier(stream.codec.family, stream.bitrate_kbps),
         object: object_audio(facts.ffprobe_profile.get(&stream.number).map(String::as_str)),
@@ -598,8 +603,8 @@ fn reference_of(ordered: &[AudioTrack]) -> Option<u32> {
         .map(|track| track.stream)
 }
 
-/// 8.10's audio name: the display name, the object-based extension, the channel layout (left out when the count is
-/// unknown).
+/// 8.10's audio name: the display name of the codec the file holds, the object-based extension, the channel layout
+/// (left out when the count is unknown).
 fn track_name(codec: &Codec, object: Option<ObjectAudio>, channels: u32) -> String {
     let mut name = codec.display.clone();
     if let Some(object) = object {
@@ -614,7 +619,8 @@ fn track_name(codec: &Codec, object: Option<ObjectAudio>, channels: u32) -> Stri
 }
 
 /// Step 5's flags and 8.10's names on the final order: attribute 7's object for a track whose ffprobe profile names
-/// none (no profile, or one without a known extension: the spellings are unverified, EXP-06), the name, the default flag
+/// none (no profile, or one without a known extension: the spellings are unverified, EXP-06), the name (from the file
+/// codec, `AudioTrack.file_codec`), the default flag
 /// on the very first track, and the original flag on the original-language tracks, or on the English ones for an
 /// English work (TMDb's code "en"). A work whose original language is unknown, "xx" or missing from the ISO 639 table
 /// is not an English work and has no Original group, so none of its tracks gets the original flag (8.6 step 5).
@@ -622,7 +628,7 @@ fn finish(mut ordered: Vec<AudioTrack>, wanted: &Wanted) -> Vec<AudioTrack> {
     let english_work = wanted.original_two_letter.as_deref().is_some_and(is_english);
     for (position, track) in ordered.iter_mut().enumerate() {
         track.object = track.object.or(track.codec.object);
-        track.name = track_name(&track.codec, track.object, track.channels);
+        track.name = track_name(&track.file_codec, track.object, track.channels);
         track.default = position == 0;
         track.original = if english_work {
             track.group == LangGroup::English

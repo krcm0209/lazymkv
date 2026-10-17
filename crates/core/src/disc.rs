@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio::titles::{dvd_scan, segments};
-use crate::codec::{bitrate_kbps, codec, Codec, Family};
+use crate::codec::{bitrate_kbps, codec, output_codec, Codec, Family};
 use crate::robot::{duration_seconds, int_attr, Attrs, Scan};
 use crate::settings::version_triple;
 
@@ -222,6 +222,10 @@ pub struct Stream {
     /// conversion )").
     pub output_codec: Option<String>,
     pub conversion: Option<String>,
+    /// The codec the rip's file holds: `codec::output_codec` of attribute 41 when present (an LPCM stream MakeMKV writes
+    /// as FLAC is FLAC, a DVD's closed captions converted to text are text), else `codec`. Read once here, so 6.2 step
+    /// 7's verification and 8.10's audio names agree. Spec 6.2 step 7, 8.10, 9.4.
+    pub file_codec: Codec,
 }
 
 /// One title of the scan, typed. Spec 9.4.
@@ -431,12 +435,15 @@ fn typed_stream(title: u32, number: u32, attrs: &Attrs) -> Result<Option<Stream>
     let codec_short = attrs.get(&6).cloned().unwrap_or_default();
     let codec_long = attrs.get(&7).cloned().unwrap_or_default();
     let bitrate_text = text_attr(attrs, 13);
+    let input = codec(&codec_id, &codec_short, &codec_long);
+    let output_short = text_attr(attrs, 41);
+    let file_codec = output_short.as_deref().map_or_else(|| input.clone(), output_codec);
     Ok(Some(Stream {
         number,
         kind,
         name: text_attr(attrs, 2),
         language: text_attr(attrs, 3).map(|code| code.to_lowercase()),
-        codec: codec(&codec_id, &codec_short, &codec_long),
+        codec: input,
         codec_id,
         codec_short,
         codec_long,
@@ -449,8 +456,9 @@ fn typed_stream(title: u32, number: u32, attrs: &Attrs) -> Result<Option<Stream>
         flags,
         tree_info: text_attr(attrs, 30),
         layout_name: text_attr(attrs, 40),
-        output_codec: text_attr(attrs, 41),
+        output_codec: output_short,
         conversion: text_attr(attrs, 42),
+        file_codec,
     }))
 }
 
@@ -954,6 +962,7 @@ mod tests {
                 layout_name: None,
                 output_codec: None,
                 conversion: Some("( Lossless conversion )".to_string()),
+                file_codec: codec("V_MPEGH/ISO/HEVC", "MpegH", "MpegH HEVC Main10@L5.1"),
             }
         );
         assert_eq!(
@@ -978,6 +987,7 @@ mod tests {
                 layout_name: Some("5.1(side)".to_string()),
                 output_codec: None,
                 conversion: Some("( Lossless conversion )".to_string()),
+                file_codec: codec("A_DTS", "DTS-HD MA", "DTS-HD Master Audio"),
             }
         );
         let core = &title.streams[2];

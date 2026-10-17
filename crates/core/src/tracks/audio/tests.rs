@@ -289,6 +289,7 @@ fn ranked(
         stream,
         language: Some("eng".to_string()),
         group: LangGroup::English,
+        file_codec: codec.clone(),
         codec,
         channels,
         tier: tier_of,
@@ -525,6 +526,7 @@ fn knowings_feature_keeps_its_english_5_1_and_drops_the_flagged_commentary_and_t
                 language: Some("eng".to_string()),
                 group: LangGroup::English,
                 codec: codec("A_AC3", "DD", "Dolby Digital"),
+                file_codec: codec("A_AC3", "DD", "Dolby Digital"),
                 channels: 6,
                 tier: Some(Tier::OtherLossy),
                 object: None,
@@ -585,6 +587,7 @@ fn smiles_feature_keeps_truehd_atmos_7_1_then_dolby_digital_5_1() {
                     language: Some("eng".to_string()),
                     group: LangGroup::English,
                     codec: codec("A_TRUEHD", "TrueHD", "TrueHD Atmos"),
+                    file_codec: codec("A_TRUEHD", "TrueHD", "TrueHD Atmos"),
                     channels: 8,
                     tier: Some(Tier::Lossless),
                     object: Some(ObjectAudio::Atmos),
@@ -601,6 +604,7 @@ fn smiles_feature_keeps_truehd_atmos_7_1_then_dolby_digital_5_1() {
                     language: Some("eng".to_string()),
                     group: LangGroup::English,
                     codec: codec("A_AC3", "DD", "Dolby Digital"),
+                    file_codec: codec("A_AC3", "DD", "Dolby Digital"),
                     channels: 6,
                     tier: Some(Tier::OtherLossy),
                     object: None,
@@ -689,6 +693,7 @@ fn an_exact_duplicate_by_md5_is_dropped_and_the_first_copy_kept() {
                 language: Some("eng".to_string()),
                 group: LangGroup::English,
                 codec: codec("A_DTS", "DTS-HD MA", "DTS-HD Master Audio"),
+                file_codec: codec("A_DTS", "DTS-HD MA", "DTS-HD Master Audio"),
                 channels: 6,
                 tier: Some(Tier::Lossless),
                 object: None,
@@ -1387,4 +1392,16 @@ fn an_override_of_a_stream_that_is_not_audio_is_ignored() {
     assert_eq!(order_of(&decision), vec![1, 2, 3]);
     assert_eq!(decision.dropped, Vec::new());
     assert_eq!(decision.confidence, AUDIO_CONFIDENCE);
+}
+
+#[test]
+fn an_lpcm_stream_the_rip_writes_as_flac_is_named_flac() {
+    // Not seen in a recording: attribute 41 "FLAC", MakeMKV's default profile writing an LPCM stream as FLAC. 8.10 names
+    // the track by the codec the file holds; the rank still reads the scan's codec (both are lossless).
+    let title = title_of(&[video(), with(lpcm("eng", "6", "24", "48000"), 41, "FLAC"), lpcm("eng", "2", "24", "48000")]);
+    let decision = decide(&title, Some("en"));
+    assert_eq!(order_of(&decision), vec![1, 2]);
+    assert_eq!(names(&decision), vec!["FLAC 5.1", "LPCM 2.0"]);
+    assert_eq!(decision.kept[0].codec.family, crate::codec::Family::Lpcm);
+    assert_eq!(decision.kept[0].file_codec.family, crate::codec::Family::Flac);
 }

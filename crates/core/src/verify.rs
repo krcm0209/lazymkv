@@ -2,9 +2,11 @@
 //! spec 6.2 step 7, 6.4 step 14, 9.4 messages 2003 and 4047; RP11). `verify_rip` checks MakeMKV's output: the duration
 //! within 2 s (on a DVD from 2 s shorter to 1% longer), the chapter count, and the tracks as an ordered match on type,
 //! output codec (attributes 41 and 42), language and channels, with a text-converted caption track expected right
-//! after the audio and the tracks MakeMKV removed (`MSG:4047`, counted over the selection) not expected. Read errors
-//! (`MSG:2003`) are carried with their count and offsets, never the drive's name. `verify_final` checks the remuxed
-//! file against the layout of 8.10. A report's pairs map file track ids back to scan streams, so the subtitle evidence
+//! after the audio and the tracks MakeMKV removed (`MSG:4047`, counted over the selection) not expected; a codec the
+//! table does not know is not compared, and the report says so. Read errors (`MSG:2003`) are carried with their count
+//! and offsets, never the drive's name. `verify_final` checks the remuxed file against the layout of 8.10, each track's
+//! codec and channels against the scan stream it comes from, and its chapters against the staged file's. A report's
+//! pairs map file track ids back to scan streams, so the subtitle evidence
 //! of 6.4 step 10 and the text rule's decisions are keyed by scan stream. Built on `reconcile`'s row builders
 //! (`expected_rows`, `removed_streams`), which stay the phase 0 rule, untouched (RP6). Written from the spec (RP20); no
 //! I/O (RP19): callers hand in parsed values, text or a `Tree`. Used by Tasks 13, 16 and 18.
@@ -13,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::codec::{mkvmerge_names, output_codec, Family};
+use crate::codec::{mkvmerge_names, Family};
 use crate::disc::{Flags, Stream, StreamKind, Title, DURATION_MATCH_S};
 use crate::lang::norm_lang;
 use crate::reconcile::{expected_rows, removed_streams};
@@ -53,9 +55,6 @@ pub fn rip_title(title: &Title, selection: &[u32]) -> Title {
 /// Attribute 41's value on a stream MakeMKV converts to text (a DVD's closed captions). Spec 6.2 step 7.
 const TEXT_OUTPUT: &str = "Text";
 
-/// mkvmerge's codec name for a stream converted to text ("`Text` arrives as `SubRip/SRT`"). Spec 6.2 step 7.
-const TEXT_CODEC: &str = "SubRip/SRT";
-
 /// A stream the file should hold, in file order (6.2 step 7).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExpectedTrack {
@@ -63,8 +62,9 @@ pub struct ExpectedTrack {
     pub stream: u32,
     /// Attribute 1.
     pub kind: StreamKind,
-    /// The names `mkvmerge -J` may give the track's codec; any one of them matches. Empty for a codec the table does
-    /// not know, which then never matches.
+    /// The names `mkvmerge -J` may give the track's codec (`expected_codecs`); any one of them matches. An attribute 41
+    /// value the table does not know expects its own text. Empty for a scan codec the table does not know (Family
+    /// Unknown, without attribute 41): the codec is then not compared, and the report's `unchecked` says so.
     pub codecs: Vec<String>,
     /// Attribute 3 as `disc::Stream` holds it (lower-cased); None on video, whose language is never compared.
     pub language: Option<String>,
@@ -78,9 +78,8 @@ pub struct ExpectedTrack {
 
 /// The title's streams in `selection` (selected_streams' result) without those `removed` (MSG:4047 indices counted over
 /// the selection from 0), with a text-converted subtitle stream (attribute 41 "Text") placed right after the audio
-/// streams (`caption_first`). Codecs: `codec::mkvmerge_names(codec)`, ["SubRip/SRT"] for a text-converted one, and for
-/// any other attribute 41 (MakeMKV's output codec short name, apdefs.h `ap_iaOutputCodecShort`) the names of the codec
-/// it gives (`codec::output_codec`), or the attribute 41 text itself when the table does not know it; attribute 42
+/// streams (`caption_first`). Codecs: `expected_codecs`, the names of `Stream.file_codec` (attribute 41, MakeMKV's
+/// output codec short name, through `codec::output_codec` when present: "Text" gives ["SubRip/SRT"]); attribute 42
 /// alone changes nothing. Language attribute 3 (None on video); flags carried (9.5's MakeMKV-only flags onto the output
 /// track). A selected stream the title does not hold as a typed stream (no attribute 1) is not expected but keeps its
 /// place in the count. Spec 6.2 step 7.
@@ -98,24 +97,23 @@ pub fn expected_tracks(title: &Title, selection: &[u32], removed: &BTreeSet<i64>
     caption_first(tracks)
 }
 
+/// The names `mkvmerge -J` may give the file's track of `stream`: `codec::mkvmerge_names` of `Stream.file_codec`
+/// (attribute 41 through `codec::output_codec` when present, else attributes 5 to 7). A file codec the table does not
+/// know expects attribute 41's own text when the stream has one, and nothing otherwise (the codec is then not
+/// compared). Spec 6.2 step 7 "Output codec", 6.4 step 14.
+pub fn expected_codecs(stream: &Stream) -> Vec<String> {
+    if stream.file_codec.family == Family::Unknown {
+        return stream.output_codec.iter().cloned().collect();
+    }
+    mkvmerge_names(&stream.file_codec).iter().map(|name| name.to_string()).collect()
+}
+
 /// One stream as the file should hold it. Spec 6.2 step 7 "Output codec".
 fn expected_track(stream: &Stream) -> ExpectedTrack {
-    let codecs: Vec<String> = match stream.output_codec.as_deref() {
-        Some(TEXT_OUTPUT) => vec![TEXT_CODEC.to_string()],
-        Some(short) => {
-            let output = output_codec(short);
-            if output.family == Family::Unknown {
-                vec![short.to_string()]
-            } else {
-                mkvmerge_names(&output).iter().map(|name| name.to_string()).collect()
-            }
-        }
-        None => mkvmerge_names(&stream.codec).iter().map(|name| name.to_string()).collect(),
-    };
     ExpectedTrack {
         stream: stream.number,
         kind: stream.kind,
-        codecs,
+        codecs: expected_codecs(stream),
         language: if stream.kind == StreamKind::Video { None } else { stream.language.clone() },
         channels: if stream.kind == StreamKind::Audio { stream.channels } else { None },
         flags: stream.flags,
@@ -200,14 +198,16 @@ const NOTHING_EXPECTED: &str = "tracks: the scan predicts no track for this titl
 pub struct VerifyReport {
     /// The file's duration against `expected_seconds` (`duration_ok` of 6.2 step 7 for a rip; the 2 s band for a remux).
     pub duration_ok: bool,
-    /// The scan's attribute 9 (verify_rip; 0 when the scan gives none) or the source duration (verify_final), seconds.
+    /// The scan's attribute 9 (verify_rip; 0 when the scan gives none) or the staged file's duration (verify_final),
+    /// seconds.
     pub expected_seconds: f64,
     /// `ident.container.properties.duration` in nanoseconds / 1e9.
     pub file_seconds: f64,
-    /// verify_rip: the file's first chapter edition against the scan's attribute 8. verify_final checks no chapters
-    /// (6.4 step 14 names the tracks and the duration): true, with both counts the file's.
+    /// The file's first chapter edition against the scan's attribute 8 (verify_rip), or against the staged file's count
+    /// when the layout keeps the chapters and 0 when it does not (verify_final, 8.10 "Chapters are kept").
     pub chapters_ok: bool,
-    /// The scan's attribute 8 (verify_rip), the file's count (verify_final).
+    /// The scan's attribute 8 (verify_rip); the staged file's count, or 0 when the layout keeps no chapters
+    /// (verify_final).
     pub scan_chapters: u32,
     /// The file's first chapter edition's `num_entries` (0 without an edition).
     pub file_chapters: u32,
@@ -222,6 +222,10 @@ pub struct VerifyReport {
     /// One sentence per difference, in track order ("track 3: forced expected true, file false", "track 2: codec expected
     /// DTS-HD Master Audio, file AC-3"), then the duration ("duration: expected 5400 s, file 5320.0 s"), then the chapters.
     pub mismatches: Vec<String>,
+    /// One sentence per comparison not made, in track order: the codec of a track whose scan codec the codec table does
+    /// not know ("track 1: codec not compared, the codec table does not know the scan's codec (file Opus)"). They fail
+    /// nothing, so a correct rip of such a stream is neither ripped again nor held (6.2 step 7).
+    pub unchecked: Vec<String>,
     /// `read_errors` of the rip log (verify_rip); empty for a remux.
     pub read_errors: Vec<ReadError>,
     /// duration_ok, chapters_ok and tracks_ok; read errors never fail it (6.2 step 7: the title is kept).
@@ -233,6 +237,15 @@ struct Matched {
     pairs: Vec<(u32, Option<i64>)>,
     extra_tracks: Vec<i64>,
     mismatches: Vec<String>,
+    unchecked: Vec<String>,
+}
+
+/// What comparing one file track with the track expected at its position found: the differences, and the comparisons
+/// that could not be made.
+#[derive(Default)]
+struct Compared {
+    mismatches: Vec<String>,
+    unchecked: Vec<String>,
 }
 
 /// The ordered match of 6.2 step 7 and 6.4 step 14, position by position: the expected track at position i against the
@@ -245,9 +258,9 @@ fn match_tracks<T>(
     file: &[MkvTrack],
     nothing: &str,
     key: impl Fn(&T) -> (u32, StreamKind),
-    differences: impl Fn(&T, &MkvTrack) -> Vec<String>,
+    differences: impl Fn(&T, &MkvTrack) -> Compared,
 ) -> Matched {
-    let mut matched = Matched { pairs: Vec::new(), extra_tracks: Vec::new(), mismatches: Vec::new() };
+    let mut matched = Matched { pairs: Vec::new(), extra_tracks: Vec::new(), mismatches: Vec::new(), unchecked: Vec::new() };
     for (position, want) in expected.iter().enumerate() {
         let (stream, kind) = key(want);
         match file.get(position) {
@@ -258,7 +271,9 @@ fn match_tracks<T>(
                         .mismatches
                         .push(format!("track {}: type expected {}, file {}", track.id, kind.as_str(), track.r#type));
                 } else {
-                    matched.mismatches.extend(differences(want, track));
+                    let compared = differences(want, track);
+                    matched.mismatches.extend(compared.mismatches);
+                    matched.unchecked.extend(compared.unchecked);
                 }
             }
             None => {
@@ -277,41 +292,58 @@ fn match_tracks<T>(
     matched
 }
 
-/// A rip's track against the scan's stream: codec (any of `codecs`), language (`norm_lang` on both sides; never on
-/// video) and channels (property `audio_channels`, on audio). Spec 6.2 step 7.
-fn rip_differences(want: &ExpectedTrack, track: &MkvTrack) -> Vec<String> {
-    let mut found = Vec::new();
-    if !want.codecs.iter().any(|name| *name == track.codec) {
-        found.push(format!("track {}: codec expected {}, file {}", track.id, codec_list(&want.codecs), track.codec));
+/// A file track's codec against `codecs`: any one of them matches; with `codecs` empty (a scan codec the table does not
+/// know) nothing is compared and an `unchecked` sentence says so. Spec 6.2 step 7, 6.4 step 14.
+fn codec_difference(codecs: &[String], track: &MkvTrack, found: &mut Compared) {
+    if codecs.is_empty() {
+        found.unchecked.push(format!(
+            "track {}: codec not compared, the codec table does not know the scan's codec (file {})",
+            track.id, track.codec
+        ));
+    } else if !codecs.iter().any(|name| *name == track.codec) {
+        found.mismatches.push(format!("track {}: codec expected {}, file {}", track.id, codecs.join(" or "), track.codec));
     }
-    if want.kind != StreamKind::Video {
-        let (expected, got) = (norm_lang(want.language.as_deref()), file_language(track));
-        if expected != got {
-            found.push(format!("track {}: language expected {expected}, file {got}", track.id));
-        }
+}
+
+/// A file track's property `audio_channels` against an audio stream's attribute 14 (nothing compared when `channels`
+/// is None: video, subtitles). Spec 6.2 step 7, 6.4 step 14.
+fn channel_difference(channels: Option<u32>, track: &MkvTrack, found: &mut Compared) {
+    let Some(channels) = channels else {
+        return;
+    };
+    let got = track.properties.get("audio_channels").and_then(Value::as_i64);
+    if got != Some(i64::from(channels)) {
+        let shown = got.map_or_else(|| "none".to_string(), |count| count.to_string());
+        found.mismatches.push(format!("track {}: channels expected {channels}, file {shown}", track.id));
     }
-    if let Some(channels) = want.channels {
-        let got = track.properties.get("audio_channels").and_then(Value::as_i64);
-        if got != Some(i64::from(channels)) {
-            let shown = got.map_or_else(|| "none".to_string(), |count| count.to_string());
-            found.push(format!("track {}: channels expected {channels}, file {shown}", track.id));
-        }
+}
+
+/// A file track's language property against `language` through `norm_lang` on both sides (never on video). Spec 6.2
+/// step 7, 6.4 step 14.
+fn language_difference(kind: StreamKind, language: Option<&str>, track: &MkvTrack, found: &mut Compared) {
+    if kind == StreamKind::Video {
+        return;
     }
+    let (expected, got) = (norm_lang(language), file_language(track));
+    if expected != got {
+        found.mismatches.push(format!("track {}: language expected {expected}, file {got}", track.id));
+    }
+}
+
+/// A rip's track against the scan's stream: codec (any of `codecs`; not compared for a codec the table does not know),
+/// language (`norm_lang` on both sides; never on video) and channels (property `audio_channels`, on audio). Spec 6.2
+/// step 7.
+fn rip_differences(want: &ExpectedTrack, track: &MkvTrack) -> Compared {
+    let mut found = Compared::default();
+    codec_difference(&want.codecs, track, &mut found);
+    language_difference(want.kind, want.language.as_deref(), track, &mut found);
+    channel_difference(want.channels, track, &mut found);
     found
 }
 
 /// The track's `language` property through `norm_lang` ("und" when absent or not text).
 fn file_language(track: &MkvTrack) -> String {
     norm_lang(track.properties.get("language").and_then(Value::as_str))
-}
-
-/// The codec names a sentence shows: joined by " or ", or "(none known)" for a codec the table does not know.
-fn codec_list(codecs: &[String]) -> String {
-    if codecs.is_empty() {
-        "(none known)".to_string()
-    } else {
-        codecs.join(" or ")
-    }
 }
 
 /// `ident.container.properties.duration` (nanoseconds) in seconds.
@@ -331,7 +363,8 @@ fn duration_sentence(expected_seconds: f64, file_seconds: f64) -> String {
 
 /// 6.2 step 7: duration_ok against the title's seconds; chapters `ident.chapters.first().map_or(0, |c| c.num_entries)`
 /// compared with `i64::from(title.chapters)`; the ordered match of expected_tracks (removed from
-/// `reconcile::removed_streams` of `rip_log`) against ident.tracks on type, codec (any of `codecs`), language
+/// `reconcile::removed_streams` of `rip_log`) against ident.tracks on type, codec (any of `codecs`; an `unchecked`
+/// sentence, not a difference, for a codec the table does not know), language
 /// (`norm_lang` of property `language` on both sides; not on video) and channels (property `audio_channels`);
 /// read_errors of `rip_log`. `selection` is selected_streams' result for the rip's profile; `dvd` is the disc's
 /// `Disc::is_dvd`. Without a rip log nothing is removed and no read error is known.
@@ -374,6 +407,7 @@ pub fn verify_rip(title: &Title, ident: &MkvmergeIdent, selection: &[u32], rip_l
         extra_tracks: matched.extra_tracks,
         unknown_removed,
         mismatches,
+        unchecked: matched.unchecked,
         read_errors: rip_log.map(read_errors).unwrap_or_default(),
         ok: duration_passes && chapters_ok && tracks_ok,
     }
@@ -403,19 +437,25 @@ fn file_flag(track: &MkvTrack, key: &str) -> bool {
     track.properties.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// A remuxed track against the layout's: language (`norm_lang` on both sides; never on video, whose language 8.10 does
-/// not set), name (`track_name`; absent is none), then the four flags. Spec 6.4 step 14, 8.10.
-fn final_differences(want: &OutputTrack, track: &MkvTrack) -> Vec<String> {
-    let mut found = Vec::new();
-    if want.kind != StreamKind::Video {
-        let (expected, got) = (norm_lang(want.language.as_deref()), file_language(track));
-        if expected != got {
-            found.push(format!("track {}: language expected {expected}, file {got}", track.id));
+/// A remuxed track against the layout's: codec and channels against the scan stream the layout names (`OutputTrack.stream`
+/// in `title`: the names of `expected_codecs`, not compared for a codec the table does not know; property
+/// `audio_channels` against attribute 14 on audio; a stream the title lacks is a difference), language (`norm_lang` on
+/// both sides; never on video, whose language 8.10 does not set), name (`track_name`; absent is none), then the four
+/// flags. Spec 6.4 step 14, 8.10.
+fn final_differences(title: &Title, want: &OutputTrack, track: &MkvTrack) -> Compared {
+    let mut found = Compared::default();
+    match title.streams.iter().find(|stream| stream.number == want.stream) {
+        Some(stream) => {
+            codec_difference(&expected_codecs(stream), track, &mut found);
+            let channels = if stream.kind == StreamKind::Audio { stream.channels } else { None };
+            channel_difference(channels, track, &mut found);
         }
+        None => found.mismatches.push(format!("track {}: stream {} is not a stream of the title", track.id, want.stream)),
     }
+    language_difference(want.kind, want.language.as_deref(), track, &mut found);
     let name = track.properties.get("track_name").and_then(Value::as_str);
     if want.name.as_deref() != name {
-        found.push(format!(
+        found.mismatches.push(format!(
             "track {}: name expected {}, file {}",
             track.id,
             want.name.as_deref().unwrap_or("none"),
@@ -431,7 +471,7 @@ fn final_differences(want: &OutputTrack, track: &MkvTrack) -> Vec<String> {
     for (flag, expected, key) in flags {
         let got = file_flag(track, key);
         if got != expected {
-            found.push(format!("track {}: {flag} expected {expected}, file {got}", track.id));
+            found.mismatches.push(format!("track {}: {flag} expected {expected}, file {got}", track.id));
         }
     }
     found
@@ -439,40 +479,50 @@ fn final_differences(want: &OutputTrack, track: &MkvTrack) -> Vec<String> {
 
 /// 6.4 step 14: the partial file's tracks must equal the layout exactly (order, type, language through norm_lang of
 /// property `language`, name from `track_name`, flags from the properties `default_track`, `forced_track`,
-/// `flag_hearing_impaired`, `flag_original`, an absent key being false), and its duration be within
-/// disc::DURATION_MATCH_S of `source_seconds`; each difference is a `mismatches` sentence. The video track's language is
-/// not compared and no chapter count is checked (`chapters_ok` true, both counts the file's); `unknown_removed` and
-/// `read_errors` are empty. An empty layout never verifies ("tracks: the layout keeps no track").
-pub fn verify_final(layout: &Layout, ident: &MkvmergeIdent, source_seconds: f64) -> VerifyReport {
+/// `flag_hearing_impaired`, `flag_original`, an absent key being false), each track's codec and channels must be those
+/// of the scan stream of `title` it comes from (`final_differences`), its duration be within disc::DURATION_MATCH_S of
+/// the staged file's (`staged`, the rip's `verify_rip` report: the remux reads that file, so the DVD band does not
+/// apply), and its chapter count equal the staged file's when `layout.chapters_kept` (8.10 "Chapters are kept"), or 0
+/// when not; each difference is a `mismatches` sentence and each comparison not made an `unchecked` one. The video
+/// track's language is not compared; `unknown_removed` and `read_errors` are empty. An empty layout never verifies
+/// ("tracks: the layout keeps no track").
+pub fn verify_final(layout: &Layout, title: &Title, staged: &VerifyReport, ident: &MkvmergeIdent) -> VerifyReport {
     let matched = match_tracks(
         &layout.tracks,
         &ident.tracks,
         NOTHING_KEPT,
         |track: &OutputTrack| (track.stream, track.kind),
-        final_differences,
+        |want: &OutputTrack, track: &MkvTrack| final_differences(title, want, track),
     );
     let tracks_ok = matched.mismatches.is_empty();
     let mut mismatches = matched.mismatches;
+    let source_seconds = staged.file_seconds;
     let file_seconds = file_duration(ident);
     let duration_passes = (file_seconds - source_seconds).abs() <= f64::from(DURATION_MATCH_S);
     if !duration_passes {
         mismatches.push(duration_sentence(source_seconds, file_seconds));
     }
-    let chapters = u32::try_from(chapter_entries(ident)).unwrap_or(0);
+    let expected_chapters = if layout.chapters_kept { staged.file_chapters } else { 0 };
+    let entries = chapter_entries(ident);
+    let chapters_ok = entries == i64::from(expected_chapters);
+    if !chapters_ok {
+        mismatches.push(format!("chapters: expected {expected_chapters}, file {entries}"));
+    }
     VerifyReport {
         duration_ok: duration_passes,
         expected_seconds: source_seconds,
         file_seconds,
-        chapters_ok: true,
-        scan_chapters: chapters,
-        file_chapters: chapters,
+        chapters_ok,
+        scan_chapters: expected_chapters,
+        file_chapters: u32::try_from(entries).unwrap_or(0),
         tracks_ok,
         pairs: matched.pairs,
         extra_tracks: matched.extra_tracks,
         unknown_removed: Vec::new(),
         mismatches,
+        unchecked: matched.unchecked,
         read_errors: Vec::new(),
-        ok: duration_passes && tracks_ok,
+        ok: duration_passes && chapters_ok && tracks_ok,
     }
 }
 
@@ -762,7 +812,10 @@ mod tests {
             vec![
                 expected(0, StreamKind::Video, "HEVC/H.265/MPEG-H", None, None, 0),
                 expected(1, StreamKind::Audio, "DTS-HD Master Audio", Some("spa"), Some(6), 1024),
-                expected(2, StreamKind::Audio, "DTS", Some("spa"), Some(6), 2304),
+                ExpectedTrack {
+                    codecs: vec!["DTS".to_string(), "DTS-ES".to_string(), "DTS 96/24".to_string()],
+                    ..expected(2, StreamKind::Audio, "DTS", Some("spa"), Some(6), 2304)
+                },
                 expected(3, StreamKind::Audio, "AC-3", Some("eng"), Some(2), 0),
                 expected(4, StreamKind::Subtitles, "HDMV PGS", Some("eng"), None, 0),
                 expected(5, StreamKind::Subtitles, "HDMV PGS", Some("eng"), None, 6144),
@@ -1122,6 +1175,7 @@ mod tests {
                 extra_tracks: vec![],
                 unknown_removed: vec![],
                 mismatches: vec![],
+                unchecked: vec![],
                 read_errors: vec![],
                 ok: true,
             }
@@ -1361,6 +1415,7 @@ mod tests {
                 "extra_tracks",
                 "unknown_removed",
                 "mismatches",
+                "unchecked",
                 "read_errors",
                 "ok",
             ]
@@ -1383,6 +1438,7 @@ mod tests {
             extra_tracks: Vec::new(),
             unknown_removed: Vec::new(),
             mismatches: Vec::new(),
+            unchecked: Vec::new(),
             read_errors,
             ok,
         }
@@ -1414,37 +1470,70 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_codec_the_table_does_not_know_never_verifies_and_fails_twice_into_review() {
-        // Not seen in a recording: an A_DTS stream whose attributes 6 and 7 the table does not know (DTS Express, Task 1's
-        // Unknown row), Family::Unknown, beside AVC video. The file's codec name for it is mkvmerge's documented spelling,
-        // not yet seen.
-        let scan = parse(&scan_text(
+    /// Title 0 of a Blu-ray scan: AVC video and one English audio stream of these attributes 5, 6 and 7 and channels.
+    fn audio_scan(codec: (&str, &str, &str), channels: &str) -> Scan {
+        parse(&scan_text(
             &[(1, "Blu-ray disc")],
             &[(
                 0,
                 &[(8, "1"), (9, "0:10:00")],
                 &[
                     (0, &[(1, "Video"), (5, "V_MPEG4/ISO/AVC"), (6, "Mpeg4"), (7, "Mpeg4 AVC High@L4.1")]),
-                    (1, &[(1, "Audio"), (3, "eng"), (5, "A_DTS"), (6, "DTS-HD LBR"), (7, "DTS Express"), (14, "2")]),
+                    (1, &[(1, "Audio"), (3, "eng"), (5, codec.0), (6, codec.1), (7, codec.2), (14, channels)]),
                 ],
             )],
-        ));
-        let title = title_of(&scan, 0);
+        ))
+    }
+
+    /// The file of audio_scan: AVC video, then an audio track named `codec` with this language and channel count.
+    fn audio_file(codec: &str, language: &str, channels: i64) -> MkvmergeIdent {
+        let tracks = vec![
+            track(0, "video", "AVC/H.264/MPEG-4p10", json!({"language": "eng"})),
+            track(1, "audio", codec, json!({"language": language, "audio_channels": channels})),
+        ];
+        file(tracks, &[1], 600_000_000_000)
+    }
+
+    #[test]
+    fn dts_es_dts_96_24_and_dts_express_rips_verify_under_mkvmerges_names() {
+        // Not seen in a recording: mkvmerge's documented names for a DTS-ES 6.1 and a DTS 96/24 stream (MakeMKV's DTS
+        // family) and for a DTS Express picture-in-picture commentary (A_DTS, attribute 6 "DTS-HD LBR").
+        for (codec, channels, written) in [
+            (("A_DTS", "DTS", "DTS"), "7", "DTS-ES"),
+            (("A_DTS", "DTS", "DTS"), "6", "DTS 96/24"),
+            (("A_DTS", "DTS-HD LBR", "DTS Express"), "2", "DTS Express"),
+        ] {
+            let title = title_of(&audio_scan(codec, channels), 0);
+            let file = audio_file(written, "eng", channels.parse().unwrap());
+            let report = verify_rip(&title, &file, &[0, 1], None, false);
+            assert_eq!(report.mismatches, Vec::<String>::new(), "{written}");
+            assert!(report.ok, "{written}");
+            assert_eq!(failure_reviews(&report, true), Vec::<ReviewReason>::new(), "{written}");
+        }
+    }
+
+    #[test]
+    fn a_codec_the_table_does_not_know_is_not_compared_and_its_rip_verifies() {
+        // Not seen in a recording: an audio stream whose codec the table does not know (a made-up A_OPUS, Family
+        // Unknown), beside AVC video. Its codec name is not compared and the report says so; its type, language and
+        // channels are, so a correct rip is neither ripped again nor held with verify_failed.
+        let title = title_of(&audio_scan(("A_OPUS", "Opus", "Opus"), "2"), 0);
         let expected = expected_tracks(&title, &[0, 1], &BTreeSet::new());
         assert_eq!(expected.len(), 2);
         assert_eq!(expected[0].codecs, ["AVC/H.264/MPEG-4p10"]);
         assert!(expected[1].codecs.is_empty(), "{expected:?}");
-        let tracks = vec![
-            track(0, "video", "AVC/H.264/MPEG-4p10", json!({"language": "eng"})),
-            track(1, "audio", "DTS Express", json!({"language": "eng", "audio_channels": 2})),
-        ];
-        let report = verify_rip(&title, &file(tracks, &[1], 600_000_000_000), &[0, 1], None, false);
-        assert_eq!(report.mismatches, ["track 1: codec expected (none known), file DTS Express"]);
-        assert!(report.duration_ok && report.chapters_ok);
-        assert!(!report.tracks_ok && !report.ok);
-        assert_eq!(failure_reviews(&report, false), Vec::<ReviewReason>::new());
-        assert_eq!(failure_reviews(&report, true), [ReviewReason::VerifyFailed]);
+        let report = verify_rip(&title, &audio_file("Opus", "eng", 2), &[0, 1], None, false);
+        assert_eq!(report.mismatches, Vec::<String>::new());
+        assert_eq!(
+            report.unchecked,
+            ["track 1: codec not compared, the codec table does not know the scan's codec (file Opus)"]
+        );
+        assert!(report.tracks_ok && report.ok);
+        assert_eq!(failure_reviews(&report, true), Vec::<ReviewReason>::new());
+        let wrong = verify_rip(&title, &audio_file("Opus", "spa", 6), &[0, 1], None, false);
+        assert_eq!(wrong.mismatches, ["track 1: language expected eng, file spa", "track 1: channels expected 2, file 6"]);
+        assert!(!wrong.ok);
+        assert_eq!(failure_reviews(&wrong, true), [ReviewReason::VerifyFailed]);
         // VC-1 video, by contrast, is a known family (Task 1's Vc1, ruling RP26; not seen in a recording): it expects
         // mkvmerge's documented name "VC-1", also not yet seen, and a file writing that name verifies.
         let vc1 = parse(&scan_text(
@@ -1516,6 +1605,21 @@ mod tests {
         }
     }
 
+    /// The scan title of spanish_layout: the bluray fixture's title 0.
+    fn spanish_title() -> Title {
+        title_of(&bluray_scan(), 0)
+    }
+
+    /// The scan title of plain_layout: AVC video and English Dolby Digital 2.0.
+    fn plain_title() -> Title {
+        title_of(&audio_scan(("A_AC3", "DD", "Dolby Digital"), "2"), 0)
+    }
+
+    /// The staged file's report as verify_final reads it: a verified rip of this duration and chapter count.
+    fn staged(file_seconds: f64, file_chapters: u32) -> VerifyReport {
+        VerifyReport { file_seconds, file_chapters, ..outcome(true, Vec::new()) }
+    }
+
     /// The file for plain_layout, without any flag property.
     fn plain_tracks() -> Vec<Value> {
         vec![track(0, "video", "AVC/H.264/MPEG-4p10", json!({})), track(1, "audio", "AC-3", json!({"language": "eng", "audio_channels": 2}))]
@@ -1523,7 +1627,7 @@ mod tests {
 
     #[test]
     fn a_remuxed_file_that_matches_the_layout_verifies() {
-        let report = verify_final(&spanish_layout(), &file(spanish_tracks(), &[22], BLURAY_NS), 7150.1);
+        let report = verify_final(&spanish_layout(), &spanish_title(), &staged(7150.1, 22), &file(spanish_tracks(), &[22], BLURAY_NS));
         assert_eq!(
             report,
             VerifyReport {
@@ -1538,6 +1642,7 @@ mod tests {
                 extra_tracks: vec![],
                 unknown_removed: vec![],
                 mismatches: vec![],
+                unchecked: vec![],
                 read_errors: vec![],
                 ok: true,
             }
@@ -1551,7 +1656,7 @@ mod tests {
         tracks[1]["properties"]["flag_original"] = json!(false);
         tracks[3]["properties"]["forced_track"] = json!(true);
         tracks[4]["properties"]["flag_hearing_impaired"] = json!(false);
-        let report = verify_final(&spanish_layout(), &file(tracks, &[22], BLURAY_NS), 7150.1);
+        let report = verify_final(&spanish_layout(), &spanish_title(), &staged(7150.1, 22), &file(tracks, &[22], BLURAY_NS));
         assert_eq!(
             report.mismatches,
             [
@@ -1570,7 +1675,7 @@ mod tests {
         tracks[2]["properties"]["language"] = json!("spa");
         tracks[2]["properties"]["track_name"] = json!("Stereo");
         tracks[3]["properties"] = json!({"language": "eng", "default_track": true});
-        let report = verify_final(&spanish_layout(), &file(tracks, &[22], BLURAY_NS), 7150.1);
+        let report = verify_final(&spanish_layout(), &spanish_title(), &staged(7150.1, 22), &file(tracks, &[22], BLURAY_NS));
         assert_eq!(
             report.mismatches,
             [
@@ -1583,14 +1688,16 @@ mod tests {
 
     #[test]
     fn an_absent_flag_property_counts_as_false() {
-        let report = verify_final(&plain_layout(), &file(plain_tracks(), &[], 600_000_000_000), 600.0);
+        let report = verify_final(&plain_layout(), &plain_title(), &staged(600.0, 0), &file(plain_tracks(), &[], 600_000_000_000));
         assert!(report.ok, "{:?}", report.mismatches);
         assert_eq!(report.pairs, vec![(0, Some(0)), (1, Some(1))]);
     }
 
     #[test]
     fn the_final_duration_has_the_two_second_band_only() {
-        let run = |file_ns: i64, source: f64| verify_final(&plain_layout(), &file(plain_tracks(), &[], file_ns), source);
+        let run = |file_ns: i64, source: f64| {
+            verify_final(&plain_layout(), &plain_title(), &staged(source, 0), &file(plain_tracks(), &[], file_ns))
+        };
         assert!(run(6_625_500_000_000, 6623.6).ok);
         let long = run(6_626_000_000_000, 6623.6);
         assert_eq!(long.mismatches, ["duration: expected 6623.6 s, file 6626.0 s"]);
@@ -1601,7 +1708,9 @@ mod tests {
 
     #[test]
     fn a_missing_an_extra_and_a_wrong_type_track_fail_the_final_check() {
-        let run = |tracks: Vec<Value>| verify_final(&plain_layout(), &file(tracks, &[], 600_000_000_000), 600.0);
+        let run = |tracks: Vec<Value>| {
+            verify_final(&plain_layout(), &plain_title(), &staged(600.0, 0), &file(tracks, &[], 600_000_000_000))
+        };
         let missing = run(vec![track(0, "video", "AVC/H.264/MPEG-4p10", json!({}))]);
         assert_eq!(missing.mismatches, ["stream 1 (audio): missing from the file"]);
         assert_eq!(missing.pairs, vec![(0, Some(0)), (1, None)]);
@@ -1619,16 +1728,70 @@ mod tests {
     fn the_video_language_is_not_compared_in_the_final_file() {
         let mut layout = plain_layout();
         layout.tracks[0].language = Some("jpn".to_string());
-        let report = verify_final(&layout, &file(plain_tracks(), &[], 600_000_000_000), 600.0);
+        let report = verify_final(&layout, &plain_title(), &staged(600.0, 0), &file(plain_tracks(), &[], 600_000_000_000));
         assert!(report.ok, "{:?}", report.mismatches);
     }
 
     #[test]
     fn an_empty_layout_never_verifies() {
         let empty = Layout { tracks: vec![], chapters_kept: true };
-        let report = verify_final(&empty, &file(Vec::new(), &[], 600_000_000_000), 600.0);
+        let report = verify_final(&empty, &plain_title(), &staged(600.0, 0), &file(Vec::new(), &[], 600_000_000_000));
         assert_eq!(report.mismatches, ["tracks: the layout keeps no track"]);
         assert!(report.duration_ok && !report.tracks_ok && !report.ok);
+    }
+
+    #[test]
+    fn a_remuxed_track_whose_codec_or_channels_are_not_its_source_streams_fails() {
+        // The remux mapped layout stream 3 (English Dolby Digital 2.0) to the Spanish DTS core's raw track: the language,
+        // name and flags are the layout's, the codec and the channels are not those of stream 3.
+        let mut tracks = spanish_tracks();
+        tracks[2]["codec"] = json!("DTS");
+        tracks[2]["properties"]["audio_channels"] = json!(6);
+        let report = verify_final(&spanish_layout(), &spanish_title(), &staged(7150.1, 22), &file(tracks, &[22], BLURAY_NS));
+        assert_eq!(report.mismatches, ["track 2: codec expected AC-3, file DTS", "track 2: channels expected 2, file 6"]);
+        assert!(!report.tracks_ok && !report.ok);
+        // A layout stream the title does not hold is a difference of its own.
+        let mut layout = plain_layout();
+        layout.tracks[1].stream = 9;
+        let report = verify_final(&layout, &plain_title(), &staged(600.0, 0), &file(plain_tracks(), &[], 600_000_000_000));
+        assert_eq!(report.mismatches, ["track 1: stream 9 is not a stream of the title"]);
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn a_remux_keeps_the_staged_files_chapter_count_when_the_layout_keeps_chapters() {
+        let run = |layout: &Layout, chapters: &[i64]| {
+            verify_final(layout, &spanish_title(), &staged(7150.1, 22), &file(spanish_tracks(), chapters, BLURAY_NS))
+        };
+        let dropped = run(&spanish_layout(), &[]);
+        assert_eq!(dropped.mismatches, ["chapters: expected 22, file 0"]);
+        assert!(dropped.tracks_ok && dropped.duration_ok && !dropped.chapters_ok && !dropped.ok);
+        assert_eq!((dropped.scan_chapters, dropped.file_chapters), (22, 0));
+        assert_eq!(run(&spanish_layout(), &[21]).mismatches, ["chapters: expected 22, file 21"]);
+        // A layout that keeps no chapters expects none.
+        let unchaptered = Layout { chapters_kept: false, ..spanish_layout() };
+        assert!(run(&unchaptered, &[]).ok);
+        assert_eq!(run(&unchaptered, &[22]).mismatches, ["chapters: expected 0, file 22"]);
+    }
+
+    #[test]
+    fn a_remuxed_track_of_a_codec_the_table_does_not_know_has_only_its_codec_left_uncompared() {
+        let title = title_of(&audio_scan(("A_OPUS", "Opus", "Opus"), "2"), 0);
+        let tracks = |channels: i64| {
+            vec![
+                track(0, "video", "AVC/H.264/MPEG-4p10", json!({})),
+                track(1, "audio", "Opus", json!({"language": "eng", "audio_channels": channels})),
+            ]
+        };
+        let report = verify_final(&plain_layout(), &title, &staged(600.0, 0), &file(tracks(2), &[], 600_000_000_000));
+        assert_eq!(report.mismatches, Vec::<String>::new());
+        assert_eq!(
+            report.unchecked,
+            ["track 1: codec not compared, the codec table does not know the scan's codec (file Opus)"]
+        );
+        assert!(report.ok);
+        let six = verify_final(&plain_layout(), &title, &staged(600.0, 0), &file(tracks(6), &[], 600_000_000_000));
+        assert_eq!(six.mismatches, ["track 1: channels expected 2, file 6"]);
     }
 
     /// The dvd fixture's eng-only rip, verified: pairs (0, 0), (1, 1), (5, 2), (3, 3).

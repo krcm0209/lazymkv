@@ -27,8 +27,11 @@ pub enum Family {
     DtsHdMa,
     /// DTS-HD High Resolution Audio (`A_DTS`, attribute 6 `DTS-HD HR`; spelling not yet seen in a recording).
     DtsHdHr,
-    /// DTS (`A_DTS`, attribute 6 `DTS`).
+    /// DTS (`A_DTS`, attribute 6 `DTS`), DTS-ES and DTS 96/24 included.
     Dts,
+    /// DTS Express (`A_DTS`, attribute 6 or 7 `DTS-HD LBR` or `DTS Express`; spelling not yet seen in a recording), the
+    /// low bit rate format of picture-in-picture commentaries.
+    DtsExpress,
     /// Dolby Digital, AC-3 (`A_AC3`).
     Ac3,
     /// Dolby Digital Plus, E-AC-3 (`A_EAC3`; spelling not yet seen in a recording).
@@ -47,13 +50,13 @@ pub enum Family {
     VobSub,
     /// A DVD's closed captions (`S_CC608/DVD`), which MakeMKV converts to text (8.7 "Set aside first").
     ClosedCaptions,
-    /// Any other codec (DTS Express, for one).
+    /// Any other codec: a codec the table does not know (6.2 step 7 then compares no codec name for it).
     Unknown,
 }
 
 impl Family {
     /// Every family, in the order of the enum. Spec 8.6 "Codecs".
-    pub const ALL: [Family; 18] = [
+    pub const ALL: [Family; 19] = [
         Family::Hevc,
         Family::Avc,
         Family::Mpeg2,
@@ -62,6 +65,7 @@ impl Family {
         Family::DtsHdMa,
         Family::DtsHdHr,
         Family::Dts,
+        Family::DtsExpress,
         Family::Ac3,
         Family::Eac3,
         Family::Lpcm,
@@ -85,6 +89,7 @@ impl Family {
             Family::DtsHdMa => "dts-hd-ma",
             Family::DtsHdHr => "dts-hd-hr",
             Family::Dts => "dts",
+            Family::DtsExpress => "dts-express",
             Family::Ac3 => "ac3",
             Family::Eac3 => "eac3",
             Family::Lpcm => "lpcm",
@@ -125,8 +130,9 @@ impl ObjectAudio {
 pub struct Codec {
     /// The codec family.
     pub family: Family,
-    /// The display name 8.10 uses ("TrueHD", "DTS-HD MA", "DTS", "Dolby Digital", "Dolby Digital Plus", "DTS-HD HR",
-    /// "LPCM", "FLAC", "MPEG Audio", "AAC", "HEVC", "AVC", "MPEG-2", "VC-1", "PGS", "VobSub", "Closed Captions");
+    /// The display name 8.10 uses ("TrueHD", "DTS-HD MA", "DTS", "DTS Express", "Dolby Digital", "Dolby Digital Plus",
+    /// "DTS-HD HR", "LPCM", "FLAC", "MPEG Audio", "AAC", "HEVC", "AVC", "MPEG-2", "VC-1", "PGS", "VobSub", "Closed
+    /// Captions");
     /// attribute 6, else 7, else 5, for Unknown.
     pub display: String,
     /// From attribute 7 at scan time: "TrueHD Atmos" gives Atmos, a 7 containing "DTS:X" gives DtsX (spelling not yet
@@ -142,8 +148,8 @@ pub struct Codec {
 /// the prefixes `A_PCM`, `A_MPEG/` and `A_AAC/`); `A_DTS` is told apart by attribute 6, then 7. The object-based
 /// extension is read from attribute 7, then 6, for an audio family only. Rows from the recordings: V_MPEGH/ISO/HEVC,
 /// V_MPEG4/ISO/AVC, V_MPEG2, A_TRUEHD, A_DTS with short "DTS-HD MA" or "DTS", A_AC3, S_HDMV/PGS, S_VOBSUB,
-/// S_CC608/DVD; rows the spec names but no recording shows, with MakeMKV's documented spellings: A_DTS "DTS-HD HR"
-/// and "DTS:X", A_EAC3 "E-AC3", A_PCM or A_LPCM "LPCM", A_FLAC "FLAC", A_MPEG/L2 "Mpeg", A_AAC "AAC"; and
+/// S_CC608/DVD; rows the spec names but no recording shows, with MakeMKV's documented spellings: A_DTS "DTS-HD HR",
+/// "DTS:X" and DTS Express ("DTS-HD LBR" or "DTS Express"), A_EAC3 "E-AC3", A_PCM or A_LPCM "LPCM", A_FLAC "FLAC", A_MPEG/L2 "Mpeg", A_AAC "AAC"; and
 /// V_MS/VFW/WVC1, VC-1 (ruling RP26), matched on attribute 5 alone. Spec 8.6 "Codecs".
 pub fn codec(id: &str, short: &str, long: &str) -> Codec {
     let family = family_of(id, short, long);
@@ -159,7 +165,7 @@ pub fn codec(id: &str, short: &str, long: &str) -> Codec {
 /// `ap_iaOutputCodecShort`), written in the spelling of attribute 6: "Text" is the one recorded (a DVD's closed
 /// captions converted to text, 6.2 step 7); the others are the attribute 6 spellings of the recordings and of the rows
 /// above ("DD" and "AC3" both for Dolby Digital), not yet seen in attribute 41.
-const OUTPUT_SHORT_NAMES: [(&str, Family); 17] = [
+const OUTPUT_SHORT_NAMES: [(&str, Family); 18] = [
     ("Text", Family::ClosedCaptions),
     ("MpegH", Family::Hevc),
     ("Mpeg4", Family::Avc),
@@ -168,6 +174,7 @@ const OUTPUT_SHORT_NAMES: [(&str, Family); 17] = [
     ("DTS-HD MA", Family::DtsHdMa),
     ("DTS-HD HR", Family::DtsHdHr),
     ("DTS", Family::Dts),
+    ("DTS-HD LBR", Family::DtsExpress),
     ("DD", Family::Ac3),
     ("AC3", Family::Ac3),
     ("E-AC3", Family::Eac3),
@@ -222,8 +229,8 @@ fn family_of(id: &str, short: &str, long: &str) -> Family {
 }
 
 /// An `A_DTS` stream's family: DTS:X (in attribute 6 or 7) rides on DTS-HD MA; else attribute 6 "DTS-HD MA",
-/// "DTS-HD HR" or "DTS", else attribute 7 "DTS-HD Master Audio", "DTS-HD High Resolution Audio" or "DTS"; else
-/// Unknown (DTS Express, for one).
+/// "DTS-HD HR" or "DTS", else attribute 7 "DTS-HD Master Audio", "DTS-HD High Resolution Audio" or "DTS"; DTS Express
+/// when attribute 6 or 7 is "DTS-HD LBR" or "DTS Express" (spelling not yet seen in a recording); else Unknown.
 fn dts_family(short: &str, long: &str) -> Family {
     if short.contains("DTS:X") || long.contains("DTS:X") {
         return Family::DtsHdMa;
@@ -231,6 +238,7 @@ fn dts_family(short: &str, long: &str) -> Family {
     match (short, long) {
         ("DTS-HD MA", _) | (_, "DTS-HD Master Audio") => Family::DtsHdMa,
         ("DTS-HD HR", _) | (_, "DTS-HD High Resolution Audio") => Family::DtsHdHr,
+        ("DTS-HD LBR" | "DTS Express", _) | (_, "DTS-HD LBR" | "DTS Express") => Family::DtsExpress,
         ("DTS", _) | (_, "DTS") => Family::Dts,
         _ => Family::Unknown,
     }
@@ -247,6 +255,7 @@ fn display_name(family: Family) -> Option<&'static str> {
         Family::DtsHdMa => "DTS-HD MA",
         Family::DtsHdHr => "DTS-HD HR",
         Family::Dts => "DTS",
+        Family::DtsExpress => "DTS Express",
         Family::Ac3 => "Dolby Digital",
         Family::Eac3 => "Dolby Digital Plus",
         Family::Lpcm => "LPCM",
@@ -269,6 +278,7 @@ fn is_audio(family: Family) -> bool {
             | Family::DtsHdMa
             | Family::DtsHdHr
             | Family::Dts
+            | Family::DtsExpress
             | Family::Ac3
             | Family::Eac3
             | Family::Lpcm
@@ -325,7 +335,7 @@ pub enum Tier {
     Lossless,
     /// (b) High-rate lossy: DTS-HD High Resolution, E-AC-3 at 768 kb/s or more, DTS at 1.5 Mb/s or more.
     HighRateLossy,
-    /// (c) Other lossy: AC-3, lower-rate E-AC-3 and DTS.
+    /// (c) Other lossy: AC-3, lower-rate E-AC-3 and DTS, and DTS Express.
     OtherLossy,
     /// (d) MPEG audio and AAC.
     Low,
@@ -352,7 +362,7 @@ pub const DTS_HIGH_RATE_KBPS: u32 = 1500;
 
 /// Spec 8.6 step 3.2: (a) Lossless for the lossless families (`is_lossless`'s set, not repeated here); (b)
 /// HighRateLossy for DtsHdHr, Eac3 at EAC3_HIGH_RATE_KBPS or more, Dts at DTS_HIGH_RATE_KBPS or more; (c) OtherLossy
-/// for Ac3, lower-rate or unknown-rate Eac3 and Dts; (d) Low for MpegAudio and Aac; None for Unknown and for video and
+/// for Ac3, lower-rate or unknown-rate Eac3 and Dts, and DtsExpress at any rate (other lossy DTS); (d) Low for MpegAudio and Aac; None for Unknown and for video and
 /// subtitle families.
 pub fn tier(family: Family, bitrate_kbps: Option<u32>) -> Option<Tier> {
     let at_least = |line: u32| bitrate_kbps.is_some_and(|rate| rate >= line);
@@ -361,7 +371,7 @@ pub fn tier(family: Family, bitrate_kbps: Option<u32>) -> Option<Tier> {
         Family::DtsHdHr => Some(Tier::HighRateLossy),
         Family::Eac3 if at_least(EAC3_HIGH_RATE_KBPS) => Some(Tier::HighRateLossy),
         Family::Dts if at_least(DTS_HIGH_RATE_KBPS) => Some(Tier::HighRateLossy),
-        Family::Ac3 | Family::Eac3 | Family::Dts => Some(Tier::OtherLossy),
+        Family::Ac3 | Family::Eac3 | Family::Dts | Family::DtsExpress => Some(Tier::OtherLossy),
         Family::MpegAudio | Family::Aac => Some(Tier::Low),
         // Video, subtitle and Unknown families have no tier. The guard arm above took the lossless families (the one
         // copy of the set is `is_lossless`); a guard does not count toward exhaustiveness, so a wildcard ends it.
@@ -389,9 +399,12 @@ pub fn object_audio(ffprobe_profile: Option<&str>) -> Option<ObjectAudio> {
 /// The codec names `mkvmerge -J` may write for a stream of this codec, as 6.2 step 7 records them; `verify_rip`
 /// accepts any of them. Hevc ["HEVC/H.265/MPEG-H"], Avc ["AVC/H.264/MPEG-4p10"], Mpeg2 ["MPEG-1/2"], TrueHd
 /// ["TrueHD", "TrueHD Atmos"] (the second provisional: an Atmos stream's spelling is not yet seen), DtsHdMa
-/// ["DTS-HD Master Audio"], DtsHdHr ["DTS-HD High Resolution Audio"], Dts ["DTS"], Ac3 ["AC-3"], Eac3 ["E-AC-3"], Lpcm
+/// ["DTS-HD Master Audio"], DtsHdHr ["DTS-HD High Resolution Audio"], Dts ["DTS", "DTS-ES", "DTS 96/24"] (a DTS-ES or
+/// DTS 96/24 stream is a DTS stream to MakeMKV and has its own name in mkvmerge), DtsExpress ["DTS Express"], Ac3
+/// ["AC-3"], Eac3 ["E-AC-3"], Lpcm
 /// ["PCM"], Flac ["FLAC"], MpegAudio ["MP2"], Aac ["AAC"], Pgs ["HDMV PGS"], VobSub ["VobSub"], ClosedCaptions
-/// ["SubRip/SRT"] (converted through attribute 41 "Text"), Vc1 ["VC-1"] (ruling RP26), Unknown []. The names seen in
+/// ["SubRip/SRT"] (converted through attribute 41 "Text"), Vc1 ["VC-1"] (ruling RP26), Unknown [] (`verify` then
+/// compares no codec name for the track and says so in its report). The names seen in
 /// the recordings are HEVC, DTS-HD Master Audio, DTS, AC-3, HDMV PGS, MPEG-1/2, VobSub, SubRip/SRT and AVC; the
 /// others are mkvmerge's documented spellings, not yet seen. Spec 6.2 step 7.
 pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str] {
@@ -403,7 +416,8 @@ pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str] {
         Family::TrueHd => &["TrueHD", "TrueHD Atmos"],
         Family::DtsHdMa => &["DTS-HD Master Audio"],
         Family::DtsHdHr => &["DTS-HD High Resolution Audio"],
-        Family::Dts => &["DTS"],
+        Family::Dts => &["DTS", "DTS-ES", "DTS 96/24"],
+        Family::DtsExpress => &["DTS Express"],
         Family::Ac3 => &["AC-3"],
         Family::Eac3 => &["E-AC-3"],
         Family::Lpcm => &["PCM"],
@@ -601,8 +615,22 @@ mod tests {
     }
 
     #[test]
+    fn dts_express_reads_as_lossy_dts_express_by_attribute_6_or_7() {
+        // Not seen in a recording: MakeMKV's documented spellings of DTS Express (a picture-in-picture commentary).
+        let expected = known(Family::DtsExpress, "DTS Express", None, false);
+        assert_eq!(codec("A_DTS", "DTS-HD LBR", "DTS Express"), expected);
+        assert_eq!(codec("A_DTS", "DTS-HD LBR", ""), expected);
+        assert_eq!(codec("A_DTS", "", "DTS Express"), expected);
+        assert_eq!(codec("A_DTS", "DTS Express", ""), expected);
+        assert_eq!(tier(Family::DtsExpress, None), Some(Tier::OtherLossy));
+        assert_eq!(tier(Family::DtsExpress, Some(1500)), Some(Tier::OtherLossy));
+        assert_eq!(mkvmerge_names(&expected), ["DTS Express"]);
+        assert_eq!(output_codec("DTS-HD LBR").family, Family::DtsExpress);
+    }
+
+    #[test]
     fn a_dts_stream_of_an_unrecognised_kind_is_unknown() {
-        assert_eq!(codec("A_DTS", "DTS-HD LBR", "DTS Express"), known(Family::Unknown, "DTS-HD LBR", None, false));
+        assert_eq!(codec("A_DTS", "DTS-XYZ", "Made Up DTS"), known(Family::Unknown, "DTS-XYZ", None, false));
     }
 
     #[test]
@@ -627,6 +655,7 @@ mod tests {
                 "dts-hd-ma",
                 "dts-hd-hr",
                 "dts",
+                "dts-express",
                 "ac3",
                 "eac3",
                 "lpcm",
@@ -874,7 +903,8 @@ mod tests {
         assert_eq!(names(Family::TrueHd), ["TrueHD", "TrueHD Atmos"]);
         assert_eq!(names(Family::DtsHdMa), ["DTS-HD Master Audio"]);
         assert_eq!(names(Family::DtsHdHr), ["DTS-HD High Resolution Audio"]);
-        assert_eq!(names(Family::Dts), ["DTS"]);
+        assert_eq!(names(Family::Dts), ["DTS", "DTS-ES", "DTS 96/24"]);
+        assert_eq!(names(Family::DtsExpress), ["DTS Express"]);
         assert_eq!(names(Family::Ac3), ["AC-3"]);
         assert_eq!(names(Family::Eac3), ["E-AC-3"]);
         assert_eq!(names(Family::Lpcm), ["PCM"]);

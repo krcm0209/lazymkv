@@ -177,6 +177,7 @@ mod tests {
             layout_name: None,
             output_codec: None,
             conversion: None,
+            file_codec: codec(id, short, long),
         }
     }
 
@@ -219,6 +220,7 @@ mod tests {
             stream,
             language: language.map(str::to_string),
             group,
+            file_codec: codec.clone(),
             codec,
             channels,
             tier: None,
