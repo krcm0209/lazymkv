@@ -3,6 +3,7 @@ pub mod codec;
 pub mod decision;
 pub mod disc;
 pub mod fingerprint;
+pub mod job;
 pub mod lang;
 pub mod lookup;
 pub mod naming;
