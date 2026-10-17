@@ -1,10 +1,22 @@
 pub mod audio;
+pub mod codec;
+pub mod decision;
+pub mod disc;
 pub mod fingerprint;
+pub mod job;
 pub mod lang;
+pub mod lookup;
+pub mod naming;
+pub mod plan;
 pub mod profile;
 pub mod recording;
 pub mod robot;
 pub mod reconcile;
+pub mod remembered;
+pub mod review;
+pub mod settings;
 pub mod subtitle;
+pub mod tracks;
+pub mod verify;
 #[cfg(any(test, feature = "testsupport"))]
 pub mod testsupport;

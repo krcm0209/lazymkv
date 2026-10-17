@@ -3,9 +3,17 @@
 //! `retune` until lazymkvctl exists). Exit 0; 1 a FAIL; 2 an argument, the spec's row 13, a --set value, a labels or
 //! fitted file, or a --compare file that is not a snapshot; 3 no evidence clone, or something could not be checked
 //! and --allow-unmeasured was not given. Py: audio_dataset.main (its positional corpus path is --evidence).
+//!
+//! `lazymkv-dev retune --subtitles [--evidence DIR] [--spec FILE] [--text DIR]` (RP15, phase 1 Task 18) runs the
+//! subtitle harness instead (`lazymkv_core::subtitle::labels::harness`, spec 15 "Rules against the stored evidence"):
+//! every labelled English or no-language subtitle track of the evidence, judged by 8.7 and by the text rule over the
+//! OCR text of --text DIR (else LAZYMKV_OCR_TEXT), counted against spec section 17 row 14 read from the spec, with
+//! spec 14's default settings. Exit 0; 1 a costly verdict; 2 an argument, the spec's row 14, a subtitle labels file
+//! that does not validate, or an OCR text folder that is not there; 3 no evidence clone, no subtitle label, or a
+//! labelled track that could not be judged.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -15,20 +23,36 @@ use lazymkv_core::audio::dataset::{
     UNCHECKED_FILE,
 };
 use lazymkv_core::audio::labels::exp13_requirements;
-use lazymkv_core::recording::{decode_text, Encoding, Errors};
+use lazymkv_core::recording::{decode_text, Encoding, Errors, Tree};
+use lazymkv_core::settings::Settings;
+use lazymkv_core::subtitle::labels::{exp14_requirements, harness as subtitle_harness};
 
-use crate::evidence::{default_spec, os_error_text, resolve_evidence, Ctx, DiskTree, Refused, EVIDENCE_SHOWN};
+use crate::evidence::{
+    default_spec, ocr_text_dir, os_error_text, resolve_evidence, Ctx, DiskTree, Refused, EVIDENCE_SHOWN,
+};
 use crate::pyjson::{dumps, write_snapshot, Style};
 use crate::{usage_error, Args};
 
 /// The synopsis after "usage: lazymkv-dev ".
-const USAGE: &str =
-    "retune [--evidence DIR] [--set NAME=VALUE] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured]";
-const FLAGS: [&str; 6] = ["--evidence", "--set", "--snapshot", "--compare", "--spec", "--allow-unmeasured"];
+const USAGE: &str = "retune [--evidence DIR] [--set NAME=VALUE] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]";
+const FLAGS: [&str; 8] =
+    ["--evidence", "--set", "--snapshot", "--compare", "--spec", "--allow-unmeasured", "--subtitles", "--text"];
+/// --subtitles runs the subtitle harness, which takes none of the audio harness's flags (RP15).
+const SUBTITLES_ALONE: &str =
+    "argument --subtitles: not allowed with --set, --snapshot, --compare or --allow-unmeasured";
+/// --text names the OCR text, which only the subtitle harness reads.
+const TEXT_NEEDS_SUBTITLES: &str = "argument --text: only with --subtitles";
+/// How to give the OCR text, at the end of the refusal of a folder that is not there.
+const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 
 pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut parsed = Args::new(args, &FLAGS);
     let allow_unmeasured = parsed.switch("--allow-unmeasured");
+    let subtitles = parsed.switch("--subtitles");
+    let text_flag = match parsed.flag("--text") {
+        Ok(value) => value,
+        Err(message) => return usage_error(err, "retune", USAGE, &message),
+    };
     let sets = match parsed.flags("--set") {
         Ok(values) => values,
         Err(message) => return usage_error(err, "retune", USAGE, &message),
@@ -56,16 +80,19 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
     if !words.is_empty() {
         return usage_error(err, "retune", USAGE, &format!("unrecognized arguments: {}", words.join(" ")));
     }
-    let (spec_path, spec_shown) = match spec_flag {
-        Some(given) => (ctx.abs(&given), given),
-        None => match default_spec(ctx) {
-            Some(path) => {
-                let shown = path.display().to_string();
-                (path, shown)
-            }
-            None => return usage_error(err, "retune", USAGE, "the following arguments are required: --spec"),
-        },
+    let (spec_path, spec_shown) = match spec_file(ctx, spec_flag) {
+        Some(found) => found,
+        None => return usage_error(err, "retune", USAGE, "the following arguments are required: --spec"),
     };
+    if subtitles {
+        if !sets.is_empty() || snapshot_flag.is_some() || compare_flag.is_some() || allow_unmeasured {
+            return usage_error(err, "retune", USAGE, SUBTITLES_ALONE);
+        }
+        return run_subtitles(ctx, evidence_flag.as_deref(), &spec_path, &spec_shown, text_flag.as_deref(), out, err);
+    }
+    if text_flag.is_some() {
+        return usage_error(err, "retune", USAGE, TEXT_NEEDS_SUBTITLES);
+    }
     let req = match read_text_file(&spec_path, &spec_shown, Encoding::Utf8Sig).and_then(|text| exp13_requirements(&text)) {
         Ok(req) => req,
         Err(message) => return fail(err, &message, 2),
@@ -153,6 +180,62 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 fn fail(err: &mut dyn Write, line: &str, code: i32) -> i32 {
     let _ = writeln!(err, "{line}");
     code
+}
+
+/// The spec file and how it is shown: --spec as given (taken against cwd), else the design spec under the repository
+/// root; None when neither names one.
+fn spec_file(ctx: &Ctx, flag: Option<String>) -> Option<(PathBuf, String)> {
+    match flag {
+        Some(given) => Some((ctx.abs(&given), given)),
+        None => default_spec(ctx).map(|path| {
+            let shown = path.display().to_string();
+            (path, shown)
+        }),
+    }
+}
+
+/// `retune --subtitles`: row 14 from the spec (exit 2 when it cannot be read), the evidence (resolve_evidence's code),
+/// the OCR text (--text DIR, else LAZYMKV_OCR_TEXT, else none; exit 2 for a folder that is not there), then the
+/// subtitle harness with spec 14's default settings; its report on stdout and its exit code. RP15, spec 15.
+fn run_subtitles(
+    ctx: &Ctx,
+    evidence_flag: Option<&str>,
+    spec_path: &Path,
+    spec_shown: &str,
+    text_flag: Option<&str>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let row14 = match read_text_file(spec_path, spec_shown, Encoding::Utf8Sig).and_then(|text| exp14_requirements(&text)) {
+        Ok(row14) => row14,
+        Err(message) => return fail(err, &message, 2),
+    };
+    let evidence = match resolve_evidence(ctx, evidence_flag) {
+        Ok(dir) => dir,
+        Err(Refused { code, line }) => return fail(err, &line, code),
+    };
+    let tree = match DiskTree::open(&evidence, EVIDENCE_SHOWN) {
+        Ok(tree) => tree,
+        Err(e) => return fail(err, &os_error_text(&e, &evidence.display().to_string()), 3),
+    };
+    let text = match ocr_text_dir(ctx, text_flag) {
+        None => None,
+        Some(dir) => {
+            let shown = dir.display().to_string();
+            if !dir.is_dir() {
+                return fail(err, &format!("the OCR text folder {shown} does not exist {TEXT_HINT}"), 2);
+            }
+            match DiskTree::open(&dir, &shown) {
+                Ok(tree) => Some(tree),
+                Err(e) => return fail(err, &os_error_text(&e, &shown), 2),
+            }
+        }
+    };
+    let h = subtitle_harness(&tree, text.as_ref().map(|tree| tree as &dyn Tree), &row14, &Settings::default());
+    for line in &h.lines {
+        let _ = writeln!(out, "{line}");
+    }
+    h.exit_code
 }
 
 /// Path.read_text(encoding) with strict errors; Err with the OSError or UnicodeDecodeError text.
