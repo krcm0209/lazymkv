@@ -246,6 +246,25 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
     })
 }
 
+/// A recording's parsed lookup answers exactly as `plan_doc` reads them (`recording_inputs`: an answer file whose
+/// lookup-status.txt line is not 200 is left unparsed, since the recorder keeps the error body of a 404 or a failed
+/// lookup), for decide's decision section (RP14), so the plan and the decision never read the answers differently.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RecordedAnswers {
+    /// thediscdb-hash.json's record (`parse_dischash`).
+    pub by_fingerprint: Option<DiscDbRecord>,
+    /// thediscdb-discid.json's records, in order (`parse_discid`).
+    pub by_disc_id: Vec<DiscDbRecord>,
+    /// tmdb.json's record (`parse_recorded`).
+    pub recorded: Option<TmdbRecord>,
+}
+
+/// The three answers of `recording_inputs(rec)?`, its refusal unchanged (spec 8.1, RP14).
+pub(crate) fn recorded_answers(rec: &Recording) -> Result<RecordedAnswers, Refused> {
+    let found = recording_inputs(rec)?;
+    Ok(RecordedAnswers { by_fingerprint: found.by_fingerprint, by_disc_id: found.by_disc_id, recorded: found.recorded })
+}
+
 /// A recording's inputs (spec 15 "Recordings"), as `plan_doc`'s doc says.
 fn recording_inputs(rec: &Recording) -> Result<Found, Refused> {
     let tree: &dyn Tree = &rec.tree;
