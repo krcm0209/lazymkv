@@ -814,17 +814,27 @@ mod roles {
         let mut group: Vec<u32> = dialogue_index.map(|index| groups[index].clone()).unwrap_or_default();
         group.sort_unstable();
 
-        // "Regular and SDH": up to two tracks of the group. More than two raise subtitle_ambiguous; the tracks a
-        // TheDiscDB description calls SDH are kept first ("A TheDiscDB description saying SDH overrides the count"),
-        // then those with the most events (ties by scan order), and the others are dropped.
+        // "Regular and SDH": up to two tracks of the group, the regular and the SDH track (R5, D20). More than two raise
+        // subtitle_ambiguous and keep one of each: as SDH a track a TheDiscDB description calls SDH ("A TheDiscDB
+        // description saying SDH overrides the count"), the one with the most events among them, else the track with the
+        // most events; as regular, of the rest, the track with the fewest events ("fewer events means regular"), an
+        // undescribed track before one described as SDH, so two described-SDH tracks are never kept while an undescribed
+        // one exists (ties by scan order). The others are dropped.
         let says_sdh =
             |stream: u32| described.get(&stream).is_some_and(|kinds| kinds.contains(&DescriptionKind::Sdh));
         let mut chosen = group.clone();
         if chosen.len() > 2 {
             reviews.push(ReviewReason::SubtitleAmbiguous);
-            let mut by_events = chosen.clone();
-            by_events.sort_by(|a, b| says_sdh(*b).cmp(&says_sdh(*a)).then(count(*b).cmp(&count(*a))).then(a.cmp(b)));
-            let keep: BTreeSet<u32> = by_events.iter().take(2).copied().collect();
+            let described_sdh: Vec<u32> = chosen.iter().copied().filter(|&stream| says_sdh(stream)).collect();
+            let candidates = if described_sdh.is_empty() { &chosen } else { &described_sdh };
+            let most = |stream: &u32| (count(*stream), std::cmp::Reverse(*stream));
+            let sdh_pick = candidates.iter().copied().max_by_key(most);
+            let regular_pick = chosen
+                .iter()
+                .copied()
+                .filter(|&stream| Some(stream) != sdh_pick)
+                .min_by_key(|&stream| (says_sdh(stream), count(stream), stream));
+            let keep: BTreeSet<u32> = sdh_pick.into_iter().chain(regular_pick).collect();
             for &stream in &chosen {
                 if !keep.contains(&stream) {
                     dropped.insert(stream, SubtitleDrop::ExtraDialogueTrack);

@@ -1725,15 +1725,16 @@ mod roles {
             decision.pairs,
             vec![(1, 2, 1.0, Band::Same), (1, 3, 1.0, Band::Same), (2, 3, 1000.0 / 1100.0, Band::Same)]
         );
-        // The two with the most events are kept: 2 (1,200) is SDH, 3 (1,100) regular; 1 (1,000) is dropped.
+        // One SDH and one regular track are kept (R5, D20): the most events, 2 (1,200), is SDH; of the rest the fewest,
+        // 1 (1,000, the plain dialogue), is regular; 3 (1,100, the dialogue plus cues) is dropped.
         assert_eq!(
             decision.kept,
             vec![
-                track(3, SubtitleRole::Regular, Some(1100), "alignment"),
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
                 track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
             ]
         );
-        assert_eq!(decision.dropped, vec![(1, SubtitleDrop::ExtraDialogueTrack)]);
+        assert_eq!(decision.dropped, vec![(3, SubtitleDrop::ExtraDialogueTrack)]);
         assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
         assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
     }
@@ -1742,7 +1743,8 @@ mod roles {
     fn a_track_described_sdh_is_one_of_the_two_kept_from_a_group_of_three() {
         // The three aligned tracks of the test above (1,000, 1,200 and 1,100 events). TheDiscDB describes stream 1, the
         // one with the fewest events, as "English SDH" and the others as "English": a description saying SDH overrides
-        // the count (8.7 "Regular and SDH"), so stream 1 is kept as SDH and the extra track is stream 3.
+        // the count (8.7 "Regular and SDH"), so stream 1 is kept as SDH, the fewest events of the rest, stream 3, as
+        // regular, and the extra track is stream 2.
         let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
         let record: DiscDbTitle = serde_json::from_value(json!({
             "index": 0,
@@ -1774,8 +1776,52 @@ mod roles {
         assert_eq!(
             decision.kept,
             vec![
-                track(2, SubtitleRole::Regular, Some(1200), "description"),
+                track(3, SubtitleRole::Regular, Some(1100), "description"),
                 track(1, SubtitleRole::Sdh, Some(1000), "description"),
+            ]
+        );
+        assert_eq!(decision.dropped, vec![(2, SubtitleDrop::ExtraDialogueTrack)]);
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
+    }
+
+    #[test]
+    fn of_a_group_of_three_two_described_sdh_tracks_are_not_both_kept_beside_an_undescribed_one() {
+        // F9's second case: TheDiscDB describes streams 2 (1,200 events) and 3 (1,100) as SDH and stream 1 (1,000) not at
+        // all. One SDH track is kept, the described one with the most events (2); the regular track is the undescribed
+        // stream 1, so stream 3, described as SDH, is never filed as the regular track: it is dropped.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let record: DiscDbTitle = serde_json::from_value(json!({
+            "index": 0,
+            "source_file": "00800.mpls",
+            "segment_map": "1",
+            "duration": "1:00:00",
+            "tracks": [
+                {"index": 0, "type": "Video", "name": "Mpeg4 AVC High@L4.1"},
+                {"index": 1, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English"},
+                {"index": 2, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "English SDH"},
+                {"index": 3, "type": "Subtitles", "name": "HDMV PGS Subtitles", "language_code": "eng",
+                 "language": "English", "description": "SDH"}
+            ]
+        }))
+        .unwrap();
+        let evidence = SubtitleFacts {
+            discdb: Some(&record),
+            ..facts(vec![
+                (1, regular_events()),
+                (2, sdh_events()),
+                (3, merged(regular_events(), times(100, 14.0, 6.0))),
+            ])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.groups, vec![vec![1, 2, 3]]);
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "description"),
+                track(2, SubtitleRole::Sdh, Some(1200), "description"),
             ]
         );
         assert_eq!(decision.dropped, vec![(3, SubtitleDrop::ExtraDialogueTrack)]);
