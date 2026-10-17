@@ -9,7 +9,7 @@ use regex::Regex;
 use crate::audio::labels::is_slug;
 use crate::codec::Family;
 use crate::disc::{disc, Disc, StreamKind, Title};
-use crate::recording::files::{rip_label, MkvmergeIdent, SubsIndexEntry, Tmdb};
+use crate::recording::files::{rip_label, MkvmergeIdent, Tmdb};
 use crate::recording::{read_json, read_text, Encoding, Errors, PathKey, Tree};
 use crate::reconcile::RIP_LOG_NAMES;
 use crate::review::ReviewReason;
@@ -19,8 +19,8 @@ use crate::subtitle::text::{subs_run, Decision, Role};
 use crate::tracks::subtitle::{decide_subtitles, english_or_none, SubtitleDecision, SubtitleFacts};
 use crate::tracks::SubtitleRole;
 use crate::verify::{
-    by_scan_stream, removed_scan_streams, selected_streams, stream_of_track, subs_streams, subtitle_events,
-    verify_rip, VerifyReport,
+    by_scan_stream, removed_scan_streams, selected_streams, stream_of_track, subs_index, subs_streams,
+    subtitle_events, verify_rip, VerifyReport,
 };
 
 use super::{load, SubtitleKind, SubtitleLabel, COUNTING_HOW, FILE_NAME};
@@ -536,10 +536,7 @@ fn text_decisions(
         return Err(run.stderr.join("; "));
     }
     let analysis = run.analysis.ok_or_else(|| "the text rule gave no analysis".to_string())?;
-    let index_path = folder.join("subs/index.json");
-    let index_text = read_text(evidence, &index_path, Encoding::Utf8Sig, Errors::Replace)?;
-    let index: Vec<SubsIndexEntry> =
-        serde_json::from_str(&index_text).map_err(|error| format!("{}: {error}", evidence.display(&index_path)))?;
+    let index = subs_index(evidence, &folder.join("subs"))?;
     Ok(by_scan_stream(&analysis.decide, &subs_streams(&index, report)))
 }
 
