@@ -40,7 +40,8 @@ pub struct SubtitleFacts<'a> {
     /// (`step10_runs`: two or more English or no-language subtitle streams in the file), so a title with one English
     /// track keeps it as "English" without the text (8.7 "Text").
     pub text: Option<&'a BTreeMap<u32, Decision>>,
-    /// The remembered overrides for this fingerprint (spec 5).
+    /// The remembered overrides of this title (spec 5): the `RememberedTitle.subtitles` of the remembered title
+    /// `remembered::matched_titles` matched to this scan title.
     pub remembered: Option<&'a [SubtitleOverrideEntry]>,
     /// The owner's Override tracks for this title (spec 11), by scan stream; they win over remembered ones. Task 13 passes
     /// `overrides.subtitles_of(title.number)` (that title's entries of `Overrides.subtitles`, by stream).

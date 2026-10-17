@@ -17,7 +17,7 @@ use lazymkv_core::lang::wanted_languages;
 use lazymkv_core::lookup::name::NameSource;
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::lookup::{IdentityStep, Kind};
-use lazymkv_core::plan::movie::TitleRule;
+use lazymkv_core::plan::movie::{is_theatrical, TitleRule};
 use lazymkv_core::plan::tv::{AssignedEpisode, Episode, SeasonSession};
 use lazymkv_core::plan::{KindSource, Mode, Plan, PlannedRole, PlannedTitle};
 use lazymkv_core::recording::text_mode;
@@ -138,8 +138,10 @@ fn planned(key: &str, title: u32, role: PlannedRole, seconds: u32, size: u64, so
     }
 }
 
+/// A planned feature as the planner flags a theatrical or main cut: theatrical without an edition, or when the edition
+/// names the theatrical cut (`plan::movie::is_theatrical`).
 fn feature(edition: Option<&str>) -> PlannedRole {
-    PlannedRole::Feature { edition: edition.map(str::to_string) }
+    PlannedRole::Feature { edition: edition.map(str::to_string), theatrical: edition.is_none() || is_theatrical(edition) }
 }
 
 fn episode(season: u32, episodes: &[u32], name: &str) -> PlannedRole {

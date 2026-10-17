@@ -1,7 +1,8 @@
 //! Spec 5's remembered decisions (`<fingerprint>.json`: the TMDb identity and kind; for each title its source file,
-//! segment map, duration and role; audio and subtitle overrides keyed by the stream's signature) and spec 11's review
-//! actions (Set identity, Assign titles, Override tracks, Resolve collision, Remember), RP16: the types, the title match
-//! (source file, segment map and duration within 2 s, never the title key) and the override lookups by signature. A
+//! segment map, duration, role, and its audio and subtitle overrides keyed by the stream's signature) and spec 11's
+//! review actions (Set identity, Assign titles, Override tracks, Resolve collision, Remember), RP16: the types, the title
+//! match (source file, segment map and duration within 2 s, never the title key) and the override lookups by signature
+//! within the matched title. A
 //! remembered or review decision sets the confidence it covers to 1.00 (`lookup::REMEMBERED_CONFIDENCE`, spec 5 and
 //! 8.8). Persistence is phase 2. Used by the planner (Task 7), the audio and subtitle rules (Tasks 8 and 10), the
 //! decision (Task 13) and the job reducer (Task 14).
@@ -12,6 +13,7 @@ use std::str::FromStr;
 use crate::codec::Family;
 use crate::disc::{same_source, segment_maps_agree, title_source, Disc, Stream, StreamKind, Title, DURATION_MATCH_S};
 use crate::lookup::tmdb::TmdbIdentity;
+use crate::settings::path_inside;
 use crate::tracks::SubtitleRole;
 
 /// A title's role in a remembered or review decision (spec 5; 11 "Assign titles", with an editable edition name). Def: T6. Use: T7, T13.
@@ -28,8 +30,10 @@ pub enum TitleRole {
     Ignored,
 }
 
-/// One title of a remembered decision (spec 5: "for each title its source file, segment map, duration, role"); `dvd_title`
-/// is attribute 24, the DVD's identity of a title (Review Focus 1). Def: T6. Use: T6, T13.
+/// One title of a remembered decision (spec 5: "for each title its source file, segment map, duration, role, and its
+/// audio and subtitle overrides keyed by the stream's signature"); `dvd_title` is attribute 24, the DVD's identity of a
+/// title (Review Focus 1). The overrides are the title's own: a signature names a stream within this title, so two
+/// titles of one disc keep their own decisions for streams of one signature. Def: T6. Use: T6, T13.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RememberedTitle {
     /// Attribute 16 (a Blu-ray's playlist, "00800.mpls"); None on a DVD.
@@ -41,6 +45,11 @@ pub struct RememberedTitle {
     /// Attribute 9 in seconds.
     pub seconds: u32,
     pub role: TitleRole,
+    /// The title's audio overrides by signature, in the order Remember wrote them (`apply_audio` reads them for the scan
+    /// title `matched_titles` matched to this one).
+    pub audio: Vec<AudioOverrideEntry>,
+    /// The title's subtitle overrides by signature (`apply_subtitles`).
+    pub subtitles: Vec<SubtitleOverrideEntry>,
 }
 
 /// A stream's signature (spec 5): kind, language, codec family, channels, position among identical streams (0-based). Def: T6. Use: T8, T10, T13.
@@ -98,19 +107,18 @@ pub struct SubtitleOverrideEntry {
     pub action: SubtitleOverride,
 }
 
-/// The remembered-decisions file (spec 5): the TMDb identity (its `kind` is the kind; no second field), the titles, the
-/// overrides. Round-trips through serde_json (`a_remembered_file_round_trips_through_json`). Def: T6. Use: T7, T13, T15.
+/// The remembered-decisions file (spec 5): the TMDb identity (its `kind` is the kind; no second field) and the titles,
+/// each with its own track overrides. Round-trips through serde_json (`a_remembered_file_round_trips_through_json`).
+/// Def: T6. Use: T7, T13, T15.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Remembered {
     /// The disc's fingerprint (spec 5), the file's name.
     pub fingerprint: String,
     pub tmdb: TmdbIdentity,
     pub titles: Vec<RememberedTitle>,
-    pub audio: Vec<AudioOverrideEntry>,
-    pub subtitles: Vec<SubtitleOverrideEntry>,
 }
 
-/// Spec 11 "Resolve collision". Def: T6. Use: T13.
+/// Spec 11 "Resolve collision": the action. `CollisionAnswer` ties it to the path it answers. Def: T6. Use: T13.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Collision {
@@ -146,6 +154,20 @@ impl FromStr for Collision {
             .find(|collision| collision.as_str() == text)
             .ok_or_else(|| format!("'{text}' is not a collision action (keep_both, replace or discard)"))
     }
+}
+
+/// One answer of spec 11's Resolve collision: the final path the owner was shown colliding with a library file (the
+/// decision's plain final path, `NamedPath.path`, without the keep-both label) and the action confirmed for it. Keep
+/// both and Replace resolve the collision of that path only: a decision that builds another path (after Set identity, a
+/// new edition or season, or a library change) raises `path_collision` again (spec 7: a file the job did not create is
+/// never overwritten without its own confirmation). Discard discards the job whatever the path. Spec 7, 11. Def: PR #3
+/// review (F5). Use: T13, T14.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CollisionAnswer {
+    /// The colliding final path as shown, compared whole, case-insensitively and separators aside (spec 7's Windows
+    /// shares).
+    pub path: String,
+    pub action: Collision,
 }
 
 /// The signature of `streams[index]` (position counts earlier streams with the same kind, language, codec and channels).
@@ -185,15 +207,17 @@ fn by_signature<'a, A>(entries: &[(&'a StreamSignature, &'a A)], streams: &[Stre
     out
 }
 
-/// Stream number to override for every stream whose signature has an entry. Only the audio streams of `streams` are
-/// looked up. Spec 5, 11. Def: T6. Use: T8.
+/// Stream number to override for every stream whose signature has an entry. `overrides` is one title's list: the
+/// `RememberedTitle.audio` of the remembered title `matched_titles` matched to the scan title whose streams these are.
+/// Only the audio streams of `streams` are looked up. Spec 5, 11. Def: T6. Use: T8.
 pub fn apply_audio<'a>(overrides: &'a [AudioOverrideEntry], streams: &[Stream]) -> BTreeMap<u32, &'a AudioOverride> {
     let entries: Vec<(&StreamSignature, &AudioOverride)> =
         overrides.iter().map(|entry| (&entry.signature, &entry.action)).collect();
     by_signature(&entries, streams, StreamKind::Audio)
 }
 
-/// The same for subtitles: only the subtitle streams of `streams` are looked up. Spec 5, 11. Def: T6. Use: T10.
+/// The same for subtitles, over the matched title's `RememberedTitle.subtitles`: only the subtitle streams of `streams`
+/// are looked up. Spec 5, 11. Def: T6. Use: T10.
 pub fn apply_subtitles<'a>(overrides: &'a [SubtitleOverrideEntry], streams: &[Stream]) -> BTreeMap<u32, &'a SubtitleOverride> {
     let entries: Vec<(&StreamSignature, &SubtitleOverride)> =
         overrides.iter().map(|entry| (&entry.signature, &entry.action)).collect();
@@ -211,20 +235,28 @@ pub fn match_title(remembered: &RememberedTitle, title: &Title) -> bool {
         && title.seconds.map_or(false, |seconds| seconds.abs_diff(remembered.seconds) <= DURATION_MATCH_S)
 }
 
-/// Every scan title matched to a remembered title, title number to role (a remembered title is used once). The scan's
-/// titles are taken in number order, each given the first remembered title not yet used that matches it. Spec 5, 6.1
-/// step 2 ("A new job applies any remembered decisions"). Def: T6. Use: T7.
-pub fn apply_titles<'a>(remembered: &'a Remembered, disc: &Disc) -> BTreeMap<u32, &'a TitleRole> {
+/// Every scan title matched to a remembered title, title number to that remembered title (a remembered title is used
+/// once). The scan's titles are taken in number order, each given the first remembered title not yet used that matches
+/// it. The matched title's `audio` and `subtitles` are the overrides `apply_audio` and `apply_subtitles` apply to that
+/// scan title. Spec 5, 6.1 step 2 ("A new job applies any remembered decisions"). Def: PR #3 review (F10). Use: T7,
+/// T13, phase 2.
+pub fn matched_titles<'a>(remembered: &'a Remembered, disc: &Disc) -> BTreeMap<u32, &'a RememberedTitle> {
     let mut used = vec![false; remembered.titles.len()];
     let mut out = BTreeMap::new();
     for (&number, title) in &disc.titles {
         let found = (0..remembered.titles.len()).find(|&at| !used[at] && match_title(&remembered.titles[at], title));
         if let Some(at) = found {
             used[at] = true;
-            out.insert(number, &remembered.titles[at].role);
+            out.insert(number, &remembered.titles[at]);
         }
     }
     out
+}
+
+/// Every scan title matched to a remembered title, title number to role (`matched_titles`' roles). Spec 5, 6.1 step 2.
+/// Def: T6. Use: T7.
+pub fn apply_titles<'a>(remembered: &'a Remembered, disc: &Disc) -> BTreeMap<u32, &'a TitleRole> {
+    matched_titles(remembered, disc).into_iter().map(|(number, title)| (number, &title.role)).collect()
 }
 
 /// One title of the owner's Assign titles: the scan title number and its role, flattened into one JSON object
@@ -276,8 +308,9 @@ pub struct Overrides {
     /// Override tracks: one entry per scan title and stream, sorted by title, then stream.
     pub audio: Vec<AudioTrackOverride>,
     pub subtitles: Vec<SubtitleTrackOverride>,
-    /// Resolve collision.
-    pub collision: Option<Collision>,
+    /// Resolve collision: one answer per colliding final path the owner was shown, sorted by path (a list of entries,
+    /// as the other keyed collections here).
+    pub collision: Vec<CollisionAnswer>,
 }
 
 impl Overrides {
@@ -296,6 +329,20 @@ impl Overrides {
             .map(|entry| (entry.stream, entry.action.clone()))
             .collect();
         (!streams.is_empty()).then_some(streams)
+    }
+
+    /// Whether the owner's Resolve collision discarded the job (any answer is Discard). Spec 11. Def: PR #3 review (F5).
+    /// Use: T13.
+    pub fn discards(&self) -> bool {
+        self.collision.iter().any(|answer| answer.action == Collision::Discard)
+    }
+
+    /// The action the owner confirmed for the colliding final path `path` (compared whole, case-insensitively,
+    /// separators and a trailing separator aside, `settings::path_inside` both ways); None when no answer names it.
+    /// Spec 7, 11. Def: PR #3 review (F5). Use: T13.
+    pub fn collision_for(&self, path: &str) -> Option<Collision> {
+        let same = |a: &str, b: &str| path_inside(a, b) && path_inside(b, a);
+        self.collision.iter().find(|answer| same(&answer.path, path)).map(|answer| answer.action)
     }
 
     /// The same for subtitles (`SubtitleFacts.reviewed`). Spec 11. Def: T6. Use: T13.
@@ -355,6 +402,8 @@ mod tests {
             segment_map: segment_map.to_string(),
             seconds,
             role,
+            audio: Vec::new(),
+            subtitles: Vec::new(),
         }
     }
 
@@ -363,25 +412,34 @@ mod tests {
     }
 
     /// What Remember (spec 11) stores for Firefly's first DVD (TMDb show 1437): its three episode titles by attribute 24,
-    /// its two short titles ignored, and track overrides by signature.
+    /// each with its track overrides by signature (the pilot's second stereo track marked commentary, the next
+    /// episode's kept), and its two short titles ignored.
     fn firefly_remembered() -> Remembered {
         let vobsub =
             StreamSignature { kind: StreamKind::Subtitles, language: Some("eng".to_string()), codec: Family::VobSub, channels: None, position: 0 };
+        let regular = SubtitleOverrideEntry { signature: vobsub, action: SubtitleOverride::Keep { role: SubtitleRole::Regular } };
+        let mut pilot = remembered_title(None, Some("01"), "1-2,3,4-6,7-10,11-15,16-20,21-24,25", 5186, episodes(1, &[1]));
+        pilot.audio = vec![
+            AudioOverrideEntry { signature: eng_ac3_2(0), action: AudioOverride::Keep { order: 0, default: true } },
+            AudioOverrideEntry { signature: eng_ac3_2(1), action: AudioOverride::Commentary },
+        ];
+        pilot.subtitles = vec![regular.clone()];
+        let mut second = remembered_title(None, Some("02"), "1,2-6,7-11,12-14,15", 2554, episodes(1, &[2]));
+        second.audio = vec![
+            AudioOverrideEntry { signature: eng_ac3_2(0), action: AudioOverride::Keep { order: 0, default: true } },
+            AudioOverrideEntry { signature: eng_ac3_2(1), action: AudioOverride::Keep { order: 1, default: false } },
+        ];
+        second.subtitles = vec![regular];
         Remembered {
             fingerprint: FIREFLY_1_API.to_string(),
             tmdb: TmdbIdentity { kind: TmdbKind::Tv, id: 1437 },
             titles: vec![
-                remembered_title(None, Some("01"), "1-2,3,4-6,7-10,11-15,16-20,21-24,25", 5186, episodes(1, &[1])),
-                remembered_title(None, Some("02"), "1,2-6,7-11,12-14,15", 2554, episodes(1, &[2])),
+                pilot,
+                second,
                 remembered_title(None, Some("03"), "1-4,5-10,11-14,15", 2627, episodes(1, &[3])),
                 remembered_title(None, Some("05"), "1,2", 7, TitleRole::Ignored),
                 remembered_title(None, Some("06"), "1,2", 11, TitleRole::Ignored),
             ],
-            audio: vec![
-                AudioOverrideEntry { signature: eng_ac3_2(0), action: AudioOverride::Keep { order: 0, default: true } },
-                AudioOverrideEntry { signature: eng_ac3_2(1), action: AudioOverride::Commentary },
-            ],
-            subtitles: vec![SubtitleOverrideEntry { signature: vobsub, action: SubtitleOverride::Keep { role: SubtitleRole::Regular } }],
         }
     }
 
@@ -473,16 +531,14 @@ mod tests {
             fingerprint: FIREFLY_1_API.to_string(),
             tmdb: TmdbIdentity { kind: TmdbKind::Tv, id: 1437 },
             titles: vec![remembered_title(None, Some("05"), "1,2", 7, TitleRole::Ignored)],
-            audio: vec![],
-            subtitles: vec![],
         };
         assert_eq!(
             json_of(&remembered),
             format!(
                 concat!(
                     r#"{{"fingerprint":"5A961BC67EB34171F24852D3A7688020","tmdb":{},"titles":[{{"source_file":null,"#,
-                    r#""dvd_title":"05","segment_map":"1,2","seconds":7,"role":{{"role":"ignored"}}}}],"audio":[],"#,
-                    r#""subtitles":[]}}"#
+                    r#""dvd_title":"05","segment_map":"1,2","seconds":7,"role":{{"role":"ignored"}},"audio":[],"#,
+                    r#""subtitles":[]}}]}}"#
                 ),
                 json_of(&remembered.tmdb)
             )
@@ -493,7 +549,7 @@ mod tests {
     fn empty_overrides_are_written_with_every_key() {
         assert_eq!(
             json_of(&Overrides::default()),
-            r#"{"identity":null,"season":null,"titles":[],"audio":[],"subtitles":[],"collision":null}"#
+            r#"{"identity":null,"season":null,"titles":[],"audio":[],"subtitles":[],"collision":[]}"#
         );
     }
 
@@ -517,7 +573,7 @@ mod tests {
                 SubtitleTrackOverride { title: 0, stream: 5, action: forced.clone() },
                 SubtitleTrackOverride { title: 0, stream: 6, action: SubtitleOverride::Drop },
             ],
-            collision: Some(Collision::KeepBoth),
+            collision: vec![CollisionAnswer { path: r"\\nas\media\Movies\Film\Film.mkv".to_string(), action: Collision::KeepBoth }],
         };
         let text = json_of(&overrides);
         assert_eq!(
@@ -528,7 +584,7 @@ mod tests {
                     r#"{{"title":4,"role":"ignored"}}],"audio":[{{"title":0,"stream":1,"action":"keep","order":0,"#,
                     r#""default":true}},{{"title":0,"stream":3,"action":"commentary"}}],"subtitles":[{{"title":0,"#,
                     r#""stream":5,"action":"keep","role":{}}},{{"title":0,"stream":6,"action":"drop"}}],"#,
-                    r#""collision":"keep_both"}}"#
+                    r#""collision":[{{"path":"\\\\nas\\media\\Movies\\Film\\Film.mkv","action":"keep_both"}}]}}"#
                 ),
                 json_of(&identity),
                 json_of(&SubtitleRole::Forced)
@@ -543,6 +599,16 @@ mod tests {
         assert_eq!(overrides.audio_of(3), None);
         assert_eq!(overrides.subtitles_of(0), Some(BTreeMap::from([(5, forced), (6, SubtitleOverride::Drop)])));
         assert_eq!(overrides.subtitles_of(1), None);
+        // Resolve collision answers its own path only, whatever its case or separators; nothing here discards the job.
+        assert_eq!(overrides.collision_for(r"\\nas\media\Movies\Film\Film.mkv"), Some(Collision::KeepBoth));
+        assert_eq!(overrides.collision_for("//NAS/media/movies/film/film.mkv"), Some(Collision::KeepBoth));
+        assert_eq!(overrides.collision_for(r"\\nas\media\Movies\Other\Other.mkv"), None);
+        assert!(!overrides.discards());
+        let discarded = Overrides {
+            collision: vec![CollisionAnswer { path: "/srv/Film.mkv".to_string(), action: Collision::Discard }],
+            ..Overrides::default()
+        };
+        assert!(discarded.discards());
     }
 
     // VIDEO and ENG_PGS are Task 5's `plan::fixtures` streams (AVC video; English PGS subtitles).
@@ -641,13 +707,7 @@ mod tests {
     }
 
     fn remembered_with(titles: Vec<RememberedTitle>) -> Remembered {
-        Remembered {
-            fingerprint: FIREFLY_1_API.to_string(),
-            tmdb: TmdbIdentity { kind: TmdbKind::Tv, id: 1437 },
-            titles,
-            audio: vec![],
-            subtitles: vec![],
-        }
+        Remembered { fingerprint: FIREFLY_1_API.to_string(), tmdb: TmdbIdentity { kind: TmdbKind::Tv, id: 1437 }, titles }
     }
 
     #[test]

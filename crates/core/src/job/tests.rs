@@ -2,7 +2,7 @@
 //! failure outcomes, the resume rules, one test per row of the reducer table (Shared interfaces, `core::job`), the job
 //! ID and the job lookup. Every input is built here; nothing is read from a file.
 
-use crate::remembered::{AudioOverride, AudioTrackOverride, Collision, TitleOverrideEntry, TitleRole};
+use crate::remembered::{AudioOverride, AudioTrackOverride, Collision, CollisionAnswer, TitleOverrideEntry, TitleRole};
 
 use super::*;
 
@@ -1503,7 +1503,10 @@ fn a_re_finalised_job_whose_recorded_file_no_longer_matches_is_held_until_the_ow
             Event::ReFinalise,
             Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: true },
             Event::ReviewApproved {
-                overrides: Overrides { collision: Some(Collision::KeepBoth), ..Overrides::default() },
+                overrides: Overrides {
+                    collision: vec![CollisionAnswer { path: "/srv/media/Movies/Film.mkv".to_string(), action: Collision::KeepBoth }],
+                    ..Overrides::default()
+                },
             },
             Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors], has_path: true },
         ],

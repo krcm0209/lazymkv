@@ -42,7 +42,8 @@ pub struct AudioFacts<'a> {
     /// (audio::reference::programme_reference in phase 0's harness) mapped to a scan stream; None when there are no
     /// verdicts.
     pub verdict_reference: Option<u32>,
-    /// The remembered overrides for this fingerprint (spec 5).
+    /// The remembered overrides of this title (spec 5): the `RememberedTitle.audio` of the remembered title
+    /// `remembered::matched_titles` matched to this scan title.
     pub remembered: Option<&'a [AudioOverrideEntry]>,
     /// The owner's Override tracks for this title (spec 11), by scan stream; they win over remembered ones.
     pub reviewed: Option<&'a BTreeMap<u32, AudioOverride>>,

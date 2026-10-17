@@ -95,13 +95,15 @@ fn file_stem(source_file: &str) -> &str {
 }
 
 /// A planned title's role (the planner's view; remembered::TitleRole is the stored one): a feature or cut with the edition
-/// name 8.4 files it under (None for a lone theatrical cut), or an episode assignment (8.5). Spec 6.1 step 5. Def: T7.
-/// Use: T11, T13, T15.
+/// name 8.4 files it under (None for a lone theatrical cut) and the planner's theatrical flag, or an episode assignment
+/// (8.5). Spec 6.1 step 5. Def: T7. Use: T11, T13, T15.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "role")]
 pub enum PlannedRole {
-    /// A feature or cut (8.3, 8.4); `edition` is the name `movie::edition_names` gives it.
-    Feature { edition: Option<String> },
+    /// A feature or cut (8.3, 8.4); `edition` is the name `movie::edition_names` gives it; `theatrical` is the planner's
+    /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (8.3 rule 2's Other suffix,
+    /// edition None) and for one of two or more structural rivals, which keep no edition until the owner names them.
+    Feature { edition: Option<String>, theatrical: bool },
     /// An episode title (8.5).
     Episode(Episode),
 }
@@ -564,7 +566,7 @@ fn assigned_entries(
         .zip(editions)
         .map(|(feature, edition)| Entry {
             title: feature.title,
-            role: PlannedRole::Feature { edition },
+            role: PlannedRole::Feature { edition, theatrical: feature.theatrical },
             suggested: false,
             remembered: true,
         })
@@ -601,21 +603,20 @@ struct Entry {
 }
 
 /// The movie titles in feature order (database index order for rule 1, each cut's lowest title number for rule 2, group
-/// order for rule 3) with 8.4's edition names over the library facts. Two or more structural rivals carry no edition
-/// name: rule 3 names no cut, and such a plan is held for review, where the owner names the cuts (8.4).
+/// order for rule 3) with 8.4's edition names over the library facts and the planner's theatrical flag. Two or more
+/// structural rivals carry no edition name and are not theatrical: rule 3 names no cut, and such a plan is held for
+/// review, where the owner names the cuts (8.4).
 fn movie_entries(found: &MoviePlan, library: &LibraryFacts) -> Vec<Entry> {
-    let editions = if found.rule == TitleRule::Structure && found.features.len() >= 2 {
-        vec![None; found.features.len()]
-    } else {
-        movie::edition_names(&found.features, library)
-    };
+    let rivals = found.rule == TitleRule::Structure && found.features.len() >= 2;
+    let editions =
+        if rivals { vec![None; found.features.len()] } else { movie::edition_names(&found.features, library) };
     found
         .features
         .iter()
         .zip(editions)
         .map(|(feature, edition)| Entry {
             title: feature.title,
-            role: PlannedRole::Feature { edition },
+            role: PlannedRole::Feature { edition, theatrical: feature.theatrical && !rivals },
             suggested: false,
             remembered: false,
         })
@@ -1096,8 +1097,15 @@ mod tests {
         }
     }
 
+    /// A planned feature: theatrical when it has no edition or its edition names the theatrical cut (Task 5's
+    /// `is_theatrical`), as the planner flags a theatrical or main cut.
     fn feature(edition: Option<&str>) -> PlannedRole {
-        PlannedRole::Feature { edition: edition.map(str::to_string) }
+        PlannedRole::Feature { edition: edition.map(str::to_string), theatrical: edition.is_none() || is_theatrical(edition) }
+    }
+
+    /// A planned feature the planner did not flag theatrical (an unnamed cut, a structural rival, a named cut).
+    fn cut(edition: Option<&str>) -> PlannedRole {
+        PlannedRole::Feature { edition: edition.map(str::to_string), theatrical: false }
     }
 
     fn episode(season: Option<u32>, episodes: &[u32], name: Option<&str>) -> PlannedRole {
@@ -1667,7 +1675,7 @@ mod tests {
             plan.titles,
             vec![
                 planned("t00-00001", 1, feature(Some("Theatrical Cut")), 6000, 30_000_000_000, Some("00001.mpls")),
-                planned("t01-00002", 2, feature(None), 6000, 31_000_000_000, Some("00002.mpls")),
+                planned("t01-00002", 2, cut(None), 6000, 31_000_000_000, Some("00002.mpls")),
             ]
         );
         assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
@@ -1687,8 +1695,8 @@ mod tests {
         assert_eq!(
             plan.titles,
             vec![
-                planned("t00-00001", 1, feature(None), 3000, 4_000_000_000, Some("00001.mpls")),
-                planned("t01-00002", 2, feature(None), 2820, 3_000_000_000, Some("00002.mpls")),
+                planned("t00-00001", 1, cut(None), 3000, 4_000_000_000, Some("00001.mpls")),
+                planned("t01-00002", 2, cut(None), 2820, 3_000_000_000, Some("00002.mpls")),
             ]
         );
         assert_eq!(plan.evidence.rivals, vec!["1".to_string(), "2".to_string()]);
@@ -2067,6 +2075,48 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_label_cut_with_an_other_suffix_is_planned_unnamed_and_decided_without_an_edition() {
+        // F11: a Java disc whose only main-feature label is FPL_MainFeature_IMAX (8.3 rule 2's Other suffix) plans one
+        // feature without an edition that the planner does not flag theatrical, at 0.60 with unnamed_cut. The film's
+        // library folder already holds an edition-named file, which names a theatrical cut "Theatrical Cut" (8.4): the
+        // unnamed cut is decided without an edition, and Remember refuses it until the owner names it.
+        let disc = made_disc(
+            true,
+            "FILM",
+            &[made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "FPL_MainFeature_IMAX", ENG)],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let library = LibraryFacts { folder_has_edition_named_file: true, ..LibraryFacts::default() };
+        let settings = Settings { movies_root: Some("/srv/media/Movies".to_string()), ..Settings::default() };
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!(plan.titles.iter().map(|planned| planned.role.clone()).collect::<Vec<_>>(), vec![cut(None)]);
+        assert!(plan.reviews.contains(&ReviewReason::UnnamedCut), "{:?}", plan.reviews);
+        let decision = crate::decision::decide(&crate::decision::DecisionInputs {
+            plan: &plan,
+            disc: &disc,
+            planned: &plan.titles[0],
+            title: disc.title(1).unwrap(),
+            audio: crate::tracks::audio::AudioFacts::default(),
+            subtitles: crate::tracks::subtitle::SubtitleFacts::default(),
+            record: None,
+            library: &library,
+            rip_reviews: Vec::new(),
+            read_errors: Vec::new(),
+            overrides: None,
+            settings: &settings,
+        })
+        .unwrap();
+        assert_eq!(decision.edition, None);
+        let overrides = Overrides { identity: Some(movie_id(77)), ..Overrides::default() };
+        assert_eq!(
+            crate::decision::remember("0123456789abcdef0123456789abcdef", &disc, &plan, &[decision], &overrides),
+            Err("planned title 1 (t00-00001) is a cut without an edition name to remember: name it first (spec 8.4)"
+                .to_string())
+        );
+    }
+
+    #[test]
     fn a_mapped_disc_without_a_fingerprint_starts_an_empty_session() {
         let log = pinned_log(CHERNOBYL_1, CHERNOBYL_1_API);
         let (settings, library) = (Settings::default(), LibraryFacts::default());
@@ -2276,7 +2326,10 @@ mod tests {
             serde_json::to_value(&plan.titles[0].role).unwrap(),
             json!({"role": "episode", "season": 1, "episodes": [1], "name": "1.23.45"})
         );
-        assert_eq!(serde_json::to_value(feature(None)).unwrap(), json!({"role": "feature", "edition": null}));
+        assert_eq!(
+            serde_json::to_value(feature(None)).unwrap(),
+            json!({"role": "feature", "edition": null, "theatrical": true})
+        );
         assert_eq!(serde_json::from_value::<Plan>(value).unwrap(), plan);
     }
 
@@ -2290,12 +2343,14 @@ mod tests {
             segment_map: segments.to_string(),
             seconds,
             role,
+            audio: Vec::new(),
+            subtitles: Vec::new(),
         }
     }
 
     /// A remembered decision for the film TMDb 6537 with these titles and no track overrides.
     fn remembered_film(titles: Vec<RememberedTitle>) -> Remembered {
-        Remembered { fingerprint: "FP".to_string(), tmdb: movie_id(6537), titles, audio: Vec::new(), subtitles: Vec::new() }
+        Remembered { fingerprint: "FP".to_string(), tmdb: movie_id(6537), titles }
     }
 
     /// One feature without Java: 100 minutes, playlist 00001.mpls, segment map 1, this size ("" leaves it out).

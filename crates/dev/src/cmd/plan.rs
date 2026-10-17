@@ -744,7 +744,7 @@ mod tests {
         PlannedTitle {
             key: "t00-00001".to_string(),
             title: 0,
-            role: PlannedRole::Feature { edition: None },
+            role: PlannedRole::Feature { edition: None, theatrical: true },
             seconds: Some(6000),
             size: Some(30_000_000_000),
             source_file: Some("00001.mpls".to_string()),
@@ -1096,7 +1096,7 @@ mod tests {
             vec![PlannedTitle {
                 key: "t00-00001".to_string(),
                 title: 0,
-                role: PlannedRole::Feature { edition: None },
+                role: PlannedRole::Feature { edition: None, theatrical: true },
                 seconds: Some(6073),
                 size: Some(67_757_930_496),
                 source_file: Some("00001.mpls".to_string()),
@@ -1298,9 +1298,9 @@ mod tests {
                 segment_map: "1".to_string(),
                 seconds: 6000,
                 role: TitleRole::Feature,
+                audio: Vec::new(),
+                subtitles: Vec::new(),
             }],
-            audio: Vec::new(),
-            subtitles: Vec::new(),
         }
     }
 
