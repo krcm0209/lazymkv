@@ -2250,7 +2250,11 @@ pub enum Event {
     HoldForReview { reasons: Vec<ReviewReason> },
     FilePhaseSlot,
     ProbeDone, ProbeFailed { failure: Failure },
-    DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason> }, DecisionFailed { failure: Failure },
+    /// 6.4 step 11's decision, with 8.8's disposition and review reasons. `has_path` is true when the decision built a
+    /// final path (phase 2 sets it from `FileDecision.path.is_some()`); false is Task 13's Open point 38 case, where
+    /// `decide` gives NeedsReview whenever the path is None.
+    DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason>, has_path: bool },
+    DecisionFailed { failure: Failure },
     RemuxDone, RemuxFailed { failure: Failure },
     FileVerified, FileVerifyFailed { failure: Failure },
     FileDone, FileFailed { failure: Failure },
@@ -2368,7 +2372,8 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `Extracting` | `TitleVerifyFailed { second: false, .. }`, or `TitleVerifyFailed { second: true, last: false }` | `Extracting` | `[ExtractTitle]` (the same title again after a first failure, the next after a second: 6.3 step 8 "verified as in 6.2 step 7") |
 | `Extracting` | `TitleVerifyFailed { second: true, last: true }` | `Inspecting` | `[Probe]` |
 | `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided { approved: true }` | `[Decide]` (with the owner's overrides) |
-| `Decided { approved: true }` | `DecisionDone { .. }` (any disposition: the owner approved, 8.8) | unchanged | `[CheckSpace]` |
+| `Decided { approved: true }` | `DecisionDone { .. }` whose reasons include `path_collision`, or whose `has_path` is false (the decision built no final path; Open point 38); see spec 7 (a file the job did not create is never overwritten) and 6.4 step 12 (Open point 39) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
+| `Decided { approved: true }` | `DecisionDone { .. }` for every other decision (any disposition, including `NeedsReview` for a confidence below `auto_threshold`, and any other review reason: the owner approved them, spec 11, 8.8) | unchanged | `[CheckSpace]` |
 | `Decided { approved: false }` | `DecisionDone { AutoFile, .. }` (the decision made again after a restart, a Return or a Retry of an auto-filed job) | unchanged | `[CheckSpace]` |
 | `Decided { approved: false }` | `DecisionDone { NeedsReview, reasons }` (6.4 step 12: an auto-filed job whose decision, made again, now needs review is gated again) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
 | `NeedsReview { .. }` | `ReviewDiscarded` | `Discarded` | `[DeleteJobData]` |
@@ -43154,9 +43159,9 @@ Expected: the first line `G krcm0209 <17315774+krcm0209@users.noreply.github.com
 
 **Files:**
 - Create: `crates/core/src/job.rs` (design spec 5 (job ID), 6.1 step 2 (job lookup), 10.1, 10.2 and 12, RP12: `NETWORK_RETRY_MIN`, `LOOKUP_RETRY_MIN`, `FailureClass`, `OutputCause`, `Failure`, `Tool`, `Held`, `State`, `WaitReason`, `NotifyEvent`, `Event`, `Action`, `Rejected`, `failure_outcome`, `classify_title_failure`, `new_job`, `resume`, `reduce`, `job_id`, `JobLookup`, `job_lookup`, and the private helpers `Rule`, `RULES`, `notify`, `any_state`, `direct_line`, `wait_reason`, `entering`, `outcome`, `copy_line`, `review_line`, `back_to`, `tool_missing`, `waits`, `step_failure`, `failures`, `disc_presence`, `job_number`, `waiting_return`; about 1,000 lines, so its tests sit in a sibling file as the conventions require for `job.rs`)
-- Create: `crates/core/src/job/tests.rs` (its 171 unit tests, in nine groups, one per behaviour unit below)
+- Create: `crates/core/src/job/tests.rs` (its 176 unit tests, in nine groups, one per behaviour unit below)
 - Modify: `crates/core/src/lib.rs` (one line, `pub mod job;`, before `pub mod lang;`)
-- Test: `crates/core/src/job/tests.rs` (171 new)
+- Test: `crates/core/src/job/tests.rs` (176 new)
 
 **Interfaces:**
 
@@ -43359,7 +43364,11 @@ pub enum Event {
     HoldForReview { reasons: Vec<ReviewReason> },
     FilePhaseSlot,
     ProbeDone, ProbeFailed { failure: Failure },
-    DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason> }, DecisionFailed { failure: Failure },
+    /// 6.4 step 11's decision, with 8.8's disposition and review reasons. `has_path` is true when the decision built a
+    /// final path (phase 2 sets it from `FileDecision.path.is_some()`); false is Task 13's Open point 38 case, where
+    /// `decide` gives NeedsReview whenever the path is None.
+    DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason>, has_path: bool },
+    DecisionFailed { failure: Failure },
     RemuxDone, RemuxFailed { failure: Failure },
     FileVerified, FileVerifyFailed { failure: Failure },
     FileDone, FileFailed { failure: Failure },
@@ -43477,7 +43486,8 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `Extracting` | `TitleVerifyFailed { second: false, .. }`, or `TitleVerifyFailed { second: true, last: false }` | `Extracting` | `[ExtractTitle]` (the same title again after a first failure, the next after a second: 6.3 step 8 "verified as in 6.2 step 7") |
 | `Extracting` | `TitleVerifyFailed { second: true, last: true }` | `Inspecting` | `[Probe]` |
 | `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided { approved: true }` | `[Decide]` (with the owner's overrides) |
-| `Decided { approved: true }` | `DecisionDone { .. }` (any disposition: the owner approved, 8.8) | unchanged | `[CheckSpace]` |
+| `Decided { approved: true }` | `DecisionDone { .. }` whose reasons include `path_collision`, or whose `has_path` is false (the decision built no final path; Open point 38); see spec 7 (a file the job did not create is never overwritten) and 6.4 step 12 (Open point 39) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
+| `Decided { approved: true }` | `DecisionDone { .. }` for every other decision (any disposition, including `NeedsReview` for a confidence below `auto_threshold`, and any other review reason: the owner approved them, spec 11, 8.8) | unchanged | `[CheckSpace]` |
 | `Decided { approved: false }` | `DecisionDone { AutoFile, .. }` (the decision made again after a restart, a Return or a Retry of an auto-filed job) | unchanged | `[CheckSpace]` |
 | `Decided { approved: false }` | `DecisionDone { NeedsReview, reasons }` (6.4 step 12: an auto-filed job whose decision, made again, now needs review is gated again) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
 | `NeedsReview { .. }` | `ReviewDiscarded` | `Discarded` | `[DeleteJobData]` |
@@ -43511,7 +43521,7 @@ Beyond the shared entry, this task adds members the plan's conventions require o
 
 Where this task settles what the spec and the interfaces leave open (each choice is pinned by a test below):
 
-1. **The table as disjoint rules.** `reduce` tries seven private rule functions in `RULES` (`any_state`, `direct_line`, `copy_line`, `review_line`, `waits`, `failures`, `disc_presence`), each holding a group of the table's rows. No pair of a state and an event is held by two rules, so the order of `RULES` is no precedence: `no_state_and_event_pair_is_held_by_two_rules` runs every one of 42 sample states against every one of 72 sample events and counts the rules that answer. Every pair no rule holds is `Rejected { state, event }` (the engine logs it and changes nothing).
+1. **The table as disjoint rules.** `reduce` tries seven private rule functions in `RULES` (`any_state`, `direct_line`, `copy_line`, `review_line`, `waits`, `failures`, `disc_presence`), each holding a group of the table's rows. No pair of a state and an event is held by two rules, so the order of `RULES` is no precedence: `no_state_and_event_pair_is_held_by_two_rules` runs every one of 42 sample states against every one of 74 sample events and counts the rules that answer. Every pair no rule holds is `Rejected { state, event }` (the engine logs it and changes nothing).
 2. **An extracted title that fails verification.** Spec 6.3 step 8 says each extracted title is "verified as in 6.2 step 7", which re-rips a title once and goes on after a second failure (the engine records `verify_failed`). The table's two `Extracting` rows for `TitleVerifyFailed` follow it: in `Extracting`, `TitleVerifyFailed { second: false, .. }` extracts the same title again, `{ second: true, last: false }` extracts the next, and `{ second: true, last: true }` goes on to `Inspecting` with `[Probe]`, as the `Ripping` rows do (`an_extracted_title_failing_verification_is_extracted_again_once_then_the_next_follows`, `the_last_extracted_title_verified_goes_on_to_inspecting_and_probes`).
 3. **A second copy failure that is not a read failure.** The table switches to Direct mode only on `CopyFailed { failure: MediaReadError, second: true }` (10.1 "second read failure"); a second failure of any other class is the table's Outcome, as a first failure is (`a_second_copy_failure_that_is_not_a_read_failure_is_an_ordinary_outcome`).
 4. **Timers after a restart.** A restart loses the engine's timers, so without a new one `AwaitingNetwork` ("retried every 10 minutes") and `AwaitingLookup` ("retried hourly") would never retry again. `resume` therefore gives `AwaitingNetwork` `[StartTimer { minutes: NETWORK_RETRY_MIN }]` and `AwaitingLookup` `[StartTimer { minutes: LOOKUP_RETRY_MIN }]`; every other waiting state still gives nothing (`resuming_a_wait_for_the_network_or_a_lookup_starts_its_retry_timer_again`). `reduce`'s Return never resumes a waiting state, so the table is unchanged.
@@ -43522,14 +43532,14 @@ Where this task settles what the spec and the interfaces leave open (each choice
 9. **No setting is read.** Nothing in 10.1, 10.2, 12, 5 or 6.1 step 2 is a spec 14 setting (the 10-minute and hourly waits are fixed values, Global Constraints), so the reducer takes no `&Settings`.
 10. **The licence, version and network rows name `Scanned`, as spec 10.1 does.** The scan itself runs while the job is `Fingerprinted` (`RunScan` is the action of entering it), so a licence, version or network message printed by the scan reaches the reducer in `Fingerprinted` and is rejected there (`a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying`, `only_scanned_ripping_and_copying_wait_for_the_network`). Phase 2's engine either delivers it after `ScanDone` or reports the scan as `ScanFailed` with class `Licence`, `NeedsMakeMkvUpdate` or `NeedsNetwork`, which the Outcome rows already send to `AwaitingMakeMkv` or `AwaitingNetwork` returning to `Fingerprinted`.
 11. **Events in JSON.** Every event round-trips through `serde_json` (`every_sample_event_round_trips_through_json`), including `ReviewApproved` with entries in the lists of `Overrides` (a title role and an audio override): spec 11's Approve reaches the engine over IPC (spec 4.5), the natural carrier of a JSON `Event`.
-12. **Deciding again in `Decided`.** `Decided` is entered three ways: from `Inspecting` with the decision made (`DecisionDone { AutoFile }`), and with `Decide` still pending after approval at the disposition gate or re-finalise. `Decided { approved }` records which way the job entered: `approved: false` from `Inspecting`, `approved: true` by approval or re-finalise (8.8: the owner approved). `resume` gives either value `[Decide]` (10.1 says header-only steps "simply run again"). An approved job then checks space whatever the disposition. An unapproved one checks space only on `AutoFile`, and on `NeedsReview` it goes to the disposition gate with the `NeedsReview` notification (6.4 step 12: such a job "enters NeedsReview and stops here until approved"), because Decide's inputs, such as the settings (`auto_threshold`, the roots) and the library facts, can change between the two runs (`a_redecided_auto_filed_job_that_now_needs_review_is_held`); a restart, a Return (an Output or LookupUnavailable failure of the decision, then `ShareBack` or `LookupAnswered`) or a Retry of a failed decision therefore never remuxes without a decision that holds the owner's overrides (`resuming_decided_decides_again`, `retrying_a_failed_decision_after_approval_decides_again`).
+12. **Deciding again in `Decided`.** `Decided` is entered three ways: from `Inspecting` with the decision made (`DecisionDone { AutoFile }`), and with `Decide` still pending after approval at the disposition gate or re-finalise. `Decided { approved }` records which way the job entered: `approved: false` from `Inspecting`, `approved: true` by approval or re-finalise (8.8: the owner approved). `resume` gives either value `[Decide]` (10.1 says header-only steps "simply run again"). An approved job then checks space whatever the disposition, review reasons and confidences its decision made again carries (spec 11 Approve: continue with the reviewed decisions; 8.8: the owner approved them, and only a review decision raises a confidence), with one exception that was ruled during execution (ruling at the controller's ledger, Task 14; the first reading checked space whatever the disposition). When the decision's reasons include `path_collision` (spec 7: lazymkv never overwrites a file the job did not create, and a re-finalise whose recorded file no longer matches raises it, Open point 39), or when `has_path` is false (the decision built no final path, Open point 38: `decide` gives `NeedsReview` whenever the path is `None`, and phase 2 sets `has_path` from `FileDecision.path.is_some()`), the job is held at the disposition gate again: `NeedsReview { DispositionGate }` with the same `Notify { NeedsReview { reasons } }` the unapproved gate emits (6.4 step 12), and the owner resolves it, for example with a `KeepBoth` collision override, and approves again. The first fix inferred the missing path from a `NeedsReview` disposition with an empty reasons list, and the second fix replaced that inference with `has_path` (ruling at the controller's ledger, Task 14), because the inference also held a job whose only cause was a confidence below `auto_threshold`. A low confidence alone never holds an approved job again. Every other review reason is one the owner approved, and the job goes on to `CheckSpace` (`an_approved_job_whose_decision_made_again_raises_path_collision_is_held_at_the_gate`, `an_approved_job_whose_decision_made_again_has_no_final_path_is_held_at_the_gate`, `an_approved_job_whose_decision_made_again_is_held_only_by_a_low_confidence_goes_on`, `an_approved_job_goes_on_for_every_review_reason_but_path_collision`, `a_re_finalised_job_whose_recorded_file_no_longer_matches_is_held_until_the_owner_resolves_it`). An unapproved one checks space only on `AutoFile`, and on `NeedsReview` it goes to the disposition gate with the `NeedsReview` notification (6.4 step 12: such a job "enters NeedsReview and stops here until approved"), because Decide's inputs, such as the settings (`auto_threshold`, the roots) and the library facts, can change between the two runs (`a_redecided_auto_filed_job_that_now_needs_review_is_held`); a restart, a Return (an Output or LookupUnavailable failure of the decision, then `ShareBack` or `LookupAnswered`) or a Retry of a failed decision therefore never remuxes without a decision that holds the owner's overrides (`resuming_decided_decides_again`, `retrying_a_failed_decision_after_approval_decides_again`).
 13. **The file-phase slot after review.** Spec 6 lets one job be in the file phase at a time, and "jobs waiting for review occupy neither the drive nor the file-phase slot". The table makes only a Direct job in `Ejected { after_copy: false }` wait for `FilePhaseSlot`; an approval (into `Extracting` or `Decided`), a re-finalise (into `Decided`) and a Retry of a job that failed in its file phase enter the file phase directly. The reducer does not model the slot for them: the docs of `ReviewApproved`, `ReFinalise`, `Retry` and `FilePhaseSlot` say that phase 2 delivers those events only once the slot is free for the job, which then holds it until it reaches `Filed`, `NeedsReview`, `Failed` or `Discarded`.
 14. **The disc gone when a disc-phase step would run again.** A Return and a Retry use `resume(state, true)`, and `MediaRemoved` and `MediaArrived` are rejected in waiting and failed states, so a job returning to `Ripping` or `Copying` issues `RipTitle` or `CopyDisc` whether or not its disc is in. The docs of the table's Return and Retry, of `back_to` and of `Action::WaitForDisc` say that phase 2 performs a disc-phase action only with the job's disc in a drive; when the disc is gone it performs none and feeds `MediaRemoved`, which gives `[WaitForDisc]`. Phase 2 does not feed the media removal its own `Eject` causes, which would otherwise reach `RipVerified` as a spurious `[WaitForDisc]` (a copy whose scan lists titles ejects from `RipVerified { after_copy: true }`, never from `Copying`). One window remains and is phase 2's to close, not the reducer's: `resume(RipVerified { .. }, false)` gives `[WaitForDisc]`, so an engine restart after the disc was ejected but before `Ejected` was persisted would wait for a disc that only needs ejecting. Phase 2, on finding a `RipVerified` job with no disc in any drive after a restart, feeds `Ejected` itself (the eject happened, or the owner removed the disc by hand); `resume` stays pure and unchanged, and its all-disc-phase-states test is unchanged.
 15. **A job that failed in its file phase is past the disc phase.** Spec 6.1 step 2 sends `already_ripped` for "a job that is past the disc phase". A job `Failed` with a class other than `MediaReadError` from a file-phase state (for example `Failed { Unknown, from: Remuxing }`) has finished its disc phase and keeps its raw rip for Retry, so `job_lookup` reads it as past the disc phase, as it reads a waiting state returning to a file-phase state: `AlreadyRipped` unless armed (`a_job_failed_in_its_file_phase_is_already_ripped`), where it gave `NewJob` before and started a needless second rip. So that the owner can still rip such a disc again, `RipAgain` is taken by a `Failed` job whose `from` is a file-phase state, as by a filed one (spec 11 "arm a new job for a disc that was already ripped"; Open point 24 says so). A job failed in its disc phase with another class still gives `NewJob`. A waiting state returning to a file-phase state also takes `RipAgain` (state unchanged, `[ArmRipAgain]`), so that the owner is not shut out while an AwaitingTool or AwaitingShare job waits, since `job_lookup` reads it as past the disc phase; `waiting_return`, which both read, is written with the review queue's rows (Step 24). The owner can overturn this reading of 6.1 step 2.
 
 - [ ] **Step 1: Confirm the starting point**
 
-This task ports no Python test (the reducer is new code, RP12, RP20). It adds 171 unit tests in `crates/core/src/job/tests.rs`, in nine groups: 21 on the closed sets and their spellings, 18 on the failure outcomes, 20 on `new_job` and `resume`, 27 on the rows for any state and the Direct main line, 19 on whole-disc copy mode and extraction, 10 on the review queue, 24 on the waiting states, 15 on step failures, Retry and the disc coming and going, and 17 on the job ID and the job lookup. Nothing goes into the 213-row mapping table.
+This task ports no Python test (the reducer is new code, RP12, RP20). It adds 176 unit tests in `crates/core/src/job/tests.rs`, in nine groups: 21 on the closed sets and their spellings, 18 on the failure outcomes, 20 on `new_job` and `resume`, 27 on the rows for any state and the Direct main line, 19 on whole-disc copy mode and extraction, 15 on the review queue, 24 on the waiting states, 15 on step failures, Retry and the disc coming and going, and 17 on the job ID and the job lookup. Nothing goes into the 213-row mapping table.
 
 Run from the repository root:
 
@@ -43576,14 +43586,14 @@ Create `crates/core/src/job.rs` with exactly this content (Step 4 inserts the `u
 mod tests;
 ```
 
-Create `crates/core/src/job/tests.rs` with exactly this content (every later test step appends its tests at the end of this file). The helpers build the sample states and events every group uses: `sample_states()` holds one state of every variant (42), `sample_events()` one event of every variant with every value of its boolean, mode, disposition and tool fields, and `ReviewApproved` both with `Overrides::default()` and with a title role and an audio override (72, covering all 50 variants). `use super::*;` brings in `job.rs`'s items and its `use` lines (`Disposition`, `Mode`, `Overrides`, `Note`, `ReviewReason`, `FromStr`); the file adds Task 6's `TitleOverrideEntry`, `TitleRole`, `AudioTrackOverride` and `AudioOverride` for that approval.
+Create `crates/core/src/job/tests.rs` with exactly this content (every later test step appends its tests at the end of this file). The helpers build the sample states and events every group uses: `sample_states()` holds one state of every variant (42), `sample_events()` one event of every variant with every value of its boolean, mode, disposition and tool fields, and `ReviewApproved` both with `Overrides::default()` and with a title role and an audio override (74, covering all 50 variants). `use super::*;` brings in `job.rs`'s items and its `use` lines (`Disposition`, `Mode`, `Overrides`, `Note`, `ReviewReason`, `FromStr`); the file adds Task 6's `TitleOverrideEntry`, `TitleRole`, `AudioTrackOverride` and `AudioOverride` for that approval.
 
 ```rust
 //! Tests of core::job (design spec 5, 6.1 step 2, 10.1, 10.2, 12; RP12): the closed sets and their spellings, the
 //! failure outcomes, the resume rules, one test per row of the reducer table (Shared interfaces, `core::job`), the job
 //! ID and the job lookup. Every input is built here; nothing is read from a file.
 
-use crate::remembered::{AudioOverride, AudioTrackOverride, TitleOverrideEntry, TitleRole};
+use crate::remembered::{AudioOverride, AudioTrackOverride, Collision, TitleOverrideEntry, TitleRole};
 
 use super::*;
 
@@ -43670,8 +43680,8 @@ fn sample_states() -> Vec<State> {
 }
 
 /// One event of every variant, with every value of each boolean, mode, disposition and tool field, the failure events
-/// with a MediaReadError failure (CopyFailed also with Unknown), and ReviewApproved also with entries in the lists of
-/// `Overrides` (72 events).
+/// with a MediaReadError failure (CopyFailed also with Unknown), DecisionDone also with a path collision and with no
+/// final path, and ReviewApproved also with entries in the lists of `Overrides` (74 events).
 fn sample_events() -> Vec<Event> {
     let read = failure(FailureClass::MediaReadError);
     let mut events = vec![
@@ -43714,8 +43724,10 @@ fn sample_events() -> Vec<Event> {
         Event::FilePhaseSlot,
         Event::ProbeDone,
         Event::ProbeFailed { failure: read },
-        Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() },
-        Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::SubtitleAmbiguous] },
+        Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true },
+        Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::SubtitleAmbiguous], has_path: true },
+        Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::PathCollision], has_path: true },
+        Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: Vec::new(), has_path: false },
         Event::DecisionFailed { failure: read },
         Event::RemuxDone,
         Event::RemuxFailed { failure: read },
@@ -44015,10 +44027,11 @@ fn an_event_is_written_with_its_name_under_event_and_its_fields_beside_it() {
     let decided = Event::DecisionDone {
         disposition: Disposition::NeedsReview,
         reasons: vec![ReviewReason::SubtitleAmbiguous],
+        has_path: true,
     };
     assert_eq!(
         json(&decided),
-        r#"{"event":"DecisionDone","disposition":"needs_review","reasons":["subtitle_ambiguous"]}"#
+        r#"{"event":"DecisionDone","disposition":"needs_review","reasons":["subtitle_ambiguous"],"has_path":true}"#
     );
     assert_eq!(
         json(&Event::FingerprintFailed { failure: output(OutputCause::OutOfSpace) }),
@@ -44294,7 +44307,10 @@ pub enum State {
     /// 10.1 main line: the decision is made, or is being made again after approval or re-finalise (6.4 steps 11 and 12).
     /// `approved` is true when entered by approval at the disposition gate or by re-finalise (8.8: the owner approved),
     /// false when entered from Inspecting with an AutoFile decision; an unapproved job whose decision, made again,
-    /// needs review goes to the disposition gate (6.4 step 12).
+    /// needs review goes to the disposition gate (6.4 step 12). An approved job goes on whatever review reasons or
+    /// confidences its decision made again carries (spec 11 Approve: continue with the reviewed decisions), except
+    /// `path_collision` (spec 7: a file the job did not create is never overwritten) and a decision with no final path
+    /// (`has_path` false, Open point 38): either holds the job at the disposition gate again (6.4 step 12, Open point 39).
     Decided { approved: bool },
     /// 10.1 main line: the partial final file is written and verified (6.4 steps 13 and 14).
     Remuxing,
@@ -44546,8 +44562,10 @@ pub enum Event {
     ProbeDone,
     /// 6.4 step 9's probe failed, with its 10.2 class.
     ProbeFailed { failure: Failure },
-    /// 6.4 step 11's decision, with 8.8's disposition and review reasons.
-    DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason> },
+    /// 6.4 step 11's decision, with 8.8's disposition and review reasons. `has_path` is true when the decision built a
+    /// final path (phase 2 sets it from `FileDecision.path.is_some()`); false is Task 13's Open point 38 case, where
+    /// `decide` gives NeedsReview whenever the path is None.
+    DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason>, has_path: bool },
     /// 6.4 step 11's decision failed, with its 10.2 class.
     DecisionFailed { failure: Failure },
     /// 6.4 step 13's remux finished.
@@ -45067,8 +45085,10 @@ pub fn new_job() -> (State, Vec<Action>) {
 
 /// "Resuming after a restart" (and the actions of a waiting state's return): Detected [Fingerprint]; Fingerprinted
 /// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided { .. } [Decide] (Decided { approved: true } may be entered
-/// with Decide pending, after approval or re-finalise; header-only steps simply run again, 10.1, and an unapproved job
-/// whose decision now needs review is gated again, settled choice 12); Ripping [EmptyTitleDirectory,
+/// with Decide pending, after approval or re-finalise; header-only steps simply run again, 10.1, and a job whose decision,
+/// made again, needs review is gated again unless the owner approved it: an approved job is held again only for
+/// `path_collision` or a decision with no final path (`has_path` false), spec 7, 6.4 step 12, Open point 39); Ripping
+/// [EmptyTitleDirectory,
 /// RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle]; Copying [EmptyCopyDirectory, CopyDisc]; RipVerified (either after_copy) [Eject];
 /// Inspecting [Probe]; Remuxing [DeletePartialFile, Remux]; Verified [File]; Ejected nothing (it waits for FilePhaseSlot or
 /// HoldForReview); a disc-phase state with `disc_present` false [WaitForDisc]; waiting, held, failed, filed and discarded
@@ -45304,7 +45324,7 @@ fn a_finished_probe_extracts_the_subtitle_evidence_then_decides() {
 #[test]
 fn an_auto_file_decision_checks_space_for_the_remux() {
     assert_eq!(
-        step(&State::Inspecting, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() }),
+        step(&State::Inspecting, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }),
         (State::Decided { approved: false }, vec![Action::CheckSpace])
     );
 }
@@ -45312,7 +45332,7 @@ fn an_auto_file_decision_checks_space_for_the_remux() {
 #[test]
 fn a_needs_review_decision_holds_the_job_at_the_disposition_gate_and_sends_its_reasons() {
     let reasons = vec![ReviewReason::AudioReferenceUnclear, ReviewReason::SubtitleAmbiguous];
-    let decided = Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone() };
+    let decided = Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: true };
     assert_eq!(
         step(&State::Inspecting, &decided),
         (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
@@ -45361,7 +45381,7 @@ fn a_direct_job_walks_the_main_line_from_detected_to_filed() {
             Event::Ejected,
             Event::FilePhaseSlot,
             Event::ProbeDone,
-            Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() },
+            Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true },
             Event::SpaceOk,
             Event::RemuxDone,
             Event::FileVerified,
@@ -45473,7 +45493,7 @@ fn direct_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         (State::Inspecting, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
             (State::Decided { approved: false }, vec![Action::CheckSpace])
         }
-        (State::Inspecting, Event::DecisionDone { disposition: Disposition::NeedsReview, reasons }) => (
+        (State::Inspecting, Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. }) => (
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
         ),
@@ -45686,7 +45706,7 @@ fn a_copy_job_walks_from_its_plan_through_review_and_extraction_to_filed() {
             Event::TitleExtracted,
             Event::TitleVerified { last: true },
             Event::ProbeDone,
-            Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() },
+            Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true },
             Event::SpaceOk,
             Event::RemuxDone,
             Event::FileVerified,
@@ -45868,7 +45888,7 @@ fn a_decision_after_approval_checks_space_whatever_its_disposition() {
     let approved = State::Decided { approved: true };
     for disposition in [Disposition::AutoFile, Disposition::NeedsReview] {
         assert_eq!(
-            step(&approved, &Event::DecisionDone { disposition, reasons: vec![ReviewReason::TvUnmapped] }),
+            step(&approved, &Event::DecisionDone { disposition, reasons: vec![ReviewReason::TvUnmapped], has_path: true }),
             (approved.clone(), vec![Action::CheckSpace])
         );
     }
@@ -45880,12 +45900,12 @@ fn a_redecided_auto_filed_job_that_now_needs_review_is_held() {
     // settings or the library facts may have changed meanwhile (6.4 step 12: it "stops here until approved").
     let unapproved = State::Decided { approved: false };
     assert_eq!(
-        step(&unapproved, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() }),
+        step(&unapproved, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }),
         (unapproved.clone(), vec![Action::CheckSpace])
     );
     let reasons = vec![ReviewReason::PathCollision];
     assert_eq!(
-        step(&unapproved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone() }),
+        step(&unapproved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: true }),
         (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
     );
 }
@@ -45896,7 +45916,7 @@ fn an_approved_job_walks_from_the_gate_through_the_remux_to_filed() {
         State::NeedsReview { held: Held::DispositionGate },
         &[
             Event::ReviewApproved { overrides: Overrides::default() },
-            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::PathCollision] },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors], has_path: true },
             Event::SpaceOk,
             Event::RemuxDone,
             Event::FileVerified,
@@ -45913,6 +45933,91 @@ fn an_approved_job_walks_from_the_gate_through_the_remux_to_filed() {
             vec![Action::VerifyFile],
             vec![Action::File],
             vec![notify(NotifyEvent::Filed)],
+        ]
+    );
+}
+
+#[test]
+fn an_approved_job_whose_decision_made_again_raises_path_collision_is_held_at_the_gate() {
+    // Spec 7: the job never overwrites a file it did not create; 6.4 step 12 holds it again, with the same notification.
+    let approved = State::Decided { approved: true };
+    for reasons in [
+        vec![ReviewReason::PathCollision],
+        vec![ReviewReason::TvUnmapped, ReviewReason::PathCollision, ReviewReason::ReadErrors],
+    ] {
+        assert_eq!(
+            step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: true }),
+            (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
+        );
+    }
+}
+
+#[test]
+fn an_approved_job_whose_decision_made_again_has_no_final_path_is_held_at_the_gate() {
+    // Open point 38: `decide` gives NeedsReview whenever the path is None; `has_path` false says so, with any reasons.
+    let approved = State::Decided { approved: true };
+    for reasons in [Vec::new(), vec![ReviewReason::TvUnmapped]] {
+        assert_eq!(
+            step(
+                &approved,
+                &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: false }
+            ),
+            (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
+        );
+    }
+}
+
+#[test]
+fn an_approved_job_whose_decision_made_again_is_held_only_by_a_low_confidence_goes_on() {
+    // 8.8: only a review decision raises a confidence, and spec 11's Approve continues with the reviewed decisions; a
+    // NeedsReview disposition with no review reason (a confidence below auto_threshold) does not hold the job again.
+    let approved = State::Decided { approved: true };
+    assert_eq!(
+        step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: Vec::new(), has_path: true }),
+        (approved.clone(), vec![Action::CheckSpace])
+    );
+}
+
+#[test]
+fn an_approved_job_goes_on_for_every_review_reason_but_path_collision() {
+    // 8.8: the owner approved the reasons the job carried; only path_collision (and a missing path) still blocks the file.
+    let approved = State::Decided { approved: true };
+    for reason in ReviewReason::ALL.into_iter().filter(|reason| *reason != ReviewReason::PathCollision) {
+        assert_eq!(
+            step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![reason], has_path: true }),
+            (approved.clone(), vec![Action::CheckSpace]),
+            "{reason:?}"
+        );
+    }
+    assert_eq!(
+        step(&approved, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }),
+        (approved.clone(), vec![Action::CheckSpace])
+    );
+}
+
+#[test]
+fn a_re_finalised_job_whose_recorded_file_no_longer_matches_is_held_until_the_owner_resolves_it() {
+    // Spec 7: a same-path decision after a re-finalise raises path_collision; Open point 39: the engine does not file it.
+    let reasons = vec![ReviewReason::PathCollision];
+    let (end, actions) = walk(
+        State::Filed,
+        &[
+            Event::ReFinalise,
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: true },
+            Event::ReviewApproved {
+                overrides: Overrides { collision: Some(Collision::KeepBoth), ..Overrides::default() },
+            },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors], has_path: true },
+        ],
+    );
+    assert_eq!(end, State::Decided { approved: true });
+    assert_eq!(
+        actions,
+        [
+            vec![Action::Decide],
+            vec![notify(NotifyEvent::NeedsReview { reasons })],
+            vec![Action::Decide],
+            vec![Action::CheckSpace],
         ]
     );
 }
@@ -45983,7 +46088,7 @@ fn re_finalise_and_discard_are_rejected_outside_their_states() {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: the build succeeds; `test result: FAILED. 108 passed; 7 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: NeedsReview { held: DispositionGate } + ReviewApproved { overrides: Overrides { identity: None, season: Some(3), titles: [], audio: [], subtitles: [], collision: None } }`); the 105 earlier tests still pass, and so do the three that assert rejections: `rip_again_is_rejected_in_the_disc_phase_and_for_discarded_or_disc_phase_waiting_or_failed_jobs`, `a_held_job_takes_no_disc_or_file_phase_event`, `re_finalise_and_discard_are_rejected_outside_their_states`.
+Expected: the build succeeds; `test result: FAILED. 108 passed; 12 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: NeedsReview { held: DispositionGate } + ReviewApproved { overrides: Overrides { identity: None, season: Some(3), titles: [], audio: [], subtitles: [], collision: None } }`); the 105 earlier tests still pass, and so do the three that assert rejections: `rip_again_is_rejected_in_the_disc_phase_and_for_discarded_or_disc_phase_waiting_or_failed_jobs`, `a_held_job_takes_no_disc_or_file_phase_event`, `re_finalise_and_discard_are_rejected_outside_their_states`.
 
 - [ ] **Step 24: Write the review queue's rows**
 
@@ -45991,8 +46096,12 @@ In `crates/core/src/job.rs`, insert the following immediately above `#[cfg(test)
 
 ```rust
 /// The review queue's rows (10.1, spec 11): approving at the disposition gate decides again with the owner's overrides
-/// (the engine passes them to Decide), and a decision after approval goes on whatever its disposition (8.8: the owner
-/// approved it); a decision made again in an unapproved job (an auto-filed job after a restart, a Return or a Retry)
+/// (the engine passes them to Decide), and a decision after approval goes on whatever its disposition, review reasons and
+/// confidences (spec 11 Approve: continue with the reviewed decisions; 8.8: only a review decision raises a confidence),
+/// except that it is held at the disposition gate again, with the same notification, when it raises `path_collision`
+/// (spec 7: the job never overwrites a file it did not create, and a re-finalise whose recorded file no longer matches
+/// raises it) or built no final path (`has_path` false, 6.4 step 12, Open points 38 and 39); a decision made again in an
+/// unapproved job (an auto-filed job after a restart, a Return or a Retry)
 /// goes on only when it files automatically and is otherwise held at the disposition gate (6.4 step 12); Discard
 /// deletes the job's data; Re-finalise takes a filed job back to an approved Decided; Rip again arms a new job for a
 /// filed, held or file-phase job, one that failed in its file phase, or a waiting job returning to a file-phase state
@@ -46002,13 +46111,25 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         (State::NeedsReview { held: Held::DispositionGate }, Event::ReviewApproved { .. }) => {
             (State::Decided { approved: true }, vec![Action::Decide])
         }
-        (State::Decided { approved: true }, Event::DecisionDone { .. })
-        | (State::Decided { approved: false }, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
+        (State::Decided { approved: true }, Event::DecisionDone { reasons, has_path, .. })
+            if !blocks_filing(reasons, *has_path) =>
+        {
             (state.clone(), vec![Action::CheckSpace])
+        }
+        (State::Decided { approved: false }, Event::DecisionDone { disposition: Disposition::AutoFile, .. }) => {
+            (state.clone(), vec![Action::CheckSpace])
+        }
+        (State::Decided { approved: true }, Event::DecisionDone { reasons, has_path, .. })
+            if blocks_filing(reasons, *has_path) =>
+        {
+            (
+                State::NeedsReview { held: Held::DispositionGate },
+                vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
+            )
         }
         (
             State::Decided { approved: false },
-            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. },
         ) => (
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
@@ -46026,6 +46147,16 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         _ => return None,
     };
     Some(next)
+}
+
+/// Whether a decision made again in an approved job still cannot be filed whatever the owner approved: it raises
+/// `path_collision` (spec 7: a file the job did not create is never overwritten, and a re-finalise whose recorded file no
+/// longer matches raises it), or it built no final path (`has_path` false, Open point 38). Open point 39: the engine does
+/// not file such a job; 6.4 step 12 holds it at the disposition gate again. Nothing else holds an approved job: every other
+/// review reason is one the owner approved, and a confidence below `auto_threshold` is no reason to stop after spec 11's
+/// Approve ("continue with the reviewed decisions"; 8.8: only a review decision raises a confidence).
+fn blocks_filing(reasons: &[ReviewReason], has_path: bool) -> bool {
+    !has_path || reasons.contains(&ReviewReason::PathCollision)
 }
 
 /// The state a waiting state returns to; None for every other state.
@@ -46060,7 +46191,7 @@ const RULES: &[Rule] = &[any_state, direct_line, copy_line, review_line];
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 115 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 120 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 26: Write the failing waiting-state tests**
 
@@ -46382,7 +46513,7 @@ fn a_waiting_state_returns_only_on_its_own_event() {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: the build succeeds; `test result: FAILED. 121 passed; 18 failed`. The failing tests panic with a message starting `rejected: ` (for example `rejected: Detected + ShareLost`), except `a_waiting_state_returns_only_on_its_own_event`, whose `assert_eq!` fails with `left: true` and `right: false` for `AwaitingShare { return_to: Ripping }` and `ShareBack`; the 115 earlier tests still pass, and so do the six that assert rejections: `a_lost_share_or_short_space_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job`, `a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying`, `only_scanned_ripping_and_copying_wait_for_the_network`, `the_disc_phase_never_waits_for_a_lookup`, `a_missing_makemkvcon_is_rejected_by_the_file_phase_states_that_do_not_run_it`, `a_tool_missing_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job_except_java`.
+Expected: the build succeeds; `test result: FAILED. 126 passed; 18 failed`. The failing tests panic with a message starting `rejected: ` (for example `rejected: Detected + ShareLost`), except `a_waiting_state_returns_only_on_its_own_event`, whose `assert_eq!` fails with `left: true` and `right: false` for `AwaitingShare { return_to: Ripping }` and `ShareBack`; the 120 earlier tests still pass, and so do the six that assert rejections: `a_lost_share_or_short_space_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job`, `a_licence_or_version_message_is_rejected_outside_scanned_ripping_and_copying`, `only_scanned_ripping_and_copying_wait_for_the_network`, `the_disc_phase_never_waits_for_a_lookup`, `a_missing_makemkvcon_is_rejected_by_the_file_phase_states_that_do_not_run_it`, `a_tool_missing_is_rejected_for_a_held_filed_failed_discarded_or_waiting_job_except_java`.
 
 - [ ] **Step 28: Write the waiting states and their returns**
 
@@ -46467,7 +46598,7 @@ const RULES: &[Rule] = &[any_state, direct_line, copy_line, review_line, waits];
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 139 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 144 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 30: Write the failing failure tests**
 
@@ -46696,7 +46827,7 @@ fn the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase() {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: the build succeeds; `test result: FAILED. 143 passed; 11 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: Detected + FingerprintFailed { failure: Failure { class: DriveIncapable, output: None } }`); the 139 earlier tests still pass, and so do the four that assert rejections: `a_step_failure_is_rejected_from_a_state_that_did_not_run_the_step`, `retry_is_rejected_for_a_drive_incapable_failure`, `retry_is_rejected_for_a_job_that_has_not_failed`, `the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase`.
+Expected: the build succeeds; `test result: FAILED. 148 passed; 11 failed`. Each failing test panics with a message starting `rejected: ` (for example `rejected: Detected + FingerprintFailed { failure: Failure { class: DriveIncapable, output: None } }`); the 144 earlier tests still pass, and so do the four that assert rejections: `a_step_failure_is_rejected_from_a_state_that_did_not_run_the_step`, `retry_is_rejected_for_a_drive_incapable_failure`, `retry_is_rejected_for_a_job_that_has_not_failed`, `the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase`.
 
 - [ ] **Step 32: Write the step failures, Retry and the disc coming and going**
 
@@ -46774,7 +46905,7 @@ const RULES: &[Rule] = &[any_state, direct_line, copy_line, review_line, waits, 
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 154 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 159 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 34: Write the failing job ID and job lookup tests**
 
@@ -47018,7 +47149,7 @@ pub fn job_lookup(earlier: &[(String, State, bool)]) -> JobLookup {
 scripts/box.sh cargo test -p lazymkv-core job::tests::
 ```
 
-Expected: `test result: ok. 171 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
+Expected: `test result: ok. 176 passed; 0 failed` for the `lazymkv-core` unit tests, and no `warning:` line names `job.rs` or `job/tests.rs`.
 
 - [ ] **Step 38: Run the whole workspace**
 
@@ -47030,7 +47161,7 @@ grep -c '^pub mod job;' crates/core/src/lib.rs
 grep -c '#\[test\]' crates/core/src/job/tests.rs
 ```
 
-Expected: the build finishes without an error and without a change to `Cargo.lock` (no dependency was added); every `test result:` line of the test run reads `ok` with `0 failed`, and `lazymkv-core`'s unit tests count 171 more than before this task (the evidence tests of `lazymkv-dev` pass or print their `skipped:` line as before; `decide`'s and `reconcile`'s goldens are untouched); no `warning:` line names `job.rs` or `job/tests.rs`; `git status --short` lists exactly ` M crates/core/src/lib.rs`, `?? crates/core/src/job.rs` and `?? crates/core/src/job/`; then `1` and `170`.
+Expected: the build finishes without an error and without a change to `Cargo.lock` (no dependency was added); every `test result:` line of the test run reads `ok` with `0 failed`, and `lazymkv-core`'s unit tests count 176 more than before this task (the evidence tests of `lazymkv-dev` pass or print their `skipped:` line as before; `decide`'s and `reconcile`'s goldens are untouched); no `warning:` line names `job.rs` or `job/tests.rs`; `git status --short` lists exactly ` M crates/core/src/lib.rs`, `?? crates/core/src/job.rs` and `?? crates/core/src/job/`; then `1` and `176`.
 
 - [ ] **Step 39: Commit**
 
