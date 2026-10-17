@@ -156,7 +156,7 @@ Paths:
 
 Job state is written atomically (temporary file, then rename).
 
-A remembered-decisions file holds the TMDb ID and kind; for each title its source file, segment map, duration, role (feature, cut with edition name, episode numbers, or ignored); and audio and subtitle overrides keyed by the stream's signature (type, language, codec, channels, position among identical streams). Titles are matched by source file, segment map and duration within 2 s, never by title key. A remembered decision sets the confidence it covers to 1.00.
+A remembered-decisions file holds the TMDb ID and kind, and for each title its source file, segment map, duration, role (feature, cut with edition name, episode numbers, or ignored), and its audio and subtitle overrides keyed by the stream's signature (type, language, codec, channels, position among identical streams). Titles are matched by source file, segment map and duration within 2 s, never by title key. A remembered decision sets the confidence it covers to 1.00.
 
 ## 6. Pipeline
 

@@ -22,7 +22,7 @@ use crate::remembered::{
     SubtitleOverride, SubtitleOverrideEntry, TitleRole,
 };
 use crate::review::{sorted_unique, Noted, ReviewReason};
-use crate::settings::{path_inside, Settings};
+use crate::settings::{configured_root, path_inside, Settings};
 use crate::tracks::audio::{decide_audio, AudioDecision, AudioFacts};
 use crate::tracks::layout::{layout, Layout};
 use crate::tracks::subtitle::{decide_subtitles, SubtitleDecision, SubtitleFacts};
@@ -484,7 +484,8 @@ fn job_features(plan: &Plan, disc: &Disc, overrides: Option<&Overrides>) -> Vec<
 
 /// The final path of 8.9 for the role: a feature through `movie_path` under settings.movies_root (needs a movie record
 /// and a resolution), an episode through `tv_path` under settings.tv_root (needs a show record, a season and an episode
-/// number; without the last two it is unmapped, 8.5). A record of the other kind builds no path: TMDb's two kinds number
+/// number; without the last two it is unmapped, 8.5). A blank root (no path component, `settings::configured_root`) is
+/// a root not set: no path is built, so the job is held rather than filed relative to the engine's working folder. A record of the other kind builds no path: TMDb's two kinds number
 /// their records separately (8.1), so a movie's ID would name a show folder, or a show's ID a movie folder (choice 1).
 fn filing(
     role: &PlannedRole,
@@ -496,7 +497,7 @@ fn filing(
 ) -> Filing {
     let unbuilt = |unmapped: bool| Filing { path: None, notes: Vec::new(), unmapped };
     match role {
-        PlannedRole::Feature { .. } => match (record, settings.movies_root.as_deref(), resolution) {
+        PlannedRole::Feature { .. } => match (record, configured_root(settings.movies_root.as_deref()), resolution) {
             (Some(record), Some(root), Some(resolution)) if record.identity.kind == TmdbKind::Movie => {
                 let (path, notes) = movie_path(root, &record.work(), resolution, edition, copy, settings);
                 Filing { path: Some(path), notes, unmapped: false }
@@ -508,7 +509,7 @@ fn filing(
                 Some(season) if !episode.episodes.is_empty() => season,
                 _ => return unbuilt(true),
             };
-            match (record, settings.tv_root.as_deref()) {
+            match (record, configured_root(settings.tv_root.as_deref())) {
                 (Some(record), Some(root)) if record.identity.kind == TmdbKind::Tv => {
                     let name = episode_name(episode, season, record);
                     let (path, notes) =
@@ -1436,6 +1437,28 @@ mod tests {
             decide(&input),
             Err("the owner discarded the job (spec 11 Resolve collision), so title 0 (t00-00800) is not decided".to_string())
         );
+    }
+
+    #[test]
+    fn a_blank_library_root_builds_no_path_and_holds_the_job() {
+        // F14: a settings file with "movies_root": "" (or blanks, or separators only) is a root not set: no relative path
+        // is built, and the decision needs review, as with no root at all; the same for tv_root.
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let library = LibraryFacts::default();
+        for blank in ["", "  ", "/", r"\\"] {
+            let settings = Settings { movies_root: Some(blank.to_string()), ..settings() };
+            let decision = decide(&inputs(&plan, &disc, 0, Some(&record), &library, &settings)).unwrap();
+            assert_eq!(decision.path, None, "{blank:?}");
+            assert_eq!(decision.disposition, Disposition::NeedsReview, "{blank:?}");
+        }
+        let office = office_disc();
+        let episodes = plan_of(&office, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Example Fifteen")))]);
+        let shows = office_record();
+        let settings = Settings { tv_root: Some(String::new()), ..settings() };
+        let decision = decide(&inputs(&episodes, &office, 0, Some(&shows), &library, &settings)).unwrap();
+        assert_eq!((decision.path, decision.disposition), (None, Disposition::NeedsReview));
     }
 
     #[test]

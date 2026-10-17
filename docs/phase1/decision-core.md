@@ -28,8 +28,8 @@ sums, ffprobe profiles, subtitle events, the content and text verdicts, library 
 | `remembered` | 5, 11 | Remembered decisions and the owner's review decisions (overrides), matched to a new scan |
 | `tracks` (`audio`, `subtitle`, `layout`) | 8.6, 8.7, 8.10 | The audio tracks kept, dropped and ordered; the English subtitle roles, the forced track and the subtitle confidence; the names, flags and order of the tracks in the final file |
 | `naming` | 8.9, 8.4, 11 | Library paths for films, editions and episodes; the compatibility tag; sanitisation; the copy label of a second copy |
-| `verify` | 6.2 step 7, 6.4 step 14 | A ripped or remuxed file against the scan or the decision; read errors |
-| `decision` | 6.4 step 11, 8.8, 11 | One title's file decision: tracks, path, the three confidences (identity, title, track), review reasons, notes and the disposition (auto-file or review); the job-level step that holds every title of a job whose final path another title also builds (`same_path_reviews`, `path_collision`); Remember, which keeps a track decision only when every title of the job agrees on it |
+| `verify` | 6.2 step 7, 6.4 step 14 | A ripped or remuxed file against the scan or the decision (a remuxed track's codec and channels against its source stream, the chapters against the staged file's); read errors |
+| `decision` | 6.4 step 11, 8.8, 11 | One title's file decision: tracks, path, the three confidences (identity, title, track), review reasons, notes and the disposition (auto-file or review); the job-level step that holds every title of a job whose final path another title also builds (`same_path_reviews`, `path_collision`); Remember, which keeps each title's track decisions with that title |
 | `job` | 10.1, 10.2, 5, 12 | The job state reducer: states, events, actions, the waiting states and the state each returns to, failure classes, resume rules, the job ID, and the job's one decision event combined from its titles' decisions (`decision_done`) |
 | `subtitle::labels` | 15, 17 row 14 | The owner's subtitle labels file and the subtitle harness that `retune --subtitles` runs |
 
@@ -247,8 +247,9 @@ The plan recorded these rulings (RP1 to RP9 are the port's, in its design). The 
 - RP15. Design spec 15's "the subtitle text rule's thresholds (8.7) are brought under `retune` in phase 1" is
   `subtitle-labels.json`, `lazymkv-dev labels --subtitles` and `lazymkv-dev retune --subtitles` (amended by RP25).
 - RP16. Remembered decisions are a `core` type with pure functions: a remembered title matches a scan title by source
-  file, segment map and duration within 2 s, and the audio and subtitle overrides are keyed by the stream's signature
-  (type, language, codec, channels, position among identical streams). Keeping them is phase 2's.
+  file, segment map and duration within 2 s, and each title's audio and subtitle overrides, kept with it, are keyed by
+  the stream's signature (type, language, codec, channels, position among identical streams; per title since F10
+  below). Keeping them is phase 2's.
 - RP17. Season sessions (8.5) are a `core` record with pure functions (`find`, `suggest`, `assign`, `close`); keeping
   them is phase 2's.
 - RP18. Edition naming (8.4) takes "the library folder already holds an edition-named file" and "an earlier filed copy
@@ -286,7 +287,7 @@ The plan recorded these rulings (RP1 to RP9 are the port's, in its design). The 
 
 ### Rulings made during execution
 
-Task 5: under 8.3 rule 1, a TheDiscDB-marked main movie whose Java label has an unrecognised suffix keeps 0.98 with no `unnamed_cut` (the label table belongs to rule 2). Task 14: in `Decided { approved: true }`, a decision whose reasons include `path_collision`, or whose `DecisionDone.has_path` is false, holds the job again at the disposition gate, while a low confidence alone never holds an approved job again (design spec 7, 6.4 step 12 and 11 under Approve). Task 18: the row 14 harness of `retune --subtitles` reads `subs/index.json` through `verify::subs_index`, the one reader of that file (the one-copy rule).
+Task 5: under 8.3 rule 1, a TheDiscDB-marked main movie whose Java label has an unrecognised suffix keeps 0.98 with no `unnamed_cut` (the label table belongs to rule 2). Task 14 (amended by F12 below): in an approved `Decided`, a decision whose reasons include `path_collision` or a reason the owner did not approve, or whose `DecisionDone.has_path` is false, holds the job again at the disposition gate, while a low confidence alone never holds an approved job again (design spec 7, 6.4 step 12 and 11 under Approve). Task 18: the row 14 harness of `retune --subtitles` reads `subs/index.json` through `verify::subs_index`, the one reader of that file (the one-copy rule).
 
 The final review of the branch added these, which the owner may also overturn:
 
@@ -296,9 +297,8 @@ The final review of the branch added these, which the owner may also overturn:
 - Two titles of one job that build the same final path both get `path_collision` and are held
   (`decision::same_path_reviews`, which phase 2 runs over the job's decisions before the disposition gate), whatever
   Resolve collision says; the owner names the cuts with Assign titles.
-- Remember stores an audio or subtitle decision for a stream signature only when every title of the job decided it the
-  same way, since design spec 5 keys those decisions by signature for the whole disc; a signature the titles decide
-  differently is left for the rules to decide again on the next job.
+- Remember stored an audio or subtitle decision for a stream signature only when every title of the job decided it the
+  same way. F10 below replaces this: each title keeps its own track decisions.
 - The text rule's decisions are used only where 6.4 step 10 runs (two or more English or no-language subtitle streams
   in the file), in one gate inside `decide_subtitles` that `decide` and `retune --subtitles` share.
 - The job's `DecisionDone` is built by `job::decision_done` over every title's decision: it needs review when any title
@@ -306,6 +306,55 @@ The final review of the branch added these, which the owner may also overturn:
   owner approved it.
 - Discard is accepted from a failed job as well as a held one (10.1's table lists only NeedsReview), so the owner can
   free a failed job's staging data, which section 7 never deletes automatically.
+
+### The review of pull request #3
+
+The review of pull request krcm0209/lazymkv#3 found fifteen defects, and the owner ruled on each fix (F1 to F15). The
+owner may still overturn any of them.
+
+- F1. The codec table knows DTS Express (`A_DTS` with attribute 6 or 7 `DTS-HD LBR` or `DTS Express`: other lossy,
+  displayed and named by mkvmerge "DTS Express"), and a DTS stream accepts mkvmerge's "DTS-ES" and "DTS 96/24". A codec
+  the table does not know is not compared: its type, language and channels are, and the report's `unchecked` says the
+  codec was not compared, so a correct rip is neither ripped again nor held with `verify_failed`.
+- F2. `decide` takes the wanted languages from the filed identity's TMDb record whenever the record is given, so a
+  record fetched after planning (a pending TMDb lookup) gives its original language.
+- F3. An Episode item on a play-all-shaped title is kept unless every episode it names is mapped by another kept
+  Episode item: a multi-clip episode playlist whose clips carry no item is the episode, not a play-all title.
+- F4. On a disc TheDiscDB states is a movie, rule 3.1 is skipped and a play-all-shaped group is an ordinary rule 3
+  group (`movie::by_structure_as_movie`); the open question on extras play-all titles below now concerns only discs
+  TheDiscDB does not know.
+- F5. Resolve collision answers a path: `Overrides.collision` lists the plain final paths the owner was shown, each
+  with its action, and Keep both or Replace resolves only a decision whose own plain path is one of them (compared
+  whole and case-insensitively); any other collision raises `path_collision` again.
+- F6. When a pending lookup answers, the reducer's return from AwaitingLookup starts with `RefreshIdentity`:
+  `plan::refresh_identity` identifies again with the answered lookups and the plan's runtime facts
+  (`PlanEvidence.runtime`), keeps the ripped titles, their title confidence and the mode, and refreshes the identity,
+  its confidence and review reasons, the wanted languages and the evidence. Phase 2 passes the refreshed plan to Decide.
+- F7. A disc-name search with several plausible results, all of the other kind than the planned kind, holds the titles
+  at 0.60 with `title_ambiguous`, as one such result does; a mixed-kind list does not, rule 4 remaining the guard.
+- F8. Rule 3.4's covering test counts streams per signature, so a title with one more stream of a signature (an SDH
+  track beside the regular one) covers the other wherever it comes in the group.
+- F9. A dialogue group of three or more tracks keeps one SDH track (one described as SDH if any, else the one with the
+  most events) and, as regular, the remaining track with the fewest events, an undescribed one before one described as
+  SDH; `subtitle_ambiguous` is still raised.
+- F10. A remembered decision keeps each title's audio and subtitle overrides with that title, keyed by the stream's
+  signature within it, and applies them to the scan title the remembered title matches (`remembered::matched_titles`);
+  design spec 5's sentence says so. Two titles that decide streams of one signature differently each keep their own
+  decision, so a remembered job reproduces every title's reviewed decision.
+- F11. A planned feature carries the planner's theatrical flag (`PlannedRole::Feature.theatrical`), so a lone unnamed
+  cut keeps no edition and Remember refuses it until the owner names it.
+- F12. Approval records the reasons shown at the gate (`ReviewApproved.approved_reasons`), and a re-finalise approves
+  the filed decision's (`ReFinalise.approved_reasons`); an approved job whose decision made again carries a reason the
+  owner did not approve (Set identity to a Japanese film that raises `original_language_missing`) is held again, as
+  one with `path_collision` or no final path is.
+- F13. `verify_final` takes the title and the staged file's `verify_rip` report: it compares each remuxed track's codec
+  and channels with the scan stream the layout names, and the chapter count with the staged file's when the layout
+  keeps chapters.
+- F14. A blank library root is a root not set, so no path is built under it, and `Settings` refuses a blank or relative
+  `movies_root` or `tv_root` (a UNC, drive-letter or POSIX path is absolute).
+- F15. A stream's file codec (attribute 41 through the output codec table when present, else the scan codec) is read
+  once, into `disc::Stream.file_codec`; the verification and the audio names use it, so an LPCM stream the rip writes
+  as FLAC is named "FLAC 5.1", and an attribute 41 value the table does not know expects its own text.
 
 ## Choices the owner should confirm
 
@@ -316,7 +365,8 @@ the plan keeps the reading given.
 - Open question: a movie disc with an extras play-all. Read literally, 8.3 rule 3.1 makes any group whose segments are
   two or more other groups' in order a play-all title, and the disc then TV. Smile's deleted-scenes playlist (title
   117) is one. Without a TheDiscDB match or Java labels, such a movie disc is planned as TV, unless TheDiscDB states it
-  is a movie. The owner may limit 3.1 to play-all titles whose parts are episode-length (15 to 120 minutes).
+  is a movie, when rule 3.1 is skipped (F4). The owner may limit 3.1 to play-all titles whose parts are episode-length
+  (15 to 120 minutes).
 - Open question: two label cuts with the same edition name. 8.3 rule 2's table names both the plain `FPL_MainFeature`
   row and the `_R` row "Theatrical Cut". A disc carrying both is planned at 0.60 with `title_ambiguous` ("two cuts are
   both named Theatrical Cut") rather than 0.90; two TheDiscDB main movies that would be filed under one name get the
@@ -352,10 +402,11 @@ the plan keeps the reading given.
 - The text rule's disagreement (8.7 "Text") compares roles only, and one review note names every disagreeing stream.
 - Library paths use the root's own separator (a backslash when the root holds one or is a UNC (universal naming convention) path, else a slash);
   `core` never asks the host. The 255-byte cap cuts on a character boundary after Unicode normalisation form C (NFC).
-- `Settings` also refuses an `auto_threshold` outside 0 to 1, `subs_diff_max` above `subs_same_min`, and a zero
-  `minlength_s`, `feature_min_minutes` or `file_phase_concurrency`.
-- The verification needs every expected track to pair in order and tolerates no extra track in the file; read errors
-  are kept by offset with their count and the error text only, never the drive's name or serial number.
+- `Settings` also refuses an `auto_threshold` outside 0 to 1, `subs_diff_max` above `subs_same_min`, a zero
+  `minlength_s`, `feature_min_minutes` or `file_phase_concurrency`, and a blank or relative library root (F14).
+- The verification needs every expected track to pair in order and tolerates no extra track in the file; a codec the
+  table does not know is not compared, and the report says so (F1); read errors are kept by offset with their count and
+  the error text only, never the drive's name or serial number.
 - Verification lowers no confidence: a failed or read-error rip holds the job through its review reason
   (`verify_failed`, `read_errors`).
 - The owner's review decisions each cover one confidence and set it to 1.00; a re-plan and the file decision both
@@ -367,8 +418,9 @@ the plan keeps the reading given.
   not yet seen either.
 - 8.3 rule 4 lowers a rule 3 plan only when every feature is more than 10% from TMDb's runtime.
 - TheDiscDB maps a TV disc only when every Episode item matches a scan title; otherwise the disc is unmapped (0.60,
-  `tv_unmapped`, whole-disc copy).
-- A decision without a path (no library root for its role, no TMDb identity, or a feature without a video height) is
+  `tv_unmapped`, whole-disc copy). A play-all-shaped title TheDiscDB labels an Episode is dropped only when the other
+  kept Episode items map every episode it names (F3).
+- A decision without a path (no library root for its role, a blank one included, no TMDb identity, or a feature without a video height) is
   held for review with no review reason, since 8.8's closed set has none for it. An episode without a season or
   episode number has no path either, and raises `tv_unmapped`.
 
@@ -380,13 +432,15 @@ the plan keeps the reading given.
 - The TheDiscDB and TMDb clients, and the live check of the TMDb shapes that phase 1's synthetic answers follow.
 - The DVD disc ID, the decoding of bitmap subtitles for OCR (decision D22), the app's own recording format and the
   form of the tuning evidence, D17's bundling table and code signing (RP10, RP13).
-- The chapter count in the check of a remuxed file (`verify_final` checks the tracks and the duration only).
+- Performing the reducer's `RefreshIdentity` (persisting the plan `plan::refresh_identity` gives and passing it to
+  Decide), and giving `ReviewApproved` the reasons the review screen showed and `ReFinalise` the filed decision's.
 
 ## Tests
 
 `cargo test --workspace -- --list` on the mini PC (Windows), on the tree of commit `0388aae`, lists 1932 tests: 1527 in `lazymkv-core`, 394 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 At `666fc16` (the merge of the port, where the decision core's branch starts) the same command listed 603, so the decision core added 1329.
 After the fixes of the branch's final review the same command lists 1965: 1557 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
+After the fixes of the review of pull request #3 (F1 to F15) the same command lists 1986: 1578 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test compiled only on Unix is not.
 
 Design spec 15 asks for a test of every rule of section 8 for its normal case and for each guard, review reason and

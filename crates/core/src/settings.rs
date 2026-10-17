@@ -73,9 +73,10 @@ pub struct Settings {
     /// Spec 7: where rips and disc copies are staged, a local or UNC path; None until set. Required by the engine,
     /// not by any rule here.
     pub staging_root: Option<String>,
-    /// Spec 7 and 8.9: the movie library's root; None until set.
+    /// Spec 7 and 8.9: the movie library's root, an absolute local or UNC path (`validate` refuses a blank or relative
+    /// one); None until set.
     pub movies_root: Option<String>,
-    /// Spec 7 and 8.9: the TV library's root; None until set.
+    /// Spec 7 and 8.9: the TV library's root, an absolute local or UNC path; None until set.
     pub tv_root: Option<String>,
     /// 120: MakeMKV's minimum title length in seconds (`--minlength`, 9.2; 8.2's candidate filter reads it).
     pub minlength_s: u32,
@@ -184,6 +185,24 @@ fn components(path: &str) -> Vec<&str> {
     path.split(|c: char| c == '/' || c == '\\').filter(|component| !component.is_empty()).collect()
 }
 
+/// A root setting as a path: None when it is absent or blank (no path component once surrounding whitespace is set
+/// aside, such as "", "  " or "/"), which is a missing setting (spec 14), so no final path is ever built under it. The
+/// one test of a blank root: `validate` and `decision::decide`'s naming both read it. Spec 7, 14. Def: PR #3 review
+/// (F14). Use: T13.
+pub fn configured_root(root: Option<&str>) -> Option<&str> {
+    root.filter(|text| !components(text.trim()).is_empty())
+}
+
+/// Whether a library root is an absolute path: a UNC path (`\\server\share`, or with forward slashes), a
+/// drive-letter path (`D:\Movies`, `D:/Movies`) or a path from the root of a POSIX file system (`/srv/media/Movies`).
+/// A relative path (`Movies`), a drive-relative one (`D:Movies`) or a path with leading whitespace is not. Spec 7, 14.
+/// Def: PR #3 review (F14). Use: T1.
+pub fn is_absolute_root(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let drive = bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/');
+    path.starts_with("\\\\") || path.starts_with('/') || drive
+}
+
 /// The version string `N.N.N` (three runs of ASCII digits joined by '.') as a comparable triple; None otherwise (a
 /// sign, a prefix, a suffix, a missing or fourth part, or a part above u32::MAX). Spec 9.1.
 pub fn version_triple(text: &str) -> Option<(u32, u32, u32)> {
@@ -219,7 +238,9 @@ fn problem(key: &str, text: impl Into<String>) -> SettingsProblem {
 
 impl Settings {
     /// Every problem, in key order (spec 14's table order, which is the struct's): staging_root inside movies_root or
-    /// tv_root, or equal to one (one problem per root, by `path_inside`); minlength_s 0; auto_threshold outside
+    /// tv_root, or equal to one (one problem per root, by `path_inside`); movies_root and tv_root, when set, blank
+    /// (`configured_root`) or not absolute (`is_absolute_root`): a final path is never built under either (8.9);
+    /// minlength_s 0; auto_threshold outside
     /// 0.0..=1.0 (not-a-number included); feature_min_minutes 0; subs_diff_max above subs_same_min; tuning_root
     /// absent or blank (no path component, so it is inside nothing) while keep_tuning_evidence is on, else tuning_root
     /// inside staging_root or a library root (one problem per root); file_phase_concurrency 0; makemkv_min_version not
@@ -241,6 +262,21 @@ impl Settings {
                         ));
                     }
                 }
+            }
+        }
+        for (key, library) in [("movies_root", &self.movies_root), ("tv_root", &self.tv_root)] {
+            let Some(text) = library.as_deref() else {
+                continue;
+            };
+            if configured_root(Some(text)).is_none() {
+                problems.push(problem(key, format!("{key} is blank: a library root must be an absolute path (spec 7, 14)")));
+            } else if !is_absolute_root(text) {
+                problems.push(problem(
+                    key,
+                    format!(
+                        "{key} {text} is not an absolute path: a library root must be a UNC path, a drive-letter path or a path from / (spec 7, 14)"
+                    ),
+                ));
             }
         }
         if self.minlength_s == 0 {
@@ -270,7 +306,7 @@ impl Settings {
                 ),
             ));
         }
-        let tuning = self.tuning_root.as_deref().filter(|text| !components(text).is_empty());
+        let tuning = configured_root(self.tuning_root.as_deref());
         match tuning {
             None => {
                 if self.keep_tuning_evidence {
@@ -610,6 +646,42 @@ mod tests {
             ..valid()
         };
         assert_eq!(settings.validate(), Vec::new());
+    }
+
+    #[test]
+    fn a_blank_or_relative_library_root_is_refused_and_an_absolute_one_of_any_form_is_not() {
+        // F14: a blank root is a missing setting, and a relative one would file relative to the engine's working folder.
+        let with = |movies: &str, tv: &str| Settings { movies_root: root(movies), tv_root: root(tv), ..valid() };
+        assert_eq!(
+            with("", "Shows").validate(),
+            vec![
+                problem("movies_root", "movies_root is blank: a library root must be an absolute path (spec 7, 14)"),
+                problem(
+                    "tv_root",
+                    "tv_root Shows is not an absolute path: a library root must be a UNC path, a drive-letter path or a path from / (spec 7, 14)"
+                ),
+            ]
+        );
+        for blank in ["  ", "/", r"\\"] {
+            assert_eq!(
+                with(blank, "/srv/media/Shows").validate(),
+                vec![problem("movies_root", "movies_root is blank: a library root must be an absolute path (spec 7, 14)")],
+                "{blank:?}"
+            );
+        }
+        for relative in ["Movies", r"D:Movies", r" \\unas-pro\media\Movies", "./Movies"] {
+            assert_eq!(with(relative, "/srv/media/Shows").validate().len(), 1, "{relative:?}");
+        }
+        for absolute in [r"\\unas-pro\media\Movies", "//unas-pro/media/Movies", r"D:\Movies", "d:/Movies", "/srv/media/Movies"] {
+            assert_eq!(with(absolute, absolute).validate(), Vec::new(), "{absolute:?}");
+            assert!(is_absolute_root(absolute), "{absolute:?}");
+        }
+        assert_eq!(configured_root(Some("  ")), None);
+        assert_eq!(configured_root(Some("/")), None);
+        assert_eq!(configured_root(None), None);
+        assert_eq!(configured_root(Some("/srv/media/Movies")), Some("/srv/media/Movies"));
+        // An unset root is no problem here: the decision builds no path under it and holds the job (8.8).
+        assert_eq!(Settings { movies_root: None, tv_root: None, ..valid() }.validate(), Vec::new());
     }
 
     #[test]
