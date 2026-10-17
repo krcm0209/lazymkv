@@ -5,6 +5,7 @@
 //! 11, 13 and 18.
 
 pub mod audio;
+pub mod subtitle;
 
 /// The role of a kept English subtitle track (spec 8.7 "Regular and SDH" and "Forced"). The derived order is 8.10's
 /// output order: forced, regular, then SDH (subtitles for the deaf and hard of hearing).
