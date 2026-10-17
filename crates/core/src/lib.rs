@@ -3,6 +3,7 @@ pub mod codec;
 pub mod disc;
 pub mod fingerprint;
 pub mod lang;
+pub mod lookup;
 pub mod profile;
 pub mod recording;
 pub mod robot;
