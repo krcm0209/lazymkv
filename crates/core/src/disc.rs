@@ -318,7 +318,7 @@ impl DiscKind {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Disc {
     pub kind: DiscKind,
-    /// CINFO 2 ("Pan's Labyrinth", "THE OFFICE S3D3", "Short Circuit 2").
+    /// CINFO 2 (the disc's name, "Pan's Labyrinth").
     pub name: Option<String>,
     /// CINFO 30.
     pub tree_name: Option<String>,

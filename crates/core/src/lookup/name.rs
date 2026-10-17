@@ -6,7 +6,7 @@
 //!
 //! A name is read in tokens, parts and pieces. The tokens are its words once underscores are spaces (split on
 //! whitespace); each token splits on hyphens into parts; each part splits into pieces, the maximal runs of ASCII
-//! digits and of other characters. `THE OFFICE S3D3` has the pieces `THE`, `OFFICE`, `S`, `3`, `D`, `3`, and `Pan's`
+//! digits and of other characters. `EXAMPLE SHOW S3D3` has the pieces `EXAMPLE`, `SHOW`, `S`, `3`, `D`, `3`, and `Pan's`
 //! is one piece. A season marker is a piece `season`, `series` or `s` (any case) followed by a digit piece; a disc
 //! number is a piece `disc` or `d` followed by a digit piece. Cleaning drops a part whose every piece belongs to a
 //! marker, and the region and format tags.
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn a_season_number_is_parsed_from_every_spelling() {
-        assert_eq!(parse_season("THE OFFICE S3D3"), Some(3));
+        assert_eq!(parse_season("EXAMPLE SHOW S3D3"), Some(3));
         assert_eq!(parse_season("FRIENDS_SEASON_1"), Some(1));
         assert_eq!(parse_season("Friends Season 10 Disc 2"), Some(10));
         assert_eq!(parse_season("season3"), Some(3));
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(parse_disc_number("Chernobyl Disc 2"), Some(2));
         assert_eq!(parse_disc_number("FIREFLY_DISC_3"), Some(3));
         assert_eq!(parse_disc_number("firefly disc4"), Some(4));
-        assert_eq!(parse_disc_number("THE OFFICE S3D3"), Some(3));
+        assert_eq!(parse_disc_number("EXAMPLE SHOW S3D3"), Some(3));
         assert_eq!(parse_disc_number("SHOW_d02"), Some(2));
         for raw in ["EXPENDABLES_3", "JOHN_WICK_UHD", "BLACKADDER SERIES 2", "DVD9", "R2", ""] {
             assert_eq!(parse_disc_number(raw), None, "{raw}");
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn a_disc_number_alone_is_not_a_season_marker() {
-        assert!(has_season_marker("THE OFFICE S3D3"));
+        assert!(has_season_marker("EXAMPLE SHOW S3D3"));
         assert!(has_season_marker("FRIENDS_SEASON_1"));
         assert!(has_season_marker("BLACKADDER SERIES 2"));
         assert!(!has_season_marker("CHERNOBYL_D1"));
@@ -384,8 +384,8 @@ mod tests {
         ("FIREFLY_D1", "FIREFLY"),
         ("FIREFLY_D2", "FIREFLY"),
         ("PANS_LABYRINTH", "PANS LABYRINTH"),
-        ("THE OFFICE S3D3", "THE OFFICE"),
-        ("SHORT_CIRCUIT", "SHORT CIRCUIT"),
+        ("EXAMPLE SHOW S3D3", "EXAMPLE SHOW"),
+        ("EXAMPLE_FILM", "EXAMPLE FILM"),
         ("DVD_VIDEO", "VIDEO"),
     ];
 
@@ -434,14 +434,14 @@ mod tests {
     #[test]
     fn the_bdmt_and_scan_names_clean_too() {
         assert_eq!(clean("Pan's Labyrinth"), "Pan's Labyrinth");
-        assert_eq!(clean("Short Circuit 2"), "Short Circuit 2");
+        assert_eq!(clean("Example Film 2"), "Example Film 2");
         assert_eq!(clean("Chernobyl Disc 1"), "Chernobyl");
         assert_eq!(clean("Expendables 3"), "Expendables 3");
     }
 
     #[test]
     fn underscores_become_spaces_and_repeated_spaces_collapse() {
-        assert_eq!(clean("  THE__OFFICE   S3D3 "), "THE OFFICE");
+        assert_eq!(clean("  EXAMPLE__SHOW   S3D3 "), "EXAMPLE SHOW");
         assert_eq!(clean("A__B"), "A B");
         assert_eq!(clean("PANS_LABYRINTH"), "PANS LABYRINTH");
         assert_eq!(clean(""), "");
@@ -571,7 +571,7 @@ mod tests {
             assert!(!is_generic(raw, cleaned), "{raw}");
         }
         assert!(!is_generic("Pan's Labyrinth", &clean("Pan's Labyrinth")));
-        assert!(!is_generic("Short Circuit 2", &clean("Short Circuit 2")));
+        assert!(!is_generic("Example Film 2", &clean("Example Film 2")));
     }
 
     fn movie_result(id: i64, title: &str, original: &str) -> TmdbSearchResult {
@@ -665,8 +665,8 @@ mod tests {
             ("FIREFLY_D1", "FIREFLY", None, Some(1), false, false),
             ("FIREFLY_D2", "FIREFLY", None, Some(2), false, false),
             ("PANS_LABYRINTH", "PANS LABYRINTH", None, None, false, false),
-            ("THE OFFICE S3D3", "THE OFFICE", Some(3), Some(3), false, true),
-            ("SHORT_CIRCUIT", "SHORT CIRCUIT", None, None, false, false),
+            ("EXAMPLE SHOW S3D3", "EXAMPLE SHOW", Some(3), Some(3), false, true),
+            ("EXAMPLE_FILM", "EXAMPLE FILM", None, None, false, false),
             ("DVD_VIDEO", "VIDEO", None, None, true, false),
         ];
         for (raw, cleaned, season, disc, generic, season_marker) in expected {
@@ -735,11 +735,11 @@ mod tests {
 
     #[test]
     fn a_disc_name_serialises_with_its_fields_in_order() {
-        let name = disc_name(None, Some("THE OFFICE S3D3")).unwrap();
+        let name = disc_name(None, Some("EXAMPLE SHOW S3D3")).unwrap();
         let text = serde_json::to_string(&name).unwrap();
         assert_eq!(
             text,
-            r#"{"raw":"THE OFFICE S3D3","source":"volume_label","season":3,"disc":3,"cleaned":"THE OFFICE","generic":false,"season_marker":true}"#
+            r#"{"raw":"EXAMPLE SHOW S3D3","source":"volume_label","season":3,"disc":3,"cleaned":"EXAMPLE SHOW","generic":false,"season_marker":true}"#
         );
         assert_eq!(serde_json::from_str::<DiscName>(&text).unwrap(), name);
     }

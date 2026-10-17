@@ -897,7 +897,7 @@ mod tests {
         let t1: &[(u32, &str)] = &[(8, "6"), (9, "0:21:30"), (11, "4700000000"), (16, "00002.mpls"), (26, "2")];
         let t3: &[(u32, &str)] = &[(8, "12"), (9, "0:43:05"), (11, "9500000000"), (16, "00004.mpls"), (26, "4")];
         let text = scan_text(
-            &[(1, "Blu-ray disc"), (2, "THE OFFICE S3D3"), (32, "THE OFFICE S3D3")],
+            &[(1, "Blu-ray disc"), (2, "EXAMPLE SHOW S3D3"), (32, "EXAMPLE SHOW S3D3")],
             &[(0, t0, streams), (1, t1, streams), (3, t3, streams)],
         );
         disc(&parse(&text)).unwrap()
@@ -943,8 +943,8 @@ mod tests {
                 season_number: 3,
                 episode_count: Some(25),
                 episodes: vec![
-                    TmdbEpisode { episode_number: 15, name: Some("Phyllis' Wedding".to_string()), runtime: Some(22) },
-                    TmdbEpisode { episode_number: 16, name: Some("Business School".to_string()), runtime: Some(22) },
+                    TmdbEpisode { episode_number: 15, name: Some("Example Fifteen".to_string()), runtime: Some(22) },
+                    TmdbEpisode { episode_number: 16, name: Some("Example Sixteen".to_string()), runtime: Some(22) },
                 ],
             }],
         }
@@ -1713,7 +1713,7 @@ mod tests {
     #[test]
     fn a_mapped_episode_is_filed_in_its_season_folder_under_its_title() {
         let disc = office_disc();
-        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Phyllis' Wedding")))]);
+        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Example Fifteen")))]);
         let record = office_record();
         let library = LibraryFacts::default();
         let settings = settings();
@@ -1728,9 +1728,9 @@ mod tests {
                 components: vec![
                     "The Office (2005) {tmdb-2316}".to_string(),
                     "Season 03".to_string(),
-                    "The Office (2005) - S03E15 - Phyllis' Wedding.mkv".to_string(),
+                    "The Office (2005) - S03E15 - Example Fifteen.mkv".to_string(),
                 ],
-                path: r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Phyllis' Wedding.mkv"
+                path: r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Example Fifteen.mkv"
                     .to_string(),
             })
         );
@@ -1745,7 +1745,7 @@ mod tests {
             &disc,
             Kind::Tv,
             Some(OFFICE),
-            &[(3, episode_role(Some(3), &[12, 13], Some("Traveling Salesmen/The Return")))],
+            &[(3, episode_role(Some(3), &[12, 13], Some("Example One/Example Two")))],
         );
         let record = office_record();
         let library = LibraryFacts::default();
@@ -1753,7 +1753,7 @@ mod tests {
         let decision = decide(&inputs(&plan, &disc, 3, Some(&record), &library, &settings)).unwrap();
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E12-E13 - Traveling SalesmenThe Return.mkv"
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E12-E13 - Example OneExample Two.mkv"
         );
     }
 
@@ -1767,14 +1767,14 @@ mod tests {
         let decision = decide(&inputs(&plan, &disc, 1, Some(&record), &library, &settings)).unwrap();
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E16 - Business School.mkv"
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E16 - Example Sixteen.mkv"
         );
     }
 
     #[test]
     fn an_episode_without_a_season_builds_no_path_and_raises_tv_unmapped() {
         let disc = office_disc();
-        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(None, &[15], Some("Phyllis' Wedding")))]);
+        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(None, &[15], Some("Example Fifteen")))]);
         let record = office_record();
         let library = LibraryFacts::default();
         let settings = settings();
@@ -1787,7 +1787,7 @@ mod tests {
     #[test]
     fn the_owners_season_fills_a_planned_episode_without_one() {
         let disc = office_disc();
-        let mut plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(None, &[15], Some("Phyllis' Wedding")))]);
+        let mut plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(None, &[15], Some("Example Fifteen")))]);
         plan.reviews = vec![ReviewReason::TvUnmapped];
         let record = office_record();
         let library = LibraryFacts::default();
@@ -1798,7 +1798,7 @@ mod tests {
         let decision = decide(&input).unwrap();
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Phyllis' Wedding.mkv"
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Example Fifteen.mkv"
         );
         assert_eq!(decision.reviews, vec![ReviewReason::TvUnmapped]);
         assert_eq!(decision.confidences.title, 0.98);
@@ -1820,7 +1820,7 @@ mod tests {
         let decision = decide(&input).unwrap();
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E16 - Business School.mkv"
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E16 - Example Sixteen.mkv"
         );
         assert_eq!(decision.confidences, Confidences { identity: 0.95, title: 1.00, track: 0.90 });
         assert!(decision.reviews.is_empty());
@@ -1829,7 +1829,7 @@ mod tests {
     #[test]
     fn without_a_tv_root_no_episode_path_is_built() {
         let disc = office_disc();
-        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Phyllis' Wedding")))]);
+        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Example Fifteen")))]);
         let record = office_record();
         let library = LibraryFacts::default();
         let settings = Settings { movies_root: Some(MOVIES.to_string()), ..Settings::default() };
@@ -1992,7 +1992,7 @@ mod tests {
         assert_eq!(decision.disposition, Disposition::NeedsReview);
         // A feature on a show's identity: a show's TMDb ID never names a movie folder.
         let office = office_disc();
-        let tv_plan = plan_of(&office, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Phyllis' Wedding")))]);
+        let tv_plan = plan_of(&office, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Example Fifteen")))]);
         let show = office_record();
         let feature =
             Overrides { titles: vec![TitleOverrideEntry { title: 0, role: TitleRole::Feature }], ..Overrides::default() };
@@ -2021,7 +2021,7 @@ mod tests {
         assert_eq!(decision.edition, None);
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Phyllis' Wedding.mkv"
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Example Fifteen.mkv"
         );
         assert_eq!(decision.confidences, Confidences { identity: 1.00, title: 1.00, track: 0.90 });
         assert!(decision.reviews.is_empty(), "{:?}", decision.reviews);
@@ -2068,7 +2068,7 @@ mod tests {
     #[test]
     fn keep_both_on_an_episode_puts_the_copy_label_after_the_episode_code() {
         let disc = office_disc();
-        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Phyllis' Wedding")))]);
+        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Example Fifteen")))]);
         let record = office_record();
         let library = LibraryFacts { path_collision: true, ..LibraryFacts::default() };
         let settings = settings();
@@ -2078,7 +2078,7 @@ mod tests {
         let decision = decide(&input).unwrap();
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 2 - Phyllis' Wedding.mkv"
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 2 - Example Fifteen.mkv"
         );
         assert!(decision.reviews.is_empty(), "{:?}", decision.reviews);
         assert_eq!(decision.disposition, Disposition::AutoFile);
@@ -2347,7 +2347,7 @@ mod tests {
             Kind::Tv,
             Some(OFFICE),
             &[
-                (0, episode_role(Some(3), &[15], Some("Phyllis' Wedding"))),
+                (0, episode_role(Some(3), &[15], Some("Example Fifteen"))),
                 (3, episode_role(None, &[12, 13], None)),
             ],
         );

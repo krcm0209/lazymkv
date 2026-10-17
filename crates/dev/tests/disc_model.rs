@@ -225,9 +225,13 @@ fn short_circuit_2_1988_dvd() {
     let Some(scan) = recorded_scan(slug) else { return };
     let dvd = typed_disc(slug, &scan);
     assert_eq!(dvd.kind, DiscKind::Dvd);
+    // The disc's name is the scan's CINFO 2, read when the test runs (RP21); its tree name is the same text, and its
+    // volume label is the generic DVD_VIDEO the spec names.
+    let name = disc_attr(&scan, 2).expect("CINFO 2 names the disc");
+    assert_eq!(disc_attr(&scan, 30), Some(name));
     assert_eq!(
         (dvd.name.as_deref(), dvd.tree_name.as_deref(), dvd.volume_label.as_deref()),
-        (Some("Short Circuit 2"), Some("Short Circuit 2"), Some("DVD_VIDEO"))
+        (Some(name), Some(name), Some("DVD_VIDEO"))
     );
     assert_eq!((dvd.makemkv_version.as_deref(), dvd.java_in_use), (Some("2.0.0"), false));
     assert_eq!((dvd.is_dvd, dvd.scan_read_errors), (true, 3));
@@ -277,9 +281,13 @@ fn the_office_2005_s3d3_bluray() {
     let Some(scan) = recorded_scan(slug) else { return };
     let office = typed_disc(slug, &scan);
     assert_eq!(office.kind, DiscKind::BluRay);
+    // The volume label is the scan's CINFO 32, read when the test runs (RP21); the name and the tree name are the same
+    // text.
+    let label = disc_attr(&scan, 32).expect("CINFO 32 is the volume label");
+    assert_eq!((disc_attr(&scan, 2), disc_attr(&scan, 30)), (Some(label), Some(label)));
     assert_eq!(
         (office.name.as_deref(), office.tree_name.as_deref(), office.volume_label.as_deref()),
-        (Some("THE OFFICE S3D3"), Some("THE OFFICE S3D3"), Some("THE OFFICE S3D3"))
+        (Some(label), Some(label), Some(label))
     );
     assert_eq!(office.metadata_language, None);
     assert_eq!((office.makemkv_version.as_deref(), office.java_in_use), (Some("2.0.0"), false));

@@ -422,7 +422,7 @@ fn sentences(lines: &[&str]) -> Vec<String> {
     lines.iter().map(|line| line.to_string()).collect()
 }
 
-/// The Office's season 3, as TMDb lists its first episodes (22-minute runtimes, made up).
+/// Example Show's season 3, as TMDb lists its first episodes (22-minute runtimes, made up).
 const OFFICE_SEASON_3: [(u32, &str, Option<u32>); 3] =
     [(1, "Gay Witch Hunt", Some(22)), (2, "The Convention", Some(22)), (3, "The Coup", Some(22))];
 /// A season 1 of five 30-minute episodes (made up), so the whole series' median differs from season 3's.
@@ -538,8 +538,8 @@ fn thediscdb_by_both_is_still_both_when_one_record_lacks_a_tmdb_id() {
 
 #[test]
 fn thediscdb_by_both_without_a_tmdb_id_searches_the_entry_title_at_0_99() {
-    let bare = without_tmdb_id("Short Circuit", 1986);
-    let results = search(&[("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09")]);
+    let bare = without_tmdb_id("Example Film", 1986);
+    let results = search(&[("movie", 1001, "Example Film", "Example Film", "1986-05-09")]);
     let inputs = LookupInputs {
         discdb_by_disc_id: Some(&bare),
         discdb_by_fingerprint: Some(&bare),
@@ -552,7 +552,7 @@ fn thediscdb_by_both_without_a_tmdb_id_searches_the_entry_title_at_0_99() {
         identity.evidence,
         sentences(&[
             "TheDiscDB knows the disc ID and the fingerprint",
-            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Short Circuit' and year 1986",
+            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Example Film' and year 1986",
             "1 of 1 search results are plausible: movie 1001",
         ])
     );
@@ -562,9 +562,9 @@ fn thediscdb_by_both_without_a_tmdb_id_searches_the_entry_title_at_0_99() {
 fn when_neither_thediscdb_record_has_a_tmdb_id_the_one_with_a_title_is_searched() {
     // The disc ID record has a title and the fingerprint's has none: the disc ID record's title is searched (8.1 "TMDb
     // is searched with the entry's title and year"), and the step stays 2.
-    let by_id = without_tmdb_id("Short Circuit", 1986);
+    let by_id = without_tmdb_id("Example Film", 1986);
     let by_hash: DiscDbRecord = serde_json::from_str(r#"{"titles": []}"#).unwrap();
-    let results = search(&[("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09")]);
+    let results = search(&[("movie", 1001, "Example Film", "Example Film", "1986-05-09")]);
     let inputs = LookupInputs {
         discdb_by_disc_id: Some(&by_id),
         discdb_by_fingerprint: Some(&by_hash),
@@ -577,7 +577,7 @@ fn when_neither_thediscdb_record_has_a_tmdb_id_the_one_with_a_title_is_searched(
         identity.evidence,
         sentences(&[
             "TheDiscDB knows the disc ID and the fingerprint",
-            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Short Circuit' and year 1986",
+            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Example Film' and year 1986",
             "1 of 1 search results are plausible: movie 1001",
         ])
     );
@@ -661,11 +661,11 @@ fn the_fetched_record_gives_the_title_year_and_original_language() {
 
 #[test]
 fn an_entry_without_a_tmdb_id_is_searched_by_its_title_kind_and_year() {
-    let fingerprint = without_tmdb_id("Short Circuit", 1986);
+    let fingerprint = without_tmdb_id("Example Film", 1986);
     let results = search(&[
-        ("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09"),
-        ("movie", 1002, "Short Circuit", "Short Circuit", "2021-03-01"),
-        ("tv", 1003, "Short Circuit", "Short Circuit", "2020-01-24"),
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("movie", 1002, "Example Film", "Example Film", "2021-03-01"),
+        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
     ]);
     let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
     assert_eq!(
@@ -674,7 +674,7 @@ fn an_entry_without_a_tmdb_id_is_searched_by_its_title_kind_and_year() {
             step: IdentityStep::DiscdbOne,
             confidence: 0.95,
             tmdb: Some(movie(1001)),
-            title: Some("Short Circuit".to_string()),
+            title: Some("Example Film".to_string()),
             year: Some(1986),
             original_language: None,
             review: None,
@@ -683,7 +683,7 @@ fn an_entry_without_a_tmdb_id_is_searched_by_its_title_kind_and_year() {
             lookup_pending: false,
             evidence: sentences(&[
                 "TheDiscDB knows the fingerprint",
-                "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Short Circuit' and year 1986",
+                "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Example Film' and year 1986",
                 "3 of 3 search results are plausible: movie 1001, movie 1002, tv 1003",
                 "preferring movie results leaves movie 1001, movie 1002",
                 "preferring results from 1986 leaves movie 1001",
@@ -694,10 +694,10 @@ fn an_entry_without_a_tmdb_id_is_searched_by_its_title_kind_and_year() {
 
 #[test]
 fn an_entry_without_a_tmdb_id_and_several_results_is_ambiguous() {
-    let fingerprint = without_tmdb_id("Short Circuit", 1986);
+    let fingerprint = without_tmdb_id("Example Film", 1986);
     let results = search(&[
-        ("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09"),
-        ("movie", 1004, "Short Circuit", "Short Circuit", "1986-11-01"),
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("movie", 1004, "Example Film", "Example Film", "1986-11-01"),
     ]);
     let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
     assert_eq!(
@@ -715,7 +715,7 @@ fn an_entry_without_a_tmdb_id_and_several_results_is_ambiguous() {
             lookup_pending: false,
             evidence: sentences(&[
                 "TheDiscDB knows the fingerprint",
-                "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Short Circuit' and year 1986",
+                "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Example Film' and year 1986",
                 "2 of 2 search results are plausible: movie 1001, movie 1004",
             ]),
         }
@@ -727,13 +727,13 @@ fn an_entry_that_states_no_kind_is_never_narrowed_by_the_structural_kind() {
     // TheDiscDB's media has a title and a year but no type: the structural kind may only pick the result shown
     // (settled items 5 and 6), so two same-year results of different kinds stay ambiguous.
     let fingerprint: DiscDbRecord = serde_json::from_str(
-        r#"{"media": {"title": "Short Circuit", "full_title": "Short Circuit", "year": 1986, "external_ids": {}}, "titles": []}"#,
+        r#"{"media": {"title": "Example Film", "full_title": "Example Film", "year": 1986, "external_ids": {}}, "titles": []}"#,
     )
     .unwrap();
     assert_eq!(fingerprint.kind(), None);
     let results = search(&[
-        ("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09"),
-        ("tv", 1003, "Short Circuit", "Short Circuit", "1986-01-24"),
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("tv", 1003, "Example Film", "Example Film", "1986-01-24"),
     ]);
     let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Movie, &RuntimeFacts::default(), &Settings::default());
@@ -746,7 +746,7 @@ fn an_entry_that_states_no_kind_is_never_narrowed_by_the_structural_kind() {
         identity.evidence,
         sentences(&[
             "TheDiscDB knows the fingerprint",
-            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Short Circuit' and year 1986",
+            "TheDiscDB gives no TMDb ID: TMDb is searched with its title 'Example Film' and year 1986",
             "2 of 2 search results are plausible: movie 1001, tv 1003",
         ])
     );
@@ -754,8 +754,8 @@ fn an_entry_that_states_no_kind_is_never_narrowed_by_the_structural_kind() {
 
 #[test]
 fn an_entry_without_a_tmdb_id_and_no_plausible_result_is_unknown() {
-    let fingerprint = without_tmdb_id("Short Circuit", 1986);
-    let results = search(&[("movie", 1002, "Short Circuit 2", "Short Circuit 2", "1988-07-06")]);
+    let fingerprint = without_tmdb_id("Example Film", 1986);
+    let results = search(&[("movie", 1002, "Example Film 2", "Example Film 2", "1988-07-06")]);
     let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Movie, &RuntimeFacts::default(), &Settings::default());
     assert_eq!(
@@ -771,9 +771,9 @@ fn an_entry_without_a_tmdb_id_and_no_plausible_result_is_unknown() {
 
 #[test]
 fn an_entry_without_a_tmdb_id_never_takes_a_result_of_another_year_or_kind() {
-    let fingerprint = without_tmdb_id("Short Circuit", 1986);
+    let fingerprint = without_tmdb_id("Example Film", 1986);
     for (media_type, id, date) in [("movie", 1002, "2021-03-01"), ("tv", 1003, "1986-01-24")] {
-        let results = search(&[(media_type, id, "Short Circuit", "Short Circuit", date)]);
+        let results = search(&[(media_type, id, "Example Film", "Example Film", date)]);
         let inputs =
             LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
         let identity = identify(&inputs, Kind::Movie, &RuntimeFacts::default(), &Settings::default());
@@ -913,10 +913,10 @@ fn without_the_record_of_the_plausible_result_the_runtime_check_cannot_run() {
 
 #[test]
 fn several_plausible_results_give_0_50_with_identity_ambiguous() {
-    let name = label("SHORT_CIRCUIT");
+    let name = label("EXAMPLE_FILM");
     let results = search(&[
-        ("movie", 1001, "Short Circuit", "Short Circuit", "1986-05-09"),
-        ("movie", 1002, "Short Circuit", "Short Circuit", "2021-03-01"),
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("movie", 1002, "Example Film", "Example Film", "2021-03-01"),
     ]);
     let inputs = LookupInputs { name: Some(&name), search: Some(&results), ..LookupInputs::default() };
     assert_eq!(
@@ -933,7 +933,7 @@ fn several_plausible_results_give_0_50_with_identity_ambiguous() {
             runtime_check: None,
             lookup_pending: false,
             evidence: sentences(&[
-                "name 'SHORT_CIRCUIT' cleaned to 'SHORT CIRCUIT'",
+                "name 'EXAMPLE_FILM' cleaned to 'EXAMPLE FILM'",
                 "2 of 2 search results are plausible: movie 1001, movie 1002",
             ]),
         }
@@ -942,11 +942,11 @@ fn several_plausible_results_give_0_50_with_identity_ambiguous() {
 
 #[test]
 fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5() {
-    let name = label("THE OFFICE S3D3");
-    let record = tv_record(2316, "The Office", &[(3, &OFFICE_SEASON_3[..])]);
+    let name = label("EXAMPLE SHOW S3D3");
+    let record = tv_record(2316, "Example Show", &[(3, &OFFICE_SEASON_3[..])]);
     let two = search(&[
-        ("tv", 2316, "The Office", "The Office", "2005-03-24"),
-        ("movie", 3003, "The Office", "The Office", "2010-01-01"),
+        ("tv", 2316, "Example Show", "Example Show", "2005-03-24"),
+        ("movie", 3003, "Example Show", "Example Show", "2010-01-01"),
     ]);
     let inputs = LookupInputs { name: Some(&name), search: Some(&two), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
@@ -961,7 +961,7 @@ fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5(
     assert_eq!(
         identity.evidence,
         sentences(&[
-            "name 'THE OFFICE S3D3' cleaned to 'THE OFFICE'",
+            "name 'EXAMPLE SHOW S3D3' cleaned to 'EXAMPLE SHOW'",
             "season 3 parsed from the name",
             "disc 3 parsed from the name",
             "2 of 2 search results are plausible: tv 2316, movie 3003",
@@ -971,9 +971,9 @@ fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5(
     );
     // Two shows of that name stay two: step 5 with no result picked, and every plausible result listed.
     let three = search(&[
-        ("tv", 2316, "The Office", "The Office", "2005-03-24"),
-        ("movie", 3003, "The Office", "The Office", "2010-01-01"),
-        ("tv", 2996, "The Office", "The Office", "2001-07-09"),
+        ("tv", 2316, "Example Show", "Example Show", "2005-03-24"),
+        ("movie", 3003, "Example Show", "Example Show", "2010-01-01"),
+        ("tv", 2996, "Example Show", "Example Show", "2001-07-09"),
     ]);
     let inputs = LookupInputs { name: Some(&name), search: Some(&three), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
@@ -986,9 +986,9 @@ fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5(
 #[test]
 fn the_runtime_check_is_the_one_of_the_results_own_kind() {
     // The structure said movie, but the one plausible result is a show: its TV check runs over the episode groups.
-    let name = label("THE OFFICE S3D3");
-    let record = tv_record(2316, "The Office", &[(3, &OFFICE_SEASON_3[..])]);
-    let results = search(&[("tv", 2316, "The Office", "The Office", "2005-03-24")]);
+    let name = label("EXAMPLE SHOW S3D3");
+    let record = tv_record(2316, "Example Show", &[(3, &OFFICE_SEASON_3[..])]);
+    let results = search(&[("tv", 2316, "Example Show", "Example Show", "2005-03-24")]);
     let facts = RuntimeFacts {
         feature_seconds: vec![5400],
         longest_rival_seconds: None,
@@ -1005,15 +1005,15 @@ fn the_runtime_check_is_the_one_of_the_results_own_kind() {
 
 #[test]
 fn the_tv_runtime_check_reads_the_parsed_season_else_the_whole_series() {
-    let record = tv_record(2316, "The Office", &[(1, &OFFICE_SEASON_1[..]), (3, &OFFICE_SEASON_3[..])]);
-    let results = search(&[("tv", 2316, "The Office", "The Office", "2005-03-24")]);
+    let record = tv_record(2316, "Example Show", &[(1, &OFFICE_SEASON_1[..]), (3, &OFFICE_SEASON_3[..])]);
+    let results = search(&[("tv", 2316, "Example Show", "Example Show", "2005-03-24")]);
     // Season 3 parsed: its 22-minute median matches the 22-minute groups.
-    let season_three = label("THE OFFICE S3D3");
+    let season_three = label("EXAMPLE SHOW S3D3");
     let inputs = LookupInputs { name: Some(&season_three), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
     assert_eq!((identity.step, identity.runtime_check), (IdentityStep::TmdbOne, Some(true)));
     // No season parsed: the whole series' median is (30 + 30) / 2 = 30 minutes, more than 15% from 22.
-    let no_season = label("THE OFFICE");
+    let no_season = label("EXAMPLE SHOW");
     let inputs = LookupInputs { name: Some(&no_season), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
     assert_eq!(
@@ -1024,9 +1024,9 @@ fn the_tv_runtime_check_reads_the_parsed_season_else_the_whole_series() {
 
 #[test]
 fn a_parsed_season_the_record_lacks_cannot_pass_step_4() {
-    let record = tv_record(2316, "The Office", &[(1, &OFFICE_SEASON_1[..]), (3, &OFFICE_SEASON_3[..])]);
-    let results = search(&[("tv", 2316, "The Office", "The Office", "2005-03-24")]);
-    let name = label("THE OFFICE S4D1");
+    let record = tv_record(2316, "Example Show", &[(1, &OFFICE_SEASON_1[..]), (3, &OFFICE_SEASON_3[..])]);
+    let results = search(&[("tv", 2316, "Example Show", "Example Show", "2005-03-24")]);
+    let name = label("EXAMPLE SHOW S4D1");
     let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
     assert_eq!((identity.step, identity.tmdb, identity.runtime_check), (IdentityStep::TmdbSeveral, Some(tv(2316)), None));
@@ -1038,9 +1038,9 @@ fn a_parsed_season_the_record_lacks_cannot_pass_step_4() {
 
 #[test]
 fn a_show_without_episode_runtimes_and_no_parsed_season_cannot_pass_step_4() {
-    let name = label("THE OFFICE");
-    let record = tv_record(2316, "The Office", &[]);
-    let results = search(&[("tv", 2316, "The Office", "The Office", "2005-03-24")]);
+    let name = label("EXAMPLE SHOW");
+    let record = tv_record(2316, "Example Show", &[]);
+    let results = search(&[("tv", 2316, "Example Show", "Example Show", "2005-03-24")]);
     let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
     assert_eq!(

@@ -27,6 +27,9 @@ use lazymkv_core::settings::Settings;
 use lazymkv_dev::cmd::plan::{plan_doc, LookupFile, PlanDoc, PlanInputsSummary, PlanOptions, PlanSource};
 use lazymkv_dev::evidence::{resolve_evidence, resolve_recording, skip, Ctx};
 
+mod clone;
+use clone::{clone_json, episode_names};
+
 /// The nine pinned logs, below corpus/thediscdb.
 const JOHN_WICK_UHD: &str = "movie/John Wick (2014)/4k-ultra-hd--blu-ray/disc01.txt";
 const JOHN_WICK_BLU_RAY: &str = "movie/John Wick (2014)/4k-ultra-hd--blu-ray/disc02.txt";
@@ -340,14 +343,6 @@ struct CloneFacts {
     disc: Disc,
 }
 
-/// A JSON file of the recording folder `dir`, a leading byte-order mark dropped.
-fn clone_json(dir: &Path, file: &str) -> serde_json::Value {
-    let path = dir.join(file);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
-}
-
 /// The facts of the recording folder `dir`.
 fn clone_facts(dir: &Path) -> CloneFacts {
     let meta = clone_json(dir, "meta.json");
@@ -374,23 +369,6 @@ fn scanned(facts: &CloneFacts, key: &str, title: u32, role: PlannedRole, source_
         scan.size.expect("the scan states the title's size"),
         source_file,
     )
-}
-
-/// The episode names of the recording folder `dir`'s TheDiscDB answer (thediscdb-hash.json): each Episode item's
-/// title, by the item's source file.
-fn episode_names(dir: &Path) -> BTreeMap<String, String> {
-    let answer = clone_json(dir, "thediscdb-hash.json");
-    answer["titles"]
-        .as_array()
-        .expect("the answer lists titles")
-        .iter()
-        .filter(|title| title["item"]["type"] == "Episode")
-        .map(|title| {
-            let source = title["source_file"].as_str().expect("an Episode item has a source file");
-            let name = title["item"]["title"].as_str().expect("an Episode item has a title");
-            (source.to_string(), name.to_string())
-        })
-        .collect()
 }
 
 #[test]
@@ -487,9 +465,11 @@ fn the_office_2005_s3d3_bluray() {
         Some(session(2316, 3, &facts.fingerprint, &[(12, 3), (13, 3), (14, 2), (15, 1), (16, 0), (17, 6), (18, 5)]))
     );
     let name = plan.evidence.name.as_ref().expect("the volume label names the disc");
+    // The label itself is the clone's scan's CINFO 32, read when the test runs (RP21).
+    let label = facts.disc.volume_label.as_deref().expect("the scan states the volume label (CINFO 32)");
     assert_eq!(
         (name.raw.as_str(), name.source, name.season, name.disc),
-        ("THE OFFICE S3D3", NameSource::VolumeLabel, Some(3), Some(3))
+        (label, NameSource::VolumeLabel, Some(3), Some(3))
     );
     assert_eq!(plan.wanted, wanted_languages(Some("en")));
     assert_filed_automatically(&plan);

@@ -489,10 +489,10 @@ mod tests {
     const SEASON_3: &str = r#"{
   "air_date": "2006-09-21",
   "episodes": [
-    {"air_date": "2007-01-04", "episode_number": 12, "id": 201, "name": "Traveling Salesmen", "runtime": 22, "season_number": 3},
-    {"air_date": "2007-01-11", "episode_number": 13, "id": 202, "name": "The Return", "runtime": 22, "season_number": 3},
-    {"air_date": "2007-01-18", "episode_number": 14, "id": 203, "name": "Ben Franklin", "runtime": 0, "season_number": 3},
-    {"air_date": "2007-02-01", "episode_number": 15, "id": 204, "name": "Phyllis' Wedding", "runtime": null, "season_number": 3}
+    {"air_date": "2007-01-04", "episode_number": 12, "id": 201, "name": "Example Twelve", "runtime": 22, "season_number": 3},
+    {"air_date": "2007-01-11", "episode_number": 13, "id": 202, "name": "Example Thirteen", "runtime": 22, "season_number": 3},
+    {"air_date": "2007-01-18", "episode_number": 14, "id": 203, "name": "Example Fourteen", "runtime": 0, "season_number": 3},
+    {"air_date": "2007-02-01", "episode_number": 15, "id": 204, "name": "Example Fifteen", "runtime": null, "season_number": 3}
   ],
   "id": 104,
   "name": "Season 3",
@@ -675,14 +675,14 @@ mod tests {
         assert_eq!(record.season(4), None);
         // A /tv answer whose seasons already hold their episodes (a merged answer, a test fixture) reads them too.
         let expanded = r#"{"id": 2316, "name": "The Office", "seasons": [{"season_number": 3, "episode_count": 2, "episodes": [
-            {"episode_number": 12, "name": "Traveling Salesmen", "runtime": 22}, {"episode_number": 13, "name": "The Return", "runtime": 0}]}]}"#;
+            {"episode_number": 12, "name": "Example Twelve", "runtime": 22}, {"episode_number": 13, "name": "Example Thirteen", "runtime": 0}]}]}"#;
         let record = parse_tv(expanded, "tv.json").unwrap();
         assert_eq!(
             record.seasons,
             vec![TmdbSeason {
                 season_number: 3,
                 episode_count: Some(2),
-                episodes: vec![episode(12, "Traveling Salesmen", Some(22)), episode(13, "The Return", None)],
+                episodes: vec![episode(12, "Example Twelve", Some(22)), episode(13, "Example Thirteen", None)],
             }]
         );
         assert_eq!((record.original_title.as_str(), record.year, record.imdb_id, record.tvdb_id), ("The Office", None, None, None));
@@ -695,16 +695,16 @@ mod tests {
         let mut record = parse_tv(TV, "tv.json").unwrap();
         merge_season(&mut record, SEASON_3, "season-3.json").unwrap();
         let episodes = vec![
-            episode(12, "Traveling Salesmen", Some(22)),
-            episode(13, "The Return", Some(22)),
-            episode(14, "Ben Franklin", None),
-            episode(15, "Phyllis' Wedding", None),
+            episode(12, "Example Twelve", Some(22)),
+            episode(13, "Example Thirteen", Some(22)),
+            episode(14, "Example Fourteen", None),
+            episode(15, "Example Fifteen", None),
         ];
         assert_eq!(record.season(3), Some(&TmdbSeason { season_number: 3, episode_count: Some(25), episodes }));
         // Merging again replaces that season's episodes; the other seasons are untouched.
-        let again = r#"{"season_number": 3, "episodes": [{"episode_number": 12, "name": "Traveling Salesmen", "runtime": 23}]}"#;
+        let again = r#"{"season_number": 3, "episodes": [{"episode_number": 12, "name": "Example Twelve", "runtime": 23}]}"#;
         merge_season(&mut record, again, "season-3.json").unwrap();
-        assert_eq!(record.season(3).map(|season| season.episodes.clone()), Some(vec![episode(12, "Traveling Salesmen", Some(23))]));
+        assert_eq!(record.season(3).map(|season| season.episodes.clone()), Some(vec![episode(12, "Example Twelve", Some(23))]));
         assert_eq!(record.seasons.iter().map(|season| season.season_number).collect::<Vec<u32>>(), vec![0, 1, 2, 3]);
         assert!(record.seasons.iter().filter(|season| season.season_number != 3).all(|season| season.episodes.is_empty()));
     }
@@ -758,9 +758,9 @@ mod tests {
                     season_number: 3,
                     episode_count: Some(3),
                     episodes: vec![
-                        episode(12, "Traveling Salesmen", Some(22)),
-                        episode(14, "Ben Franklin", None),
-                        episode(13, "The Return", Some(21)),
+                        episode(12, "Example Twelve", Some(22)),
+                        episode(14, "Example Fourteen", None),
+                        episode(13, "Example Thirteen", Some(21)),
                     ],
                 },
             ],
@@ -816,7 +816,7 @@ mod tests {
         let text = tmdb_movie_json(1417, "Pan's Labyrinth", "El laberinto del fauno", "2006-10-11", "es", None);
         assert_eq!(parse_movie(&text, "movie.json").unwrap().runtime, None);
 
-        let season_3: &[(u32, &str, Option<u32>)] = &[(12, "Traveling Salesmen", Some(22)), (13, "The Return", None)];
+        let season_3: &[(u32, &str, Option<u32>)] = &[(12, "Example Twelve", Some(22)), (13, "Example Thirteen", None)];
         let show = parse_tv(&tmdb_tv_json(2316, "The Office", "2005-03-24", "en", &[(3, season_3)]), "tv.json").unwrap();
         assert_eq!(
             (show.identity, show.title.as_str(), show.original_title.as_str(), show.year, show.original_language.as_deref()),
@@ -824,7 +824,7 @@ mod tests {
         );
         assert_eq!(
             show.season(3).map(|season| season.episodes.clone()),
-            Some(vec![episode(12, "Traveling Salesmen", Some(22)), episode(13, "The Return", None)])
+            Some(vec![episode(12, "Example Twelve", Some(22)), episode(13, "Example Thirteen", None)])
         );
         assert_eq!(show.episode_runtimes(Some(3)), vec![22]);
 

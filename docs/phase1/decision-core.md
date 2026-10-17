@@ -20,7 +20,7 @@ sums, ffprobe profiles, subtitle events, the content and text verdicts, library 
 |---|---|---|
 | `settings` | 14, 7 | Every setting with its default; a settings file names only the keys it changes; the checks of the roots (a staging root inside a library root, the tuning root) and of the values the rules divide by or compare against |
 | `review` | 8.8, and the notes of 8.6, 8.7, 8.9 and 7 | The closed sets of review reasons and notes, with the spec's spellings |
-| `codec` | 8.6 "Codecs", 8.10 | MakeMKV's codec names (attributes 5, 6 and 7) to a family, a fidelity tier and a display name; the bitrate of attribute 13; channel layouts; the object-based extension (Atmos, DTS:X); mkvmerge's names for the verification |
+| `codec` | 8.6 "Codecs", 8.10 | MakeMKV's codec names (attributes 5, 6 and 7) to a family, a fidelity tier and a display name; attribute 41, MakeMKV's output codec short name, to the codec the file holds; the bitrate of attribute 13; channel layouts; the object-based extension (Atmos, DTS:X); mkvmerge's names for the verification |
 | `lang` (extended) | 8.6 "Languages", R4 | The wanted languages: English and the original language |
 | `disc` | 9.4, 9.5, 5, 6.1 step 2 | The typed disc model over the parsed scan: titles, streams, flags, the MakeMKV version, Java use, the `bdmt` disc name, title matching by source file, segment map and duration |
 | `lookup` (`discdb`, `tmdb`, `name`) | 8.1 | TheDiscDB and TMDb answers, the disc name and its cleaning, plausibility, the runtime checks, the identity and its confidence |
@@ -29,8 +29,8 @@ sums, ffprobe profiles, subtitle events, the content and text verdicts, library 
 | `tracks` (`audio`, `subtitle`, `layout`) | 8.6, 8.7, 8.10 | The audio tracks kept, dropped and ordered; the English subtitle roles, the forced track and the subtitle confidence; the names, flags and order of the tracks in the final file |
 | `naming` | 8.9, 8.4, 11 | Library paths for films, editions and episodes; the compatibility tag; sanitisation; the copy label of a second copy |
 | `verify` | 6.2 step 7, 6.4 step 14 | A ripped or remuxed file against the scan or the decision; read errors |
-| `decision` | 6.4 step 11, 8.8, 11 | One title's file decision: tracks, path, the three confidences (identity, title, track), review reasons, notes and the disposition (auto-file or review) |
-| `job` | 10.1, 10.2, 5, 12 | The job state reducer: states, events, actions, the waiting states and the state each returns to, failure classes, resume rules, the job ID |
+| `decision` | 6.4 step 11, 8.8, 11 | One title's file decision: tracks, path, the three confidences (identity, title, track), review reasons, notes and the disposition (auto-file or review); the job-level step that holds every title of a job whose final path another title also builds (`same_path_reviews`, `path_collision`); Remember, which keeps a track decision only when every title of the job agrees on it |
+| `job` | 10.1, 10.2, 5, 12 | The job state reducer: states, events, actions, the waiting states and the state each returns to, failure classes, resume rules, the job ID, and the job's one decision event combined from its titles' decisions (`decision_done`) |
 | `subtitle::labels` | 15, 17 row 14 | The owner's subtitle labels file and the subtitle harness that `retune --subtitles` runs |
 
 The port's modules keep their behaviour: `core::reconcile` and its goldens are byte-identical (it is the Python's
@@ -136,7 +136,7 @@ recordings' rows skip without the clone):
 | Firefly disc 1, `disc01.txt` | discdb_one 0.95, tv 1437 | tv | mapped (attribute 24): title 0 S01E01, title 1 S01E02, title 2 S01E03 | 0.98, Direct | none |
 | Firefly disc 2, `disc02.txt` | discdb_one 0.95, tv 1437 | tv | mapped (attribute 24): titles 0, 1, 2, 5 as S01E04 to S01E07 | 0.98, Direct | none |
 | `pans-labyrinth-2006-uhd` (clone) | discdb_one 0.95 (discid answered 404), movie 1417, original `es`, wanted eng and spa | movie | database: title 0 (00800.mpls); name from `bdmt_eng.xml` | 0.98, Direct | none |
-| `the-office-2005-s3d3-bluray` (clone) | discdb_one 0.95, tv 2316 | tv | mapped: title 3 S03E12-E13, title 2 S03E14, title 1 S03E15, title 0 S03E16, title 6 S03E17, title 5 S03E18 (ordered by episode); season 3 and disc 3 from `THE OFFICE S3D3` | 0.98, Direct | none |
+| `the-office-2005-s3d3-bluray` (clone) | discdb_one 0.95, tv 2316 | tv | mapped: title 3 S03E12-E13, title 2 S03E14, title 1 S03E15, title 0 S03E16, title 6 S03E17, title 5 S03E18 (ordered by episode); season 3 and disc 3 from its volume label | 0.98, Direct | none |
 | `short-circuit-1986-dvd` (clone) | nothing 0 (no answers; no search recorded) | movie | structure: one rival, title 0 | 0.85, Direct | identity_unknown |
 | `short-circuit-2-1988-dvd` (clone) | nothing 0 (`DVD_VIDEO` is generic) | movie | structure: title 0 (1:50:06) | 0.85, Direct | identity_unknown |
 
@@ -161,8 +161,8 @@ use in place of the defaults.
   plan does not include that title or an input cannot be read. It holds `title_key`; `verify`, the report that maps
   the file's tracks onto the scan's streams (6.2 step 7); `facts`, which scan streams each measured fact covered (the
   packet MD5 sums from the level folders' manifests, the ffprobe profiles, the subtitle events of `subs/`, the content
-  verdicts of the `audio` section and their reference, the text decisions of the `subtitles` section, the streams the
-  rip removed); and `decision`: the audio and subtitle tracks kept and dropped, their order, flags and names
+  verdicts of the `audio` section and their reference, the text decisions of the `subtitles` section that the decision
+  used, the streams the rip removed); and `decision`: the audio and subtitle tracks kept and dropped, their order, flags and names
   (`layout`), the resolution, the edition, the final path, the three confidences, the review reasons, the notes, the
   read errors and the disposition (`auto_file` or `needs_review`). With the default settings no library root is set,
   so `decide` builds no path (`path` is null) and every decision is held for review; the tests make a second decision
@@ -170,7 +170,10 @@ use in place of the defaults.
   `no plan: ` and the same line.
 
 The text decisions are there only when OCR (optical character recognition) text is found (`--text DIR`, or `LAZYMKV_OCR_TEXT`), as for the port's
-`subtitles` section. The top-level `reviews` stays the port's union of the audio verdicts' and the subtitle
+`subtitles` section, and the decision uses them only where design spec 6.4 step 10 runs: when the file holds two or more
+English or no-language subtitle streams (a derived forced-only stream and the closed captions count; a stream MakeMKV
+removed does not). A title with one English subtitle track keeps it as "English" without the text, as `retune
+--subtitles`' 8.7 column does; `core::tracks::subtitle::step10_runs` is the one copy of that rule. The top-level `reviews` stays the port's union of the audio verdicts' and the subtitle
 decisions' reasons; the decision's own `reviews` are the product's (8.8). The exit codes are the port's: 0; 1 when a
 reconcile verdict is no; 2 for an argument error, an unreadable input or a folder that is not a rip label; 3 for a
 slug without the evidence clone. A skipped section never changes the exit code.
@@ -210,7 +213,7 @@ a stream the text rule sets aside (the DVD closed captions), it judges the class
 judged track it shows what the classifier of 8.7 decides from the `subs/` events. A track without OCR text is listed
 as not judged. It then reports:
 
-- the count per kind of the labels made by reading or watching (D23) that the owner is sure of and gave before seeing the verdict (`saw_verdict` false; ruling RP25), against the kinds section 17 row 14 requires, and row 14's UK-style SDH track, counted from the counted `sdh` labels whose `style` is `uk`,
+- the count per kind of the labels made by reading or watching (D23) that the owner is sure of and gave before seeing the verdict (`saw_verdict` false; ruling RP25), against the kinds section 17 row 14 requires (a recording is a feature film or a TV episode by its `tmdb.json`, else by its recorded TheDiscDB answer, else by 8.2's structural rule, and the report names each such recording's kind and where it was read), and row 14's UK-style SDH track, counted from the counted `sdh` labels whose `style` is `uk`,
   read from the spec text as the audio harness reads row 13 (`--spec`, default the design spec under the repository
   root); a label on one of the two discs row 14 names as fitting discs is reported but never counted;
 - the costly verdicts as row 14 defines them, each without a review: a dialogue track dropped
@@ -256,7 +259,9 @@ The plan recorded these rulings (RP1 to RP9 are the port's, in its design). The 
   order and the spec's spellings, and keyed collections are sorted maps (in a type written as JSON, sorted lists of
   named entries: RP23).
 - RP21. No test in `crates/` holds a byte copy of, or a value read only from, `corpus/owner`; dev tests over the clone
-  read it at run time.
+  read it at run time, and core's tests use made-up values of the same shape. `crates/dev/tests/clone_values.rs` pins
+  it over the clone: no file under `crates/` quotes a disc name or volume label of a recording's scan, or holds one of
+  its title sizes or TheDiscDB item titles, unless the public spec, `docs/phase0` or the pinned fixtures publish it.
 - RP22. `Settings::from_json` is the one reader of a settings file. It refuses, in one sentence naming the key, only
   text that is not one JSON object or a key it cannot read (a key the settings lack, or a value of the wrong type);
   otherwise it returns the settings with the problems the checks of design spec 14 and section 7 find, and
@@ -282,6 +287,25 @@ The plan recorded these rulings (RP1 to RP9 are the port's, in its design). The 
 ### Rulings made during execution
 
 Task 5: under 8.3 rule 1, a TheDiscDB-marked main movie whose Java label has an unrecognised suffix keeps 0.98 with no `unnamed_cut` (the label table belongs to rule 2). Task 14: in `Decided { approved: true }`, a decision whose reasons include `path_collision`, or whose `DecisionDone.has_path` is false, holds the job again at the disposition gate, while a low confidence alone never holds an approved job again (design spec 7, 6.4 step 12 and 11 under Approve). Task 18: the row 14 harness of `retune --subtitles` reads `subs/index.json` through `verify::subs_index`, the one reader of that file (the one-copy rule).
+
+The final review of the branch added these, which the owner may also overturn:
+
+- A search identity whose kind contradicts the planned kind adds `identity_ambiguous` and, unless assigned titles cover
+  the titles, holds the title confidence at 0.60 with `title_ambiguous`, so the disc is copied whole and review never
+  needs it again (6.3, 8.8 "Limits of D1"). This is a provisional rule: the spec leaves the case to the owner.
+- Two titles of one job that build the same final path both get `path_collision` and are held
+  (`decision::same_path_reviews`, which phase 2 runs over the job's decisions before the disposition gate), whatever
+  Resolve collision says; the owner names the cuts with Assign titles.
+- Remember stores an audio or subtitle decision for a stream signature only when every title of the job decided it the
+  same way, since design spec 5 keys those decisions by signature for the whole disc; a signature the titles decide
+  differently is left for the rules to decide again on the next job.
+- The text rule's decisions are used only where 6.4 step 10 runs (two or more English or no-language subtitle streams
+  in the file), in one gate inside `decide_subtitles` that `decide` and `retune --subtitles` share.
+- The job's `DecisionDone` is built by `job::decision_done` over every title's decision: it needs review when any title
+  does, and has a path only when every title has one; a job with no final path is never filed, whether or not the
+  owner approved it.
+- Discard is accepted from a failed job as well as a held one (10.1's table lists only NeedsReview), so the owner can
+  free a failed job's staging data, which section 7 never deletes automatically.
 
 ## Choices the owner should confirm
 
@@ -318,8 +342,8 @@ the plan keeps the reading given.
   are keyed by attribute 24 and the segment map, because a DVD's segment numbers restart in every title.
 - The closed-caption stream of a DVD is recognised by its codec (`S_CC608/DVD`), not by attribute 41 alone.
 - Three TheDiscDB description kinds are provisional, because TheDiscDB's wording for them is not yet known: isolated
-  score, music and effects, and a plain subtitle description (one containing "subtitle", or one equal to the track's
-  own language name).
+  score, music and effects, and a plain subtitle description (one containing "subtitle" that does not also name
+  commentary, or one equal to the track's own language name).
 - The object-based audio extension is read from ffprobe's profile ("Atmos", "DTS:X"), else from attribute 7
   ("TrueHD Atmos"); both spellings are provisional until experiment 6 runs.
 - In 8.6's ranking, a lossy track without bitrate text comes after every lossy track with one, and guard G1 treats it
@@ -362,6 +386,7 @@ the plan keeps the reading given.
 
 `cargo test --workspace -- --list` on the mini PC (Windows), on the tree of commit `0388aae`, lists 1932 tests: 1527 in `lazymkv-core`, 394 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 At `666fc16` (the merge of the port, where the decision core's branch starts) the same command listed 603, so the decision core added 1329.
+After the fixes of the branch's final review the same command lists 1965: 1557 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test compiled only on Unix is not.
 
 Design spec 15 asks for a test of every rule of section 8 for its normal case and for each guard, review reason and
@@ -373,7 +398,8 @@ The tests are:
   answers (`corpus/thediscdb-api`); these always run;
 - `crates/core/tests/thediscdb_corpus.rs`, the pinned logs as a corpus;
 - the `lazymkv-dev` integration tests: `lookup_answers.rs` (the recorded TheDiscDB and TMDb answers of the evidence
-  clone), `disc_model.rs` (the disc model over every recording's `scan.txt`),
+  clone), `disc_model.rs` (the disc model over every recording's `scan.txt`), `clone_values.rs` (ruling RP21 over the
+  clone: no value only the clone holds is written under `crates/`),
   `verify.rs` (the recordings' rips against their scans), `plan.rs` (the command over the nine pinned logs, which
   always run, and the four recordings), `decide.rs` (the port's golden comparisons, unchanged, and the new `plan`
   and `decision` sections, including the Office's twin tracks dropped as duplicates by their packet MD5 sums),

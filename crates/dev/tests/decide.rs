@@ -11,7 +11,7 @@
 //! Inputs: the evidence clone (LAZYMKV_EVIDENCE, else corpus/owner under the repository root) and the OCR text
 //! (LAZYMKV_OCR_TEXT, laid out as <DIR>/<slug>/<label>/<reading>/sub-<n>.ocr.jsonl).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +38,9 @@ use lazymkv_dev::cmd::decide::{
 use lazymkv_dev::evidence::{ocr_text_dir, resolve_evidence, resolve_recording, skip, Ctx, Recording};
 use lazymkv_dev::pyjson::{structural_diff, Tolerance};
 use serde_json::Value;
+
+mod clone;
+use clone::episode_names;
 
 /// The recordings of the evidence clone, one test each. A recording added later is listed by
 /// recordings_without_a_test_are_listed_as_not_covered until it gets its test here.
@@ -538,11 +541,11 @@ fn short_circuit_2() -> RecordingExpectation {
 }
 
 /// The Office season 3 disc 3 (Blu-ray): TheDiscDB by fingerprint, TMDb show 2316, mapped episodes. e16-stereo is title
-/// 0 (S03E16, "Business School"), rehearsal title 1 (S03E15, "Phyllis' Wedding", the twin DTS-HD MA tracks),
-/// t3-all-tracks title 3 (S03E12-E13, "Traveling Salesmen/The Return", whose slash 8.9 removes). The title keys are
-/// built from the playlists of `disc`, the recording's own scan, when the test runs (RP21: which title is which
-/// playlist stays in the clone).
-fn the_office(disc: &Disc) -> RecordingExpectation {
+/// 0 (S03E16), rehearsal title 1 (S03E15, the twin DTS-HD MA tracks), t3-all-tracks title 3 (S03E12-E13, whose
+/// two-episode name has a slash that 8.9 removes). The title keys are built from the playlists of `disc`, the
+/// recording's own scan, and the episode names in the file names from `names`, TheDiscDB's Episode items by source
+/// file, both read when the test runs (RP21: which title is which playlist, and the episode names, stay in the clone).
+fn the_office(disc: &Disc, names: &BTreeMap<String, String>) -> RecordingExpectation {
     // The titles in plan order (8.5: ordered by episode), and spec 5's key of each at its position.
     let order = [3, 2, 1, 0, 6, 5];
     let key = |title: u32| {
@@ -550,6 +553,13 @@ fn the_office(disc: &Disc) -> RecordingExpectation {
         title_key(position, disc.title(title).unwrap_or_else(|sentence| panic!("{sentence}")), disc.is_dvd)
     };
     let show = r"\\unas-pro\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005)";
+    // The file name of title `title`, holding `episodes`: TheDiscDB's episode name of its playlist, with the slash 8.9
+    // removes from a component.
+    let file = |title: u32, episodes: &str| {
+        let playlist = disc.title(title).ok().and_then(|found| found.source_file.clone()).expect("a title with a playlist");
+        let name = names.get(&playlist).unwrap_or_else(|| panic!("TheDiscDB's answer names no episode for {playlist}"));
+        format!("{show} - {episodes} - {}.mkv", name.replace('/', ""))
+    };
     RecordingExpectation {
         plan: PlanExpectation {
             step: IdentityStep::DiscdbOne,
@@ -580,7 +590,7 @@ fn the_office(disc: &Disc) -> RecordingExpectation {
                     subtitles_dropped: vec![(5, SubtitleDrop::DerivedForcedOnlyEmpty)],
                     confidences: (0.95, 0.98, 0.90),
                     reviews: vec![ReviewReason::CommentaryDetected],
-                    path: Some(format!("{show} - S03E16 - Business School.mkv")),
+                    path: Some(file(0, "S03E16")),
                     disposition: Disposition::NeedsReview,
                 }),
             ),
@@ -606,7 +616,7 @@ fn the_office(disc: &Disc) -> RecordingExpectation {
                     subtitles_dropped: vec![(6, SubtitleDrop::DerivedForcedOnlyEmpty)],
                     confidences: (0.95, 0.98, 0.90),
                     reviews: Vec::new(),
-                    path: Some(format!("{show} - S03E15 - Phyllis' Wedding.mkv")),
+                    path: Some(file(1, "S03E15")),
                     disposition: Disposition::AutoFile,
                 }),
             ),
@@ -628,7 +638,7 @@ fn the_office(disc: &Disc) -> RecordingExpectation {
                     subtitles_dropped: vec![(5, SubtitleDrop::DerivedForcedOnlyEmpty)],
                     confidences: (0.95, 0.98, 0.90),
                     reviews: Vec::new(),
-                    path: Some(format!("{show} - S03E12-E13 - Traveling SalesmenThe Return.mkv")),
+                    path: Some(file(3, "S03E12-E13")),
                     disposition: Disposition::AutoFile,
                 }),
             ),
@@ -824,7 +834,8 @@ fn short_circuit_2_1988_dvd() {
 fn the_office_2005_s3d3_bluray() {
     let slug = "the-office-2005-s3d3-bluray";
     let Some(disc) = recorded_disc(slug) else { return };
-    check_recording(slug, &the_office(&disc));
+    let Ok(evidence) = resolve_evidence(&context(), None) else { return };
+    check_recording(slug, &the_office(&disc, &episode_names(&evidence.join(slug))));
 }
 
 #[test]

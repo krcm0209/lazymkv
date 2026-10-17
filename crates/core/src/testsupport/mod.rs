@@ -689,7 +689,7 @@ mod builder_tests {
             "The Office",
             "2005-03-24",
             "en",
-            &[(3, &[(15, "Phyllis' Wedding", Some(22)), (16, "Business School", None)]), (0, &[])],
+            &[(3, &[(15, "Example Fifteen", Some(22)), (16, "Example Sixteen", None)]), (0, &[])],
         );
         assert_eq!(
             text,
@@ -697,8 +697,8 @@ mod builder_tests {
                 r#"{"id":2316,"name":"The Office","original_name":"The Office","first_air_date":"2005-03-24","#,
                 r#""original_language":"en","external_ids":{"imdb_id":"tt0002316","tvdb_id":102316},"#,
                 r#""seasons":[{"season_number":3,"episode_count":2,"episodes":["#,
-                r#"{"episode_number":15,"name":"Phyllis' Wedding","runtime":22},"#,
-                r#"{"episode_number":16,"name":"Business School","runtime":null}]},"#,
+                r#"{"episode_number":15,"name":"Example Fifteen","runtime":22},"#,
+                r#"{"episode_number":16,"name":"Example Sixteen","runtime":null}]},"#,
                 r#"{"season_number":0,"episode_count":0,"episodes":[]}]}"#,
             )
         );

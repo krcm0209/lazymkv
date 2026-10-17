@@ -403,6 +403,10 @@ pub fn object_audio(ffprobe_profile: Option<&str>) -> Option<ObjectAudio>;
 /// AC-3, HDMV PGS, MPEG-1/2, VobSub, SubRip/SRT and AVC; the others are mkvmerge's documented spellings, not yet seen.
 /// Spec 6.2 step 7. Def: T1. Use: T12.
 pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str];
+/// Attribute 41, MakeMKV's output codec short name (apdefs.h ap_iaOutputCodecShort), as a Codec: the attribute 6
+/// spellings ("FLAC", "LPCM", "DD", "E-AC3", "Text" and the others) give their family, anything else is read as a codec
+/// ID. Spec 6.2 step 7, 8.6 "Codecs". Def: final review (A1). Use: T12.
+pub fn output_codec(short: &str) -> Codec;
 ```
 
 ### `core::tracks` (`tracks/mod.rs`, Task 1; Tasks 8, 9 and 11 add `pub mod audio;`, `pub mod subtitle;`, `pub mod layout;`)
@@ -1323,14 +1327,16 @@ pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>);
 /// Spec 8.5 "pre-assigned to episodes by runtime as a suggestion": the groups' representatives in title order, assigned
 /// from episode `start`: each takes the next episode, or the next two when its duration is within TV_RUNTIME_TOLERANCE of
 /// the sum of the next two episodes' runtimes and not within it of the next one's; an episode without a runtime takes one
-/// title. Returns (title, episode numbers) pairs. Def: T6. Use: T6.
-pub fn suggest_by_runtime(groups: &[&Group], episodes: &[TmdbEpisode], start: u32) -> Vec<(u32, Vec<u32>)>;
+/// title. Episodes `session` already assigned are skipped, as `suggest` skips them (a two-episode title needs both free;
+/// the final review). Returns (title, episode numbers) pairs. Def: T6. Use: T6.
+pub fn suggest_by_runtime(groups: &[&Group], episodes: &[TmdbEpisode], start: u32, session: Option<&SeasonSession>) -> Vec<(u32, Vec<u32>)>;
 /// 8.5 second bullet: 0.60 with tv_unmapped; the episode-length groups' representatives are suggested from `start` (the
 /// session's next unassigned episode, or 1), through `suggest_by_runtime` when `episodes` (the season's TMDb episodes) are
 /// given, else one episode each in title order; `suggested: true`; in `season` (None when no season was parsed and no
-/// session was found). Episode numbers run on from `start` without skipping episodes the session assigned later in the
-/// season; review confirms every suggestion (0.60, tv_unmapped). Def: T6. Use: T7.
-pub fn unmapped(groups: &[Group], season: Option<u32>, start: u32, episodes: Option<&TmdbSeason>) -> TvPlan;
+/// session was found). Episode numbers run on from `start`, skipping the episodes `session` (the season session found for
+/// the disc) already assigned, as `suggest` does (8.5; the final review); review confirms every suggestion (0.60,
+/// tv_unmapped). Def: T6. Use: T7.
+pub fn unmapped(groups: &[Group], season: Option<u32>, start: u32, episodes: Option<&TmdbSeason>, session: Option<&SeasonSession>) -> TvPlan;
 
 /// One assigned episode of a season session: the episode number and the disc fingerprint and scan title it was assigned
 /// from. Spec 8.5. Def: T6. Use: T6, T7.
@@ -1587,7 +1593,9 @@ pub struct PlanInputs<'a> {
 /// and set title confidence to 1.00, and Set identity or a remembered identity sets identity confidence to 1.00;
 /// `overrides.season` fills a planned episode whose season is None (else the disc name's season does); the mode; reviews
 /// and notes gathered (8.8: identity and title confidence are fixed here; a search identity, TmdbOne or TmdbSeveral, whose
-/// kind is not the planned kind adds identity_ambiguous, a provisional rule left to the owner). `Plan.titles` order
+/// kind is not the planned kind adds identity_ambiguous and, unless assigned titles cover the titles, holds the title
+/// confidence at 0.60 with title_ambiguous so whole-disc copy mode applies (6.3, 8.8 "Limits of D1"), a provisional rule
+/// left to the owner; the final review's ruling C2 amends settled point 12). `Plan.titles` order
 /// (which fixes the keys' NN through `title_key(position, ..)`): movies in feature order (database index order for rule
 /// 1, each cut's lowest title number for rule 2, group order for rule 3), TV by (season, first episode) with season None
 /// last in title order. The identity is confirmed when its step is Reviewed, Remembered, DiscdbBoth or DiscdbOne (8.5
@@ -1902,8 +1910,13 @@ pub struct SubtitleDecision {
 /// file (not in facts.removed) has an override (other-language streams are dropped by 8.7's first sentence; the case
 /// unchanged). A title with one English stream and no events keeps it as Regular "English" (row 14 (b) fallback), case
 /// OneFull; when that stream is flagged forced (4096 without 2048) it is kept as Forced by its flag, case
-/// FlagsOrDescriptions. Def: T10. Use: T13, T16, T18.
+/// FlagsOrDescriptions. The text rule's decisions are used only where 6.4 step 10 runs (`step10_runs`; the final
+/// review's ruling on E2, I1 and X1). Def: T10. Use: T13, T16, T18.
 pub fn decide_subtitles(title: &Title, facts: &SubtitleFacts<'_>, settings: &Settings) -> SubtitleDecision;
+/// 6.4 step 10 runs: two or more English or no-language subtitle streams in `title` (the title as the rip's file holds
+/// it) that are not in `removed`, forced-only streams and closed captions included. The one copy of the rule. Spec 6.4
+/// step 10, 8.7 "Text". Def: final review. Use: T10, T16, phase 2.
+pub fn step10_runs(title: &Title, removed: &BTreeSet<u32>) -> bool;
 /// 8.7 "Text": the streams where a text decision differs from the counts, for any English or no-language stream: its
 /// role (Regular, Sdh, Forced, Drop) differs from the kept role (or kept against a Drop, or dropped against a kept
 /// role). SetAside never disagrees; Keep, and any verdict carrying the text rule's review, always disagree
@@ -2000,9 +2013,14 @@ pub struct ExpectedTrack { pub stream: u32, pub kind: StreamKind, pub codecs: Ve
 
 /// The title's streams in `selection` (selected_streams' result) without those `removed` (MSG:4047 indices counted over the
 /// selection from 0), with a text-converted subtitle stream (attribute 41 "Text") placed right after the audio streams
-/// (`caption_first`). Codecs: `codec::mkvmerge_names(codec)`, ["SubRip/SRT"] for a text-converted one; language attribute 3
-/// (None on video); flags carried (9.5's MakeMKV-only flags onto the output track). Def: T12. Use: T12, T16.
+/// (`caption_first`). Codecs: `codec::mkvmerge_names(codec)`, ["SubRip/SRT"] for a text-converted one, and for another
+/// attribute 41 (MakeMKV's output codec short name) `codec::output_codec`'s names, or the attribute 41 text itself when
+/// the table does not know it (the final review); language attribute 3 (None on video); flags carried (9.5's
+/// MakeMKV-only flags onto the output track). Def: T12. Use: T12, T16.
 pub fn expected_tracks(title: &Title, selection: &[u32], removed: &BTreeSet<i64>) -> Vec<ExpectedTrack>;
+/// `title` with only the streams of `selection`: the one narrowing decide's decision section and retune --subtitles share
+/// before 8.7 (the final review). Def: final review. Use: T16, T18.
+pub fn rip_title(title: &Title, selection: &[u32]) -> Title;
 /// Moves every text_converted track to right after the last audio track (6.2 step 7 "Order"). Def: T12. Use: T12.
 pub fn caption_first(tracks: Vec<ExpectedTrack>) -> Vec<ExpectedTrack>;
 
@@ -2154,8 +2172,13 @@ pub fn track_confidence(audio: &AudioDecision, subtitles: &SubtitleDecision) -> 
 /// any title, else every planned title under its planned role (Err for an episode without a season or episode numbers,
 /// and for a feature without an edition in a plan of two or more features: an unnamed cut or structural rival the owner
 /// must name first, 8.4), every kept and dropped audio and subtitle stream of `decisions` as an override entry keyed by
-/// `remembered::signature`. Def: T13. Use: phase 2.
+/// `remembered::signature`, a signature stored only when every decision of the job that holds it decided it the same way
+/// (left out otherwise; the final review's ruling on C4 and G1). Def: T13. Use: phase 2.
 pub fn remember(fingerprint: &str, disc: &Disc, plan: &Plan, decisions: &[FileDecision], overrides: &Overrides) -> Result<Remembered, String>;
+/// The job-level step after every title is decided: each decision whose final path another decision of the same job also
+/// builds (compared ignoring case and separators) gets `path_collision` and NeedsReview, whatever `overrides.collision`
+/// says (spec 7, 8.9; the final review's ruling on C3 and G3; Open point 40). Def: final review. Use: T16, phase 2.
+pub fn same_path_reviews(decisions: &mut [FileDecision]);
 ```
 
 ### `core::job` (Task 14)
@@ -2250,9 +2273,10 @@ pub enum Event {
     HoldForReview { reasons: Vec<ReviewReason> },
     FilePhaseSlot,
     ProbeDone, ProbeFailed { failure: Failure },
-    /// 6.4 step 11's decision, with 8.8's disposition and review reasons. `has_path` is true when the decision built a
-    /// final path (phase 2 sets it from `FileDecision.path.is_some()`); false is Task 13's Open point 38 case, where
-    /// `decide` gives NeedsReview whenever the path is None.
+    /// 6.4 step 11's decision for the whole job, with 8.8's disposition and review reasons: phase 2 builds it with
+    /// `decision_done` over every FileDecision of the job (after `decision::same_path_reviews`), never from one title's.
+    /// `has_path` is true only when every title built a final path; false is Task 13's Open point 38 case, where
+    /// `decide` gives NeedsReview whenever a path is None.
     DecisionDone { disposition: Disposition, reasons: Vec<ReviewReason>, has_path: bool },
     DecisionFailed { failure: Failure },
     RemuxDone, RemuxFailed { failure: Failure },
@@ -2265,6 +2289,7 @@ pub enum Event {
     /// Spec 11 Approve. Phase 2 delivers it only once spec 6's file-phase slot is free for this job, as FilePhaseSlot is for a
     /// Direct job in Ejected; the job holds the slot until it reaches Filed, NeedsReview, Failed or Discarded.
     ReviewApproved { overrides: Overrides },
+    /// Spec 11 Discard: from NeedsReview and from Failed of every class (the final review's ruling on H7).
     ReviewDiscarded,
     /// Spec 11 Retry. For a job that failed in its file phase, phase 2 delivers it only once spec 6's file-phase slot is free
     /// for this job, as for ReviewApproved.
@@ -2326,11 +2351,15 @@ pub fn job_id(fingerprint: &str, earlier: &[&str]) -> String;
 pub enum JobLookup { Resume(String), AlreadyRipped(String), NewJob }
 /// Spec 6.1 step 2 over the earlier jobs of this fingerprint as (job id, state, rip again armed); the one with the highest n
 /// decides: Resume when it has not finished its disc phase (a disc-phase state, or a waiting state returning to one) or is
-/// Failed { MediaReadError }; AlreadyRipped when it is past the disc phase (a file-phase state, NeedsReview, Filed, a
-/// waiting state returning to a file-phase state, or Failed with another class from a file-phase state) and not armed;
-/// NewJob otherwise (armed, Discarded, Failed with another class from a disc-phase state, or no earlier job). Def: T14.
-/// Use: phase 2.
+/// Failed { MediaReadError } from a disc-phase state; AlreadyRipped when it is past the disc phase (a file-phase state,
+/// NeedsReview, Filed, a waiting state returning to a file-phase state, or Failed of any class from a file-phase state)
+/// and not armed; NewJob otherwise (armed, Discarded, Failed with another class from a disc-phase state, or no earlier
+/// job). Def: T14. Use: phase 2.
 pub fn job_lookup(earlier: &[(String, State, bool)]) -> JobLookup;
+/// The job's DecisionDone from the FileDecisions of all its titles: NeedsReview when any title's is (or there is none),
+/// the reasons' sorted union, `has_path` only when every title built a path (6.4 step 12, Open points 38 and 39; the final
+/// review's ruling on H5). Def: final review. Use: phase 2.
+pub fn decision_done(decisions: &[FileDecision]) -> Event;
 ```
 
 The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting state's `return_to`, with `resume(return_to, true)`'s actions followed by `Notify { Resumed }`; phase 2 performs a disc-phase action only with the job's disc in a drive, and when the disc is gone it performs none and feeds `MediaRemoved`, which gives `[WaitForDisc]` (it does not feed the media removal its own `Eject` causes). "Outcome" means: `failure_outcome(failure, state)`, with `[Notify { Failed { class } }]` for a Failed state, and for a waiting state `[Notify { Waiting { reason } }]` preceded by `StartTimer { minutes: NETWORK_RETRY_MIN }` for AwaitingNetwork or `StartTimer { minutes: LOOKUP_RETRY_MIN }` for AwaitingLookup.
@@ -2351,8 +2380,8 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `RipVerified { after_copy: false }` | `EjectFailed` | `Ejected { after_copy: false }` | `[Notify { EjectFailed }]` (the disc phase is over; the disc is removed by hand, 10.3, 12) |
 | `Ejected { after_copy: false }` | `FilePhaseSlot` | `Inspecting` | `[Probe]` |
 | `Inspecting` | `ProbeDone` | `Inspecting` | `[ExtractSubtitleEvidence, Decide]` (performed in order) |
-| `Inspecting` | `DecisionDone { AutoFile, .. }` | `Decided { approved: false }` | `[CheckSpace]` |
-| `Inspecting` | `DecisionDone { NeedsReview, reasons }` (10.1 "Decided, review reason or low confidence") | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
+| `Inspecting` | `DecisionDone { AutoFile, has_path: true, .. }` | `Decided { approved: false }` | `[CheckSpace]` |
+| `Inspecting` | `DecisionDone { NeedsReview, reasons }` (10.1 "Decided, review reason or low confidence"), or any `DecisionDone` with `has_path` false (a job with no final path is never AutoFile, the final review's ruling) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
 | `Decided { .. }` | `SpaceOk` | `Remuxing` | `[Remux]` |
 | `Remuxing` | `RemuxDone` | `Remuxing` | `[VerifyFile]` |
 | `Remuxing` | `FileVerified` | `Verified` | `[File]` |
@@ -2374,9 +2403,9 @@ The reducer table (`reduce`, spec 10.1 and 10.2). "Return" means: the waiting st
 | `NeedsReview { DispositionGate }` | `ReviewApproved { overrides }` | `Decided { approved: true }` | `[Decide]` (with the owner's overrides) |
 | `Decided { approved: true }` | `DecisionDone { .. }` whose reasons include `path_collision`, or whose `has_path` is false (the decision built no final path; Open point 38); see spec 7 (a file the job did not create is never overwritten) and 6.4 step 12 (Open point 39) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
 | `Decided { approved: true }` | `DecisionDone { .. }` for every other decision (any disposition, including `NeedsReview` for a confidence below `auto_threshold`, and any other review reason: the owner approved them, spec 11, 8.8) | unchanged | `[CheckSpace]` |
-| `Decided { approved: false }` | `DecisionDone { AutoFile, .. }` (the decision made again after a restart, a Return or a Retry of an auto-filed job) | unchanged | `[CheckSpace]` |
-| `Decided { approved: false }` | `DecisionDone { NeedsReview, reasons }` (6.4 step 12: an auto-filed job whose decision, made again, now needs review is gated again) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
-| `NeedsReview { .. }` | `ReviewDiscarded` | `Discarded` | `[DeleteJobData]` |
+| `Decided { approved: false }` | `DecisionDone { AutoFile, has_path: true, .. }` (the decision made again after a restart, a Return or a Retry of an auto-filed job) | unchanged | `[CheckSpace]` |
+| `Decided { approved: false }` | `DecisionDone { NeedsReview, reasons }`, or any `DecisionDone` with `has_path` false (6.4 step 12: an auto-filed job whose decision, made again, now needs review is gated again; a job with no final path is never AutoFile, the final review's ruling) | `NeedsReview { DispositionGate }` | `[Notify { NeedsReview { reasons } }]` |
+| `NeedsReview { .. }`, `Failed { .. }` | `ReviewDiscarded` | `Discarded` | `[DeleteJobData]` (from Failed by the final review's ruling on H7: spec 11's Discard frees a failed job's data, which spec 7 never deletes automatically; 10.1's table lists only NeedsReview) |
 | `Filed` | `ReFinalise` | `Decided { approved: true }` | `[Decide]` |
 | `Filed`, `NeedsReview { .. }`, any file-phase state, `Failed { from, .. }` with `from` a file-phase state, any waiting state whose `return_to` is a file-phase state | `RipAgain` | unchanged | `[ArmRipAgain]` |
 | any disc- or file-phase state | `ShareLost` | `AwaitingShare { return_to: state }` | `[Notify { Waiting { Share } }]` |
@@ -2627,7 +2656,7 @@ into the port spec's section 3.4 `decide` row.
 26. `lazymkv-dev plan <dir>/discNN.txt` (a pinned log, `PlanSource::ScanFile`) takes its fingerprint from the log's HSH lines, its TheDiscDB answer from `corpus/thediscdb-api/dischash-<fingerprint>.json` when present, else from `discNN.json` with the same stem beside it, and takes no TMDb answer (identity then stops at step 3 with TheDiscDB's TMDb ID, or at step 6 when only the pinned form, without media, is found); a directory argument is always a recording (scan.txt).
 27. `Wanted.original_is_english` is true when TMDb's code is absent, "en", "xx" or not in the ISO639 table; `wanted_languages(None)` therefore yields English only and `original_language_missing` is never raised without a known original language.
 28. On a DVD, TheDiscDB's `source_file` is the DVD title number (attribute 24), compared as numbers through `disc::TitleSource`; pinned by `a_dvd_title_matches_thediscdb_by_its_attribute_24` (Knowing) and `firefly_disc_2_maps_title_5_to_episode_7` (Firefly disc 2's `"11"`).
-29. A plain subtitle description is the `Dialogue` kind: one containing "subtitle", or one equal after trimming and case-folding to the track's own language name ("English", "ENglish"); provisional, since 8.1's last bullet names no such word. 8.7's "the one TheDiscDB describes as subtitles or SDH" is the group holding a track whose aligned description is Dialogue or Sdh.
+29. A plain subtitle description is the `Dialogue` kind: one containing "subtitle" (unless it also names commentary: "Commentary subtitles" is `Commentary` only, the final review's B2), or one equal after trimming and case-folding to the track's own language name ("English", "ENglish"); provisional, since 8.1's last bullet names no such word. 8.7's "the one TheDiscDB describes as subtitles or SDH" is the group holding a track whose aligned description is Dialogue or Sdh.
 30. Verification lowers no confidence. A failed or read-error rip holds the job through its review reason (verify_failed, read_errors), which has the same effect on the disposition as a confidence below auto_threshold (8.8).
 31. 8.3 rule 2 runs before identification with English only and again with the identity's original language when it is not English (Review Focus 6); only the variant within a cut can change between the passes.
 32. The owner's review decisions are `remembered::Overrides`; each covers one confidence (Set identity the identity, Assign titles the title, Override tracks every stream it names) and sets it to 1.00; a later re-plan (`PlanInputs.overrides`) and the decision (`DecisionInputs.overrides`) both apply them, so a job approved at the disposition gate (`[Decide]` in the reducer) needs no re-plan. An assigned episode carries no name of its own in both the decision and the re-plan, so both file it under TMDb's episode name.
@@ -2638,6 +2667,7 @@ into the port spec's section 3.4 `decide` row.
 37. `verify_final` checks tracks (type, language, name, four flags) and duration only; `Layout` carries no chapter count, codec or channels, so a remux that drops chapters passes (6.4 step 14 asks for an exact match with the decision; 8.10 says "Chapters are kept"). Phase 2's remux verification adds the staged file's chapter count (from `verify_rip`'s `file_chapters`) as an input. Recorded as a known limitation in Task 12's settled point 7.
 38. A FileDecision without a path is NeedsReview even with no review reason; 8.8's closed set has no reason for it, so Task 14's NeedsReview notification may carry an empty list until the owner adds one. Task 13's `decide` builds no path without a TMDb record or identity, without the library root of the role (`movies_root`, `tv_root`; both None in spec 14's defaults), without a video height for a feature, when the record's kind does not match the filed role (a feature needs a movie record, an episode a show record: TMDb numbers the two kinds separately, 8.1), or for an episode without a season or episode number (which alone raises `tv_unmapped`); pinned by Task 13's `without_a_movies_root_no_path_is_built_and_the_job_is_held_without_a_review_reason` and `a_role_whose_kind_differs_from_the_records_builds_no_path`.
 39. `LibraryFacts.path_collision` is one fact about the plain final path (no copy label); phase 2 computes it before `decide`. Under the owner's Resolve collision "keep both", `decide` files to the copy-labelled path (` 2` after the resolution label or the episode code) and raises no `path_collision`, so phase 2 also checks that labelled path before filing: when it is taken too (a third copy), the engine does not file and holds the job with `path_collision` (spec 7: lazymkv never overwrites a file it did not create, and "a path collision with any other file adds the review reason `path_collision`"). A second `LibraryFacts` field for the labelled path (and a higher copy number) is left to the plan's owner. Recorded by Task 13's settled choice 5.
+40. Two titles of one job that build the same final path (two assigned features, a Feature beside a "Theatrical Cut", structural rivals approved without names, two titles planned as one episode) are held by the job-level step `decision::same_path_reviews`, which phase 2's engine runs over every FileDecision of the job before it builds the job's `DecisionDone` with `job::decision_done` and before the disposition gate: each such decision gets `path_collision` and NeedsReview, whatever Resolve collision says (Keep both and Replace answer a file already in the library). The final review's ruling on C3 and G3; Review Focus 8's plan-time guard stays as it is. Pinned by Task 13's `two_assigned_features_on_one_path_are_held_with_path_collision` and its neighbours.
 
 ## Expected plans (Tasks 7 and 15)
 
@@ -11452,13 +11482,13 @@ and replace it with
     #[test]
     fn match_titles_never_uses_the_title_numbers() {
         let scan = scan_disc(&[
-            (0, vec![(9, "0:21:49"), (11, "4686133248"), (16, "00005.mpls"), (26, "7")]),
-            (7, vec![(9, "0:21:18"), (11, "5168762880"), (16, "00006.mpls"), (26, "8")]),
+            (0, vec![(9, "0:21:00"), (11, "1000000000"), (16, "00011.mpls"), (26, "21")]),
+            (7, vec![(9, "0:22:00"), (11, "2000000000"), (16, "00012.mpls"), (26, "22")]),
         ]);
         let record = DiscDbRecord {
             titles: vec![
-                db_title(0, Some("00006.mpls"), "8", "0:21:18", Some(5168762880)),
-                db_title(7, Some("00009.mpls"), "9", "0:29:35", Some(7141834752)),
+                db_title(0, Some("00012.mpls"), "22", "0:22:00", Some(2000000000)),
+                db_title(7, Some("00019.mpls"), "29", "0:30:00", Some(3000000000)),
             ],
             ..bare_record()
         };
@@ -23129,7 +23159,7 @@ Where this task settles what the spec and the interfaces leave open (each choice
 9. **Space needs** are computed in integer arithmetic (`bytes * (100 + percent)`, divided by 100 rounding up, at most `u64::MAX`), so a 67,757,930,496-byte title needs exactly 71,145,827,021 bytes.
 10. **Synthetic TMDb answers.** No TMDb search answer or full record is recorded anywhere; the tests build them with Task 2's `search_json`, `tmdb_movie_json` and `tmdb_tv_json`, which follow TMDb's documented `/search/multi`, `/movie/{id}` and `/tv/{id}` shapes. Phase 2's client verifies the shapes live.
 11. **A play-all title on a disc TheDiscDB calls a movie.** 8.2 says "TheDiscDB states the kind when it knows the disc", so 8.3 rule 3.1's "treat the disc as TV" applies only when the kind came from structure, a season marker or the movie default. When TheDiscDB's record says Movie but rule 1 gives no plan (its MainMovie does not reconcile, Open point 4, or it marks none) and rule 3 finds a play-all title (an extras play-all, as on Smile and Chernobyl, Task 5 point 9), the disc stays a movie and rule 3 runs again without the play-all groups, one at a time until it plans; the sentence `8.3 rule 3.1: group <key> is a play-all title, but TheDiscDB states the disc is a movie (8.2)` records it. Pinned by `a_play_all_title_on_a_disc_thediscdb_calls_a_movie_leaves_it_a_movie`.
-12. **A search identity of the other kind than the planned disc** (open: the spec does not settle it; recorded for the owner). 8.1's runtime check is the plausible result's own kind's (Task 4), so a one-episode disc of a show with feature-length episodes (one group of about 100 minutes, no season marker) is planned as a movie (8.2's default; rule 3 at 0.85) while TMDb's one plausible result, a show, passes its TV check at step 4 (0.90). Nothing would hold that plan: mode Direct and no review reason, and Task 13 could file it on a movie path. Until the owner rules, D1 decides (hold the disc when unsure): when the step is TmdbOne or TmdbSeveral and the identity's kind is not the planned kind (after any assigned titles), `plan` adds `identity_ambiguous` and the sentence `the TMDb identity is TV but the disc is planned as a movie` (or the reverse). A TheDiscDB, remembered or reviewed identity is not checked: TheDiscDB states the kind (8.2), and the owner chose the other two. Pinned by `a_search_identity_of_the_other_kind_than_the_planned_disc_is_held`.
+12. **A search identity of the other kind than the planned disc** (open: the spec does not settle it; recorded for the owner). 8.1's runtime check is the plausible result's own kind's (Task 4), so a one-episode disc of a show with feature-length episodes (one group of about 100 minutes, no season marker) is planned as a movie (8.2's default; rule 3 at 0.85) while TMDb's one plausible result, a show, passes its TV check at step 4 (0.90). Nothing would hold that plan: mode Direct and no review reason, and Task 13 could file it on a movie path. Until the owner rules, D1 decides (hold the disc when unsure): when the step is TmdbOne or TmdbSeveral and the identity's kind is not the planned kind (after any assigned titles), `plan` adds `identity_ambiguous` and the sentence `the TMDb identity is TV but the disc is planned as a movie` (or the reverse). A TheDiscDB, remembered or reviewed identity is not checked: TheDiscDB states the kind (8.2), and the owner chose the other two. Pinned by `a_search_identity_of_the_other_kind_than_the_planned_disc_is_held`. Amended by the final review's ruling on C2: the planned titles may be the wrong ones (a TV disc planned as a movie keeps one feature, and a Direct rip would leave the other episodes on the disc), so unless assigned titles cover them, `plan` also holds the title confidence at 0.60 with `title_ambiguous` and the disc is copied whole (6.3, 8.8 "Limits of D1"); pinned by `firefly_disc_1_without_thediscdb_and_a_tv_search_identity_is_copied_whole`.
 
 The spec rows this task's tests cover, one test or more each: 6.1 step 5's order (rule 2 before and after the TMDb match, rule 4 after it); spec 5's title key on a Blu-ray, on a DVD and without a source; section 7's three space needs; 8.8's planning-time confidences: identity 1.00 (Remembered, Reviewed), 0.99, 0.95, 0.90, 0.84, 0.50, 0; title 1.00, 0.98 (database and TV map), 0.90 (one cut, two recognised cuts), 0.85, 0.60 (unnamed cut, multiple features, rule 4, TV unmapped); the review reasons `identity_unknown`, `identity_ambiguous` (cap, several results, and a search identity of the other kind than the planned disc), `unnamed_cut`, `multiple_features`, `title_ambiguous`, `tv_unmapped`; the note `label_rule_unavailable` and its absence on a DVD, with Java and on a disc made TV before rule 2; 8.3 rule 3.1's play-all (a movie disc made TV, the play-all title never suggested, every play-all group dropped, and a disc TheDiscDB calls a movie kept a movie); the mode at and below `auto_threshold`; spec 11's Set identity (including attaching an unmapped disc to its season session), Assign titles (features, cuts, episodes, ignored, and the kind they change) and Remember (including a decision that matches only some of its titles); 8.5's map, suggestions, sessions (new, existing, single open, several open, none, and none for a mapped disc whose identity is not confirmed) and episode order. Every setting `plan` reads directly or through the rules it calls is exercised at its default and at one other value: `minlength_s` (120, 60), `feature_min_minutes` (45, 48), `auto_threshold` (0.85, 0.90), `tmdb_only_autofile` (on, off).
 
@@ -39514,7 +39544,8 @@ fn the_office_2005_s3d3_bluray() {
     assert_eq!((t3.title.number, t3.selection.clone()), (3, vec![0, 1, 2, 3, 4, 5]));
     assert_verified("t3-all-tracks", &t3.report);
     assert_eq!(t3.report.pairs, pairs(&[0, 1, 2, 3, 4]));
-    assert_eq!(t3.report.expected_seconds, 2564.0);
+    // The docs publish no duration for this title either (ruling RP21): the expected duration is the scan's.
+    assert_eq!(t3.report.expected_seconds, f64::from(t3.title.seconds.unwrap()));
     assert_eq!(subs_map(&rec, "t3-all-tracks", &t3.report), BTreeMap::from([(0, 4)]));
     assert_eq!(event_counts(&rec, "t3-all-tracks", &t3.report, default), BTreeMap::from([(4, 710)]));
     assert_eq!(event_counts(&rec, "t3-all-tracks", &t3.report, 0), BTreeMap::from([(4, 1420)]));

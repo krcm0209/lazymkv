@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn a_season_marker_in_the_disc_name_makes_a_tv_disc() {
-        let office = disc_name(None, Some("THE OFFICE S3D3")).expect("a name");
+        let office = disc_name(None, Some("EXAMPLE SHOW S3D3")).expect("a name");
         assert!(office.season_marker);
         let john_wick = groups_of(&pinned(JOHN_WICK_UHD));
         assert_eq!(disc_kind(None, &john_wick, Some(&office)), (Kind::Tv, KindSource::SeasonMarker));
