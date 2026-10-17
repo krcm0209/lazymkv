@@ -2,7 +2,7 @@
 //! failure outcomes, the resume rules, one test per row of the reducer table (Shared interfaces, `core::job`), the job
 //! ID and the job lookup. Every input is built here; nothing is read from a file.
 
-use crate::remembered::{AudioOverride, AudioTrackOverride, TitleOverrideEntry, TitleRole};
+use crate::remembered::{AudioOverride, AudioTrackOverride, Collision, TitleOverrideEntry, TitleRole};
 
 use super::*;
 
@@ -1277,7 +1277,7 @@ fn an_approved_job_walks_from_the_gate_through_the_remux_to_filed() {
         State::NeedsReview { held: Held::DispositionGate },
         &[
             Event::ReviewApproved { overrides: Overrides::default() },
-            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::PathCollision] },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors] },
             Event::SpaceOk,
             Event::RemuxDone,
             Event::FileVerified,
@@ -1294,6 +1294,75 @@ fn an_approved_job_walks_from_the_gate_through_the_remux_to_filed() {
             vec![Action::VerifyFile],
             vec![Action::File],
             vec![notify(NotifyEvent::Filed)],
+        ]
+    );
+}
+
+#[test]
+fn an_approved_job_whose_decision_made_again_raises_path_collision_is_held_at_the_gate() {
+    // Spec 7: the job never overwrites a file it did not create; 6.4 step 12 holds it again, with the same notification.
+    let approved = State::Decided { approved: true };
+    for reasons in [
+        vec![ReviewReason::PathCollision],
+        vec![ReviewReason::TvUnmapped, ReviewReason::PathCollision, ReviewReason::ReadErrors],
+    ] {
+        assert_eq!(
+            step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone() }),
+            (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
+        );
+    }
+}
+
+#[test]
+fn an_approved_job_whose_decision_made_again_has_no_final_path_is_held_at_the_gate() {
+    // Open point 38: a decision without a path is NeedsReview with no review reason (the event carries no other marker).
+    let approved = State::Decided { approved: true };
+    assert_eq!(
+        step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: Vec::new() }),
+        (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons: Vec::new() })])
+    );
+}
+
+#[test]
+fn an_approved_job_goes_on_for_every_review_reason_but_path_collision() {
+    // 8.8: the owner approved the reasons the job carried; only path_collision (and a missing path) still blocks the file.
+    let approved = State::Decided { approved: true };
+    for reason in ReviewReason::ALL.into_iter().filter(|reason| *reason != ReviewReason::PathCollision) {
+        assert_eq!(
+            step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![reason] }),
+            (approved.clone(), vec![Action::CheckSpace]),
+            "{reason:?}"
+        );
+    }
+    assert_eq!(
+        step(&approved, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new() }),
+        (approved.clone(), vec![Action::CheckSpace])
+    );
+}
+
+#[test]
+fn a_re_finalised_job_whose_recorded_file_no_longer_matches_is_held_until_the_owner_resolves_it() {
+    // Spec 7: a same-path decision after a re-finalise raises path_collision; Open point 39: the engine does not file it.
+    let reasons = vec![ReviewReason::PathCollision];
+    let (end, actions) = walk(
+        State::Filed,
+        &[
+            Event::ReFinalise,
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone() },
+            Event::ReviewApproved {
+                overrides: Overrides { collision: Some(Collision::KeepBoth), ..Overrides::default() },
+            },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors] },
+        ],
+    );
+    assert_eq!(end, State::Decided { approved: true });
+    assert_eq!(
+        actions,
+        [
+            vec![Action::Decide],
+            vec![notify(NotifyEvent::NeedsReview { reasons })],
+            vec![Action::Decide],
+            vec![Action::CheckSpace],
         ]
     );
 }
