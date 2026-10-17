@@ -2,7 +2,9 @@
 //! function of the scan, the probes, the database answers and settings." `decide` runs the audio rule (8.6) and the
 //! subtitle rule (8.7) with the owner's Override tracks (spec 11), lays the tracks out (8.10), builds the final path
 //! (8.9, with spec 7's `path_collision` and spec 11's Resolve collision), fixes the three confidences of 8.8 and the
-//! disposition; `remember` is spec 11's Remember: a reviewed job's decisions as a remembered-decisions file (spec 5).
+//! disposition; `same_path_reviews` is the job-level step that holds every title of a job whose final path another
+//! title of the same job also builds (spec 7, 8.9's `path_collision`); `remember` is spec 11's Remember: a reviewed
+//! job's decisions as a remembered-decisions file (spec 5).
 //! Verification lowers no confidence: a failed or read-error rip holds the job through its review reason (6.2 step
 //! 7, Open point 30). Written from the spec (RP20); used by `lazymkv-dev decide` (Task 16), the job reducer's
 //! `DecisionDone` event (Task 14, `Disposition`) and phase 2's engine.
@@ -20,7 +22,7 @@ use crate::remembered::{
     SubtitleOverride, SubtitleOverrideEntry, TitleRole,
 };
 use crate::review::{sorted_unique, Noted, ReviewReason};
-use crate::settings::Settings;
+use crate::settings::{path_inside, Settings};
 use crate::tracks::audio::{decide_audio, AudioDecision, AudioFacts};
 use crate::tracks::layout::{layout, Layout};
 use crate::tracks::subtitle::{decide_subtitles, SubtitleDecision, SubtitleFacts};
@@ -311,6 +313,39 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
     })
 }
 
+/// The job-level step after every title of one job is decided (6.4 step 11, before the disposition gate of 6.4 step
+/// 12): each decision whose final path another decision of the same job also builds gets `path_collision` (its reviews
+/// sorted and unique again) and NeedsReview. Paths are compared whole and case-insensitively, separators and a trailing
+/// separator aside (`settings::path_inside` both ways), since the library roots are Windows shares. Applied whatever
+/// `overrides.collision` says: spec 11's Keep both and Replace resolve a collision with a file already in the library,
+/// never two titles of one job; the owner settles a same-job clash with Assign titles (naming the cuts, D2, 8.4), and
+/// the job reducer keeps a job held while `path_collision` is present, approved or not. A decision without a path is
+/// left as it is (it is NeedsReview already, Open point 38). Covers every way two titles reach one path: two assigned
+/// features or a Feature beside a "Theatrical Cut", structural rivals approved without names, two cut names that share
+/// their first 32 characters, two titles planned as one episode. Spec 7 ("Path collisions add `path_collision`"), 8.9
+/// ("A second copy at the same resolution and edition is a `path_collision`"), D1. Def: final review (C3, G3). Use:
+/// `lazymkv-dev decide`, phase 2 (before the job's `DecisionDone`, `job::decision_done`).
+pub fn same_path_reviews(decisions: &mut [FileDecision]) {
+    let paths: Vec<Option<String>> =
+        decisions.iter().map(|decision| decision.path.as_ref().map(|named| named.path.clone())).collect();
+    let same = |a: &str, b: &str| path_inside(a, b) && path_inside(b, a);
+    for (index, decision) in decisions.iter_mut().enumerate() {
+        let Some(path) = paths[index].as_deref() else {
+            continue;
+        };
+        let shared = paths
+            .iter()
+            .enumerate()
+            .any(|(other, found)| other != index && found.as_deref().is_some_and(|found| same(found, path)));
+        if shared {
+            let mut reviews = std::mem::take(&mut decision.reviews);
+            reviews.push(ReviewReason::PathCollision);
+            decision.reviews = sorted_unique(reviews);
+            decision.disposition = Disposition::NeedsReview;
+        }
+    }
+}
+
 /// What the naming step gave: the final path when it could be built, the naming notes (8.9's compat_tag_omitted),
 /// and whether an episode lacked its season or its episode numbers (8.5's tv_unmapped).
 struct Filing {
@@ -501,8 +536,15 @@ fn episode_name(episode: &Episode, season: u32, record: &TmdbRecord) -> Option<S
 /// title it does not name is not remembered, and a title it names that the scan lacks is left out); a planned feature without an edition beside another feature is not
 /// `TitleRole::Feature`, which means the theatrical or main cut and would come back as a second "Theatrical Cut". A kept
 /// audio track is `Keep` with its 0-based final position and its default flag, a dropped one `Drop` (or `Commentary`
-/// when the owner marked it so); a kept subtitle track is `Keep` with its role, a dropped one `Drop`; a signature
-/// already stored is not stored again (the first decision wins). Err for a job without an identity, a planned episode
+/// when the owner marked it so); a kept subtitle track is `Keep` with its role, a dropped one `Drop`. Spec 5 keys these
+/// overrides by stream signature alone, for the whole disc, so a signature is stored only when every decision of the
+/// job that holds a stream with that signature decided it the same way (the whole action: `Keep` with its order and
+/// default flag, `Commentary` or `Drop` for audio; `Keep` with its role or `Drop` for subtitles), in the order first
+/// seen; a signature two decisions decide differently (a track the owner kept in one title and marked commentary in
+/// another, a forced-only stream empty in one title and holding forced captions in the next) is left out, so a later
+/// job's rules decide those streams again below 1.00 and review applies as usual (8.8: a remembered decision sets 1.00
+/// only for what it covers). The left-out signatures are not reported: no note spelling covers them. Err for a job
+/// without an identity, a planned episode
 /// without a season or episode numbers, an unnamed planned cut, a title without a duration, a decision whose key is not
 /// in the plan, or a stream its scan title lacks. Spec 5, 11. Def: T13. Use: phase 2.
 pub fn remember(
@@ -541,8 +583,9 @@ pub fn remember(
         }
     }
 
-    let mut audio: Vec<AudioOverrideEntry> = Vec::new();
-    let mut subtitles: Vec<SubtitleOverrideEntry> = Vec::new();
+    // Every decision's action per signature; a signature keeps its action only while every decision agrees on it.
+    let mut audio: Vec<(StreamSignature, Option<AudioOverride>)> = Vec::new();
+    let mut subtitles: Vec<(StreamSignature, Option<SubtitleOverride>)> = Vec::new();
     for decision in decisions {
         let planned = plan
             .titles
@@ -553,23 +596,31 @@ pub fn remember(
         let reviewed_audio = overrides.audio_of(planned.title).unwrap_or_default();
         for (order, track) in decision.audio.kept.iter().enumerate() {
             let action = AudioOverride::Keep { order: order as u32, default: track.default };
-            push_audio(&mut audio, stream_signature(title, track.stream)?, action);
+            agree(&mut audio, stream_signature(title, track.stream)?, action);
         }
         for (stream, _) in &decision.audio.dropped {
             let action = match reviewed_audio.get(stream) {
                 Some(AudioOverride::Commentary) => AudioOverride::Commentary,
                 _ => AudioOverride::Drop,
             };
-            push_audio(&mut audio, stream_signature(title, *stream)?, action);
+            agree(&mut audio, stream_signature(title, *stream)?, action);
         }
         for track in &decision.subtitles.kept {
             let action = SubtitleOverride::Keep { role: track.role };
-            push_subtitle(&mut subtitles, stream_signature(title, track.stream)?, action);
+            agree(&mut subtitles, stream_signature(title, track.stream)?, action);
         }
         for (stream, _) in &decision.subtitles.dropped {
-            push_subtitle(&mut subtitles, stream_signature(title, *stream)?, SubtitleOverride::Drop);
+            agree(&mut subtitles, stream_signature(title, *stream)?, SubtitleOverride::Drop);
         }
     }
+    let audio = audio
+        .into_iter()
+        .filter_map(|(signature, action)| Some(AudioOverrideEntry { signature, action: action? }))
+        .collect();
+    let subtitles = subtitles
+        .into_iter()
+        .filter_map(|(signature, action)| Some(SubtitleOverrideEntry { signature, action: action? }))
+        .collect();
     Ok(Remembered { fingerprint: fingerprint.to_string(), tmdb, titles, audio, subtitles })
 }
 
@@ -616,17 +667,16 @@ fn stream_signature(title: &Title, stream: u32) -> Result<StreamSignature, Strin
     Ok(signature(&title.streams, index))
 }
 
-/// Adds an audio override unless its signature is stored already (the first decision wins).
-fn push_audio(entries: &mut Vec<AudioOverrideEntry>, signature: StreamSignature, action: AudioOverride) {
-    if !entries.iter().any(|entry| entry.signature == signature) {
-        entries.push(AudioOverrideEntry { signature, action });
-    }
-}
-
-/// Adds a subtitle override unless its signature is stored already (the first decision wins).
-fn push_subtitle(entries: &mut Vec<SubtitleOverrideEntry>, signature: StreamSignature, action: SubtitleOverride) {
-    if !entries.iter().any(|entry| entry.signature == signature) {
-        entries.push(SubtitleOverrideEntry { signature, action });
+/// Records one decision's `action` for `signature`: a signature first seen takes it; one seen before keeps its action
+/// while this one equals it and has none (None) from the first disagreement on, so it is never stored.
+fn agree<A: PartialEq>(seen: &mut Vec<(StreamSignature, Option<A>)>, signature: StreamSignature, action: A) {
+    match seen.iter_mut().find(|(found, _)| *found == signature) {
+        None => seen.push((signature, Some(action))),
+        Some((_, agreed)) => {
+            if agreed.as_ref() != Some(&action) {
+                *agreed = None;
+            }
+        }
     }
 }
 
@@ -651,7 +701,7 @@ mod tests {
     use crate::settings::EditionStyle;
     use crate::testsupport::scan_text;
     use crate::tracks::audio::AudioDrop;
-    use crate::tracks::subtitle::SubtitleCase;
+    use crate::tracks::subtitle::{SubtitleCase, SubtitleDrop};
     use crate::tracks::SubtitleRole;
 
     /// An audio decision that keeps nothing, at `confidence` (only the confidence reaches the track confidence).
@@ -2425,5 +2475,249 @@ mod tests {
                 TitleRole::Cut { edition: "Director's Cut".to_string() },
             ]
         );
+    }
+
+    // The final review's fixes: one job's titles on one path (C3, G3) and the agreement rule of Remember (C4, G1).
+
+    /// Every title of `numbers` decided under `overrides`, then the job-level `same_path_reviews`.
+    fn job_decided(plan: &Plan, disc: &Disc, numbers: &[u32], record: &TmdbRecord, overrides: Option<&Overrides>) -> Vec<FileDecision> {
+        let mut decisions: Vec<FileDecision> =
+            numbers.iter().map(|&number| decided(plan, disc, number, record, overrides)).collect();
+        same_path_reviews(&mut decisions);
+        decisions
+    }
+
+    /// The owner's Assign titles giving title 0 and title 1 these roles.
+    fn assigned(first: TitleRole, second: TitleRole) -> Overrides {
+        Overrides {
+            titles: vec![TitleOverrideEntry { title: 0, role: first }, TitleOverrideEntry { title: 1, role: second }],
+            ..Overrides::default()
+        }
+    }
+
+    #[test]
+    fn two_assigned_features_on_one_path_are_held_with_path_collision() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None)), (1, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let overrides = assigned(TitleRole::Feature, TitleRole::Feature);
+        let alone = [decided(&plan, &disc, 0, &record, Some(&overrides)), decided(&plan, &disc, 1, &record, Some(&overrides))];
+        // Each title alone is filed automatically, and both build the one path of the theatrical cut.
+        assert_eq!(path_of(&alone[0]), path_of(&alone[1]));
+        assert!(alone.iter().all(|decision| decision.disposition == Disposition::AutoFile && decision.reviews.is_empty()));
+        let decisions = job_decided(&plan, &disc, &[0, 1], &record, Some(&overrides));
+        for decision in &decisions {
+            assert_eq!(decision.reviews, vec![ReviewReason::PathCollision]);
+            assert_eq!(decision.disposition, Disposition::NeedsReview);
+        }
+    }
+
+    #[test]
+    fn an_assigned_theatrical_cut_beside_a_feature_is_held_with_path_collision() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None)), (1, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let overrides = assigned(TitleRole::Cut { edition: "Theatrical Cut".to_string() }, TitleRole::Feature);
+        let decisions = job_decided(&plan, &disc, &[0, 1], &record, Some(&overrides));
+        assert_eq!(path_of(&decisions[0]), path_of(&decisions[1]));
+        for decision in &decisions {
+            assert_eq!(decision.reviews, vec![ReviewReason::PathCollision]);
+            assert_eq!(decision.disposition, Disposition::NeedsReview);
+        }
+    }
+
+    #[test]
+    fn two_structural_rivals_approved_without_names_build_one_path_and_are_held_with_path_collision() {
+        // 8.3 rule 3's two rivals at 0.60 with multiple_features, approved as they stand: neither has an edition name, so
+        // both file to the unnamed path and the job-level step holds them (spec 7: one cut would replace the other).
+        let disc = film_disc();
+        let mut plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None)), (1, feature_role(None))]);
+        plan.title_confidence = 0.60;
+        plan.reviews = vec![ReviewReason::MultipleFeatures];
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let decisions = job_decided(&plan, &disc, &[0, 1], &record, None);
+        assert_eq!(path_of(&decisions[0]), path_of(&decisions[1]));
+        for decision in &decisions {
+            assert_eq!(decision.reviews, vec![ReviewReason::MultipleFeatures, ReviewReason::PathCollision]);
+            assert_eq!(decision.disposition, Disposition::NeedsReview);
+        }
+    }
+
+    #[test]
+    fn two_titles_planned_as_one_episode_are_held_with_path_collision() {
+        let disc = office_disc();
+        let plan = plan_of(
+            &disc,
+            Kind::Tv,
+            Some(OFFICE),
+            &[
+                (0, episode_role(Some(3), &[15], Some("Example Fifteen"))),
+                (1, episode_role(Some(3), &[15], Some("Example Fifteen"))),
+            ],
+        );
+        let record = office_record();
+        let decisions = job_decided(&plan, &disc, &[0, 1], &record, None);
+        assert_eq!(path_of(&decisions[0]), path_of(&decisions[1]));
+        for decision in &decisions {
+            assert_eq!(decision.reviews, vec![ReviewReason::PathCollision]);
+            assert_eq!(decision.disposition, Disposition::NeedsReview);
+        }
+    }
+
+    #[test]
+    fn two_cuts_with_their_own_edition_names_keep_their_paths_and_file_automatically() {
+        let disc = film_disc();
+        let plan = plan_of(
+            &disc,
+            Kind::Movie,
+            Some(FILM),
+            &[(0, feature_role(Some("Theatrical Cut"))), (1, feature_role(Some("Director's Cut")))],
+        );
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let decisions = job_decided(&plan, &disc, &[0, 1], &record, None);
+        assert_ne!(path_of(&decisions[0]), path_of(&decisions[1]));
+        for decision in &decisions {
+            assert!(decision.reviews.is_empty(), "{:?}", decision.reviews);
+            assert_eq!(decision.disposition, Disposition::AutoFile);
+        }
+    }
+
+    #[test]
+    fn paths_that_differ_only_by_case_or_separator_are_one_path_and_a_decision_without_a_path_is_left_alone() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None)), (1, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let mut decisions = [decided(&plan, &disc, 0, &record, None), decided(&plan, &disc, 1, &record, None)];
+        let first = decisions[0].path.clone().unwrap();
+        decisions[1].path = Some(NamedPath { path: first.path.to_uppercase().replace('\\', "/"), ..first });
+        let mut pathless = decided(&plan, &disc, 0, &record, None);
+        pathless.path = None;
+        pathless.disposition = Disposition::NeedsReview;
+        let before = pathless.clone();
+        let mut job = vec![decisions[0].clone(), decisions[1].clone(), pathless];
+        same_path_reviews(&mut job);
+        assert!(job[0].reviews.contains(&ReviewReason::PathCollision));
+        assert!(job[1].reviews.contains(&ReviewReason::PathCollision));
+        assert_eq!(job[2], before);
+    }
+
+    /// An English Dolby Digital stereo track.
+    const ENG_AC3_2CH: &[(u32, &str)] =
+        &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (13, "192 Kb/s"), (14, "2")];
+    /// An English derived forced-only PGS stream (flags 4096 and 2048).
+    const ENG_PGS_FORCED_ONLY: &[(u32, &str)] =
+        &[(1, "Subtitles"), (3, "eng"), (5, "S_HDMV/PGS"), (6, "PGS"), (7, "HDMV PGS Subtitles"), (22, "6144")];
+
+    /// A Blu-ray of two episode titles 0 and 1 with the same streams.
+    fn two_episodes(streams: &[(u32, &[(u32, &str)])]) -> Disc {
+        let t0: &[(u32, &str)] = &[(8, "6"), (9, "0:21:37"), (11, "4800000000"), (16, "00001.mpls"), (26, "1")];
+        let t1: &[(u32, &str)] = &[(8, "6"), (9, "0:21:30"), (11, "4700000000"), (16, "00002.mpls"), (26, "2")];
+        let text = scan_text(&[(1, "Blu-ray disc"), (32, "EXAMPLE SHOW S3D3")], &[(0, t0, streams), (1, t1, streams)]);
+        disc(&parse(&text)).unwrap()
+    }
+
+    /// The plan of `two_episodes`: title 0 episode 15, title 1 episode 16 of season 3.
+    fn two_episode_plan(disc: &Disc) -> Plan {
+        plan_of(
+            disc,
+            Kind::Tv,
+            Some(OFFICE),
+            &[(0, episode_role(Some(3), &[15], Some("Example Fifteen"))), (1, episode_role(Some(3), &[16], Some("Example Sixteen")))],
+        )
+    }
+
+    #[test]
+    fn remember_leaves_out_a_signature_two_titles_decide_differently() {
+        // Both episodes hold English DTS-HD MA 5.1 and English Dolby Digital 2.0. In review the owner marks title 0's
+        // stereo track as commentary and keeps title 1's, then chooses Remember.
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_DTS_HD_MA_6CH), (2, ENG_AC3_2CH)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let overrides = Overrides {
+            audio: vec![AudioTrackOverride { title: 0, stream: 2, action: AudioOverride::Commentary }],
+            ..Overrides::default()
+        };
+        let decisions = [decided(&plan, &disc, 0, &record, Some(&overrides)), decided(&plan, &disc, 1, &record, Some(&overrides))];
+        assert_eq!(decisions[0].audio.dropped, vec![(2, AudioDrop::Reviewed)]);
+        assert_eq!(decisions[1].audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1, 2]);
+        let remembered = remember(FINGERPRINT, &disc, &plan, &decisions, &overrides).unwrap();
+        // The lossless track both titles kept first and default is remembered; the stereo track is not.
+        assert_eq!(
+            remembered.audio,
+            vec![AudioOverrideEntry {
+                signature: sig(StreamKind::Audio, "eng", Family::DtsHdMa, Some(6)),
+                action: AudioOverride::Keep { order: 0, default: true },
+            }]
+        );
+        assert!(remembered.audio.iter().all(|entry| entry.signature != sig(StreamKind::Audio, "eng", Family::Ac3, Some(2))));
+        // The next job for the fingerprint decides title 1's stereo track by the rules again: kept, below 1.00.
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let mut next = inputs(&plan, &disc, 1, Some(&record), &library, &settings);
+        next.audio.remembered = Some(remembered.audio.as_slice());
+        let again = decide(&next).unwrap();
+        assert_eq!(again.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1, 2]);
+        assert_ne!(again.audio.confidence, 1.00);
+    }
+
+    #[test]
+    fn remember_leaves_out_a_subtitle_signature_two_titles_give_different_roles() {
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_AC3_6CH), (2, ENG_PGS)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let overrides = Overrides {
+            subtitles: vec![SubtitleTrackOverride {
+                title: 0,
+                stream: 2,
+                action: SubtitleOverride::Keep { role: SubtitleRole::Sdh },
+            }],
+            ..Overrides::default()
+        };
+        let decisions = [decided(&plan, &disc, 0, &record, Some(&overrides)), decided(&plan, &disc, 1, &record, Some(&overrides))];
+        assert_eq!(decisions[0].subtitles.kept.iter().map(|track| track.role).collect::<Vec<_>>(), vec![SubtitleRole::Sdh]);
+        assert_eq!(decisions[1].subtitles.kept.iter().map(|track| track.role).collect::<Vec<_>>(), vec![SubtitleRole::Regular]);
+        let remembered = remember(FINGERPRINT, &disc, &plan, &decisions, &overrides).unwrap();
+        assert_eq!(remembered.subtitles, Vec::<SubtitleOverrideEntry>::new());
+        assert_eq!(remembered.audio.len(), 1);
+    }
+
+    #[test]
+    fn titles_that_disagree_on_a_signature_leave_it_unremembered() {
+        // Both episodes hold an English PGS stream (2) and its derived forced-only stream (3). In title 0 the forced-only
+        // stream is empty and MakeMKV removed it (MSG:4047); in title 1 it holds the forced captions. Flags are not part
+        // of the signature, so stream 3 is (subtitles, eng, PGS, position 1) in both titles, decided Drop and Forced.
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_AC3_6CH), (2, ENG_PGS), (3, ENG_PGS_FORCED_ONLY)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let dialogue: Vec<f64> = (0..1000).map(|k| 10.0 + 6.0 * f64::from(k)).collect();
+        let forced: Vec<f64> = (0..20).map(|k| 100.0 + 60.0 * f64::from(k)).collect();
+        let mut first = inputs(&plan, &disc, 0, Some(&record), &library, &settings);
+        first.subtitles.events = BTreeMap::from([(2, dialogue.clone())]);
+        first.subtitles.removed = [3].into_iter().collect();
+        let mut second = inputs(&plan, &disc, 1, Some(&record), &library, &settings);
+        second.subtitles.events = BTreeMap::from([(2, dialogue.clone()), (3, forced.clone())]);
+        let decisions = [decide(&first).unwrap(), decide(&second).unwrap()];
+        assert_eq!(decisions[0].subtitles.dropped, vec![(3, SubtitleDrop::DerivedForcedOnlyEmpty)]);
+        assert!(decisions[1].subtitles.kept.iter().any(|track| track.stream == 3 && track.role == SubtitleRole::Forced));
+        let remembered = remember(FINGERPRINT, &disc, &plan, &decisions, &Overrides::default()).unwrap();
+        let forced_only = StreamSignature { position: 1, ..sig(StreamKind::Subtitles, "eng", Family::Pgs, None) };
+        assert!(remembered.subtitles.iter().all(|entry| entry.signature != forced_only), "{:?}", remembered.subtitles);
+        assert_eq!(
+            remembered.subtitles,
+            vec![SubtitleOverrideEntry {
+                signature: sig(StreamKind::Subtitles, "eng", Family::Pgs, None),
+                action: SubtitleOverride::Keep { role: SubtitleRole::Regular },
+            }]
+        );
+        // The next job for the fingerprint keeps title 1's forced stream by the rule, and the subtitle confidence is not
+        // the remembered 1.00.
+        let mut next = inputs(&plan, &disc, 1, Some(&record), &library, &settings);
+        next.subtitles.events = BTreeMap::from([(2, dialogue), (3, forced)]);
+        next.subtitles.remembered = Some(remembered.subtitles.as_slice());
+        let again = decide(&next).unwrap();
+        assert!(again.subtitles.kept.iter().any(|track| track.stream == 3 && track.role == SubtitleRole::Forced));
+        assert_ne!(again.subtitles.confidence, 1.00);
     }
 }
