@@ -369,6 +369,15 @@ fn checked(before: &[String], new: Value) -> Result<(Value, Vec<String>), String
     Ok((new, after))
 }
 
+// ------------------------------------------------------------------ row 14 and the harness (Task 18)
+
+pub use row14::{costly, exp14_requirements, harness, Costly, Outcome, Row14, SubtitleHarness};
+
+/// Spec section 17 row 14 (a) read from the spec text, its costly verdicts, and the subtitle harness behind
+/// `lazymkv-dev retune --subtitles` (RP15; spec 15 "Rules against the stored evidence"; 8.7 "Text"; Task 18). Private:
+/// what other code uses is re-exported above it.
+mod row14;
+
 #[cfg(test)]
 mod tests {
     use super::*;
