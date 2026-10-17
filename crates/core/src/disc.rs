@@ -7,7 +7,7 @@
 //! `BDMV/META/DL/bdmt_*.xml` (`bdmt_name`, `bdmt_candidates`). No I/O: callers hand in the parsed scan and the XML text.
 //! Used by Tasks 3 to 16 of the phase 1 plan.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::audio::titles::{dvd_scan, segments};
 use crate::codec::{bitrate_kbps, codec, output_codec, Codec, Family};
@@ -281,14 +281,15 @@ impl Title {
         self.seconds.map(|seconds| f64::from(seconds) / 60.0)
     }
 
-    /// The (kind, language, codec family, channels) of every audio and subtitle stream as a set, for 8.3 rule 3.4's
-    /// "superset of every other title's" test.
-    pub fn signature_set(&self) -> BTreeSet<(StreamKind, Option<String>, Family, Option<u32>)> {
-        self.streams
-            .iter()
-            .filter(|stream| stream.kind != StreamKind::Video)
-            .map(|stream| (stream.kind, stream.language.clone(), stream.codec.family, stream.channels))
-            .collect()
+    /// How many audio and subtitle streams the title holds of each (kind, language, codec family, channels), for 8.3
+    /// rule 3.4's "superset of every other title's" test, counted per signature: a title with two English PGS streams
+    /// holds more than one with a single English PGS stream. Spec 8.3 rule 3.4.
+    pub fn signature_counts(&self) -> BTreeMap<(StreamKind, Option<String>, Family, Option<u32>), u32> {
+        let mut counts = BTreeMap::new();
+        for stream in self.streams.iter().filter(|stream| stream.kind != StreamKind::Video) {
+            *counts.entry((stream.kind, stream.language.clone(), stream.codec.family, stream.channels)).or_insert(0) += 1;
+        }
+        counts
     }
 
     /// `title_source(source_file, dvd_title)`. Spec 5.
@@ -596,8 +597,6 @@ pub fn bdmt_candidates(names: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
     use crate::codec::{codec, Family};
     use crate::robot::parse;
@@ -1183,16 +1182,16 @@ mod tests {
     }
 
     #[test]
-    fn the_signature_set_holds_each_audio_and_subtitle_stream_once_by_kind_language_codec_and_channels() {
+    fn the_signature_counts_count_each_audio_and_subtitle_stream_by_kind_language_codec_and_channels() {
         let typed = disc(&parse(&full_scan())).unwrap();
-        let expected: BTreeSet<(StreamKind, Option<String>, Family, Option<u32>)> = [
-            (StreamKind::Audio, Some("spa".to_string()), Family::DtsHdMa, Some(6)),
-            (StreamKind::Audio, Some("spa".to_string()), Family::Dts, Some(6)),
-            (StreamKind::Subtitles, Some("eng".to_string()), Family::Pgs, None),
+        let expected: BTreeMap<(StreamKind, Option<String>, Family, Option<u32>), u32> = [
+            ((StreamKind::Audio, Some("spa".to_string()), Family::DtsHdMa, Some(6)), 1),
+            ((StreamKind::Audio, Some("spa".to_string()), Family::Dts, Some(6)), 1),
+            ((StreamKind::Subtitles, Some("eng".to_string()), Family::Pgs, None), 1),
         ]
         .into_iter()
         .collect();
-        assert_eq!(typed.title(0).unwrap().signature_set(), expected);
+        assert_eq!(typed.title(0).unwrap().signature_counts(), expected);
         let twins = scan_text(
             &[],
             &[(
@@ -1206,9 +1205,9 @@ mod tests {
             )],
         );
         let both = disc(&parse(&twins)).unwrap();
-        let set: Vec<(StreamKind, Option<String>, Family, Option<u32>)> =
-            both.title(0).unwrap().signature_set().into_iter().collect();
-        assert_eq!(set, [(StreamKind::Audio, Some("eng".to_string()), Family::Ac3, Some(2))]);
+        let counts: Vec<((StreamKind, Option<String>, Family, Option<u32>), u32)> =
+            both.title(0).unwrap().signature_counts().into_iter().collect();
+        assert_eq!(counts, [((StreamKind::Audio, Some("eng".to_string()), Family::Ac3, Some(2)), 2)]);
     }
 
     #[test]

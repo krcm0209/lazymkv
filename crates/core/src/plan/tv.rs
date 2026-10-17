@@ -6,9 +6,9 @@
 //! `suggest` and `close` serve phase 2's review (Assign titles, the owner's close); Tasks 11 and 13 read `Episode`
 //! through the plan. No setting is read here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lookup::discdb::{DiscDbRecord, ItemType};
+use crate::lookup::discdb::{DiscDbItem, DiscDbRecord, ItemType};
 use crate::lookup::tmdb::{TmdbEpisode, TmdbSeason};
 use crate::lookup::{within, TV_RUNTIME_TOLERANCE};
 use crate::plan::kind::{episode_length_groups, play_all, Group};
@@ -108,9 +108,12 @@ pub struct TvPlan {
 /// matches no scan title (as Open point 4 for MainMovies), or when a reconciled Episode item on a title that is not
 /// play-all names no episode number (D1); plan::plan then plans the disc as unmapped. A Direct job holds only its planned
 /// titles (8.8 "Limits of D1"), so mapping the rest would file the disc without that episode. An Episode item whose
-/// episode text gives no number makes `by_discdb` return None (D1), as an unmatched one does; a title of a group
-/// `kind::play_all` finds is dropped even when TheDiscDB labels it an Episode item (the play-all check comes first, so
-/// such an item never needs a number), and `play_all` is never applied on a DVD. Def: T6. Use: T7.
+/// episode text gives no number makes `by_discdb` return None (D1), as an unmatched one does. A title of a group
+/// `kind::play_all` finds is dropped even when TheDiscDB labels it an Episode item, unless that item names an episode
+/// no other kept Episode item maps: then the title is the episode (a multi-clip episode playlist whose clips MakeMKV also
+/// lists, and TheDiscDB describes with no item, is play-all shaped), it is kept and left out of `dropped_play_all`. The
+/// play-all titles' items are taken fewest episodes first, each kept one's episodes then counting as mapped; one that
+/// names no number is never kept. `play_all` is never applied on a DVD. Def: T6. Use: T7.
 pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[Group], dvd: bool) -> Option<TvPlan> {
     // D1 ("When unsure, ... queue the disc for review"): an episode TheDiscDB describes but the scan does not show leaves
     // the disc unmapped, as 8.3 rule 1 needs every MainMovie to reconcile (Open point 4).
@@ -118,14 +121,24 @@ pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[
         return None;
     }
     // 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1), found again until none is, as plan::plan does.
-    let (_, dropped_play_all) = without_play_all(groups, dvd);
+    let (_, mut dropped_play_all) = without_play_all(groups, dvd);
+    let item_of = |index: u32| {
+        record
+            .titles
+            .iter()
+            .find(|db| db.index == index)
+            .and_then(|db| db.item.as_ref())
+            .filter(|item| item.item_type == ItemType::Episode)
+    };
+    let kept_play_all = kept_play_all_episodes(matches, &dropped_play_all, item_of);
+    dropped_play_all.retain(|title| !kept_play_all.contains(title));
     let mut episodes = Vec::new();
     let mut evidence = Vec::new();
     for (&index, &title) in matches {
-        let Some(item) = record.titles.iter().find(|db| db.index == index).and_then(|db| db.item.as_ref()) else {
+        let Some(item) = item_of(index) else {
             continue;
         };
-        if item.item_type != ItemType::Episode || dropped_play_all.contains(&title) {
+        if dropped_play_all.contains(&title) {
             continue;
         }
         let numbers = parse_episode_numbers(item.episode.as_deref().unwrap_or(""));
@@ -150,7 +163,52 @@ pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[
             "play-all title {title} dropped (8.5): its segment map is the concatenation of other groups' maps"
         ));
     }
+    for title in &kept_play_all {
+        evidence.push(format!(
+            "title {title} is play-all shaped but kept: its Episode item names an episode no other title maps"
+        ));
+    }
     Some(TvPlan { mapped: true, episodes, confidence: MAPPED_TV_CONFIDENCE, reviews: Vec::new(), dropped_play_all, evidence })
+}
+
+/// The (season, episode) pairs an Episode item names: its season parsed as a number (None when absent) with each of
+/// `parse_episode_numbers(item.episode)`.
+fn named_episodes(item: &DiscDbItem) -> Vec<(Option<u32>, u32)> {
+    let season = item.season.as_deref().and_then(whole_number);
+    parse_episode_numbers(item.episode.as_deref().unwrap_or("")).into_iter().map(|number| (season, number)).collect()
+}
+
+/// The play-all titles (`dropped_play_all`) whose Episode item `by_discdb` keeps, sorted: the items of the other matched
+/// titles map their episodes first; then the play-all titles' items, fewest episodes first (then by database index),
+/// each kept when it names an episode not yet mapped, its episodes then counting as mapped. Spec 8.5, D1.
+fn kept_play_all_episodes<'a>(
+    matches: &BTreeMap<u32, u32>,
+    dropped_play_all: &[u32],
+    item_of: impl Fn(u32) -> Option<&'a DiscDbItem>,
+) -> Vec<u32> {
+    let mut mapped: BTreeSet<(Option<u32>, u32)> = matches
+        .iter()
+        .filter(|(_, title)| !dropped_play_all.contains(title))
+        .filter_map(|(&index, _)| item_of(index))
+        .flat_map(named_episodes)
+        .collect();
+    let mut candidates: Vec<(usize, u32, u32, Vec<(Option<u32>, u32)>)> = matches
+        .iter()
+        .filter(|(_, title)| dropped_play_all.contains(title))
+        .filter_map(|(&index, &title)| item_of(index).map(|item| (index, title, named_episodes(item))))
+        .map(|(index, title, named)| (named.len(), index, title, named))
+        .collect();
+    candidates.sort_by_key(|(count, index, _, _)| (*count, *index));
+    let mut kept = Vec::new();
+    for (_, _, title, named) in candidates {
+        if named.iter().any(|pair| !mapped.contains(pair)) {
+            mapped.extend(named);
+            kept.push(title);
+        }
+    }
+    kept.sort_unstable();
+    kept.dedup();
+    kept
 }
 
 /// 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1, `kind::play_all`, found again until none is;
@@ -732,9 +790,89 @@ mod tests {
         let dvd = by_discdb(&record, &matches, &groups, true).unwrap();
         assert_eq!(dvd.episodes.len(), 3);
         assert_eq!(dvd.dropped_play_all, Vec::<u32>::new());
-        let blu_ray = by_discdb(&record, &matches, &groups, false).unwrap();
+        // On a Blu-ray the same groups make title 2 play-all shaped; it is dropped when its Episode item names only
+        // episodes the other titles map (here E01-E02), and kept when it names one they do not (E03 above).
+        let play_all = record_with_play_all("1-2");
+        let blu_ray = by_discdb(&play_all, &matches, &groups, false).unwrap();
         assert_eq!(blu_ray.episodes.iter().map(|e| e.title).collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(blu_ray.dropped_play_all, vec![2]);
+        assert_eq!(by_discdb(&play_all, &matches, &groups, true).unwrap().episodes.len(), 3);
+        let kept = by_discdb(&record, &matches, &groups, false).unwrap();
+        assert_eq!(kept.episodes.iter().map(|e| e.title).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(kept.dropped_play_all, Vec::<u32>::new());
+    }
+
+    /// The record of `on_a_dvd_no_title_is_dropped_as_play_all` with title 2 labelled as these episodes of season 1.
+    fn record_with_play_all(episodes: &str) -> DiscDbRecord {
+        record(json!([
+            {"index": 0, "source_file": "01", "item": {"title": "First", "type": "Episode", "season": "1", "episode": "1"}},
+            {"index": 1, "source_file": "02", "item": {"title": "Second", "type": "Episode", "season": "1", "episode": "2"}},
+            {"index": 2, "source_file": "03", "item": {"title": "Both", "type": "Episode", "season": "1", "episode": episodes}}
+        ]))
+    }
+
+    #[test]
+    fn a_multi_clip_episode_playlist_whose_clips_carry_no_item_is_kept() {
+        // Title 0 (00800.mpls, clips 20 and 21) is TheDiscDB's S01E01-E02 and title 1 (00801.mpls, clip 22) its S01E03;
+        // titles 2 and 3 are the clips 00020.m2ts and 00021.m2ts, which MakeMKV lists too and TheDiscDB describes with no
+        // item. Title 0 is play-all shaped (its segments are groups 2 and 3 in turn), but no other Episode item maps E01
+        // or E02, so it is the episode and is kept; the clips carry no item and are not episodes.
+        let opening = record(json!([
+            {"index": 0, "item": {"title": "Opening", "type": "Episode", "season": "1", "episode": "1-2"}},
+            {"index": 1, "item": {"title": "Third", "type": "Episode", "season": "1", "episode": "3"}},
+            {"index": 2, "item": null},
+            {"index": 3, "item": null}
+        ]));
+        let matches = BTreeMap::from([(0, 0), (1, 1), (2, 2), (3, 3)]);
+        let groups = vec![group(0, &[20, 21], 2640), group(1, &[22], 1320), group(2, &[20], 1300), group(3, &[21], 1340)];
+        let plan = by_discdb(&opening, &matches, &groups, false).unwrap();
+        assert_eq!(
+            plan.episodes,
+            vec![
+                episode_title(0, Some(1), &[1, 2], Some("Opening"), false),
+                episode_title(1, Some(1), &[3], Some("Third"), false),
+            ]
+        );
+        assert_eq!(plan.dropped_play_all, Vec::<u32>::new());
+        assert_eq!((plan.confidence, plan.reviews.clone()), (MAPPED_TV_CONFIDENCE, vec![]));
+        assert_eq!(
+            plan.evidence.last().unwrap(),
+            "title 0 is play-all shaped but kept: its Episode item names an episode no other title maps"
+        );
+        // One episode split across two clips is kept the same way.
+        let split = record(json!([
+            {"index": 0, "item": {"title": "Long One", "type": "Episode", "season": "1", "episode": "1"}},
+            {"index": 1, "item": {"title": "Third", "type": "Episode", "season": "1", "episode": "3"}},
+            {"index": 2, "item": null},
+            {"index": 3, "item": null}
+        ]));
+        let plan = by_discdb(&split, &matches, &groups, false).unwrap();
+        assert_eq!(plan.episodes.iter().map(|e| e.title).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(plan.dropped_play_all, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn of_two_play_all_titles_the_one_whose_episodes_another_kept_title_maps_is_dropped() {
+        // Title 0 (clips 20, 21) is E01-E02 and title 4 (clips 20, 21, 22) E01-E03 beside title 1 (clip 22, E03): title 0
+        // is kept (no other title maps E01 or E02), and then title 4's episodes are all mapped, so it is dropped.
+        let record = record(json!([
+            {"index": 0, "item": {"title": "Opening", "type": "Episode", "season": "1", "episode": "1-2"}},
+            {"index": 1, "item": {"title": "Third", "type": "Episode", "season": "1", "episode": "3"}},
+            {"index": 2, "item": null},
+            {"index": 3, "item": null},
+            {"index": 4, "item": {"title": "Play All", "type": "Episode", "season": "1", "episode": "1-3"}}
+        ]));
+        let matches = BTreeMap::from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]);
+        let groups = vec![
+            group(0, &[20, 21], 2640),
+            group(1, &[22], 1320),
+            group(2, &[20], 1300),
+            group(3, &[21], 1340),
+            group(4, &[20, 21, 22], 3960),
+        ];
+        let plan = by_discdb(&record, &matches, &groups, false).unwrap();
+        assert_eq!(plan.episodes.iter().map(|e| e.title).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(plan.dropped_play_all, vec![4]);
     }
 
     #[test]
@@ -785,11 +923,18 @@ mod tests {
             {"index": 3}
         ]));
         assert_eq!(by_discdb(&no_episode, &BTreeMap::from([(1, 0), (2, 1), (3, 2)]), &[], false), None);
-        // Only a play-all title is labelled an episode: once it is dropped, nothing is mapped.
+        // Only a play-all title is labelled an episode, and its item names no episode number: it is dropped, and nothing
+        // is mapped.
         let only_play_all =
-            record(json!([{"index": 0, "item": {"title": "Play All", "type": "Episode", "season": "1", "episode": "1-2"}}]));
+            record(json!([{"index": 0, "item": {"title": "Play All", "type": "Episode", "season": "1", "episode": ""}}]));
         let groups = vec![group(0, &[10, 11], 2640), group(1, &[10], 1320), group(2, &[11], 1320)];
         assert_eq!(by_discdb(&only_play_all, &BTreeMap::from([(0, 0)]), &groups, false), None);
+        // Naming E01-E02, which no other title maps, the same play-all-shaped title is the episode and is kept.
+        let numbered =
+            record(json!([{"index": 0, "item": {"title": "Play All", "type": "Episode", "season": "1", "episode": "1-2"}}]));
+        let kept = by_discdb(&numbered, &BTreeMap::from([(0, 0)]), &groups, false).unwrap();
+        assert_eq!(kept.episodes, vec![episode_title(0, Some(1), &[1, 2], Some("Play All"), false)]);
+        assert_eq!(kept.dropped_play_all, Vec::<u32>::new());
     }
 
     #[test]

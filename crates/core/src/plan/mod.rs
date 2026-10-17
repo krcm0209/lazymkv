@@ -201,8 +201,9 @@ pub struct PlanInputs<'a> {
 
 /// 6.1 step 5 in order: candidates and groups (8.2); the kind; the structural pass (8.3 rules 1 to 3, or 8.5) to fill
 /// RuntimeFacts, running by_labels with `wanted_languages(None)` (8.3 rule 3.1's play-all makes the disc TV unless
-/// TheDiscDB states it is a movie, 8.2, when rule 3 runs again without the play-all groups; every play-all group is left
-/// out of the episode-length groups, 8.5 "play all titles are dropped"); identify (8.1) over `inputs.lookups` with
+/// TheDiscDB states it is a movie, 8.2, when rule 3 runs without 3.1 over every group, `movie::by_structure_as_movie`,
+/// so a play-all-shaped group is an ordinary rival; every play-all group is left out of the episode-length groups, 8.5
+/// "play all titles are dropped"); identify (8.1) over `inputs.lookups` with
 /// `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to `inputs.overrides.and_then(|o|
 /// o.identity)`; when `identity.original_language` is Some and not English, by_labels runs again with
 /// `wanted_languages(identity.original_language)` and its features replace the first pass's (cuts, editions and
@@ -274,23 +275,14 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
                 label_rule_reached = true;
                 let key = groups.get(group).map_or("", |found| found.key.as_str());
                 if kind_source == KindSource::Discdb {
-                    // 8.2 "TheDiscDB states the kind when it knows the disc": its movie stays a movie, and rule 3 runs
-                    // again without the play-all groups, one at a time until it plans.
+                    // 8.2 "TheDiscDB states the kind when it knows the disc": its movie stays a movie, so rule 3.1 does
+                    // not apply and every play-all-shaped group is an ordinary rule 3 group (a multi-clip feature whose
+                    // clips MakeMKV also lists is one).
                     sentences.push(format!(
-                        "8.3 rule 3.1: group {key} is a play-all title, but TheDiscDB states the disc is a movie (8.2)"
+                        "8.3 rule 3.1: group {key} is play-all shaped, but TheDiscDB states the disc is a movie (8.2), so \
+                         rule 3 runs without 3.1"
                     ));
-                    let mut rest = groups.clone();
-                    let mut dropped = group;
-                    loop {
-                        rest.remove(dropped);
-                        match movie::by_structure(disc, &rest, settings) {
-                            StructureOutcome::Plan(found) => {
-                                found_movie = Some(found);
-                                break;
-                            }
-                            StructureOutcome::PlayAll { group: next } => dropped = next,
-                        }
-                    }
+                    found_movie = Some(movie::by_structure_as_movie(disc, &groups, settings));
                 } else {
                     planned_kind = Kind::Tv;
                     kind_source = KindSource::PlayAll;
@@ -781,24 +773,36 @@ fn kind_source_words(source: KindSource) -> &'static str {
 /// planned disc; None otherwise. The spec does not settle this case (left to the owner): the search's runtime check was
 /// the result's own kind's, so nothing else would hold such a disc (D1). `plan` then also holds the planned titles at
 /// 0.60 with title_ambiguous (whole-disc copy mode, 6.3, 8.8 "Limits of D1") unless assigned titles cover them; this
-/// provisional rule is flagged for the owner with the first. A TheDiscDB, remembered or reviewed identity is not
-/// checked: TheDiscDB states the kind (8.2), and the owner chose the other two.
+/// provisional rule is flagged for the owner with the first. Several plausible results (TmdbSeveral) of which
+/// `identify` picked none (it narrows a mixed-kind list to the planned kind and picks none when every result is of the
+/// other kind) contradict the plan the same way when every plausible result is of the other kind; a mixed-kind list does
+/// not (its pick is of the planned kind, and 8.3 rule 4 remains the guard). A TheDiscDB, remembered or reviewed
+/// identity is not checked: TheDiscDB states the kind (8.2), and the owner chose the other two.
 fn kind_disagreement(identity: &Identity, planned_kind: Kind, sentences: &mut Vec<String>) -> Option<ReviewReason> {
-    if !matches!(identity.step, IdentityStep::TmdbOne | IdentityStep::TmdbSeveral) {
-        return None;
-    }
-    let identity_kind = match identity.tmdb?.kind {
+    let kind_of = |tmdb: &TmdbIdentity| match tmdb.kind {
         TmdbKind::Movie => Kind::Movie,
         TmdbKind::Tv => Kind::Tv,
     };
-    if identity_kind == planned_kind {
-        return None;
-    }
-    sentences.push(format!(
-        "the TMDb identity is {} but the disc is planned as {}",
-        kind_words(identity_kind),
-        kind_words(planned_kind)
-    ));
+    let other = match planned_kind {
+        Kind::Movie => Kind::Tv,
+        Kind::Tv => Kind::Movie,
+    };
+    let sentence = match (identity.step, identity.tmdb.as_ref()) {
+        (IdentityStep::TmdbOne | IdentityStep::TmdbSeveral, Some(tmdb)) if kind_of(tmdb) == other => {
+            format!("the TMDb identity is {} but the disc is planned as {}", kind_words(other), kind_words(planned_kind))
+        }
+        (IdentityStep::TmdbSeveral, None)
+            if !identity.plausible.is_empty() && identity.plausible.iter().all(|tmdb| kind_of(tmdb) == other) =>
+        {
+            format!(
+                "every plausible TMDb result is {} but the disc is planned as {}",
+                kind_words(other),
+                kind_words(planned_kind)
+            )
+        }
+        _ => return None,
+    };
+    sentences.push(sentence);
     Some(ReviewReason::IdentityAmbiguous)
 }
 
@@ -1988,13 +1992,78 @@ mod tests {
         assert!(!plan.reviews.contains(&ReviewReason::TvUnmapped));
         assert_eq!(plan.reviews, Vec::<ReviewReason>::new());
         assert!(plan.evidence.sentences.contains(
-            &"8.3 rule 3.1: group 1,2,3 is a play-all title, but TheDiscDB states the disc is a movie (8.2)".to_string()
+            &"8.3 rule 3.1: group 1,2,3 is play-all shaped, but TheDiscDB states the disc is a movie (8.2), so rule 3 runs \
+              without 3.1"
+                .to_string()
         ));
         // Rule 1 gave no plan and MakeMKV did not report Java: the label rule's note (10.2).
         assert_eq!(
             plan.notes,
             vec![Noted { note: Note::LabelRuleUnavailable, stream: None, detail: LABEL_RULE_UNAVAILABLE.to_string() }]
         );
+    }
+
+    #[test]
+    fn a_play_all_shaped_feature_on_a_disc_thediscdb_calls_a_movie_is_an_ordinary_rival() {
+        // The feature (title 3, 00800.mpls) plays a 100-minute body clip and a 10-minute credits clip, which MakeMKV also
+        // lists as titles 1 and 2 (00001.m2ts, 00002.m2ts). TheDiscDB knows the disc as a movie but lists no title, so
+        // rule 1 gives no plan and rule 3 decides without 3.1: the 110-minute "1,2" and the 100-minute "1" are rivals
+        // (within 10%), whose segments differ by half, so the plan is 0.60 multiple_features in copy mode. Dropping the
+        // play-all-shaped group would have planned the body clip alone at 0.85 and filed the movie without its last clip.
+        let disc = made_disc(
+            false,
+            "FILM_DISC",
+            &[
+                made(1, "1:40:00", "15", "00001.m2ts", "1", "28000000000", "", ENG),
+                made(2, "0:10:00", "1", "00002.m2ts", "2", "2800000000", "", ENG),
+                made(3, "1:50:00", "16", "00800.mpls", "1,2", "30800000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let record: DiscDbRecord = serde_json::from_value(json!({
+            "media": {"title": "Film", "year": 2010, "type": "Movie", "external_ids": {"tmdb": "77"}},
+            "titles": []
+        }))
+        .unwrap();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), discdb_by_fingerprint: Some(&record), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Discdb));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.evidence.rivals, vec!["1".to_string(), "1,2".to_string()]);
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert_eq!(plan.reviews, vec![ReviewReason::MultipleFeatures]);
+    }
+
+    #[test]
+    fn several_search_results_all_of_the_other_kind_hold_the_disc_planned_as_a_movie() {
+        // The disc of a_search_identity_of_the_other_kind_than_the_planned_disc_is_held (one 100-minute title named
+        // SHOW, planned as a movie at 0.85), with two plausible shows of that name: identify picks none (none is of the
+        // planned kind), and every plausible result is TV, so the kind contradiction holds the titles for copy mode.
+        let disc = made_disc(false, "SHOW", &[made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "", ENG)]);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let two_shows = search_json(&[("tv", 99, "Show", "Show", "2010-01-01"), ("tv", 98, "Show", "Show", "2005-03-24")]);
+        let search = parse_search(&two_shows, "search.json").unwrap();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, None), &settings, &library));
+        assert_eq!((plan.identity.step, plan.identity.tmdb), (IdentityStep::TmdbSeveral, None));
+        assert_eq!(plan.identity.plausible, vec![show_id(99), show_id(98)]);
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous, ReviewReason::TitleAmbiguous]);
+        assert!(plan
+            .evidence
+            .sentences
+            .contains(&"every plausible TMDb result is TV but the disc is planned as a movie".to_string()));
+        // A mixed-kind list does not hold the titles: identify picks the movie, the kinds agree, and rule 4 remains the
+        // guard.
+        let mixed = search_json(&[("tv", 99, "Show", "Show", "2010-01-01"), ("movie", 97, "Show", "Show", "2012-06-01")]);
+        let search = parse_search(&mixed, "search.json").unwrap();
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, None), &settings, &library));
+        assert_eq!((plan.identity.step, plan.identity.tmdb), (IdentityStep::TmdbSeveral, Some(movie_id(97))));
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous]);
     }
 
     #[test]

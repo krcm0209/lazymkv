@@ -416,18 +416,26 @@ pub enum StructureOutcome {
     Plan(MoviePlan),
 }
 
-/// Rule 3 on the groups: 3.1 play-all (the disc is TV); 3.2 keep groups >= settings.feature_min_minutes, else the longest; 3.3
-/// rivals within RIVAL_BAND of the longest kept; 3.4 in each rival the title with chapters, then the one whose audio and
-/// subtitle stream signatures (kind, language, codec family, channels) are a superset of every other's, else 0.60
-/// title_ambiguous; 3.5 one rival 0.85; 3.6 every pair's segment_difference <= 0.25 gives 0.60 title_ambiguous; 3.7 else 0.60
-/// multiple_features. Reads `settings.feature_min_minutes` only. No group at all (no candidate) gives a plan with no
-/// feature, 0.60 and title_ambiguous. Def: T5. Use: T5, T7.
+/// Rule 3 on the groups: 3.1 play-all (the disc is TV); then `by_structure_as_movie`'s 3.2 to 3.7. Reads
+/// `settings.feature_min_minutes` only. Def: T5. Use: T5, T7.
 pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> StructureOutcome {
     if let Some(group) = play_all(groups, disc.is_dvd) {
         return StructureOutcome::PlayAll { group };
     }
+    StructureOutcome::Plan(by_structure_as_movie(disc, groups, settings))
+}
+
+/// Rule 3 without 3.1, for a disc that is a movie whatever its groups' shape (8.2 "TheDiscDB states the kind when it
+/// knows the disc", so a play-all-shaped group is an ordinary group here): 3.2 keep groups >= settings.feature_min_minutes,
+/// else the longest; 3.3 rivals within RIVAL_BAND of the longest kept; 3.4 in each rival the title with chapters, then the
+/// one whose audio and subtitle streams cover every other's, counted per signature (kind, language, codec family,
+/// channels: it holds at least as many streams of each signature as every other title), else 0.60 title_ambiguous; 3.5
+/// one rival 0.85; 3.6 every pair's segment_difference <= 0.25 gives 0.60 title_ambiguous; 3.7 else 0.60
+/// multiple_features. Reads `settings.feature_min_minutes` only. No group at all (no candidate) gives a plan with no
+/// feature, 0.60 and title_ambiguous. Def: T5. Use: T5, T7.
+pub fn by_structure_as_movie(disc: &Disc, groups: &[Group], settings: &Settings) -> MoviePlan {
     if groups.is_empty() {
-        return StructureOutcome::Plan(MoviePlan {
+        return MoviePlan {
             rule: TitleRule::Structure,
             features: Vec::new(),
             feature_seconds: Vec::new(),
@@ -436,7 +444,7 @@ pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> Struc
             notes: Vec::new(),
             rivals: Vec::new(),
             evidence: vec!["no title passed the candidate filter".to_string()],
-        });
+        };
     }
     let mut evidence = Vec::new();
     let minimum = u64::from(settings.feature_min_minutes) * 60;
@@ -497,7 +505,7 @@ pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> Struc
     } else {
         AMBIGUOUS_TITLE_CONFIDENCE
     };
-    StructureOutcome::Plan(MoviePlan {
+    MoviePlan {
         rule: TitleRule::Structure,
         features,
         feature_seconds,
@@ -506,7 +514,7 @@ pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> Struc
         notes: Vec::new(),
         rivals: rivals.iter().map(|group| group.key.clone()).collect(),
         evidence,
-    })
+    }
 }
 
 /// The first group with the longest duration (`groups` is not empty).
@@ -522,7 +530,8 @@ fn longest_group(groups: &[Group]) -> &Group {
 
 /// Rule 3.4 within one rival group: (the title chosen, how, whether the choice is clear). A group of one title is clear;
 /// otherwise the titles with chapters stay in the running when any has chapters (all of them when none has), one left is
-/// chosen, and among several the first whose stream signatures are a superset of every other remaining title's is chosen;
+/// chosen, and among several the first whose streams cover every other remaining title's (`Title::signature_counts`: at
+/// least as many streams of each signature, so a title with one more stream of a signature covers the other) is chosen;
 /// when none is, the first remaining title is kept and the choice is not clear.
 fn choose_title(disc: &Disc, group: &Group) -> (u32, &'static str, bool) {
     let members: Vec<&Title> = group.titles.iter().filter_map(|number| disc.titles.get(number)).collect();
@@ -534,9 +543,12 @@ fn choose_title(disc: &Disc, group: &Group) -> (u32, &'static str, bool) {
     if remaining.len() == 1 {
         return (remaining[0].number, "the title with chapters", true);
     }
-    let signatures: Vec<BTreeSet<_>> = remaining.iter().map(|title| title.signature_set()).collect();
+    let signatures: Vec<BTreeMap<_, u32>> = remaining.iter().map(|title| title.signature_counts()).collect();
+    let covers = |wide: &BTreeMap<_, u32>, narrow: &BTreeMap<_, u32>| {
+        narrow.iter().all(|(signature, count)| wide.get(signature).is_some_and(|have| have >= count))
+    };
     let covering = (0..remaining.len()).find(|&index| {
-        (0..remaining.len()).all(|other| other == index || signatures[index].is_superset(&signatures[other]))
+        (0..remaining.len()).all(|other| other == index || covers(&signatures[index], &signatures[other]))
     });
     match covering {
         Some(index) => (remaining[index].number, "its streams cover every other title's", true),
@@ -1320,6 +1332,22 @@ mod tests {
         assert_eq!(plan.features, vec![feature(0, None, true, &[1, 2])]);
         assert_eq!((plan.confidence, plan.reviews), (AMBIGUOUS_TITLE_CONFIDENCE, vec![ReviewReason::TitleAmbiguous]));
         assert_eq!(plan.evidence[1], "rival group 5: title 0 (no title's streams cover every other's)");
+    }
+
+    #[test]
+    fn a_title_with_one_more_stream_of_a_signature_covers_the_other() {
+        // Rule 3.4 counts each signature: title 1 holds two English PGS streams (a regular and an SDH track, R5 and D20),
+        // title 0 one, and title 1 comes second; then a second English Dolby Digital 5.1 track the same way.
+        let disc = structure_disc(&[
+            (0, "1:40:00", "12", "5", &[ENG_AC3, ENG_PGS]),
+            (1, "1:40:00", "12", "5", &[ENG_AC3, ENG_PGS, ENG_PGS]),
+        ]);
+        let plan = structure(&disc, &Settings::default());
+        assert_eq!(plan.features, vec![feature(1, None, true, &[0])]);
+        assert_eq!((plan.confidence, plan.reviews), (0.85, vec![]));
+        assert_eq!(plan.evidence[1], "rival group 5: title 1 (its streams cover every other title's)");
+        let audio = structure_disc(&[(0, "1:40:00", "12", "5", &[ENG_AC3]), (1, "1:40:00", "12", "5", &[ENG_AC3, ENG_AC3])]);
+        assert_eq!(structure(&audio, &Settings::default()).features, vec![feature(1, None, true, &[0])]);
     }
 
     #[test]
