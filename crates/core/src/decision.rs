@@ -102,7 +102,9 @@ pub fn track_confidence(audio: &AudioDecision, subtitles: &SubtitleDecision) -> 
 /// 7), the rip's review reasons and read errors (6.2 step 7, 6.3), the owner's review decisions (spec 11) and the
 /// settings. Spec 6.4 step 11. Def: T13. Use: T16.
 pub struct DecisionInputs<'a> {
-    /// The job's plan: its identity and title confidences, reviews, notes, wanted languages and titles.
+    /// The job's plan: its identity and title confidences, reviews, notes, wanted languages and titles. After a wait in
+    /// AwaitingLookup it is the refreshed plan (`plan::refresh_identity` over the answered lookups, which the reducer asks
+    /// for with `job::Action::RefreshIdentity`), so the late TheDiscDB and TMDb answers reach the decision (8.1).
     pub plan: &'a Plan,
     /// The scan the plan was made from: the owner's Assign titles leaves out a title it lacks, as Task 7's re-plan
     /// (`assigned_entries`) does (Open point 32).
@@ -687,7 +689,7 @@ mod tests {
     use crate::codec::Family;
     use crate::disc::{disc, StreamKind};
     use crate::lookup::tmdb::{TmdbEpisode, TmdbSeason};
-    use crate::lookup::{Identity, IdentityStep, Kind};
+    use crate::lookup::{Identity, IdentityStep, Kind, RuntimeFacts};
     use crate::plan::movie::{is_theatrical, TitleRule};
     use crate::plan::{title_key, KindSource, Mode, PlanEvidence};
     use crate::remembered::{
@@ -1027,6 +1029,7 @@ mod tests {
                 },
                 labels: Vec::new(),
                 discdb_matches: Vec::new(),
+                runtime: RuntimeFacts::default(),
                 sentences: Vec::new(),
             },
         }

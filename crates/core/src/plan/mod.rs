@@ -158,6 +158,9 @@ pub struct PlanEvidence {
     /// by database index. A list of entries, not a map keyed by the index: the plan is read back inside `decide`'s
     /// untagged sections, whose buffered content cannot give an integer map key (the interfaces' "Keyed collections").
     pub discdb_matches: Vec<DiscDbMatch>,
+    /// 8.1's runtime facts the structural pass gave the identification (6.1 step 5's order), kept so `refresh_identity`
+    /// identifies again with the same facts once a pending lookup answers.
+    pub runtime: RuntimeFacts,
     /// One plain sentence per step, in the order the planner took them.
     pub sentences: Vec<String>,
 }
@@ -473,9 +476,57 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
             title_rule,
             labels,
             discdb_matches: matches.iter().map(|(&discdb_index, &title)| DiscDbMatch { discdb_index, title }).collect(),
+            runtime,
             sentences,
         },
     })
+}
+
+/// Spec 8.1 after AwaitingLookup ("If TheDiscDB or TMDb cannot be reached, ... planning proceeds on structure alone and
+/// the lookup is recorded as pending. After eject the job waits in AwaitingLookup, retrying hourly, before the file
+/// phase decides anything"): the plan with its identity made again from the answered lookups. `identify` runs again over
+/// `lookups` with the plan's kind and the runtime facts the plan identified with (`PlanEvidence.runtime`); a Remembered
+/// or Reviewed identity stays (the plan's identity is passed as `remembered` or `reviewed` when `lookups` gives none).
+/// The ripped titles (their keys and roles), the title confidence, the mode, the notes and the season session are kept:
+/// the disc is gone, so the titles cannot change. Refreshed: the identity and identity confidence; the identity's review
+/// reasons (the plan's identity_unknown and identity_ambiguous give way to the new identity's, and to the kind
+/// contradiction's identity_ambiguous when a search identity is of the other kind than the plan's; the titles being
+/// kept, it adds no title_ambiguous); the wanted languages (`wanted_languages` of the new identity's original language);
+/// and the evidence (a sentence naming the new step, then the kind contradiction's). Pure: phase 2 runs it for
+/// `job::Action::RefreshIdentity`, persists the refreshed plan and passes it to the next Decide
+/// (`decision::DecisionInputs.plan`). Spec 8.1, 10.1. Def: PR #3 review (F6). Use: phase 2.
+pub fn refresh_identity(plan: &Plan, lookups: &LookupInputs<'_>, settings: &Settings) -> Plan {
+    let mut lookups = lookups.clone();
+    match plan.identity.step {
+        IdentityStep::Remembered => lookups.remembered = lookups.remembered.or(plan.identity.tmdb),
+        IdentityStep::Reviewed => lookups.reviewed = lookups.reviewed.or(plan.identity.tmdb),
+        _ => {}
+    }
+    let identity = identify(&lookups, plan.kind, &plan.evidence.runtime, settings);
+    let mut sentences = plan.evidence.sentences.clone();
+    sentences.push(format!(
+        "the identity was made again with the answered lookups (8.1): step {}, confidence {:.2}",
+        identity.step.as_str(),
+        identity.confidence
+    ));
+    let kind_review = kind_disagreement(&identity, plan.kind, &mut sentences);
+    let reviews = sorted_unique(
+        plan.reviews
+            .iter()
+            .copied()
+            .filter(|reason| !matches!(reason, ReviewReason::IdentityUnknown | ReviewReason::IdentityAmbiguous))
+            .chain(identity.review)
+            .chain(kind_review)
+            .collect(),
+    );
+    Plan {
+        wanted: wanted_languages(identity.original_language.as_deref()),
+        identity_confidence: identity.confidence,
+        identity,
+        reviews,
+        evidence: PlanEvidence { sentences, ..plan.evidence.clone() },
+        ..plan.clone()
+    }
 }
 
 /// The roles that replace the planned titles: the owner's Assign titles when it names any title, else the remembered
@@ -2114,6 +2165,86 @@ mod tests {
             Err("planned title 1 (t00-00001) is a cut without an edition name to remember: name it first (spec 8.4)"
                 .to_string())
         );
+    }
+
+    #[test]
+    fn a_plan_made_with_both_lookups_pending_takes_the_late_answers_and_keeps_its_ripped_titles() {
+        // F6 (8.1): TheDiscDB and TMDb were unreachable at the disc phase, so the structure-only plan has no identity
+        // (step Nothing, 0, identity_unknown, the lookups pending) and its title was ripped. After AwaitingLookup both
+        // answer: TheDiscDB knows the fingerprint as movie 77, and TMDb's record says the film is Spanish.
+        let disc = made_disc(false, "FILM_DISC", &[made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "", ENG_SPA)]);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let pending =
+            LookupInputs { name: name.as_ref(), discdb_pending: true, tmdb_pending: true, ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, pending, &settings, &library));
+        assert_eq!((plan.identity.step, plan.identity_confidence, plan.identity.tmdb), (IdentityStep::Nothing, 0.0, None));
+        assert!(plan.identity.lookup_pending);
+        assert_eq!(plan.reviews, vec![ReviewReason::IdentityUnknown]);
+        assert_eq!(plan.wanted, wanted_languages(None));
+        let record: DiscDbRecord = serde_json::from_value(json!({
+            "media": {"title": "Film", "year": 2010, "type": "Movie", "external_ids": {"tmdb": "77"}},
+            "titles": []
+        }))
+        .unwrap();
+        let tmdb = parse_movie(&tmdb_movie_json(77, "Film", "Film", "2010-01-01", "es", Some(100)), "movie.json").unwrap();
+        let answered = LookupInputs {
+            name: name.as_ref(),
+            discdb_by_fingerprint: Some(&record),
+            record: Some(&tmdb),
+            ..LookupInputs::default()
+        };
+        let refreshed = refresh_identity(&plan, &answered, &settings);
+        assert_eq!((refreshed.identity.step, refreshed.identity.tmdb), (IdentityStep::DiscdbOne, Some(movie_id(77))));
+        assert_eq!((refreshed.identity_confidence, refreshed.identity.lookup_pending), (0.95, false));
+        assert_eq!(refreshed.reviews, Vec::<ReviewReason>::new());
+        assert_eq!(refreshed.wanted, wanted_languages(Some("es")));
+        // The ripped titles stay as they were: the disc is gone.
+        assert_eq!(refreshed.titles, plan.titles);
+        assert_eq!(
+            (refreshed.kind, refreshed.title_confidence, refreshed.mode),
+            (plan.kind, plan.title_confidence, plan.mode)
+        );
+        assert_eq!(refreshed.evidence.runtime, plan.evidence.runtime);
+        assert_eq!(refreshed.evidence.runtime.feature_seconds, vec![6000]);
+        assert_eq!(
+            refreshed.evidence.sentences.last().map(String::as_str),
+            Some("the identity was made again with the answered lookups (8.1): step discdb_one, confidence 0.95")
+        );
+        // Decide with the refreshed plan and the late record: the identity's confidence, and the Spanish track wanted.
+        let decision = crate::decision::decide(&crate::decision::DecisionInputs {
+            plan: &refreshed,
+            disc: &disc,
+            planned: &refreshed.titles[0],
+            title: disc.title(1).unwrap(),
+            audio: crate::tracks::audio::AudioFacts::default(),
+            subtitles: crate::tracks::subtitle::SubtitleFacts::default(),
+            record: Some(&tmdb),
+            library: &library,
+            rip_reviews: Vec::new(),
+            read_errors: Vec::new(),
+            overrides: None,
+            settings: &settings,
+        })
+        .unwrap();
+        assert_eq!(decision.confidences.identity, 0.95);
+        assert!(!decision.reviews.contains(&ReviewReason::IdentityUnknown), "{:?}", decision.reviews);
+        assert_eq!(decision.audio.kept.len(), 2);
+    }
+
+    #[test]
+    fn refreshing_a_remembered_identity_keeps_it() {
+        let disc = one_feature("30000000000");
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let remembered = remembered_film(vec![remembered_title("00001.mpls", "1", 6000, TitleRole::Feature)]);
+        let mut planned_inputs = inputs(&disc, LookupInputs { tmdb_pending: true, ..LookupInputs::default() }, &settings, &library);
+        planned_inputs.remembered = Some(&remembered);
+        let plan = run(&planned_inputs);
+        assert_eq!((plan.identity.step, plan.identity_confidence), (IdentityStep::Remembered, 1.0));
+        let refreshed = refresh_identity(&plan, &LookupInputs::default(), &settings);
+        assert_eq!((refreshed.identity.step, refreshed.identity.tmdb), (IdentityStep::Remembered, Some(movie_id(6537))));
+        assert_eq!(refreshed.identity_confidence, 1.0);
+        assert_eq!(refreshed.titles, plan.titles);
     }
 
     #[test]

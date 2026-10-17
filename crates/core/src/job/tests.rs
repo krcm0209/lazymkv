@@ -2,6 +2,7 @@
 //! failure outcomes, the resume rules, one test per row of the reducer table (Shared interfaces, `core::job`), the job
 //! ID and the job lookup. Every input is built here; nothing is read from a file.
 
+use crate::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use crate::remembered::{AudioOverride, AudioTrackOverride, Collision, CollisionAnswer, TitleOverrideEntry, TitleRole};
 
 use super::*;
@@ -43,8 +44,8 @@ fn file_phase_states() -> Vec<State> {
         State::Ejected { after_copy: true },
         State::Extracting,
         State::Inspecting,
-        State::Decided { approved: false },
-        State::Decided { approved: true },
+        State::Decided { approved: None },
+        State::Decided { approved: Some(vec![ReviewReason::IdentityAmbiguous]) },
         State::Remuxing,
         State::Verified,
     ]
@@ -159,18 +160,19 @@ fn sample_events() -> Vec<Event> {
         events.push(Event::ToolFound { tool });
     }
     events.extend([
-        Event::ReviewApproved { overrides: Overrides::default() },
+        Event::ReviewApproved { overrides: Overrides::default(), approved_reasons: Vec::new() },
         Event::ReviewApproved {
             overrides: Overrides {
                 titles: vec![TitleOverrideEntry { title: 1, role: TitleRole::Feature }],
                 audio: vec![AudioTrackOverride { title: 1, stream: 2, action: AudioOverride::Drop }],
                 ..Overrides::default()
             },
+            approved_reasons: vec![ReviewReason::TitleAmbiguous],
         },
         Event::ReviewDiscarded,
         Event::Retry,
         Event::RipAgain,
-        Event::ReFinalise,
+        Event::ReFinalise { approved_reasons: Vec::new() },
         Event::EngineRestart { disc_present: false },
         Event::EngineRestart { disc_present: true },
     ]);
@@ -392,7 +394,11 @@ fn a_state_is_written_with_its_name_under_state_and_its_fields_beside_it() {
     assert_eq!(json(&State::RipVerified { after_copy: false }), r#"{"state":"RipVerified","after_copy":false}"#);
     assert_eq!(json(&State::Planned { mode: Mode::Copy }), r#"{"state":"Planned","mode":"copy"}"#);
     assert_eq!(json(&State::Ejected { after_copy: true }), r#"{"state":"Ejected","after_copy":true}"#);
-    assert_eq!(json(&State::Decided { approved: true }), r#"{"state":"Decided","approved":true}"#);
+    assert_eq!(
+        json(&State::Decided { approved: Some(vec![ReviewReason::IdentityAmbiguous]) }),
+        r#"{"state":"Decided","approved":["identity_ambiguous"]}"#
+    );
+    assert_eq!(json(&State::Decided { approved: None }), r#"{"state":"Decided","approved":null}"#);
     assert_eq!(
         json(&State::NeedsReview { held: Held::DispositionGate }),
         r#"{"state":"NeedsReview","held":"disposition_gate"}"#
@@ -649,8 +655,8 @@ fn resuming_planned_checks_space_in_either_mode() {
 
 #[test]
 fn resuming_decided_decides_again() {
-    assert_eq!(resumed(State::Decided { approved: false }), [Action::Decide]);
-    assert_eq!(resumed(State::Decided { approved: true }), [Action::Decide]);
+    assert_eq!(resumed(State::Decided { approved: None }), [Action::Decide]);
+    assert_eq!(resumed(State::Decided { approved: Some(Vec::new()) }), [Action::Decide]);
 }
 
 #[test]
@@ -930,7 +936,7 @@ fn an_auto_file_decision_without_a_final_path_is_held_at_the_gate_whether_first_
     // Ruling T14: a job with no final path is never AutoFile. `decide` never pairs AutoFile with no path, but the event
     // is the job's, combined from its titles (`decision_done`), so the reducer holds it in both unapproved states too.
     let pathless = Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: false };
-    for state in [State::Inspecting, State::Decided { approved: false }] {
+    for state in [State::Inspecting, State::Decided { approved: None }] {
         assert_eq!(
             step(&state, &pathless),
             (
@@ -943,7 +949,7 @@ fn an_auto_file_decision_without_a_final_path_is_held_at_the_gate_whether_first_
     let reasons = vec![ReviewReason::TvUnmapped];
     let unmapped = Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: false };
     assert_eq!(
-        step(&State::Decided { approved: false }, &unmapped),
+        step(&State::Decided { approved: None }, &unmapped),
         (State::NeedsReview { held: Held::DispositionGate }, vec![notify(NotifyEvent::NeedsReview { reasons })])
     );
 }
@@ -1013,7 +1019,7 @@ fn a_job_of_several_titles_needs_review_when_any_title_does_and_has_a_path_only_
     );
     // Even an approved job is held: one title has no final path (Open point 38).
     assert_eq!(
-        step(&State::Decided { approved: true }, &done),
+        step(&State::Decided { approved: Some(vec![ReviewReason::TvUnmapped]) }, &done),
         (
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: vec![ReviewReason::TvUnmapped] })]
@@ -1030,7 +1036,7 @@ fn every_title_filing_automatically_gives_an_auto_file_job() {
     );
     assert_eq!(
         step(&State::Inspecting, &decision_done(&decisions)),
-        (State::Decided { approved: false }, vec![Action::CheckSpace])
+        (State::Decided { approved: None }, vec![Action::CheckSpace])
     );
 }
 
@@ -1063,7 +1069,7 @@ fn an_empty_decision_list_is_held_with_no_path() {
 fn an_auto_file_decision_checks_space_for_the_remux() {
     assert_eq!(
         step(&State::Inspecting, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }),
-        (State::Decided { approved: false }, vec![Action::CheckSpace])
+        (State::Decided { approved: None }, vec![Action::CheckSpace])
     );
 }
 
@@ -1079,8 +1085,8 @@ fn a_needs_review_decision_holds_the_job_at_the_disposition_gate_and_sends_its_r
 
 #[test]
 fn a_decided_job_with_space_remuxes() {
-    for approved in [false, true] {
-        assert_eq!(step(&State::Decided { approved }, &Event::SpaceOk), (State::Remuxing, vec![Action::Remux]));
+    for approved in [None, Some(vec![ReviewReason::IdentityAmbiguous])] {
+        assert_eq!(step(&State::Decided { approved: approved.clone() }, &Event::SpaceOk), (State::Remuxing, vec![Action::Remux]));
     }
 }
 
@@ -1274,7 +1280,10 @@ fn a_second_copy_failure_that_is_not_a_read_failure_is_an_ordinary_outcome() {
 #[test]
 fn approving_a_copy_job_checks_space_for_the_extraction() {
     assert_eq!(
-        step(&State::NeedsReview { held: Held::AfterCopy }, &Event::ReviewApproved { overrides: Overrides::default() }),
+        step(
+            &State::NeedsReview { held: Held::AfterCopy },
+            &Event::ReviewApproved { overrides: Overrides::default(), approved_reasons: vec![ReviewReason::TitleAmbiguous] }
+        ),
         (State::Extracting, vec![Action::CheckSpace])
     );
 }
@@ -1333,7 +1342,10 @@ fn a_copy_job_walks_from_its_plan_through_review_and_extraction_to_filed() {
             Event::CopyDone { scan_listed_titles: true, hash_errors: true },
             Event::Ejected,
             Event::HoldForReview { reasons: vec![ReviewReason::TitleAmbiguous, ReviewReason::CopyHashErrors] },
-            Event::ReviewApproved { overrides: Overrides::default() },
+            Event::ReviewApproved {
+                overrides: Overrides::default(),
+                approved_reasons: vec![ReviewReason::TitleAmbiguous, ReviewReason::CopyHashErrors],
+            },
             Event::SpaceOk,
             Event::TitleExtracted,
             Event::TitleVerified { last: true },
@@ -1373,17 +1385,18 @@ fn a_copy_job_walks_from_its_plan_through_review_and_extraction_to_filed() {
 // `reduce`: the review queue (10.1, spec 11).
 
 #[test]
-fn approving_at_the_disposition_gate_decides_again_with_the_owners_overrides() {
+fn approving_at_the_disposition_gate_decides_again_with_the_owners_overrides_and_records_the_reasons_approved() {
     let overrides = Overrides { season: Some(3), ..Overrides::default() };
+    let approved_reasons = vec![ReviewReason::TvUnmapped];
     assert_eq!(
-        step(&State::NeedsReview { held: Held::DispositionGate }, &Event::ReviewApproved { overrides }),
-        (State::Decided { approved: true }, vec![Action::Decide])
+        step(&State::NeedsReview { held: Held::DispositionGate }, &Event::ReviewApproved { overrides, approved_reasons }),
+        (State::Decided { approved: Some(vec![ReviewReason::TvUnmapped]) }, vec![Action::Decide])
     );
 }
 
 #[test]
 fn a_decision_after_approval_checks_space_whatever_its_disposition() {
-    let approved = State::Decided { approved: true };
+    let approved = State::Decided { approved: Some(vec![ReviewReason::TvUnmapped]) };
     for disposition in [Disposition::AutoFile, Disposition::NeedsReview] {
         assert_eq!(
             step(&approved, &Event::DecisionDone { disposition, reasons: vec![ReviewReason::TvUnmapped], has_path: true }),
@@ -1394,9 +1407,9 @@ fn a_decision_after_approval_checks_space_whatever_its_disposition() {
 
 #[test]
 fn a_redecided_auto_filed_job_that_now_needs_review_is_held() {
-    // A job that auto-filed (Decided { approved: false }) decides again after a restart, a Return or a Retry; the
+    // A job that auto-filed (Decided { approved: None }) decides again after a restart, a Return or a Retry; the
     // settings or the library facts may have changed meanwhile (6.4 step 12: it "stops here until approved").
-    let unapproved = State::Decided { approved: false };
+    let unapproved = State::Decided { approved: None };
     assert_eq!(
         step(&unapproved, &Event::DecisionDone { disposition: Disposition::AutoFile, reasons: Vec::new(), has_path: true }),
         (unapproved.clone(), vec![Action::CheckSpace])
@@ -1413,7 +1426,7 @@ fn an_approved_job_walks_from_the_gate_through_the_remux_to_filed() {
     let (end, actions) = walk(
         State::NeedsReview { held: Held::DispositionGate },
         &[
-            Event::ReviewApproved { overrides: Overrides::default() },
+            Event::ReviewApproved { overrides: Overrides::default(), approved_reasons: vec![ReviewReason::ReadErrors] },
             Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors], has_path: true },
             Event::SpaceOk,
             Event::RemuxDone,
@@ -1437,8 +1450,11 @@ fn an_approved_job_walks_from_the_gate_through_the_remux_to_filed() {
 
 #[test]
 fn an_approved_job_whose_decision_made_again_raises_path_collision_is_held_at_the_gate() {
-    // Spec 7: the job never overwrites a file it did not create; 6.4 step 12 holds it again, with the same notification.
-    let approved = State::Decided { approved: true };
+    // Spec 7: the job never overwrites a file it did not create; 6.4 step 12 holds it again, with the same notification,
+    // even when the owner approved the reasons the decision carries.
+    let approved = State::Decided {
+        approved: Some(vec![ReviewReason::TvUnmapped, ReviewReason::PathCollision, ReviewReason::ReadErrors]),
+    };
     for reasons in [
         vec![ReviewReason::PathCollision],
         vec![ReviewReason::TvUnmapped, ReviewReason::PathCollision, ReviewReason::ReadErrors],
@@ -1453,7 +1469,7 @@ fn an_approved_job_whose_decision_made_again_raises_path_collision_is_held_at_th
 #[test]
 fn an_approved_job_whose_decision_made_again_has_no_final_path_is_held_at_the_gate() {
     // Open point 38: `decide` gives NeedsReview whenever the path is None; `has_path` false says so, with any reasons.
-    let approved = State::Decided { approved: true };
+    let approved = State::Decided { approved: Some(vec![ReviewReason::TvUnmapped]) };
     for reasons in [Vec::new(), vec![ReviewReason::TvUnmapped]] {
         assert_eq!(
             step(
@@ -1469,7 +1485,7 @@ fn an_approved_job_whose_decision_made_again_has_no_final_path_is_held_at_the_ga
 fn an_approved_job_whose_decision_made_again_is_held_only_by_a_low_confidence_goes_on() {
     // 8.8: only a review decision raises a confidence, and spec 11's Approve continues with the reviewed decisions; a
     // NeedsReview disposition with no review reason (a confidence below auto_threshold) does not hold the job again.
-    let approved = State::Decided { approved: true };
+    let approved = State::Decided { approved: Some(Vec::new()) };
     assert_eq!(
         step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: Vec::new(), has_path: true }),
         (approved.clone(), vec![Action::CheckSpace])
@@ -1477,9 +1493,9 @@ fn an_approved_job_whose_decision_made_again_is_held_only_by_a_low_confidence_go
 }
 
 #[test]
-fn an_approved_job_goes_on_for_every_review_reason_but_path_collision() {
+fn an_approved_job_goes_on_for_every_review_reason_the_owner_approved_but_path_collision() {
     // 8.8: the owner approved the reasons the job carried; only path_collision (and a missing path) still blocks the file.
-    let approved = State::Decided { approved: true };
+    let approved = State::Decided { approved: Some(ReviewReason::ALL.to_vec()) };
     for reason in ReviewReason::ALL.into_iter().filter(|reason| *reason != ReviewReason::PathCollision) {
         assert_eq!(
             step(&approved, &Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![reason], has_path: true }),
@@ -1496,22 +1512,25 @@ fn an_approved_job_goes_on_for_every_review_reason_but_path_collision() {
 #[test]
 fn a_re_finalised_job_whose_recorded_file_no_longer_matches_is_held_until_the_owner_resolves_it() {
     // Spec 7: a same-path decision after a re-finalise raises path_collision; Open point 39: the engine does not file it.
-    let reasons = vec![ReviewReason::PathCollision];
+    // The filed decision carried read_errors, which filing approved; the gate shows both reasons, the owner approves
+    // them with keep both, and the decision made again carries read_errors only.
+    let reasons = vec![ReviewReason::PathCollision, ReviewReason::ReadErrors];
     let (end, actions) = walk(
         State::Filed,
         &[
-            Event::ReFinalise,
+            Event::ReFinalise { approved_reasons: vec![ReviewReason::ReadErrors] },
             Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: reasons.clone(), has_path: true },
             Event::ReviewApproved {
                 overrides: Overrides {
                     collision: vec![CollisionAnswer { path: "/srv/media/Movies/Film.mkv".to_string(), action: Collision::KeepBoth }],
                     ..Overrides::default()
                 },
+                approved_reasons: reasons.clone(),
             },
             Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::ReadErrors], has_path: true },
         ],
     );
-    assert_eq!(end, State::Decided { approved: true });
+    assert_eq!(end, State::Decided { approved: Some(reasons.clone()) });
     assert_eq!(
         actions,
         [
@@ -1534,8 +1553,57 @@ fn discarding_a_held_job_deletes_its_data() {
 }
 
 #[test]
-fn re_finalising_a_filed_job_decides_again() {
-    assert_eq!(step(&State::Filed, &Event::ReFinalise), (State::Decided { approved: true }, vec![Action::Decide]));
+fn re_finalising_a_filed_job_decides_again_approving_the_filed_decisions_reasons() {
+    assert_eq!(
+        step(&State::Filed, &Event::ReFinalise { approved_reasons: vec![ReviewReason::ReadErrors] }),
+        (State::Decided { approved: Some(vec![ReviewReason::ReadErrors]) }, vec![Action::Decide])
+    );
+}
+
+#[test]
+fn an_approved_job_whose_decision_made_again_carries_a_reason_the_owner_did_not_approve_is_held() {
+    // F12: held with identity_ambiguous only, the owner sets the identity to a Japanese film and approves. The decision
+    // made again wants Japanese audio, which the disc lacks, so it raises original_language_missing: the owner never saw
+    // that reason, and 8.6 says the review reasons hold the job regardless (6.4 step 12).
+    let japanese = TmdbIdentity { kind: TmdbKind::Movie, id: 4935 };
+    let raised = vec![ReviewReason::OriginalLanguageMissing];
+    let (end, actions) = walk(
+        State::NeedsReview { held: Held::DispositionGate },
+        &[
+            Event::ReviewApproved {
+                overrides: Overrides { identity: Some(japanese), ..Overrides::default() },
+                approved_reasons: vec![ReviewReason::IdentityAmbiguous],
+            },
+            Event::DecisionDone { disposition: Disposition::NeedsReview, reasons: raised.clone(), has_path: true },
+        ],
+    );
+    assert_eq!(end, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(actions, [vec![Action::Decide], vec![notify(NotifyEvent::NeedsReview { reasons: raised })]]);
+    // Approved again with the new reason shown, the job goes on.
+    let approved = State::Decided { approved: Some(vec![ReviewReason::OriginalLanguageMissing]) };
+    let again = Event::DecisionDone {
+        disposition: Disposition::NeedsReview,
+        reasons: vec![ReviewReason::OriginalLanguageMissing],
+        has_path: true,
+    };
+    assert_eq!(step(&approved, &again), (approved.clone(), vec![Action::CheckSpace]));
+    // A re-finalise approves the filed decision's reasons only: a new no_wanted_audio holds the job, never files it.
+    let (end, actions) = walk(
+        State::Filed,
+        &[
+            Event::ReFinalise { approved_reasons: Vec::new() },
+            Event::DecisionDone {
+                disposition: Disposition::NeedsReview,
+                reasons: vec![ReviewReason::NoWantedAudio],
+                has_path: true,
+            },
+        ],
+    );
+    assert_eq!(end, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(
+        actions,
+        [vec![Action::Decide], vec![notify(NotifyEvent::NeedsReview { reasons: vec![ReviewReason::NoWantedAudio] })]]
+    );
 }
 
 #[test]
@@ -1576,10 +1644,14 @@ fn a_held_job_takes_no_disc_or_file_phase_event() {
 
 #[test]
 fn re_finalise_and_discard_are_rejected_outside_their_states() {
-    assert!(rejects(&State::Decided { approved: true }, &Event::ReFinalise));
-    assert!(rejects(&State::NeedsReview { held: Held::DispositionGate }, &Event::ReFinalise));
+    let re_finalise = Event::ReFinalise { approved_reasons: Vec::new() };
+    assert!(rejects(&State::Decided { approved: Some(Vec::new()) }, &re_finalise));
+    assert!(rejects(&State::NeedsReview { held: Held::DispositionGate }, &re_finalise));
     assert!(rejects(&State::Filed, &Event::ReviewDiscarded));
-    assert!(rejects(&State::Inspecting, &Event::ReviewApproved { overrides: Overrides::default() }));
+    assert!(rejects(
+        &State::Inspecting,
+        &Event::ReviewApproved { overrides: Overrides::default(), approved_reasons: Vec::new() }
+    ));
     // A waiting job is neither held nor failed: Discard waits until it is.
     assert!(rejects(&State::AwaitingSpace { return_to: boxed(State::Copying) }, &Event::ReviewDiscarded));
     for state in disc_phase_states().into_iter().chain(file_phase_states()) {
@@ -1663,8 +1735,8 @@ fn the_share_back_returns_to_the_interrupted_state_with_its_resume_actions_then_
 #[test]
 fn space_freed_returns_to_the_interrupted_state_with_its_resume_actions_then_resumed() {
     assert_eq!(
-        step(&State::AwaitingSpace { return_to: boxed(State::Decided { approved: true }) }, &Event::SpaceFreed),
-        (State::Decided { approved: true }, vec![Action::Decide, notify(NotifyEvent::Resumed)])
+        step(&State::AwaitingSpace { return_to: boxed(State::Decided { approved: Some(Vec::new()) }) }, &Event::SpaceFreed),
+        (State::Decided { approved: Some(Vec::new()) }, vec![Action::Decide, notify(NotifyEvent::Resumed)])
     );
 }
 
@@ -1785,7 +1857,7 @@ fn the_disc_phase_never_waits_for_a_lookup() {
     for state in disc_phase_states() {
         assert!(rejects(&state, &Event::LookupPending), "{state:?}");
     }
-    for approved in [false, true] {
+    for approved in [None, Some(vec![ReviewReason::IdentityAmbiguous])] {
         assert!(rejects(&State::Decided { approved }, &Event::LookupPending));
     }
 }
@@ -1800,15 +1872,19 @@ fn a_lookup_still_pending_at_the_hourly_retry_starts_the_timer_again() {
 }
 
 #[test]
-fn an_answered_lookup_returns_to_the_interrupted_state() {
+fn an_answered_lookup_refreshes_the_identity_and_returns_to_the_interrupted_state() {
+    // F6 (8.1): the answers reach the plan before the file phase's next action, so the Decide that follows uses them.
     assert_eq!(
         step(&State::AwaitingLookup { return_to: boxed(State::Inspecting) }, &Event::LookupAnswered),
-        (State::Inspecting, vec![Action::Probe, notify(NotifyEvent::Resumed)])
+        (State::Inspecting, vec![Action::RefreshIdentity, Action::Probe, notify(NotifyEvent::Resumed)])
     );
     assert_eq!(
         step(&State::AwaitingLookup { return_to: boxed(State::Ejected { after_copy: false }) }, &Event::LookupAnswered),
-        (State::Ejected { after_copy: false }, vec![notify(NotifyEvent::Resumed)])
+        (State::Ejected { after_copy: false }, vec![Action::RefreshIdentity, notify(NotifyEvent::Resumed)])
     );
+    // A lookup still pending at the hourly retry refreshes nothing.
+    let waiting = State::AwaitingLookup { return_to: boxed(State::Inspecting) };
+    assert_eq!(step(&waiting, &Event::LookupPending), (waiting.clone(), vec![Action::StartTimer { minutes: LOOKUP_RETRY_MIN }]));
 }
 
 #[test]
@@ -1923,8 +1999,8 @@ fn failing_steps(failure: Failure) -> Vec<(State, Event)> {
         (State::Extracting, Event::ExtractFailed { failure }),
         (State::Inspecting, Event::ProbeFailed { failure }),
         (State::Inspecting, Event::DecisionFailed { failure }),
-        (State::Decided { approved: false }, Event::DecisionFailed { failure }),
-        (State::Decided { approved: true }, Event::DecisionFailed { failure }),
+        (State::Decided { approved: None }, Event::DecisionFailed { failure }),
+        (State::Decided { approved: Some(Vec::new()) }, Event::DecisionFailed { failure }),
         (State::Remuxing, Event::RemuxFailed { failure }),
         (State::Remuxing, Event::FileVerifyFailed { failure }),
         (State::Verified, Event::FileFailed { failure }),
@@ -2046,10 +2122,10 @@ fn retry_takes_a_failed_job_back_to_the_state_that_failed_with_its_resume_action
 fn retrying_a_failed_decision_after_approval_decides_again() {
     assert_eq!(
         step(
-            &State::Failed { class: FailureClass::Unknown, from: boxed(State::Decided { approved: true }) },
+            &State::Failed { class: FailureClass::Unknown, from: boxed(State::Decided { approved: Some(Vec::new()) }) },
             &Event::Retry,
         ),
-        (State::Decided { approved: true }, vec![Action::Decide])
+        (State::Decided { approved: Some(Vec::new()) }, vec![Action::Decide])
     );
 }
 

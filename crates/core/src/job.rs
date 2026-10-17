@@ -243,13 +243,16 @@ pub enum State {
     /// 10.1 main line: the staged files are probed and the decision made (6.4 steps 9 to 11).
     Inspecting,
     /// 10.1 main line: the decision is made, or is being made again after approval or re-finalise (6.4 steps 11 and 12).
-    /// `approved` is true when entered by approval at the disposition gate or by re-finalise (8.8: the owner approved),
-    /// false when entered from Inspecting with an AutoFile decision; an unapproved job whose decision, made again,
-    /// needs review goes to the disposition gate (6.4 step 12). An approved job goes on whatever review reasons or
-    /// confidences its decision made again carries (spec 11 Approve: continue with the reviewed decisions), except
-    /// `path_collision` (spec 7: a file the job did not create is never overwritten) and a decision with no final path
-    /// (`has_path` false, Open point 38): either holds the job at the disposition gate again (6.4 step 12, Open point 39).
-    Decided { approved: bool },
+    /// `approved` holds the review reasons the owner approved when entered by approval at the disposition gate (the
+    /// reasons shown there) or by re-finalise (the filed decision's reasons; 8.8: the owner approved), and is None when
+    /// entered from Inspecting with an AutoFile decision; an unapproved job whose decision, made again, needs review goes
+    /// to the disposition gate (6.4 step 12). An approved job goes on whatever confidences its decision made again carries
+    /// and whatever review reasons the owner approved (spec 11 Approve: continue with the reviewed decisions), but a
+    /// reason the owner did not approve (one the decision made again with the overrides raised first, such as
+    /// original_language_missing after Set identity; 6.4 step 12, 8.6 "The review reasons above hold the job
+    /// regardless"), `path_collision` (spec 7: a file the job did not create is never overwritten) and a decision with no
+    /// final path (`has_path` false, Open point 38) hold the job at the disposition gate again (Open point 39).
+    Decided { approved: Option<Vec<ReviewReason>> },
     /// 10.1 main line: the partial final file is written and verified (6.4 steps 13 and 14).
     Remuxing,
     /// 10.1 main line: the partial file matched the decision; it is renamed into its final path (6.4 step 14).
@@ -548,10 +551,12 @@ pub enum Event {
     ToolMissing { tool: Tool },
     /// The self-test found `tool`; AwaitingTool returns.
     ToolFound { tool: Tool },
-    /// Spec 11 Approve, with the owner's review decisions. Phase 2 delivers it only once spec 6's file-phase slot is free
-    /// for this job, as FilePhaseSlot is for a Direct job in Ejected; the job holds the slot until it reaches Filed,
-    /// NeedsReview, Failed or Discarded.
-    ReviewApproved { overrides: Overrides },
+    /// Spec 11 Approve, with the owner's review decisions and the review reasons shown at the gate when the owner
+    /// approved (`approved_reasons`: the held decision's reasons, which the decision made again may carry without
+    /// holding the job; 6.4 step 12). Phase 2 delivers it only once spec 6's file-phase slot is free for this job, as
+    /// FilePhaseSlot is for a Direct job in Ejected; the job holds the slot until it reaches Filed, NeedsReview, Failed or
+    /// Discarded.
+    ReviewApproved { overrides: Overrides, approved_reasons: Vec<ReviewReason> },
     /// Spec 11 Discard: accepted from NeedsReview and from Failed of every class (spec 11's Discard deletes the job's
     /// staging data, 4.5 `discard`, and spec 7 never deletes a held or failed job's data automatically, so a failed job's
     /// data is freed only this way), to Discarded with DeleteJobData.
@@ -561,10 +566,12 @@ pub enum Event {
     Retry,
     /// Spec 11 Rip again: arm a new job for a disc that was already ripped.
     RipAgain,
-    /// Spec 11 Re-finalise, from history. Phase 2 delivers it only once spec 6's file-phase slot is free for this job, as
-    /// FilePhaseSlot is for a Direct job in Ejected; the job holds the slot until it reaches Filed, NeedsReview, Failed or
-    /// Discarded.
-    ReFinalise,
+    /// Spec 11 Re-finalise, from history, with the review reasons of the decision the job was filed with
+    /// (`approved_reasons`, the engine's job record): filing approved them, and a reason the decision made again raises
+    /// beyond them holds the job (6.4 step 12). Phase 2 delivers it only once spec 6's file-phase slot is free for this
+    /// job, as FilePhaseSlot is for a Direct job in Ejected; the job holds the slot until it reaches Filed, NeedsReview,
+    /// Failed or Discarded.
+    ReFinalise { approved_reasons: Vec<ReviewReason> },
     /// The engine started again; `disc_present` says whether the job's disc is in a drive.
     EngineRestart { disc_present: bool },
 }
@@ -582,6 +589,10 @@ pub enum Action {
     RunScan,
     /// 6.1 step 5.
     Plan,
+    /// 8.1 after AwaitingLookup: the answered lookups refresh the plan's identity (`plan::refresh_identity`, which keeps
+    /// the ripped titles); phase 2 persists the refreshed plan and passes it to the next Decide
+    /// (`decision::DecisionInputs.plan`), so the answers the job waited for reach the decision.
+    RefreshIdentity,
     /// Section 7's space check for the next step.
     CheckSpace,
     /// 6.2 step 6, the next planned title (or the same one again after a first verification failure).
@@ -706,10 +717,11 @@ pub fn new_job() -> (State, Vec<Action>) {
 }
 
 /// "Resuming after a restart" (and the actions of a waiting state's return): Detected [Fingerprint]; Fingerprinted
-/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided { .. } [Decide] (Decided { approved: true } may be entered
-/// with Decide pending, after approval or re-finalise; header-only steps simply run again, 10.1, and a job whose decision,
-/// made again, needs review is gated again unless the owner approved it: an approved job is held again only for
-/// `path_collision` or a decision with no final path (`has_path` false), spec 7, 6.4 step 12, Open point 39); Ripping
+/// [RunScan]; Scanned [Plan]; Planned [CheckSpace]; Decided { .. } [Decide] (an approved Decided may be entered with
+/// Decide pending, after approval or re-finalise; header-only steps simply run again, 10.1, and a job whose decision,
+/// made again, needs review is gated again unless the owner approved it: an approved job is held again only for a
+/// reason the owner did not approve, `path_collision` or a decision with no final path (`has_path` false), spec 7, 6.4
+/// step 12, Open point 39); Ripping
 /// [EmptyTitleDirectory, RipTitle]; Extracting [EmptyTitleDirectory, ExtractTitle]; Copying [EmptyCopyDirectory,
 /// CopyDisc]; RipVerified (either after_copy) [Eject]; Inspecting [Probe]; Remuxing [DeletePartialFile, Remux]; Verified [File]; Ejected nothing (it waits for FilePhaseSlot or
 /// HoldForReview); a disc-phase state with `disc_present` false [WaitForDisc]; waiting, held, failed, filed and discarded
@@ -811,7 +823,7 @@ fn direct_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
             (State::Inspecting, vec![Action::ExtractSubtitleEvidence, Action::Decide])
         }
         (State::Inspecting, Event::DecisionDone { disposition: Disposition::AutoFile, has_path: true, .. }) => {
-            (State::Decided { approved: false }, vec![Action::CheckSpace])
+            (State::Decided { approved: None }, vec![Action::CheckSpace])
         }
         // A decision with no final path is never filed (Open point 38): held at the gate whatever its disposition.
         (
@@ -926,34 +938,36 @@ fn copy_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
 }
 
 /// The review queue's rows (10.1, spec 11): approving at the disposition gate decides again with the owner's overrides
-/// (the engine passes them to Decide), and a decision after approval goes on whatever its disposition, review reasons and
-/// confidences (spec 11 Approve: continue with the reviewed decisions; 8.8: only a review decision raises a confidence),
-/// except that it is held at the disposition gate again, with the same notification, when it raises `path_collision`
-/// (spec 7: the job never overwrites a file it did not create, and a re-finalise whose recorded file no longer matches
-/// raises it) or built no final path (`has_path` false, 6.4 step 12, Open points 38 and 39); a decision made again in an
+/// (the engine passes them to Decide) and records the reasons the owner approved, and a decision after approval goes on
+/// whatever its disposition and confidences and whatever reasons the owner approved (spec 11 Approve: continue with the
+/// reviewed decisions; 8.8: only a review decision raises a confidence), except that it is held at the disposition gate
+/// again, with the same notification, when it carries a reason the owner did not approve (6.4 step 12), raises
+/// `path_collision` (spec 7: the job never overwrites a file it did not create, and a re-finalise whose recorded file
+/// no longer matches raises it) or built no final path (`has_path` false, Open points 38 and 39); a decision made again in an
 /// unapproved job (an auto-filed job after a restart, a Return or a Retry) goes on only when it files automatically with
 /// a final path and is otherwise held at the disposition gate (6.4 step 12; a job with no final path is never AutoFile);
 /// Discard deletes the job's data, of a held job (10.1's table) or of a failed one of any class (spec 11's Discard, the
 /// 10.1 row extended by the final review's ruling: spec 7 never deletes a failed job's data automatically, so this is
-/// how the owner frees it); Re-finalise takes a filed job back to an approved Decided; Rip again arms a new job for a
+/// how the owner frees it); Re-finalise takes a filed job back to a Decided that approves the filed decision's reasons;
+/// Rip again arms a new job for a
 /// filed, held or file-phase job, one that failed in its file phase, or a waiting job returning to a file-phase state
 /// (6.1 step 2 counts each as past the disc phase), and leaves its state.
 fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     let next = match (state, event) {
-        (State::NeedsReview { held: Held::DispositionGate }, Event::ReviewApproved { .. }) => {
-            (State::Decided { approved: true }, vec![Action::Decide])
+        (State::NeedsReview { held: Held::DispositionGate }, Event::ReviewApproved { approved_reasons, .. }) => {
+            (State::Decided { approved: Some(approved_reasons.clone()) }, vec![Action::Decide])
         }
-        (State::Decided { approved: true }, Event::DecisionDone { reasons, has_path, .. })
-            if !blocks_filing(reasons, *has_path) =>
+        (State::Decided { approved: Some(approved) }, Event::DecisionDone { reasons, has_path, .. })
+            if !blocks_filing(reasons, *has_path, approved) =>
         {
             (state.clone(), vec![Action::CheckSpace])
         }
         (
-            State::Decided { approved: false },
+            State::Decided { approved: None },
             Event::DecisionDone { disposition: Disposition::AutoFile, has_path: true, .. },
         ) => (state.clone(), vec![Action::CheckSpace]),
-        (State::Decided { approved: true }, Event::DecisionDone { reasons, has_path, .. })
-            if blocks_filing(reasons, *has_path) =>
+        (State::Decided { approved: Some(approved) }, Event::DecisionDone { reasons, has_path, .. })
+            if blocks_filing(reasons, *has_path, approved) =>
         {
             (
                 State::NeedsReview { held: Held::DispositionGate },
@@ -961,7 +975,7 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
             )
         }
         (
-            State::Decided { approved: false },
+            State::Decided { approved: None },
             Event::DecisionDone { disposition: Disposition::NeedsReview, reasons, .. }
             | Event::DecisionDone { has_path: false, reasons, .. },
         ) => (
@@ -971,7 +985,9 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         (State::NeedsReview { .. } | State::Failed { .. }, Event::ReviewDiscarded) => {
             (State::Discarded, vec![Action::DeleteJobData])
         }
-        (State::Filed, Event::ReFinalise) => (State::Decided { approved: true }, vec![Action::Decide]),
+        (State::Filed, Event::ReFinalise { approved_reasons }) => {
+            (State::Decided { approved: Some(approved_reasons.clone()) }, vec![Action::Decide])
+        }
         (State::Filed | State::NeedsReview { .. }, Event::RipAgain) => (state.clone(), vec![Action::ArmRipAgain]),
         (State::Failed { from, .. }, Event::RipAgain) if from.is_file_phase() => {
             (state.clone(), vec![Action::ArmRipAgain])
@@ -985,14 +1001,18 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     Some(next)
 }
 
-/// Whether a decision made again in an approved job still cannot be filed whatever the owner approved: it raises
-/// `path_collision` (spec 7: a file the job did not create is never overwritten, and a re-finalise whose recorded file no
-/// longer matches raises it), or it built no final path (`has_path` false, Open point 38). Open point 39: the engine does
-/// not file such a job; 6.4 step 12 holds it at the disposition gate again. Nothing else holds an approved job: every other
-/// review reason is one the owner approved, and a confidence below `auto_threshold` is no reason to stop after spec 11's
-/// Approve ("continue with the reviewed decisions"; 8.8: only a review decision raises a confidence).
-fn blocks_filing(reasons: &[ReviewReason], has_path: bool) -> bool {
-    !has_path || reasons.contains(&ReviewReason::PathCollision)
+/// Whether a decision made again in an approved job cannot be filed: it carries a review reason not in `approved` (the
+/// reasons the owner approved at the gate, or the filed decision's for a re-finalise), so the owner never saw it (6.4
+/// step 12; 8.6 "The review reasons above hold the job regardless": Set identity to a Japanese film raises
+/// original_language_missing on a disc without Japanese audio); it raises `path_collision`, approved or not (spec 7: a
+/// file the job did not create is never overwritten, and a re-finalise whose recorded file no longer matches raises
+/// it); or it built no final path (`has_path` false, Open point 38). Open point 39: the engine does not file such a job;
+/// 6.4 step 12 holds it at the disposition gate again. A confidence below `auto_threshold` is no reason to stop after
+/// spec 11's Approve ("continue with the reviewed decisions"; 8.8: only a review decision raises a confidence).
+fn blocks_filing(reasons: &[ReviewReason], has_path: bool, approved: &[ReviewReason]) -> bool {
+    !has_path
+        || reasons.contains(&ReviewReason::PathCollision)
+        || reasons.iter().any(|reason| !approved.contains(reason))
 }
 
 /// The state a waiting state returns to; None for every other state.
@@ -1037,7 +1057,8 @@ fn tool_missing(state: &State, tool: Tool) -> Option<(State, Vec<Action>)> {
 }
 
 /// The waiting states (10.1, section 7, 10.2): entering each from the states its row names, the hourly retry of a lookup
-/// still pending, and the Return of each when its condition clears.
+/// still pending, and the Return of each when its condition clears; AwaitingLookup's Return starts with RefreshIdentity
+/// (8.1: the answered lookups reach the decision).
 fn waits(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     let working = state.is_disc_phase() || state.is_file_phase();
     let here = || Box::new(state.clone());
@@ -1061,8 +1082,14 @@ fn waits(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
         | (State::AwaitingSpace { return_to }, Event::SpaceFreed)
         | (State::AwaitingMakeMkv { return_to }, Event::MakeMkvChanged)
         | (State::AwaitingNetwork { return_to }, Event::NetworkRetry)
-        | (State::AwaitingLookup { return_to }, Event::LookupAnswered)
         | (State::AwaitingTool { return_to }, Event::ToolFound { .. }) => Some(back_to(return_to)),
+        // 8.1: the answers the job waited for refresh the plan's identity before the file phase's next action, so the
+        // Decide that follows uses them (`plan::refresh_identity`).
+        (State::AwaitingLookup { return_to }, Event::LookupAnswered) => {
+            let (state, mut actions) = back_to(return_to);
+            actions.insert(0, Action::RefreshIdentity);
+            Some((state, actions))
+        }
         _ => None,
     }
 }
