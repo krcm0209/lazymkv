@@ -12,11 +12,11 @@ const NAME: &str = "hit-rate";
 /// Its usage after "usage: lazymkv-dev ". The Python read sys.argv[1] and ignored any further word; so does this.
 const USAGE: &str = "hit-rate <dir>";
 
-/// How a lookup ended. Py: lookup's strings.
-const HIT: &str = "hit";
-const MISS: &str = "miss";
-const FAILED: &str = "failed";
-const NOT_MADE: &str = "n/a";
+/// How a lookup ended. Py: lookup's strings. `cmd::plan` (Task 15) spells its answer words with these.
+pub(crate) const HIT: &str = "hit";
+pub(crate) const MISS: &str = "miss";
+pub(crate) const FAILED: &str = "failed";
+pub(crate) const NOT_MADE: &str = "n/a";
 
 /// HTTP status per lookup, from the recorder's lookup-status.txt ({"dischash": "200"}); empty when the file cannot be
 /// read (the Python's OSError); Err when it is not UTF-8 (the Python crashed). Py: hit_rate.statuses.
