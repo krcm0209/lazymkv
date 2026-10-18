@@ -288,7 +288,7 @@ First applicable rule:
 
    Other labelled playlists (for example a copy-disclaimer playlist) are not the feature.
 3. **Structure**, on the groups from 8.2:
-   1. If a group's segment map is the concatenation of two or more other groups' maps, it is a "play all" title: treat the disc as TV (8.5).
+   1. If a group's segment map is the concatenation of two or more other groups' maps, each of them episode-length (15 to 120 minutes, 8.2), it is a "play all" title: treat the disc as TV (8.5). A concatenation of shorter groups (a play-all of extras) is an ordinary group here (ruling R1, 2026-10-17).
    2. Keep groups at least `feature_min_minutes` long (default 45). If none, keep the longest group.
    3. Call a kept group a rival if its duration is within 10% of the longest kept group's. Shorter groups are extras and are ignored.
    4. Within each rival group, choose the title to rip: the one with chapters (R2); then the one whose audio and subtitle streams are a superset of every other title's in the group. If no title is such a superset (the titles carry different audio), the group is ambiguous: 0.60, review reason `title_ambiguous`.
@@ -311,7 +311,7 @@ Edition naming is decided per film, not per job, so that copies filed from diffe
 
 ### 8.5 TV
 
-- **TheDiscDB maps the disc:** each episode title is ripped in Direct mode; "play all" titles are dropped. Title confidence 0.98. Multi-episode titles are filed as multi-episode files as TheDiscDB describes them.
+- **TheDiscDB maps the disc:** each episode title is ripped in Direct mode; "play all" titles are dropped (here any group whose segment map is the concatenation of two or more other groups' maps, whatever their length: a play-all of extras is dropped too; R15). Title confidence 0.98. Multi-episode titles are filed as multi-episode files as TheDiscDB describes them.
 - **Otherwise:** title confidence 0.60 with the review reason `tv_unmapped`, so whole-disc copy mode is used. Episode-length titles are pre-assigned to episodes by runtime as a suggestion.
 - **Season session:** a record keyed by TMDb show ID and season number, holding the discs seen, the episodes assigned, and the next unassigned episode. A disc joins a session when its identity is confirmed (by TheDiscDB or in review). A disc finds its session by show ID and the season number parsed from its name (8.1); without a parsed season it uses the show's single open session; failing that, suggestions start at the first episode and review asks for the season. Suggestions start at the session's next unassigned episode. A session closes when every episode is assigned or when the owner closes it.
 - Episode numbers follow TMDb's aired order.

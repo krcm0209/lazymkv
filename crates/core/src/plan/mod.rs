@@ -205,10 +205,12 @@ pub struct PlanInputs<'a> {
 }
 
 /// 6.1 step 5 in order: candidates and groups (8.2); the kind; the structural pass (8.3 rules 1 to 3, or 8.5) to fill
-/// RuntimeFacts, running by_labels with `wanted_languages(None)` (8.3 rule 3.1's play-all makes the disc TV unless
-/// TheDiscDB states it is a movie, 8.2, when rule 3 runs without 3.1 over every group, `movie::by_structure_as_movie`,
-/// so a play-all-shaped group is an ordinary rival; every play-all group is left out of the episode-length groups, 8.5
-/// "play all titles are dropped"); identify (8.1) over `inputs.lookups` with
+/// RuntimeFacts, running by_labels with `wanted_languages(None)` (8.3 rule 3.1's play-all, a group whose every part is
+/// episode-length under R1, makes the disc TV unless TheDiscDB states it is a movie, 8.2, when rule 3 runs without 3.1
+/// over every group, `movie::by_structure_as_movie`, so a play-all-shaped group is an ordinary rival; a play-all of
+/// shorter parts, such as an extras playlist or a feature and its 10-minute credits clip, is not rule 3.1's play-all
+/// title, and rule 3 runs directly, as TheDiscDB's movie kind would make it anyway; every play-all group of any parts is
+/// left out of the episode-length groups, 8.5 "play all titles are dropped", R15); identify (8.1) over `inputs.lookups` with
 /// `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to `inputs.overrides.and_then(|o|
 /// o.identity)`; when `identity.original_language` is Some and not English, by_labels runs again with
 /// `wanted_languages(identity.original_language)` and its features replace the first pass's (cuts, editions and
@@ -263,7 +265,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     ));
     let (mut planned_kind, mut kind_source) = kind::disc_kind(discdb, &groups, name);
     sentences.push(format!("the disc is {}: {}", kind_words(planned_kind), kind_source_words(kind_source)));
-    // 8.5 "play all titles are dropped": no play-all group (8.3 rule 3.1) is an episode, so each is left out until none is.
+    // 8.5 "play all titles are dropped" (R15: any parts): no play-all group is an episode, so each is left out until none is.
     let (episode_groups, _) = tv::without_play_all(&groups, disc.is_dvd);
 
     // 8.3 rules 1 to 3 with English only (the original language comes with the identity), or 8.5's map.
@@ -2063,12 +2065,43 @@ mod tests {
     }
 
     #[test]
+    fn an_extras_play_all_on_a_disc_without_thediscdb_leaves_it_a_movie() {
+        // R1: a 100-minute feature and two 5-minute extras with their 10-minute play-all (title 4, segments 2,3). The
+        // parts are not episode-length, so the group is not 8.3 rule 3.1's play-all title and the disc stays a movie.
+        let disc = made_disc(
+            false,
+            "EXAMPLE_FILM",
+            &[
+                made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "", ENG),
+                made(2, "0:05:00", "2", "00002.mpls", "2", "1500000000", "", ENG),
+                made(3, "0:05:00", "2", "00003.mpls", "3", "1500000000", "", ENG),
+                made(4, "0:10:00", "4", "00004.mpls", "2,3", "3000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![1]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(
+            !plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("8.3 rule 3.1")),
+            "{:?}",
+            plan.evidence.sentences
+        );
+    }
+
+    #[test]
     fn a_play_all_shaped_feature_on_a_disc_thediscdb_calls_a_movie_is_an_ordinary_rival() {
         // The feature (title 3, 00800.mpls) plays a 100-minute body clip and a 10-minute credits clip, which MakeMKV also
-        // lists as titles 1 and 2 (00001.m2ts, 00002.m2ts). TheDiscDB knows the disc as a movie but lists no title, so
-        // rule 1 gives no plan and rule 3 decides without 3.1: the 110-minute "1,2" and the 100-minute "1" are rivals
-        // (within 10%), whose segments differ by half, so the plan is 0.60 multiple_features in copy mode. Dropping the
-        // play-all-shaped group would have planned the body clip alone at 0.85 and filed the movie without its last clip.
+        // lists as titles 1 and 2 (00001.m2ts, 00002.m2ts). The 10-minute clip is not episode-length, so under R1 the
+        // group is not rule 3.1's play-all title. TheDiscDB knows the disc as a movie but lists no title, so rule 1 gives
+        // no plan and rule 3 runs directly (as TheDiscDB's movie kind would make it anyway): the 110-minute "1,2" and the
+        // 100-minute "1" are rivals (within 10%), whose segments differ by half, so the plan is 0.60 multiple_features in
+        // copy mode. Dropping the play-all-shaped group would have planned the body clip alone at 0.85 and filed the movie
+        // without its last clip.
         let disc = made_disc(
             false,
             "FILM_DISC",

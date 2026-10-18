@@ -211,8 +211,8 @@ fn kept_play_all_episodes<'a>(
     kept
 }
 
-/// 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1, `kind::play_all`, found again until none is;
-/// never on a DVD) is removed. Returns the remaining groups and the dropped titles, sorted. Def: T6. Use: T6, T7.
+/// 8.5 "play all titles are dropped": every play-all group (`kind::play_all`, parts of any length under R15, found again
+/// until none is; never on a DVD) is removed. Returns the remaining groups and the dropped titles, sorted. Def: T6. Use: T6, T7.
 pub fn without_play_all(groups: &[Group], dvd: bool) -> (Vec<Group>, Vec<u32>) {
     let mut rest: Vec<Group> = groups.to_vec();
     let mut dropped: Vec<u32> = Vec::new();

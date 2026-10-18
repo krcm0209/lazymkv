@@ -15,7 +15,7 @@ use crate::lookup::within;
 use crate::review::{sorted_unique, Noted, ReviewReason};
 use crate::settings::Settings;
 
-use super::kind::{play_all, Group};
+use super::kind::{play_all_of_episodes, Group};
 
 /// What every label starts with (8.3 rule 2), after an optional `SEG_` or `SEG `.
 const LABEL_PREFIX: &str = "FPL_MainFeature";
@@ -411,15 +411,17 @@ fn coverage(title: &Title, wanted: &Wanted) -> usize {
 /// What rule 3 found. Def: T5. Use: T7.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StructureOutcome {
-    /// Rule 3.1: the group at this index of the groups is a "play all" title, so the disc is TV (8.5).
+    /// Rule 3.1 under R1: the group at this index of the groups is a "play all" title of episode-length parts, so the disc
+    /// is TV (8.5).
     PlayAll { group: usize },
     Plan(MoviePlan),
 }
 
-/// Rule 3 on the groups: 3.1 play-all (the disc is TV); then `by_structure_as_movie`'s 3.2 to 3.7. Reads
-/// `settings.feature_min_minutes` only. Def: T5. Use: T5, T7.
+/// Rule 3 on the groups: 3.1 under R1 (a "play all" title of episode-length parts, `kind::play_all_of_episodes`; the disc
+/// is TV); then `by_structure_as_movie`'s 3.2 to 3.7. A play-all of shorter parts, such as an extras playlist, is an
+/// ordinary group here. Reads `settings.feature_min_minutes` only. Def: T5. Use: T5, T7.
 pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> StructureOutcome {
-    if let Some(group) = play_all(groups, disc.is_dvd) {
+    if let Some(group) = play_all_of_episodes(groups, disc.is_dvd) {
         return StructureOutcome::PlayAll { group };
     }
     StructureOutcome::Plan(by_structure_as_movie(disc, groups, settings))
@@ -1359,11 +1361,47 @@ mod tests {
     }
 
     #[test]
-    fn a_play_all_group_makes_the_structure_rule_answer_tv() {
-        for (log, group) in [(CHERNOBYL_1, 1), (CHERNOBYL_2, 1), (SMILE, 5)] {
+    fn a_play_all_of_episode_length_parts_makes_the_structure_rule_answer_tv() {
+        let disc = structure_disc(&[
+            (0, "1:07:30", "15", "1,2,3", &[ENG_AC3]),
+            (1, "0:22:00", "5", "1", &[ENG_AC3]),
+            (2, "0:22:30", "5", "2", &[ENG_AC3]),
+            (3, "0:23:00", "5", "3", &[ENG_AC3]),
+        ]);
+        let settings = Settings::default();
+        assert_eq!(by_structure(&disc, &groups_of(&disc, &settings), &settings), StructureOutcome::PlayAll { group: 0 });
+    }
+
+    #[test]
+    fn an_extras_play_all_is_not_rule_3_1s_play_all_title() {
+        // R1: the pinned logs' play-all titles (a deleted-scenes playlist, two extras playlists) have parts of a few minutes.
+        for log in [CHERNOBYL_1, CHERNOBYL_2, SMILE] {
             let disc = pinned(log);
             let settings = Settings::default();
-            assert_eq!(by_structure(&disc, &groups_of(&disc, &settings), &settings), StructureOutcome::PlayAll { group }, "{log}");
+            assert!(matches!(by_structure(&disc, &groups_of(&disc, &settings), &settings), StructureOutcome::Plan(_)), "{log}");
+        }
+        let disc = structure_disc(&[
+            (0, "1:40:00", "16", "1", &[ENG_AC3]),
+            (1, "0:05:00", "", "2", &[ENG_AC3]),
+            (2, "0:05:00", "", "3", &[ENG_AC3]),
+            (3, "0:10:00", "", "2,3", &[ENG_AC3]),
+        ]);
+        let plan = structure(&disc, &Settings::default());
+        assert_eq!((plan.features, plan.confidence), (vec![feature(0, None, true, &[])], 0.85));
+    }
+
+    #[test]
+    fn a_tv_disc_known_only_by_an_extras_play_all_is_held_as_a_movie_in_copy_mode() {
+        // Review Focus 1: without TheDiscDB, labels or a season marker, CHERNOBYL_2's extras play-all no longer makes it TV.
+        let disc = pinned(CHERNOBYL_2);
+        let settings = Settings::default();
+        let found = groups_of(&disc, &settings);
+        match movie_plan(&disc, None, &BTreeMap::new(), &found, &wanted_languages(None), &settings) {
+            StructureOutcome::Plan(plan) => {
+                assert_eq!((plan.rule, plan.confidence), (TitleRule::Structure, 0.60));
+                assert!(!plan.reviews.is_empty(), "{:?}", plan.reviews);
+            }
+            other => panic!("{other:?}"),
         }
     }
 
@@ -1504,8 +1542,8 @@ mod tests {
         let chernobyl = pinned(CHERNOBYL_1);
         let chernobyl_groups = groups_of(&chernobyl, &settings);
         assert_eq!(
-            movie_plan(&chernobyl, None, &BTreeMap::new(), &chernobyl_groups, &english, &settings),
-            StructureOutcome::PlayAll { group: 1 }
+            rule_of(movie_plan(&chernobyl, None, &BTreeMap::new(), &chernobyl_groups, &english, &settings)),
+            Some(TitleRule::Structure)
         );
     }
 
