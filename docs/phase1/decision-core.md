@@ -19,7 +19,7 @@ sums, ffprobe profiles, subtitle events, the content and text verdicts, library 
 | Module | Design spec | What it decides |
 |---|---|---|
 | `settings` | 14, 7 | Every setting with its default; a settings file names only the keys it changes; the checks of the roots (a staging root inside a library root, the tuning root) and of the values the rules divide by or compare against |
-| `review` | 8.8, and the notes of 8.6, 8.7, 8.9 and 7 | The closed sets of review reasons and notes, with the spec's spellings |
+| `review` | 8.8, and the notes of 8.6, 8.7, 8.9, 7, 6.3, 10.2 and 8.3 | The closed sets of review reasons and notes, with the spec's spellings |
 | `codec` | 8.6 "Codecs", 8.10 | MakeMKV's codec names (attributes 5, 6 and 7) to a family, a fidelity tier and a display name; attribute 41, MakeMKV's output codec short name, to the codec the file holds; the bitrate of attribute 13; channel layouts; the object-based extension (Atmos, DTS:X); mkvmerge's names for the verification |
 | `lang` (extended) | 8.6 "Languages", R4 | The wanted languages: English and the original language |
 | `disc` | 9.4, 9.5, 5, 6.1 step 2 | The typed disc model over the parsed scan: titles, streams, flags, the MakeMKV version, Java use, the `bdmt` disc name, title matching by source file, segment map and duration |
@@ -361,23 +361,27 @@ owner may still overturn any of them.
 ### The owner's rulings of 2026-10-17
 
 After the merge the owner ruled on the open questions and the follow-ups (OR1 to OR16); the controller's sub-rulings SR1
-to SR9 settled what the readers found while planning. The owner may overturn any of them.
+to SR9 settled what the readers found while planning. The owner may overturn any of them. The plan of this work is
+`docs/superpowers/plans/2026-10-17-phase-1-rulings.md`, called the rulings plan below; a task named without it, such
+as Task 5 in OR5, is the phase 1 plan's.
 
 - OR1. 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120 minutes, 8.2). OR15 limits
   this to rule 3.1: 8.5's dropping of play-all titles from a TV disc keeps the literal shape (any concatenation of two
   or more other groups' maps), so an extras play-all is never suggested as an episode. The whole group's own length is
   unconstrained (SR1).
 - OR2. Two label cuts both named "Theatrical Cut" (the `none` and `_R` rows) keep the 0.60 `title_ambiguous` hold; two
-  TheDiscDB main movies that would share one name likewise. No code change; the spec says so (Task 4).
+  TheDiscDB main movies that would share one name likewise. No code change; the spec says so (the rulings plan's
+  Task 4).
 - OR3. When the default audio is not English and no regular English track is kept, the SDH track is the default
-  subtitle. No code change; the spec says so (Task 4).
+  subtitle. No code change; the spec says so (the rulings plan's Task 4).
 - OR4. Leading periods and spaces are dropped from a path component as well as trailing ones. No code change; the spec
-  says so (Task 4).
-- OR5. C1: rule 1 still wins (TheDiscDB's main movies at 0.98, Direct), but a Java-labelled cut (rule 2's grouping) none
-  of whose titles is a main movie's scan title is planned too, as an unnamed cut (edition none, not theatrical), with
-  the review reason `unnamed_cut` and, per OR16, the note `unlisted_label_cut` naming the title and its label, so the
-  owner names it with Assign titles. The main movie's own label suffix, its dub variants and a Narrative variant name no
-  second cut (the Task 5 ruling stands).
+  says so (the rulings plan's Task 4).
+- OR5. C1 (the final review's parked finding: a labelled second cut TheDiscDB does not list): rule 1 still wins
+  (TheDiscDB's main movies at 0.98, Direct), but a Java-labelled cut (rule 2's grouping) none of whose titles is a main
+  movie's scan title is planned too, as an unnamed cut (edition none, not theatrical), with the review reason
+  `unnamed_cut` and, per OR16, the note `unlisted_label_cut` naming the title and its label, so the owner names it with
+  Assign titles. The main movie's own label suffix, its dub variants and a Narrative variant name no second cut (the
+  Task 5 ruling stands).
 - OR6. Name cleaning: `S3D` and `3D` are format tags (never a season marker or a disc number); a region tag that is the
   whole label is kept (`US` is the film Us). SR2 settles the scope: the whole-label rule applies to a single-token label
   that is a region tag (`US`, `UK`, `EU`, `WW`, `DOM`, `INT`, `R1` to `R6`), with its brackets stripped (`(US)` gives
@@ -386,13 +390,13 @@ to SR9 settled what the readers found while planning. The owner may overturn any
   they are.
 - OR7. The object-audio spellings (`Atmos`, `DTS:X`) stay provisional until experiment 6 runs. No change.
 - OR8. RP27's four note names are confirmed: `possible_audio_description`, `lossy_before_lossless`,
-  `direct_mode_fallback`, `label_rule_unavailable`; the spec names them (Task 4).
+  `direct_mode_fallback`, `label_rule_unavailable`; the spec names them (the rulings plan's Task 4).
 - OR9. RP25's subtitle-label vocabulary is confirmed. No change.
 - OR10. The final review's six provisional rules are kept. No change.
 - OR11. RP10 is confirmed; the spec's three sentences still saying "phase 1" for phase 2 work (lines 226, 363, 743) are
-  edited now (Task 4).
-- OR12. Of the 95 deferred minors only the test gaps are pinned (Tasks 5 to 8); where a gap exposed a defect, the defect
-  is fixed with the test (SR4, SR5, SR6, SR8).
+  edited now (the rulings plan's Task 4).
+- OR12. Of the 95 deferred minors only the test gaps are pinned (the rulings plan's Tasks 5 to 8); where a gap exposed
+  a defect, the defect is fixed with the test (SR4, SR5, SR6, SR8).
 - OR13. The four phase 2 leftovers (lookup answers outside AwaitingLookup, restart between answer and refresh, collision
   answer by path, a relative root in `decide`) stay for phase 2.
 - OR14. The pull request runs subagent-driven.
@@ -401,14 +405,16 @@ to SR9 settled what the readers found while planning. The owner may overturn any
 - OR16. (Form of OR5's note.) A new note `unlisted_label_cut`, the thirteenth of the closed set, with the title and
   label in its detail, carried into `Plan.notes` and every `FileDecision.notes`; plus an evidence sentence.
 
-The controller made these sub-rulings while writing the plan from the readers' findings; the owner may overturn any of
-them.
+The controller made these sub-rulings while writing the rulings plan from the readers' findings; the owner may
+overturn any of them.
 
 - SR1. Rule 3.1's parts are each checked against the 8.2 band; the whole group's length and the parts' mutual spread are
   not checked.
 - SR2. The whole-label rule's scope, as written under OR6.
 - SR3. `by_database` takes `wanted: &Wanted` (the languages `movie_plan` already holds) so the unlisted cut's variant is
-  chosen as rule 2 chooses it; no second pass with the original language for rule 1 plans.
+  chosen as rule 2 chooses it; no second pass with the original language for rule 1 plans; so a rule 1 plan's unlisted
+  cut keeps the variant chosen with English only, and for a non-English film its original-language variant may need
+  the disc again (8.8 "Limits of D1").
 - SR4. `plan::movie::coverage` uses `lang::is_english` (phase 1 plan decision 6: one English test); `Wanted.english`
   stays, serialised as before.
 - SR5. `codec::dts_family` reads attribute 6, then attribute 7, as its doc says (a conflicting made-up pair follows
@@ -426,28 +432,32 @@ them.
 - SR9. `TEXT_HINT` has one definition, `pub const` in `core::subtitle::labels` (its harness text already carries it);
   the dev crate uses it.
 
-The controller made these rulings while executing the plan.
+The controller made these rulings while executing the rulings plan.
 
 - ER1. The owner's rulings are cited as OR1 to OR16 in every document and comment, because the design spec's R1 to R8
-  are its requirements (Task 1's first commit subject keeps "(R1, R15)"; history is not rewritten).
+  are its requirements (the rulings plan's Task 1 first commit subject keeps "(R1, R15)"; history is not rewritten).
 - ER2. The second-label-pass test's disc gives each cut's two variants one shared segment map (two variants of one cut
   play the same segments), since four distinct equal-length groups read as TV under 8.2.
 - ER3. The pending-flag test asserts on `plan.identity.evidence`, where `identify` writes the pending sentence; the
   plan's `evidence.sentences` assertion was vacuous and was deleted.
-- ER4. Task 8's T18a pins `sub_clear_max_bytes` only: `subs_tolerance_ms` does not move the text rule's words on the
-  harness fixtures, so the call site passing `Settings::text_rule()` to the text run stays unpinned (a follow-up).
+- ER4. The rulings plan's Task 8 test T18a
+  (`the_text_rule_judges_the_events_sub_clear_max_bytes_gives_when_ocr_text_is_given`) pins `sub_clear_max_bytes`
+  only: `subs_tolerance_ms` does not move the text rule's words on the harness fixtures, so the call site passing
+  `Settings::text_rule()` to the text run stays unpinned (a follow-up).
 - Open for the owner: under OR6 a title containing `3D` (`PIRANHA_3D`, `STEP_UP_3D`) now cleans to the bare title, so
   TMDb's "Piranha 3D" is not a plausible result and identity rests on the runtime check against the same-named film; a
   remedy would let plausibility also accept the name with its format tags kept.
 
 ## Choices the owner should confirm
 
-The plan settled these where the spec leaves a choice open; each is pinned by a test, and each can be changed by
-changing that test and its rule. The four open questions were ruled on 2026-10-17 (OR1 to OR4 above).
+The first four were the open questions, ruled on 2026-10-17 (OR1 to OR4 above) and now stated in the spec; the phase 1
+plan settled the rest where the spec leaves a choice open. Each is pinned by a test, and each can be changed by
+changing that test and its rule.
 
 - Ruling OR1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120
   minutes); a play-all of extras (Smile's deleted-scenes playlist, title 117) is an ordinary group, so a movie disc
-  with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (OR15).
+  with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (OR15), except a
+  play-all-shaped title whose TheDiscDB Episode item names an episode no other kept title maps (F3).
 - Ruling OR2 (2026-10-17): two cuts named alike keep 0.60 with `title_ambiguous`. 8.3 rule 2's table names both the
   plain `FPL_MainFeature` row and the `_R` row "Theatrical Cut", so a disc carrying both is planned at 0.60 ("two cuts
   are both named Theatrical Cut") rather than 0.90, and two TheDiscDB main movies that would be filed under one name
@@ -517,6 +527,11 @@ changing that test and its rule. The four open questions were ruled on 2026-10-1
   form of the tuning evidence, D17's bundling table and code signing (RP10, RP13).
 - Performing the reducer's `RefreshIdentity` (persisting the plan `plan::refresh_identity` gives and passing it to
   Decide), and giving `ReviewApproved` the reasons the review screen showed and `ReFinalise` the filed decision's.
+- A lookup answer that arrives while the job is not in AwaitingLookup (OR13).
+- A restart between a lookup's answer and the identity refresh, so that RefreshIdentity still runs (OR13).
+- The collision answer by path: F5 already matches an answer to a decision's plain path; the engine still has to show
+  the owner the colliding paths and keep the answers with the job (OR13).
+- A relative root given to `decide` (OR13).
 
 ## Tests
 
