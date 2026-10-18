@@ -278,11 +278,12 @@ The plan recorded these rulings (RP1 to RP9 are the port's, in its design). The 
   required `saw_verdict` (a label given after seeing the rule's verdict never counts, as with the audio labels) and
   `style` (null, or `uk` for row 14's UK-style SDH track), and `how` gains the observation `flag`.
   `labels --subtitles set` takes `--saw-verdict yes|no` and `--style uk`; `retune --subtitles` counts only labels
-  read or watched, sure and given before the verdict, and counts the UK-style SDH track from `style`.
+  read or watched, sure and given before the verdict, and counts the UK-style SDH track from `style`
+  (confirmed by ruling OR9, 2026-10-17).
 - RP26. VC-1 video (`V_MS/VFW/WVC1`) is a codec family of its own, matched on attribute 5 alone, with the display
   and mkvmerge name `VC-1`, and no tier.
-- RP27. Four note names the design spec describes only in words keep the plan's spellings until the owner confirms
-  them: `possible_audio_description` (the port's ruling RP7), `lossy_before_lossless` (decision D9),
+- RP27. The four note names the design spec described only in words are confirmed (ruling OR8, 2026-10-17) and the
+  spec now names them: `possible_audio_description` (the port's ruling RP7), `lossy_before_lossless` (decision D9),
   `direct_mode_fallback` (6.3 step 6a) and `label_rule_unavailable` (8.3 rule 2 with 10.2).
 
 ### Rulings made during execution
@@ -366,17 +367,16 @@ the plan keeps the reading given.
 - Ruling OR1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120
   minutes); a play-all of extras (Smile's deleted-scenes playlist, title 117) is an ordinary group, so a movie disc
   with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (OR15).
-- Open question: two label cuts with the same edition name. 8.3 rule 2's table names both the plain `FPL_MainFeature`
-  row and the `_R` row "Theatrical Cut". A disc carrying both is planned at 0.60 with `title_ambiguous` ("two cuts are
-  both named Theatrical Cut") rather than 0.90; two TheDiscDB main movies that would be filed under one name get the
-  same 0.60 rather than 0.98. The owner may rule that they are one cut, or that 0.90 stands.
-- Open question: the default subtitle when the default audio is not English and no regular English track is kept.
-  8.10 names only the regular track; the plan makes the SDH track the default. The owner may rule that no subtitle is
-  default.
-- Open question: leading periods in a path component. 8.9 trims trailing spaces and periods only, so a title that
-  begins with periods (`...And Justice for All`) would give a folder and a file hidden on the share. The plan drops
-  leading periods as well as leading spaces (`And Justice for All (1979) {tmdb-ID}`). The owner may confirm it or rule
-  another treatment.
+- Ruling OR2 (2026-10-17): two cuts named alike keep 0.60 with `title_ambiguous`. 8.3 rule 2's table names both the
+  plain `FPL_MainFeature` row and the `_R` row "Theatrical Cut", so a disc carrying both is planned at 0.60 ("two cuts
+  are both named Theatrical Cut") rather than 0.90, and two TheDiscDB main movies that would be filed under one name
+  get the same 0.60 rather than 0.98.
+- Ruling OR3 (2026-10-17): when the default audio is not English and no regular English track is kept, the SDH track is
+  the default subtitle, and the forced track is not. 8.10 named only the regular track; the spec now names the SDH
+  fallback too.
+- Ruling OR4 (2026-10-17): leading periods and spaces are dropped from a path component. 8.9 trimmed trailing spaces
+  and periods only, so a title that begins with periods (`...And Justice for All`) would give a folder and a file
+  hidden on the share; it is now filed as `And Justice for All (1979) {tmdb-ID}`, and the spec now says so.
 - A TMDb record without a runtime (or a season without episode runtimes) fails 8.1's runtime check, so step 4 cannot
   pass and step 5 applies (0.50, `identity_ambiguous`).
 - Identity step 2 (TheDiscDB by both disc ID and fingerprint, 0.99) needs both records and, when both carry a TMDb ID,
@@ -397,7 +397,7 @@ the plan keeps the reading given.
   score, music and effects, and a plain subtitle description (one containing "subtitle" that does not also name
   commentary, or one equal to the track's own language name).
 - The object-based audio extension is read from ffprobe's profile ("Atmos", "DTS:X"), else from attribute 7
-  ("TrueHD Atmos"); both spellings are provisional until experiment 6 runs.
+  ("TrueHD Atmos"); both spellings are provisional until experiment 6 runs (ruling OR7: kept provisional).
 - In 8.6's ranking, a lossy track without bitrate text comes after every lossy track with one, and guard G1 treats it
   as at or below 256 kb/s.
 - A title with exactly one English subtitle stream and no subtitle events keeps it as regular "English" at 0.90.
