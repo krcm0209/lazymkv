@@ -995,7 +995,7 @@ mod tests {
             plan.evidence.last().map(String::as_str),
             Some("scan title 2 carries the label FPL_MainFeature_R, a cut TheDiscDB does not list as a main movie")
         );
-        // Review Focus 3: a cut present only as a dub variant is unlisted too, its chosen title the variant.
+        // OR5: a cut present only as a dub variant is unlisted too, its chosen title the variant.
         let dub_only = java_disc(&[(1, "FPL_MainFeature_UR", &[ENG_AC3]), (2, "FPL_MainFeature_R_JPN", &[JPN_AC3])]);
         let plan = by_database(&one, &main_is_title_1, &dub_only, &english).expect("rule 1 applies");
         assert_eq!(plan.features, vec![feature(1, Some("Unrated Cut"), false, &[]), feature(2, None, false, &[])]);
@@ -1250,7 +1250,8 @@ mod tests {
         groups(disc, &candidate_filter(disc, settings))
     }
 
-    /// Rule 3's plan for a disc that has no play-all title.
+    /// Rule 3's plan for a disc that has no play-all title of episode-length parts (rule 3.1, ruling OR1); a play-all
+    /// of shorter extras is an ordinary group here.
     fn structure(disc: &Disc, settings: &Settings) -> MoviePlan {
         match by_structure(disc, &groups_of(disc, settings), settings) {
             StructureOutcome::Plan(plan) => plan,
@@ -1515,14 +1516,16 @@ mod tests {
 
     #[test]
     fn a_tv_disc_known_only_by_an_extras_play_all_is_held_as_a_movie_in_copy_mode() {
-        // Review Focus 1: without TheDiscDB, labels or a season marker, CHERNOBYL_2's extras play-all no longer makes it TV.
+        // Ruling OR1: without TheDiscDB, labels or a season marker, CHERNOBYL_2's extras play-all no longer makes it
+        // TV.
         let disc = pinned(CHERNOBYL_2);
         let settings = Settings::default();
         let found = groups_of(&disc, &settings);
         match movie_plan(&disc, None, &BTreeMap::new(), &found, &wanted_languages(None), &settings) {
             StructureOutcome::Plan(plan) => {
                 assert_eq!((plan.rule, plan.confidence), (TitleRule::Structure, 0.60));
-                assert!(!plan.reviews.is_empty(), "{:?}", plan.reviews);
+                assert_eq!(plan.reviews, vec![ReviewReason::MultipleFeatures]);
+                assert_eq!(crate::plan::mode(plan.confidence, &settings), crate::plan::Mode::Copy);
             }
             other => panic!("{other:?}"),
         }

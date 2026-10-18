@@ -1,7 +1,9 @@
 //! `lazymkv-dev labels --subtitles` (RP15; design spec 15 "Recordings", section 17 row 14, D20, D23) over synthetic
 //! recordings in a scratch folder: `set` writes `<slug_dir>/subtitle-labels.json` beside `audio-labels.json`, keeps a
 //! label with the same substance as it is, keeps a replaced label in its history, says when a source is only an
-//! observation, records a UK-style SDH track with `--style uk` (RP25), and refuses a change that would add a problem; `unset` moves a label to `removed` with why and when;
+//! observation, records a UK-style SDH track with `--style uk` (RP25), and refuses a change that would add a problem,
+//! and after an edit or an unchanged set warns about the problems the file already had (joined by "; "; an unchanged
+//! set does not rewrite the file); `unset` moves a label to `removed` with why and when;
 //! `check` validates every subtitle labels file under a folder; `kinds` prints the vocabulary; the argument errors are
 //! argparse's; the audio commands are as before. The subtitle words read no spec (what counts towards row 14 is
 //! `retune --subtitles`'), so no test writes one. The last test runs `check` over the evidence clone and skips with

@@ -1022,10 +1022,11 @@ mod runs {
     }
 
     #[test]
-    fn the_text_rule_reads_the_settings_when_ocr_text_is_given() {
-        // With the OCR text given the harness judges each track by the text rule, built from the same settings as
-        // 8.7 (`Settings::text_rule`). The words below were taken from the first mini PC run on this branch and
-        // checked by reading them.
+    fn the_text_rule_judges_the_events_sub_clear_max_bytes_gives_when_ocr_text_is_given() {
+        // With the OCR text given, the harness judges each track by the text rule too. This pins the rule line's
+        // settings and that the text run sees the events sub_clear_max_bytes yields; it does not pin that
+        // Settings::text_rule reaches the text rule (TextRule::default() would pass; ER4, a follow-up). The words below
+        // were taken from the first mini PC run and checked by reading them.
         //
         // subs_tolerance_ms on the fixtures of the test above, both streams read: 8.7 moves with the tolerance (0.5 s
         // apart is one group only at 600 ms), while the text rule says "regular (review)" of both streams at both

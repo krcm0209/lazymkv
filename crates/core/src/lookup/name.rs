@@ -113,15 +113,15 @@ fn first_marker(raw: &str, kind: MarkerKind) -> Option<u32> {
     markers(&pieces(&tokens(raw))).into_iter().find(|marker| marker.kind == kind).map(|marker| marker.number)
 }
 
-/// A season number from `season N`, `series N`, `sN` or `sNN` (case-insensitive; `S3D3` gives 3; tokens split on
-/// spaces, underscores, hyphens and the letter boundary of `S3D3`). Spec 8.1 "a season number and a disc number are
-/// parsed". Def: T4. Use: T4.
+/// A season number from `season N`, `series N`, `sN` or `sNN` (case-insensitive; `S3D3` gives 3; `S3D` and `3D`, format
+/// tags, give none (ruling OR6); tokens split on spaces, underscores, hyphens and the letter boundary of `S3D3`). Spec
+/// 8.1 "a season number and a disc number are parsed". Def: T4. Use: T4.
 pub fn parse_season(raw: &str) -> Option<u32> {
     first_marker(raw, MarkerKind::Season)
 }
 
-/// A disc number from `disc N`, `disc_N`, `discN`, `dN`, `D1` (`CHERNOBYL_D1` gives 1, `S3D3` gives 3). Spec 8.1.
-/// Def: T4. Use: T4.
+/// A disc number from `disc N`, `disc_N`, `discN`, `dN`, `D1` (`CHERNOBYL_D1` gives 1, `S3D3` gives 3); the D of `3D`
+/// or `S3D` starts none (ruling OR6). Spec 8.1. Def: T4. Use: T4.
 pub fn parse_disc_number(raw: &str) -> Option<u32> {
     first_marker(raw, MarkerKind::Disc)
 }
@@ -173,7 +173,8 @@ fn is_year(token: &str) -> bool {
 /// whole hyphen part goes too (`MOVIE-D2` gives `MOVIE`, `X-MEN-UHD` gives `X-MEN`, `HUGO-S3D` gives `HUGO`); a tag
 /// may sit in round or square brackets; a year that is the only token left stays. A region tag that is the whole label
 /// stays, without its brackets (`US` gives `US`, `(UK)` gives `UK`, since a disc labelled `US` is the film Us), while a
-/// format tag alone, or two region tags, clean to nothing (rulings OR6 and SR2). Def: T4. Use: T4.
+/// format tag alone, or a name of two or more tags (`US UK`, `US_UHD`), cleans to nothing (rulings OR6 and SR2).
+/// Def: T4. Use: T4.
 pub fn clean(raw: &str) -> String {
     let tokens = tokens(raw);
     let pieces = pieces(&tokens);
@@ -529,7 +530,7 @@ mod tests {
         assert_eq!(clean("1917"), "1917");
         assert_eq!(clean("ALIEN 1899"), "ALIEN 1899");
         assert_eq!(clean("ALIEN 2100"), "ALIEN 2100");
-        // Spec 8.1's rule read literally: a title that ends in a year loses it (listed for the owner).
+        // Spec 8.1's rule read literally: a title that ends in a year loses it; the owner ruled it stays (OR6).
         assert_eq!(clean("BLADE_RUNNER_2049"), "BLADE RUNNER");
     }
 

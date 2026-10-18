@@ -157,16 +157,16 @@ struct Found {
 /// (`parse_discid`; its first record with titles is `discdb_by_disc_id`), tmdb.json (`parse_recorded`) and
 /// lookup-status.txt (`hit_rate::statuses`); an absent lookup file means that lookup was not made, a lookup that
 /// failed is pending (8.1), an answer file whose status line is not 200 is not parsed (the recorder keeps the error
-/// body of a 404 or a failed lookup), and only a file that exists and does not parse is Refused { code: 2 }. A given
-/// --tmdb-record replaces the lookup's record, so it also clears a pending TMDb lookup (SR8): `inputs.tmdb` still
-/// says "failed", the TheDiscDB lookups stay pending, and --tmdb-search, a different lookup, does not clear the flag.
-/// A bare scan file
-/// `<dir>/discNN.txt` is a pinned log: its fingerprint is `fingerprint::content_hash(&fingerprint::hashed_files(log))`
-/// of its HSH lines; `discdb_by_fingerprint` is `corpus/thediscdb-api/dischash-<fingerprint>.json` under
+/// body of a 404 or a failed lookup), and only a file that exists and does not parse is Refused { code: 2 }. A bare
+/// scan file `<dir>/discNN.txt` is a pinned log: its fingerprint is
+/// `fingerprint::content_hash(&fingerprint::hashed_files(log))` of its HSH lines; `discdb_by_fingerprint` is
+/// `corpus/thediscdb-api/dischash-<fingerprint>.json` under
 /// `repo_root(ctx.cwd)` when present (it carries media), else `<dir>/discNN.json` with the same stem (no media: kind
 /// and TMDb ID then unknown); `discdb_by_disc_id` is None (TheDiscDB's global_disc_id is not the disc ID, spec 5); no
-/// TMDb answer. Then --settings (defaults otherwise), --tmdb-search, --tmdb-record (which replaces tmdb.json's record)
-/// and --remembered (refused when it remembers another fingerprint); the disc name with
+/// TMDb answer. Then --settings (defaults otherwise), --tmdb-search, --tmdb-record (which replaces tmdb.json's record
+/// and so clears the pending flag a failed TMDb lookup set, SR8; `inputs.tmdb` still says "failed", a failed TheDiscDB
+/// lookup stays pending, and --tmdb-search, a different lookup, does not clear the flag) and --remembered (refused
+/// when it remembers another fingerprint); the disc name with
 /// `lookup::name::disc_name(bdmt, disc.volume_label)`; PlanInputs with no sessions, no overrides and default
 /// LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). Def: T15. Use: T15, T16.
 pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Result<PlanDoc, Refused> {
@@ -970,7 +970,7 @@ mod tests {
         assert!(!doc.plan.identity.lookup_pending);
         assert!(!doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
         assert_eq!(doc.plan.identity.original_language.as_deref(), Some("fr"));
-        // A failed TheDiscDB lookup keeps the job pending whatever record is given (Review Focus 5).
+        // A failed TheDiscDB lookup keeps the job pending whatever record is given (SR8).
         tmp.write("rec/lookup-status.txt", "dischash 500\ndiscid 404\ntmdb movie/6537 500\n");
         let doc = planned(&tmp, &PlanOptions { tmdb_record: Some(PathBuf::from("movie.json")), ..PlanOptions::default() });
         assert!(doc.plan.identity.lookup_pending);

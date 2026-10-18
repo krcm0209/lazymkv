@@ -120,7 +120,8 @@ pub fn by_discdb(record: &DiscDbRecord, matches: &BTreeMap<u32, u32>, groups: &[
     if record.episodes().iter().any(|db| !matches.contains_key(&db.index)) {
         return None;
     }
-    // 8.5 "play all titles are dropped": every play-all group (8.3 rule 3.1), found again until none is, as plan::plan does.
+    // 8.5 "play all titles are dropped": every play-all group (8.5's reading, OR15: `kind::play_all`, parts of any
+    // length), found again until none is, as plan::plan does.
     let (_, mut dropped_play_all) = without_play_all(groups, dvd);
     let item_of = |index: u32| {
         record
@@ -285,8 +286,8 @@ fn free_from(session: Option<&SeasonSession>, episode: u32) -> Option<u32> {
 /// episode"), so a suggestion never names an episode another disc holds; review confirms every suggestion (0.60,
 /// tv_unmapped). A suggestion's name is TMDb's episode name, a
 /// two-episode suggestion's names joined with " / ".
-/// The caller passes the groups to suggest: a play-all group (8.3 rule 3.1) is left out by plan::plan, since this
-/// function has no DVD flag to find one. Def: T6. Use: T7.
+/// The caller passes the groups to suggest: a play-all group (8.5, OR15: `kind::play_all`, parts of any length) is left
+/// out by plan::plan, since this function has no DVD flag to find one. Def: T6. Use: T7.
 pub fn unmapped(
     groups: &[Group],
     season: Option<u32>,

@@ -1951,12 +1951,9 @@ mod tests {
 
     #[test]
     fn subtitle_events_prefix_a_packets_file_that_is_not_an_object_with_its_path() {
-        // load_packets returns the AttributeError text of a top level that is not an object bare; the path is added here.
-        let tree = subs_tree(&[("subs/index.json", INDEX), ("subs/sub-0.packets.json", "[]"), ("subs/sub-1.packets.json", IMAGE_PACKETS)]);
-        assert_eq!(
-            subtitle_events(&tree, &PathKey::new("subs"), &dvd_report(), 64),
-            Err("rec/subs/sub-0.packets.json: 'list' object has no attribute 'get'".to_string())
-        );
+        // For a top level that is not an object, load_packets returns Python's AttributeError text without the path;
+        // subtitle_events adds it.
+        assert_eq!(text_packets_error("[]"), "rec/subs/sub-0.packets.json: 'list' object has no attribute 'get'");
     }
 
     #[test]

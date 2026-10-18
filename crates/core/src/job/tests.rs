@@ -93,9 +93,9 @@ fn sample_states() -> Vec<State> {
     states
 }
 
-/// Overrides with an entry in every list and every kind of entry: Set identity (a show), the season, Assign titles
-/// (episodes, a named cut, an ignored title), Override tracks (a kept audio track, a commentary one, a subtitle kept as
-/// forced, a dropped one) and one Resolve collision answer per `Collision` value.
+/// Overrides with an entry in every list: Set identity (a show), the season, Assign titles (episodes, a named cut, an
+/// ignored title), Override tracks (a kept audio track, a commentary one, a subtitle kept as forced, a dropped one) and
+/// one Resolve collision answer per `Collision` value.
 fn full_overrides() -> Overrides {
     Overrides {
         identity: Some(TmdbIdentity { kind: TmdbKind::Tv, id: 2316 }),
@@ -114,8 +114,8 @@ fn full_overrides() -> Overrides {
             SubtitleTrackOverride { title: 3, stream: 6, action: SubtitleOverride::Drop },
         ],
         collision: vec![
-            CollisionAnswer { path: r"\\nas\media\Movies\Film\Film.mkv".to_string(), action: Collision::KeepBoth },
             CollisionAnswer { path: r"\\nas\media\Movies\Film\Film - 2.mkv".to_string(), action: Collision::Replace },
+            CollisionAnswer { path: r"\\nas\media\Movies\Film\Film.mkv".to_string(), action: Collision::KeepBoth },
             CollisionAnswer { path: r"\\nas\media\Movies\Other\Other.mkv".to_string(), action: Collision::Discard },
         ],
     }
@@ -123,8 +123,8 @@ fn full_overrides() -> Overrides {
 
 /// One event of every variant, with every value of each boolean, mode, disposition and tool field, the failure events
 /// with a MediaReadError failure (CopyFailed also with Unknown), DecisionDone also with a path collision and with no
-/// final path, and ReviewApproved also with entries in the lists of `Overrides` and with entries of every kind in all
-/// of them (75 events).
+/// final path, and ReviewApproved also with entries in the lists of `Overrides` and with the entries of
+/// `full_overrides` (75 events).
 fn sample_events() -> Vec<Event> {
     let read = failure(FailureClass::MediaReadError);
     let mut events = vec![

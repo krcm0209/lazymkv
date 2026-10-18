@@ -214,15 +214,17 @@ pub struct PlanInputs<'a> {
 /// left out of the episode-length groups, 8.5 "play all titles are dropped", OR15); identify (8.1) over `inputs.lookups` with
 /// `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to `inputs.overrides.and_then(|o|
 /// o.identity)`; when `identity.original_language` is Some and not English, by_labels runs again with
-/// `wanted_languages(identity.original_language)` and its features replace the first pass's (cuts, editions and
-/// confidence never change between the passes, only the variant chosen within a cut); `Plan.wanted` is
+/// `wanted_languages(identity.original_language)` for a rule 2 plan only (a rule 1 plan's unlisted cut keeps the
+/// variant chosen with English only, SR3) and its features replace the first pass's (cuts, editions and confidence
+/// never change between the passes, only the variant chosen within a cut); `Plan.wanted` is
 /// `wanted_languages(identity.original_language)` for every title rule (English only when the original language is
 /// unknown or English); rule 4; a remembered decision (`remembered::apply_titles`) or the owner's Assign titles
 /// (`overrides.titles`, which win) replace the planned titles and set title confidence to 1.00, and Set identity or a
 /// remembered identity sets identity confidence to 1.00; `overrides.season` fills a planned episode whose season is
 /// None (else the disc name's season does); the mode; reviews and notes gathered (8.8: identity and title confidence
 /// are fixed here). `Plan.titles` order (which fixes the keys' NN through `title_key(position, ..)`): movies in feature
-/// order (database index order for rule 1, each cut's lowest title number for rule 2, group order for rule 3), TV by
+/// order (database index order for rule 1, then each labelled cut TheDiscDB does not list in rule 2's cut order (OR5);
+/// each cut's lowest title number for rule 2; group order for rule 3), TV by
 /// (season, first episode) with season None last in title order. The identity is confirmed when its step is Reviewed,
 /// Remembered, DiscdbBoth or DiscdbOne (8.5 "when its identity is confirmed (by TheDiscDB or in review)"). With a mapped
 /// TV plan and the identity confirmed (or assigned episodes), a TMDb show identity and a season, `Plan.session` is
@@ -2091,8 +2093,10 @@ mod tests {
 
     #[test]
     fn a_play_all_title_on_a_disc_thediscdb_calls_a_movie_leaves_it_a_movie() {
-        // An extras play-all (title 4, segments 1,2,3) beside a 100-minute feature (title 5), without Java. TheDiscDB
-        // knows the disc as a movie but lists no title, so rule 1 gives no plan and rule 3 decides (8.3).
+        // A play-all of three episode-length titles (title 4, segments 1,2,3: rule 3.1's play-all under OR1) beside a
+        // 100-minute feature (title 5), without Java. TheDiscDB knows the disc as a movie but lists no title, so rule 1
+        // gives no plan and rule 3 decides (8.3). This is the test that keeps plan::plan's TheDiscDB-movie branch
+        // covered under OR1.
         let disc = made_disc(
             false,
             "FILM_DISC",
@@ -2784,8 +2788,9 @@ mod tests {
 
     #[test]
     fn assigned_episodes_join_the_season_session_even_under_an_unconfirmed_search_identity() {
-        // SR7: spec 8.5 lets "episodes assigned in review" join the session whatever the identity step; only an
-        // unmapped disc needs a confirmed identity to be attached.
+        // SR7: owner-assigned episodes join or create the season session whatever the identity step, since the owner
+        // assigned them (8.5 joins a disc "when its identity is confirmed"); only an unmapped disc needs a confirmed
+        // identity to be attached.
         let disc = episodes_disc("SHOW", false);
         let name = disc_name(None, disc.volume_label.as_deref());
         let search = show_search();

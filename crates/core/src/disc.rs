@@ -1368,7 +1368,7 @@ mod tests {
 
     #[test]
     fn bdmt_name_does_not_decode_a_character_xml_forbids() {
-        // Review Focus 4 and SR6: XML 1.0's Char production excludes U+0000, U+0001 to U+0008, U+000B, U+000C, U+000E to
+        // SR6: XML 1.0's Char production excludes U+0000, U+0001 to U+0008, U+000B, U+000C, U+000E to
         // U+001F, U+FFFE and U+FFFF; such a reference stays as written, like a refused entity.
         for (xml, name) in [("A&#0;B", "A&#0;B"), ("A&#x1F;B", "A&#x1F;B"), ("A&#xFFFE;B", "A&#xFFFE;B"), ("A&#9;B", "A\tB")] {
             assert_eq!(bdmt_name(&format!("<di:name>{xml}</di:name>")).as_deref(), Some(name), "{xml}");

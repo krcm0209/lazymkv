@@ -101,9 +101,9 @@ pub fn layout(title: &Title, audio: &AudioDecision, subtitles: &SubtitleDecision
 }
 
 /// Spec 8.10's default subtitle: the forced track when the default audio is English; when it is not, the regular
-/// English track, or the SDH track when no regular track is kept (the forced track is then not default). 8.10 names
-/// only the regular track; the SDH fallback serves the title whose only English dialogue track is SDH, and is the
-/// owner's confirmed choice (ruling OR3, 2026-10-17). None when the track the rule names does not exist.
+/// English track, or the SDH track when no regular track is kept (the forced track is then not default). 8.10 names the
+/// SDH fallback since ruling OR3 (2026-10-17); it serves the title whose only English dialogue track is SDH. None when
+/// the track the rule names does not exist.
 pub fn default_subtitle(default_audio_is_english: bool, subtitles: &SubtitleDecision) -> Option<u32> {
     let kept = |role: SubtitleRole| subtitles.kept.iter().find(|track| track.role == role).map(|track| track.stream);
     if default_audio_is_english {

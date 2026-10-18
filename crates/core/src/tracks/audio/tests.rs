@@ -952,7 +952,8 @@ fn an_ffprobe_extension_wins_over_attribute_7_for_the_object_and_the_name() {
 
 #[test]
 fn a_dts_x_track_is_named_after_the_dts_hd_ma_core_its_extension_and_its_layout() {
-    // Attribute 6 reads DTS-HD MA and attribute 7 the extension (SR5): the family is the core's, the object is DTS:X.
+    // The DTS:X pre-check gives the core's family (DTS-HD MA) and attribute 7 the object; the name is display name,
+    // extension, layout (SR7).
     let title = title_of(&[video(), dts_hd_ma("eng", "8"), dts_x("eng", "8")]);
     let planned = decide(&title, Some("en"));
     assert_eq!(order_of(&planned), vec![1, 2]);
