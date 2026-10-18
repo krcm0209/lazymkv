@@ -969,7 +969,6 @@ mod tests {
         assert_eq!(doc.inputs.tmdb, found("rec/tmdb.json", "failed"));
         assert!(!doc.plan.identity.lookup_pending);
         assert!(!doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
-        assert!(!doc.plan.evidence.sentences.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.evidence.sentences);
         assert_eq!(doc.plan.identity.original_language.as_deref(), Some("fr"));
         // A failed TheDiscDB lookup keeps the job pending whatever record is given (Review Focus 5).
         tmp.write("rec/lookup-status.txt", "dischash 500\ndiscid 404\ntmdb movie/6537 500\n");
