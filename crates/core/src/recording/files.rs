@@ -1,7 +1,8 @@
 //! The recorder's files as the PowerShell jobs and crates/capture write them (port spec 3.3, `core::recording`), and
 //! what makes a folder a rip label. Unknown keys are ignored; every field the Python reads with .get() is an Option.
 //! A file whose field has another type fails to parse, and its reader reports it unreadable (02-interfaces.md, open
-//! point 10: every recorded rip-summary.json has `ok` a bool, `title` and `bytes` ints).
+//! point 10: every recorded rip-summary.json has `ok` a bool, `title` and `bytes` ints); the one exception is `Tmdb`'s
+//! record fields (Task 3, spec 8.1), which read a value of another type as None.
 
 use super::{py_split, py_splitlines, py_strip, py_truthy, read_json, Ordered, PathKey, Tree};
 use serde_json::Value;
@@ -234,11 +235,54 @@ pub fn read_jsonl(text: &str) -> Result<Vec<OcrLine>, String> {
     Ok(out)
 }
 
-/// tmdb.json, slimmed (original_language, fetched_at).
+/// tmdb.json, slimmed: original_language and fetched_at, as the text rule reads them (subtitle::text::subs_run), and the
+/// record's id, title (a movie) or name (a TV show), original title or name, release or first-air date and external IDs,
+/// which `lookup::tmdb::parse_recorded` maps to a record (spec 8.1). The record's fields are lenient: a value of another
+/// type reads as None, never as an error, so every file the text rule read before they were added still reads.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct Tmdb {
     pub original_language: Option<String>,
     pub fetched_at: Option<String>,
+    #[serde(default, deserialize_with = "lenient_i64")]
+    pub id: Option<i64>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub title: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub original_title: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub original_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub release_date: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub first_air_date: Option<String>,
+    /// `imdb_id` (a string), `tvdb_id` (a number) and keys no rule reads (`wikidata_id`).
+    #[serde(default, deserialize_with = "lenient_object")]
+    pub external_ids: Option<serde_json::Map<String, Value>>,
+}
+
+/// A tmdb.json field that is a whole number, else None.
+fn lenient_i64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    Ok(<Value as serde::Deserialize>::deserialize(deserializer)?.as_i64())
+}
+
+/// A tmdb.json field that is a string, else None.
+fn lenient_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(match <Value as serde::Deserialize>::deserialize(deserializer)? {
+        Value::String(text) => Some(text),
+        _ => None,
+    })
+}
+
+/// A tmdb.json field that is an object, else None.
+fn lenient_object<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Map<String, Value>>, D::Error> {
+    Ok(match <Value as serde::Deserialize>::deserialize(deserializer)? {
+        Value::Object(map) => Some(map),
+        _ => None,
+    })
 }
 
 /// What thediscdb-hash.json / thediscdb-discid.json says.
@@ -484,5 +528,28 @@ mod tests {
             statuses.0,
             vec![("dischash".to_string(), "500".to_string()), ("discid".to_string(), "404".to_string())]
         );
+    }
+
+    #[test]
+    fn the_slim_tmdb_json_reads_its_record_fields_and_ignores_values_of_another_type() {
+        let show: Tmdb = serde_json::from_str(
+            r#"{"id": 2316, "name": "The Office", "original_name": "The Office", "first_air_date": "2005-03-24",
+                "original_language": "en", "external_ids": {"imdb_id": "tt0002316", "tvdb_id": 102316}, "fetched_at": "2026-01-02"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (show.id, show.name.as_deref(), show.original_name.as_deref(), show.first_air_date.as_deref()),
+            (Some(2316), Some("The Office"), Some("The Office"), Some("2005-03-24"))
+        );
+        assert_eq!((show.title.as_deref(), show.original_title.as_deref(), show.release_date.as_deref()), (None, None, None));
+        assert_eq!(show.external_ids.as_ref().and_then(|ids| ids.get("tvdb_id")), Some(&json!(102316)));
+        assert_eq!((show.original_language.as_deref(), show.fetched_at.as_deref()), (Some("en"), Some("2026-01-02")));
+        // A value of another type in a new field reads as None, so a file the text rule read before still reads.
+        let odd: Tmdb = serde_json::from_str(
+            r#"{"original_language": "es", "id": "1417", "title": 5, "name": null, "release_date": ["2006"], "external_ids": "none"}"#,
+        )
+        .unwrap();
+        assert_eq!(odd.original_language.as_deref(), Some("es"));
+        assert_eq!((odd.id, odd.title, odd.name, odd.release_date, odd.external_ids), (None, None, None, None, None));
     }
 }
