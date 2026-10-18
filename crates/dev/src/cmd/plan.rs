@@ -120,7 +120,8 @@ pub struct PlanOptions {
     pub settings: Option<PathBuf>,
     /// A TMDb `/search/multi` answer for the disc's name (8.1 steps 4 and 5; TMDb's documented shape).
     pub tmdb_search: Option<PathBuf>,
-    /// A TMDb `/movie/{id}` or `/tv/{id}` answer (8.1); it replaces the recording's tmdb.json.
+    /// A TMDb `/movie/{id}` or `/tv/{id}` answer (8.1); it replaces the recording's tmdb.json, so a failed TMDb lookup
+    /// is no longer pending (SR8).
     pub tmdb_record: Option<PathBuf>,
     /// A remembered decision for this disc's fingerprint (spec 5, 8.1 step 1).
     pub remembered: Option<PathBuf>,
@@ -156,8 +157,10 @@ struct Found {
 /// (`parse_discid`; its first record with titles is `discdb_by_disc_id`), tmdb.json (`parse_recorded`) and
 /// lookup-status.txt (`hit_rate::statuses`); an absent lookup file means that lookup was not made, a lookup that
 /// failed is pending (8.1), an answer file whose status line is not 200 is not parsed (the recorder keeps the error
-/// body of a 404 or a failed lookup), and only a file that exists and does not parse is Refused { code: 2 }. A bare
-/// scan file
+/// body of a 404 or a failed lookup), and only a file that exists and does not parse is Refused { code: 2 }. A given
+/// --tmdb-record replaces the lookup's record, so it also clears a pending TMDb lookup (SR8): `inputs.tmdb` still
+/// says "failed", the TheDiscDB lookups stay pending, and --tmdb-search, a different lookup, does not clear the flag.
+/// A bare scan file
 /// `<dir>/discNN.txt` is a pinned log: its fingerprint is `fingerprint::content_hash(&fingerprint::hashed_files(log))`
 /// of its HSH lines; `discdb_by_fingerprint` is `corpus/thediscdb-api/dischash-<fingerprint>.json` under
 /// `repo_root(ctx.cwd)` when present (it carries media), else `<dir>/discNN.json` with the same stem (no media: kind
@@ -213,7 +216,9 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
             discdb_pending: found.discdb_pending,
             search: search.as_ref().map(|(_, search)| search),
             record,
-            tmdb_pending: found.tmdb_pending,
+            // SR8: a record the owner gives replaces the lookup's answer, so a failed TMDb lookup no longer leaves the
+            // job pending; --tmdb-search is a different lookup and does not clear the flag.
+            tmdb_pending: found.tmdb_pending && given_record.is_none(),
             remembered: None,
             reviewed: None,
         },
@@ -945,6 +950,33 @@ mod tests {
         // A recording whose lookups all answered is not pending.
         film_recording(&tmp, "rec3");
         assert!(!doc_of(&tmp, "rec3", &PlanOptions::default()).unwrap().plan.identity.lookup_pending);
+    }
+
+    #[test]
+    fn a_tmdb_record_file_clears_the_pending_flag_of_a_failed_tmdb_lookup() {
+        let tmp = Scratch::new("plan-record-clears-pending");
+        // SR8: tmdb.json is there but TMDb answered 500, so the lookup failed and the job is pending.
+        film_recording(&tmp, "rec");
+        tmp.write("rec/lookup-status.txt", "dischash 200\ndiscid 404\ntmdb movie/6537 500\n");
+        tmp.write("movie.json", tmdb_movie_json(6537, "Made Up Film", "Pelicula Inventada", "2007-05-20", "fr", Some(100)));
+        let pending = planned(&tmp, &PlanOptions::default());
+        assert_eq!(pending.inputs.tmdb, found("rec/tmdb.json", "failed"));
+        assert!(pending.plan.identity.lookup_pending, "the regression guard: without the option the lookup is pending");
+        assert!(pending.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", pending.plan.identity.evidence);
+        // A record the owner gives replaces the lookup's answer, so the TMDb lookup is no longer pending; the answer
+        // word of tmdb.json stays what the status line says.
+        let doc = planned(&tmp, &PlanOptions { tmdb_record: Some(PathBuf::from("movie.json")), ..PlanOptions::default() });
+        assert_eq!(doc.inputs.tmdb, found("rec/tmdb.json", "failed"));
+        assert!(!doc.plan.identity.lookup_pending);
+        assert!(!doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
+        assert!(!doc.plan.evidence.sentences.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.evidence.sentences);
+        assert_eq!(doc.plan.identity.original_language.as_deref(), Some("fr"));
+        // A failed TheDiscDB lookup keeps the job pending whatever record is given (Review Focus 5).
+        tmp.write("rec/lookup-status.txt", "dischash 500\ndiscid 404\ntmdb movie/6537 500\n");
+        let doc = planned(&tmp, &PlanOptions { tmdb_record: Some(PathBuf::from("movie.json")), ..PlanOptions::default() });
+        assert!(doc.plan.identity.lookup_pending);
+        assert!(doc.plan.identity.evidence.iter().any(|s| s == "the TheDiscDB lookup is pending"), "{:?}", doc.plan.identity.evidence);
+        assert!(!doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
     }
 
     #[test]

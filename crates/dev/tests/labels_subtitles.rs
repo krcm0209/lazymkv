@@ -70,6 +70,19 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
+/// ONE_LINE_FILE with one more `all-tracks` track for each of `streams`, whose "sure" is the word "yes" (a problem each:
+/// "track all-tracks stream <n>: sure must be true or false"), on one line.
+fn one_line_file_with_bad_sure(streams: &[i64]) -> String {
+    let mut data: Value = serde_json::from_str(ONE_LINE_FILE).unwrap();
+    for stream in streams {
+        data["tracks"].as_array_mut().unwrap().push(json!({
+            "label": "all-tracks", "stream": stream, "kind": "sdh", "how": "read", "sure": "yes", "date": "2026-10-14",
+            "saw_verdict": false, "note": null, "style": null,
+        }));
+    }
+    serde_json::to_string(&data).unwrap()
+}
+
 #[test]
 fn the_labels_row_of_commands_names_the_subtitles_option() {
     let row = COMMANDS.iter().find(|(name, _, _)| *name == "labels").expect("labels is registered");
@@ -248,6 +261,97 @@ fn unset_moves_the_label_to_removed_with_why_and_when() {
     assert_eq!(
         call(&tmp.0, &["--subtitles", "check", "disc-b"]),
         (0, "ok disc-b/subtitle-labels.json (0 tracks)\n".to_string(), String::new())
+    );
+}
+
+#[test]
+fn set_warns_about_the_problems_the_file_already_had() {
+    let (tmp, file) = scratch_with_disc_b("labels-subtitles");
+    tmp.write("disc-b/subtitle-labels.json", one_line_file_with_bad_sure(&[9]));
+    let args = ["--subtitles", "set", "disc-b", "all-tracks", "4", "regular", "--how", "read", "--saw-verdict", "no", "--date", "2026-10-15"];
+    assert_eq!(
+        call(&tmp.0, &args),
+        (
+            0,
+            concat!(
+                "labelled all-tracks stream 4: regular (read, 2026-10-15, saw verdict no, sure yes); replaces 1 earlier label(s), kept in its history\n",
+                "warning: the file still has 1 problem(s): track all-tracks stream 9: sure must be true or false\n",
+            )
+            .to_string(),
+            String::new()
+        )
+    );
+    // The edit is written and the old problem stays: `check` still refuses the file.
+    assert_eq!(read_json(&file)["tracks"][0]["kind"], json!("regular"));
+    assert_eq!(
+        call(&tmp.0, &["--subtitles", "check", "disc-b"]),
+        (2, "disc-b/subtitle-labels.json: track all-tracks stream 9: sure must be true or false\n".to_string(), String::new())
+    );
+}
+
+#[test]
+fn set_joins_two_old_problems_with_a_semicolon() {
+    let (tmp, _file) = scratch_with_disc_b("labels-subtitles");
+    tmp.write("disc-b/subtitle-labels.json", one_line_file_with_bad_sure(&[9, 10]));
+    let args = ["--subtitles", "set", "disc-b", "all-tracks", "4", "regular", "--how", "read", "--saw-verdict", "no", "--date", "2026-10-15"];
+    let (code, out, err) = call(&tmp.0, &args);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert!(
+        out.ends_with(concat!(
+            "warning: the file still has 2 problem(s): track all-tracks stream 9: sure must be true or false; ",
+            "track all-tracks stream 10: sure must be true or false\n",
+        )),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_unchanged_set_prints_the_old_problems_and_does_not_rewrite_the_file() {
+    let (tmp, file) = scratch_with_disc_b("labels-subtitles");
+    let before = one_line_file_with_bad_sure(&[9]);
+    tmp.write("disc-b/subtitle-labels.json", &before);
+    let args = [
+        "--subtitles", "set", "disc-b", "all-tracks", "4", "sdh", "--how", "read", "--saw-verdict", "no", "--date", "2026-10-20",
+        "--note", "sound cues in brackets",
+    ];
+    assert_eq!(
+        call(&tmp.0, &args),
+        (
+            0,
+            concat!(
+                "unchanged all-tracks stream 4: sdh (read, 2026-10-14, saw verdict no, sure yes)\n",
+                "warning: the file still has 1 problem(s): track all-tracks stream 9: sure must be true or false\n",
+            )
+            .to_string(),
+            String::new()
+        )
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn unset_warns_about_the_problems_the_file_already_had() {
+    let (tmp, file) = scratch_with_disc_b("labels-subtitles");
+    tmp.write("disc-b/subtitle-labels.json", one_line_file_with_bad_sure(&[9]));
+    let args = ["--subtitles", "unset", "disc-b", "all-tracks", "4", "--note", "x"];
+    assert_eq!(
+        call(&tmp.0, &args),
+        (
+            0,
+            concat!(
+                "unset all-tracks stream 4: the label is kept under 'removed'\n",
+                "warning: the file still has 1 problem(s): track all-tracks stream 9: sure must be true or false\n",
+            )
+            .to_string(),
+            String::new()
+        )
+    );
+    let written = read_json(&file);
+    assert_eq!(written["removed"][0]["why"], json!("x"));
+    assert_eq!(written["tracks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        call(&tmp.0, &["--subtitles", "check", "disc-b"]),
+        (2, "disc-b/subtitle-labels.json: track all-tracks stream 9: sure must be true or false\n".to_string(), String::new())
     );
 }
 
