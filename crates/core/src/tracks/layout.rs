@@ -536,6 +536,12 @@ mod tests {
             audio_track(4, Some("zxx"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
             audio_track(5, Some("mul"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
             audio_track(6, Some(""), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            // The tag drops only an empty code, "-" and "und" in any case; "mis" and "ZXX" keep theirs as written.
+            audio_track(7, Some("-"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(8, Some("UND"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(9, Some("Und"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(10, Some("mis"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(11, Some("ZXX"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
         ]);
         let languages: Vec<Option<String>> = layout(&film_title(), &kept, &subtitles(Vec::new()))
             .tracks
@@ -545,7 +551,19 @@ mod tests {
             .collect();
         assert_eq!(
             languages,
-            vec![Some("spa".to_string()), None, None, Some("zxx".to_string()), Some("mul".to_string()), None]
+            vec![
+                Some("spa".to_string()),
+                None,
+                None,
+                Some("zxx".to_string()),
+                Some("mul".to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some("mis".to_string()),
+                Some("ZXX".to_string()),
+            ]
         );
     }
 
