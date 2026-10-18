@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.99.0, edition 2021; `serde`, `serde_json`, `regex`, `unicode-normalization`, as in the workspace. No new dependency.
 
-**Spec:** `docs/superpowers/specs/2026-10-04-lazymkv-design.md` (sections 6.3, 8.1, 8.2, 8.3, 8.5, 8.6, 8.8, 8.9, 8.10, 10.2, 16, 18; decisions D2, D9, D15) and `docs/superpowers/specs/2026-10-13-rust-port-design.md` (RP7). The phase 1 plan `docs/superpowers/plans/2026-10-16-phase-1-decision-core.md` and `docs/phase1/decision-core.md` record the rulings RP10 to RP27 and F1 to F15 that still bind. The rulings below (R1 to R16, SR1 to SR9) bind every task of this plan.
+**Spec:** `docs/superpowers/specs/2026-10-04-lazymkv-design.md` (sections 6.3, 8.1, 8.2, 8.3, 8.5, 8.6, 8.8, 8.9, 8.10, 10.2, 16, 18; decisions D2, D9, D15) and `docs/superpowers/specs/2026-10-13-rust-port-design.md` (RP7). The phase 1 plan `docs/superpowers/plans/2026-10-16-phase-1-decision-core.md` and `docs/phase1/decision-core.md` record the rulings RP10 to RP27 and F1 to F15 that still bind. The rulings below (OR1 to OR16, SR1 to SR9) bind every task of this plan.
 
 **Branch:** `phase-1-rulings`, from `main` at `4cdc0ea` (the merge of pull request #3).
 
@@ -27,26 +27,26 @@
 
 ## Rulings
 
-Owner rulings of 2026-10-17 (R1 to R16) and the controller's sub-rulings (SR1 to SR9) made while writing this plan from the readers' findings. The owner can overturn any SR.
+Owner rulings of 2026-10-17 (OR1 to OR16; the prefix OR, owner ruling, keeps them apart from the spec's requirements R1 to R8) and the controller's sub-rulings (SR1 to SR9) made while writing this plan from the readers' findings. The owner can overturn any SR.
 
-- R1. 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120 minutes, 8.2). R15 limits this to rule 3.1: 8.5's dropping of play-all titles from a TV disc keeps the literal shape (any concatenation of two or more other groups' maps), so an extras play-all is never suggested as an episode. The whole group's own length is unconstrained (SR1).
-- R2. Two label cuts both named "Theatrical Cut" (the `none` and `_R` rows) keep the 0.60 `title_ambiguous` hold; two TheDiscDB main movies that would share one name likewise. No code change; the spec says so (Task 4).
-- R3. When the default audio is not English and no regular English track is kept, the SDH track is the default subtitle. No code change; the spec says so (Task 4).
-- R4. Leading periods and spaces are dropped from a path component as well as trailing ones. No code change; the spec says so (Task 4).
-- R5. C1: rule 1 still wins (TheDiscDB's main movies at 0.98, Direct), but a Java-labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too, as an unnamed cut (edition none, not theatrical), with the review reason `unnamed_cut` and, per R16, the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles. The main movie's own label suffix, its dub variants and a Narrative variant name no second cut (the Task 5 ruling stands).
-- R6. Name cleaning: `S3D` and `3D` are format tags (never a season marker or a disc number); a region tag that is the whole label is kept (`US` is the film Us). SR2 settles the scope: the whole-label rule applies to a single-token label that is a region tag (`US`, `UK`, `EU`, `WW`, `DOM`, `INT`, `R1` to `R6`), with its brackets stripped (`(US)` gives `US`); a format tag that is the whole label (`UHD`, `DVD`, `BLU-RAY`, `3D`) still cleans to nothing and stays generic; a label of two or more tag tokens cleans to nothing. `S1M0NE`, `BLADE_RUNNER_2049` and `D2_THE_MIGHTY_DUCKS` stay as they are.
-- R7. The object-audio spellings (`Atmos`, `DTS:X`) stay provisional until experiment 6 runs. No change.
-- R8. RP27's four note names are confirmed: `possible_audio_description`, `lossy_before_lossless`, `direct_mode_fallback`, `label_rule_unavailable`; the spec names them (Task 4).
-- R9. RP25's subtitle-label vocabulary is confirmed. No change.
-- R10. The final review's six provisional rules are kept. No change.
-- R11. RP10 is confirmed; the spec's three sentences still saying "phase 1" for phase 2 work (lines 226, 363, 743) are edited now (Task 4).
-- R12. Of the 95 deferred minors only the test gaps are pinned (Tasks 5 to 8); where a gap exposed a defect, the defect is fixed with the test (SR4, SR5, SR6, SR8).
-- R13. The four phase 2 leftovers (lookup answers outside AwaitingLookup, restart between answer and refresh, collision answer by path, a relative root in `decide`) stay for phase 2.
-- R14. The pull request runs subagent-driven.
-- R15. (Scope of R1.) The episode-length restriction applies to rule 3.1 only; 8.5 keeps dropping any concatenation title.
-- R16. (Form of R5's note.) A new note `unlisted_label_cut`, the thirteenth of the closed set, with the title and label in its detail, carried into `Plan.notes` and every `FileDecision.notes`; plus an evidence sentence.
+- OR1. 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120 minutes, 8.2). OR15 limits this to rule 3.1: 8.5's dropping of play-all titles from a TV disc keeps the literal shape (any concatenation of two or more other groups' maps), so an extras play-all is never suggested as an episode. The whole group's own length is unconstrained (SR1).
+- OR2. Two label cuts both named "Theatrical Cut" (the `none` and `_R` rows) keep the 0.60 `title_ambiguous` hold; two TheDiscDB main movies that would share one name likewise. No code change; the spec says so (Task 4).
+- OR3. When the default audio is not English and no regular English track is kept, the SDH track is the default subtitle. No code change; the spec says so (Task 4).
+- OR4. Leading periods and spaces are dropped from a path component as well as trailing ones. No code change; the spec says so (Task 4).
+- OR5. C1: rule 1 still wins (TheDiscDB's main movies at 0.98, Direct), but a Java-labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too, as an unnamed cut (edition none, not theatrical), with the review reason `unnamed_cut` and, per OR16, the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles. The main movie's own label suffix, its dub variants and a Narrative variant name no second cut (the Task 5 ruling stands).
+- OR6. Name cleaning: `S3D` and `3D` are format tags (never a season marker or a disc number); a region tag that is the whole label is kept (`US` is the film Us). SR2 settles the scope: the whole-label rule applies to a single-token label that is a region tag (`US`, `UK`, `EU`, `WW`, `DOM`, `INT`, `R1` to `R6`), with its brackets stripped (`(US)` gives `US`); a format tag that is the whole label (`UHD`, `DVD`, `BLU-RAY`, `3D`) still cleans to nothing and stays generic; a label of two or more tag tokens cleans to nothing. `S1M0NE`, `BLADE_RUNNER_2049` and `D2_THE_MIGHTY_DUCKS` stay as they are.
+- OR7. The object-audio spellings (`Atmos`, `DTS:X`) stay provisional until experiment 6 runs. No change.
+- OR8. RP27's four note names are confirmed: `possible_audio_description`, `lossy_before_lossless`, `direct_mode_fallback`, `label_rule_unavailable`; the spec names them (Task 4).
+- OR9. RP25's subtitle-label vocabulary is confirmed. No change.
+- OR10. The final review's six provisional rules are kept. No change.
+- OR11. RP10 is confirmed; the spec's three sentences still saying "phase 1" for phase 2 work (lines 226, 363, 743) are edited now (Task 4).
+- OR12. Of the 95 deferred minors only the test gaps are pinned (Tasks 5 to 8); where a gap exposed a defect, the defect is fixed with the test (SR4, SR5, SR6, SR8).
+- OR13. The four phase 2 leftovers (lookup answers outside AwaitingLookup, restart between answer and refresh, collision answer by path, a relative root in `decide`) stay for phase 2.
+- OR14. The pull request runs subagent-driven.
+- OR15. (Scope of OR1.) The episode-length restriction applies to rule 3.1 only; 8.5 keeps dropping any concatenation title.
+- OR16. (Form of OR5's note.) A new note `unlisted_label_cut`, the thirteenth of the closed set, with the title and label in its detail, carried into `Plan.notes` and every `FileDecision.notes`; plus an evidence sentence.
 - SR1. Rule 3.1's parts are each checked against the 8.2 band; the whole group's length and the parts' mutual spread are not checked.
-- SR2. The whole-label rule's scope, as written under R6.
+- SR2. The whole-label rule's scope, as written under OR6.
 - SR3. `by_database` takes `wanted: &Wanted` (the languages `movie_plan` already holds) so the unlisted cut's variant is chosen as rule 2 chooses it; no second pass with the original language for rule 1 plans.
 - SR4. `plan::movie::coverage` uses `lang::is_english` (phase 1 plan decision 6: one English test); `Wanted.english` stays, serialised as before.
 - SR5. `codec::dts_family` reads attribute 6, then attribute 7, as its doc says (a conflicting made-up pair follows attribute 6); the DTS:X pre-check stays first.
@@ -57,7 +57,7 @@ Owner rulings of 2026-10-17 (R1 to R16) and the controller's sub-rulings (SR1 to
 
 ## Review Focus
 
-1. **A TV disc whose only kind evidence was an extras play-all.** Under R1 a disc without TheDiscDB, labels or a season marker, whose episodes are two features' worth of rivals and whose play-all is of short extras, is no longer TV: rule 3 runs and holds it at 0.60 in copy mode. Task 1's `a_tv_disc_known_only_by_an_extras_play_all_is_held_as_a_movie_in_copy_mode` pins it on CHERNOBYL_2 without TheDiscDB (rule Structure, 0.60, `multiple_features` or `title_ambiguous` as the mini PC run shows; the implementer reports which).
+1. **A TV disc whose only kind evidence was an extras play-all.** Under OR1 a disc without TheDiscDB, labels or a season marker, whose episodes are two features' worth of rivals and whose play-all is of short extras, is no longer TV: rule 3 runs and holds it at 0.60 in copy mode. Task 1's `a_tv_disc_known_only_by_an_extras_play_all_is_held_as_a_movie_in_copy_mode` pins it on CHERNOBYL_2 without TheDiscDB (rule Structure, 0.60, `multiple_features` or `title_ambiguous` as the mini PC run shows; the implementer reports which).
 2. **A region tag in another case or in brackets as the whole label.** `(us)` and `us` are the film Us too. Task 2's `a_region_tag_that_is_the_whole_label_is_kept` pins `us`, `(US)` and `UK`, and that `US UK` and `UHD` still clean to nothing.
 3. **A second cut present only as a dub variant.** A disc whose main movie is `FPL_MainFeature_UR` and whose only theatrical label is `FPL_MainFeature_R_JPN` has an unlisted cut (the `_R` cut, chosen title the Japanese variant). Task 3's rule 1 and rule 2 interaction test pins it.
 4. **A numeric character reference XML forbids inside a disc name.** `A&#0;B` must not become a name holding U+0000 (a path component with a NUL). Task 5's `bdmt_name_does_not_decode_a_character_xml_forbids` pins it.
@@ -70,7 +70,7 @@ Owner rulings of 2026-10-17 (R1 to R16) and the controller's sub-rulings (SR1 to
 | Path | Change |
 |---|---|
 | `crates/core/src/plan/kind.rs` | `is_episode_length`, `play_all_of_episodes`, the part predicate inside `concatenates`; tests. |
-| `crates/core/src/plan/movie.rs` | `by_structure` uses `play_all_of_episodes`; `by_database(record, matches, disc, wanted)` plans unlisted labelled cuts (R5); `coverage` uses `is_english` (SR4); tests. |
+| `crates/core/src/plan/movie.rs` | `by_structure` uses `play_all_of_episodes`; `by_database(record, matches, disc, wanted)` plans unlisted labelled cuts (OR5); `coverage` uses `is_english` (SR4); tests. |
 | `crates/core/src/plan/mod.rs` | Docs of `PlannedRole`, `movie_entries`; the `by_database` call; tests (rule 3.1, C1, test gaps T7). |
 | `crates/core/src/plan/tv.rs` | Fixture row removed (T6); `without_play_all` test. |
 | `crates/core/src/review.rs` | `Note::UnlistedLabelCut`; header comments; tests. |
@@ -83,15 +83,15 @@ Owner rulings of 2026-10-17 (R1 to R16) and the controller's sub-rulings (SR1 to
 | `crates/core/src/remembered.rs` | Fixture rows removed (T6). |
 | `crates/core/src/tracks/audio/tests.rs` | T8 tests. |
 | `crates/core/src/tracks/subtitle/tests.rs` | T9, T10 tests. |
-| `crates/core/src/tracks/layout.rs` | Doc comment (R3); R3 layout-level test; T11 test rows. |
-| `crates/core/src/naming.rs` | Doc comment (R4). |
+| `crates/core/src/tracks/layout.rs` | Doc comment (OR3); OR3 layout-level test; T11 test rows. |
+| `crates/core/src/naming.rs` | Doc comment (OR4). |
 | `crates/core/src/verify.rs` | T12 tests. |
 | `crates/core/src/decision.rs` | Doc of `job_features`; T13 tests. |
 | `crates/core/src/job/tests.rs` | T14 sample. |
 | `crates/core/src/subtitle/labels.rs`, `labels/row14.rs`, `row14/tests.rs` | `pub const TEXT_HINT` (SR9); T18a test. |
 | `crates/dev/src/cmd/plan.rs` | `tmdb_pending` fix (SR8); test. |
 | `crates/dev/src/cmd/retune.rs`, `cmd/decide.rs`, `cmd/golden.rs` | Use `TEXT_HINT` from core. |
-| `crates/dev/tests/plan.rs` | Expendables expectation (R5); `cut` helper. |
+| `crates/dev/tests/plan.rs` | Expendables expectation (OR5); `cut` helper. |
 | `crates/dev/tests/labels_subtitles.rs` | T17 tests. |
 | `crates/dev/tests/decide.rs` | Uses `TEXT_HINT` from core. |
 | `docs/superpowers/specs/2026-10-04-lazymkv-design.md` | Lines 36, 45, 197, 201, 226, 246, 260, 270, 291, 314, 349-355, 363, 397-407, 443, 447, 571, 700, 743 (one sentence each, cited per task). |
@@ -102,10 +102,10 @@ Owner rulings of 2026-10-17 (R1 to R16) and the controller's sub-rulings (SR1 to
 
 | Task | Deliverable | Model tier |
 |---|---|---|
-| 1 | Rule 3.1 counts only play-all titles of episode-length parts (R1, R15, SR1) | standard |
-| 2 | `S3D`/`3D` are format tags; a whole-label region tag is kept (R6, SR2) | standard |
-| 3 | C1: an unlisted labelled cut beside the main movie (R5, R16, SR3) | standard |
-| 4 | The confirmed choices and the note names written into the spec (R2, R3, R4, R7, R8, R9, R11) | cheap |
+| 1 | Rule 3.1 counts only play-all titles of episode-length parts (OR1, OR15, SR1) | standard |
+| 2 | `S3D`/`3D` are format tags; a whole-label region tag is kept (OR6, SR2) | standard |
+| 3 | C1: an unlisted labelled cut beside the main movie (OR5, OR16, SR3) | standard |
+| 4 | The confirmed choices and the note names written into the spec (OR2, OR3, OR4, OR7, OR8, OR9, OR11) | cheap |
 | 5 | Core test gaps A: lang, codec, settings, disc (A4, T1, T2; SR4, SR5, SR6) | standard |
 | 6 | Core test gaps B: the planner (T4, T5, T6, T7, T8; SR7) | standard |
 | 7 | Core test gaps C: subtitles, layout, verify, decision, job (T9 to T14) | standard |
@@ -143,7 +143,7 @@ fn a_play_all_of_episodes_counts_only_parts_of_episode_length() {
     assert_eq!(play_all_of_episodes(&two_parts(899, 1320), false), None);
     assert_eq!(play_all_of_episodes(&two_parts(7201, 1320), false), None);
     assert_eq!(play_all_of_episodes(&two_parts(1320, 1320), true), None, "never on a DVD");
-    // 8.5's reading (R15) is unchanged: any parts.
+    // 8.5's reading (OR15) is unchanged: any parts.
     assert_eq!(play_all(&two_parts(1320, 600), false), Some(2));
 }
 
@@ -173,7 +173,7 @@ Expected: compile error, `play_all_of_episodes` and `is_episode_length` not foun
 
 - `pub fn is_episode_length(group: &Group) -> bool`: `(EPISODE_MIN_S..=EPISODE_MAX_S).contains(&group.seconds)`; `episode_length_groups` filters with it.
 - `pub fn play_all(groups, dvd)` keeps its signature and doc (now "8.5's play-all title, any parts") and calls a private `fn play_all_where(groups: &[Group], dvd: bool, part: &dyn Fn(&Group) -> bool) -> Option<usize>`, the current body.
-- `pub fn play_all_of_episodes(groups, dvd)`: `play_all_where(groups, dvd, &is_episode_length)`; doc: "Spec 8.3 rule 3.1 under ruling R1: a play-all title whose every part is episode-length (15 to 120 minutes, 8.2); a concatenation of shorter extras is not one. Def: this plan. Use: `movie::by_structure`."
+- `pub fn play_all_of_episodes(groups, dvd)`: `play_all_where(groups, dvd, &is_episode_length)`; doc: "Spec 8.3 rule 3.1 under ruling OR1: a play-all title whose every part is episode-length (15 to 120 minutes, 8.2); a concatenation of shorter extras is not one. Def: this plan. Use: `movie::by_structure`."
 - `concatenates` gains the `part` argument; its skip condition gains `|| !part(group)`. Module doc line 4 says the two readings.
 
 - [ ] **Step 4: Run the kind tests to verify they pass**
@@ -200,7 +200,7 @@ fn a_play_all_of_episode_length_parts_makes_the_structure_rule_answer_tv() {
 
 #[test]
 fn an_extras_play_all_is_not_rule_3_1s_play_all_title() {
-    // R1: the pinned logs' play-all titles (a deleted-scenes playlist, two extras playlists) have parts of a few minutes.
+    // OR1: the pinned logs' play-all titles (a deleted-scenes playlist, two extras playlists) have parts of a few minutes.
     for log in [CHERNOBYL_1, CHERNOBYL_2, SMILE] {
         let disc = pinned(log);
         let settings = Settings::default();
@@ -261,11 +261,11 @@ Expected: the three new movie tests and the plan test FAIL (PlayAll where Plan i
 
 - [ ] **Step 7: Switch `by_structure` and update the docs and comments**
 
-- `movie::by_structure`: `play_all_of_episodes(groups, disc.is_dvd)`; its doc and `StructureOutcome::PlayAll`'s doc say "rule 3.1 under R1: a play-all title of episode-length parts".
+- `movie::by_structure`: `play_all_of_episodes(groups, disc.is_dvd)`; its doc and `StructureOutcome::PlayAll`'s doc say "rule 3.1 under OR1: a play-all title of episode-length parts".
 - `plan/mod.rs:207-211` doc and the comment at `:2066-2071`: the 10-minute credits clip is not episode-length, so the group is not rule 3.1's play-all title; rule 3 runs directly, as TheDiscDB's movie kind would make it anyway.
-- Spec line 291 becomes: `1. If a group's segment map is the concatenation of two or more other groups' maps, each of them episode-length (15 to 120 minutes, 8.2), it is a "play all" title: treat the disc as TV (8.5). A concatenation of shorter groups (a play-all of extras) is an ordinary group here (ruling R1, 2026-10-17).`
-- Spec line 314, after `"play all" titles are dropped`: `(here any group whose segment map is the concatenation of two or more other groups' maps, whatever their length: a play-all of extras is dropped too; R15)`.
-- `decision-core.md:366-370`: the open question becomes `- Ruling R1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120 minutes); a play-all of extras (Smile's deleted-scenes playlist, title 117) is an ordinary group, so a movie disc with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (R15).` and `:323-325` (F4) ends `; ruling R1 then settled it.`
+- Spec line 291 becomes: `1. If a group's segment map is the concatenation of two or more other groups' maps, each of them episode-length (15 to 120 minutes, 8.2), it is a "play all" title: treat the disc as TV (8.5). A concatenation of shorter groups (a play-all of extras) is an ordinary group here (ruling OR1, 2026-10-17).`
+- Spec line 314, after `"play all" titles are dropped`: `(here any group whose segment map is the concatenation of two or more other groups' maps, whatever their length: a play-all of extras is dropped too; OR15)`.
+- `decision-core.md:366-370`: the open question becomes `- Ruling OR1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120 minutes); a play-all of extras (Smile's deleted-scenes playlist, title 117) is an ordinary group, so a movie disc with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (OR15).` and `:323-325` (F4) ends `; ruling OR1 then settled it.`
 
 - [ ] **Step 8: Run the core tests to verify they pass**
 
@@ -276,7 +276,7 @@ Expected: PASS. Report in the task report which review reason Review Focus 1's t
 
 ```bash
 git add crates/core/src/plan docs/superpowers/specs/2026-10-04-lazymkv-design.md docs/phase1/decision-core.md
-git commit -m "core::plan: rule 3.1 counts only play-all titles of episode-length parts (R1, R15); 8.5 keeps the literal shape"
+git commit -m "core::plan: rule 3.1 counts only play-all titles of episode-length parts (OR1, OR15); 8.5 keeps the literal shape"
 ```
 
 ---
@@ -299,7 +299,7 @@ Replace `a_3d_label_s3d_reads_as_season_3_by_spec_8_2s_literal_rule` with:
 ```rust
 #[test]
 fn s3d_and_3d_are_format_tags_not_a_season_marker() {
-    // R6: `S3D` (stereoscopic 3D) is a format tag, so its pieces S, 3, D belong to no marker.
+    // OR6: `S3D` (stereoscopic 3D) is a format tag, so its pieces S, 3, D belong to no marker.
     assert_eq!(parse_season("HUGO_S3D"), None);
     assert_eq!(parse_disc_number("HUGO_S3D"), None);
     assert!(!has_season_marker("HUGO_S3D"));
@@ -315,7 +315,7 @@ fn s3d_and_3d_are_format_tags_not_a_season_marker() {
 
 #[test]
 fn a_region_tag_that_is_the_whole_label_is_kept() {
-    // R6 and SR2: a disc labelled US is the film Us; a format tag alone is still a placeholder.
+    // OR6 and SR2: a disc labelled US is the film Us; a format tag alone is still a placeholder.
     assert_eq!(clean("US"), "US");
     assert_eq!(clean("us"), "us");
     assert_eq!(clean("(US)"), "US");
@@ -330,7 +330,7 @@ fn a_region_tag_that_is_the_whole_label_is_kept() {
 }
 ```
 
-In `every_region_and_format_tag_is_removed_as_a_whole_token_in_any_case`: add `"S3D", "3D"` to its `tags` array; change `assert_eq!(clean("US"), "");` to `assert_eq!(clean("US"), "US");` and reword the comment (a tag token beside other words is removed; alone, a region tag is the name: R6). In `a_name_with_no_letters_or_nothing_left_after_cleaning_is_generic`: replace the last two lines by `assert!(!is_generic("US", &clean("US")), "the film Us is searched (R6)");`.
+In `every_region_and_format_tag_is_removed_as_a_whole_token_in_any_case`: add `"S3D", "3D"` to its `tags` array; change `assert_eq!(clean("US"), "");` to `assert_eq!(clean("US"), "US");` and reword the comment (a tag token beside other words is removed; alone, a region tag is the name: OR6). In `a_name_with_no_letters_or_nothing_left_after_cleaning_is_generic`: replace the last two lines by `assert!(!is_generic("US", &clean("US")), "the film Us is searched (OR6)");`.
 
 In `plan/kind.rs` tests, beside `a_season_marker_in_the_disc_name_makes_a_tv_disc` and built the same way with the name `HUGO_S3D` and a movie's groups: `a_3d_label_is_not_a_season_marker_for_the_kind`, asserting `(Kind::Movie, KindSource::Default)`.
 
@@ -341,12 +341,12 @@ Expected: FAIL on `parse_season("HUGO_S3D")` (Some(3)) and `clean("US")` ("").
 
 - [ ] **Step 3: Implement**
 
-- Split `TAGS` into `REGION_TAGS` and `FORMAT_TAGS` (docs name spec 8.1 and R6); `is_region_tag(token)` and `is_tag(token)` (`is_region_tag || FORMAT_TAGS.contains(..)`), both through `unbracketed` and ASCII upper-case as today.
+- Split `TAGS` into `REGION_TAGS` and `FORMAT_TAGS` (docs name spec 8.1 and OR6); `is_region_tag(token)` and `is_tag(token)` (`is_region_tag || FORMAT_TAGS.contains(..)`), both through `unbracketed` and ASCII upper-case as today.
 - `Piece` gains `tag: bool`; `pieces` sets it to `is_tag(word) || is_tag(text)` for every piece of that token and hyphen part.
 - `markers`: the condition at `:86` becomes `!word.digits && next.digits && !word.tag && !next.tag`.
 - `clean`: before `kept.join(" ")`, `if kept.is_empty() && tokens.len() == 1 && is_region_tag(&tokens[0]) { return unbracketed(&tokens[0]).to_string(); }`.
 - Docs: module doc (a piece of a tag token or tag part belongs to no marker), `clean`'s doc (the tag lists with `S3D` and `3D`; the whole-label sentence), `has_season_marker`'s doc (`S3D` and `3D` are never a season marker), and remove the "listed for the owner" remarks at `:488`, `:526-528`, `:557`.
-- Spec line 246, after "region and format tags", a parenthesis: (`3D` and `S3D`, stereoscopic, are format tags; a region tag that is the whole name is kept, since a disc labelled `US` is the film Us: ruling R6, 2026-10-17). Spec line 260, after "(`season`, `series` or `s` followed by a number)": "; `S3D` and `3D` are format tags, not season markers (R6)".
+- Spec line 246, after "region and format tags", a parenthesis: (`3D` and `S3D`, stereoscopic, are format tags; a region tag that is the whole name is kept, since a disc labelled `US` is the film Us: ruling OR6, 2026-10-17). Spec line 260, after "(`season`, `series` or `s` followed by a number)": "; `S3D` and `3D` are format tags, not season markers (OR6)".
 
 - [ ] **Step 4: Run the core tests to verify they pass**
 
@@ -357,7 +357,7 @@ Expected: PASS (the thirteen-name tables, `S3D3` and `S4D1` tests unchanged).
 
 ```bash
 git add crates/core/src/lookup/name.rs crates/core/src/plan/kind.rs docs/superpowers/specs/2026-10-04-lazymkv-design.md
-git commit -m "core::lookup::name: S3D and 3D are format tags, a whole-label region tag is kept (R6)"
+git commit -m "core::lookup::name: S3D and 3D are format tags, a whole-label region tag is kept (OR6)"
 ```
 
 ---
@@ -386,7 +386,7 @@ git commit -m "core::lookup::name: S3D and 3D are format tags, a whole-label reg
 ```rust
 #[test]
 fn a_java_label_naming_a_cut_thediscdb_does_not_list_is_an_unnamed_cut_beside_the_main_movie_at_0_98() {
-    // R5: rule 1 still wins, and the labelled cut TheDiscDB does not list is ripped as an unnamed cut for Assign titles.
+    // OR5: rule 1 still wins, and the labelled cut TheDiscDB does not list is ripped as an unnamed cut for Assign titles.
     let one = record(Some("Film"), &["Film"]);
     let main_is_title_1 = BTreeMap::from([(0, 1)]);
     let english = wanted_languages(None);
@@ -445,11 +445,11 @@ Expected: compile errors (`UnlistedLabelCut`, the fourth argument).
 
 - [ ] **Step 3: Implement**
 
-- `review.rs`: the variant with doc `Spec 8.3 rule 1 under ruling R5 (2026-10-17): a Java label names a cut TheDiscDB does not list as a main movie; names the title and its label.`; `ALL`, `as_str`; the header comment now says the four spellings were confirmed (R8) and this plan adds `unlisted_label_cut` (R16).
-- `movie.rs` `by_database(record, matches, disc, wanted)`: after `same_name` and the main-movie `reviews` and `confidence` (unchanged), collect `main_titles: BTreeSet<u32>` from `features`; `if let Some(labelled) = by_labels(disc, wanted)`, for each `(cut, seconds)` of `labelled.features` zipped with `labelled.feature_seconds` whose `title` and `siblings` are all outside `main_titles`: push the evidence sentence, the `Noted`, the seconds and `Feature { title: cut.title, edition: None, theatrical: false, siblings: cut.siblings }`; then `if !unlisted.is_empty() { reviews.push(ReviewReason::UnnamedCut); }`, extend `features`, return `reviews: sorted_unique(reviews), notes`. Imports: `Note`, `BTreeSet`. `movie_plan` passes its `wanted`. Docs: `by_database` (R5), `Feature.theatrical` ("or a Java-labelled cut TheDiscDB does not list"), module doc.
+- `review.rs`: the variant with doc `Spec 8.3 rule 1 under ruling OR5 (2026-10-17): a Java label names a cut TheDiscDB does not list as a main movie; names the title and its label.`; `ALL`, `as_str`; the header comment now says the four spellings were confirmed (OR8) and this plan adds `unlisted_label_cut` (OR16).
+- `movie.rs` `by_database(record, matches, disc, wanted)`: after `same_name` and the main-movie `reviews` and `confidence` (unchanged), collect `main_titles: BTreeSet<u32>` from `features`; `if let Some(labelled) = by_labels(disc, wanted)`, for each `(cut, seconds)` of `labelled.features` zipped with `labelled.feature_seconds` whose `title` and `siblings` are all outside `main_titles`: push the evidence sentence, the `Noted`, the seconds and `Feature { title: cut.title, edition: None, theatrical: false, siblings: cut.siblings }`; then `if !unlisted.is_empty() { reviews.push(ReviewReason::UnnamedCut); }`, extend `features`, return `reviews: sorted_unique(reviews), notes`. Imports: `Note`, `BTreeSet`. `movie_plan` passes its `wanted`. Docs: `by_database` (OR5), `Feature.theatrical` ("or a Java-labelled cut TheDiscDB does not list"), module doc.
 - `plan/mod.rs` docs: `PlannedRole::Feature.theatrical` (false also for rule 1's unlisted cut); `movie_entries` ("database index order for rule 1, then each unlisted labelled cut"). `decision.rs` `job_features` doc likewise. No code change in either.
-- Spec line 270 becomes: "1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98. When the scan reported a Java runtime in use, a labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too, as an unnamed cut, with the review reason `unnamed_cut` and the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles; the title confidence stays 0.98 (ruling R5, 2026-10-17; D2)."
-- `decision-core.md:131`: titles `title 41 (00756.mpls), edition `Unrated Cut` (from the Java label table, `FPL_MainFeature_UR`), then title 54 (00820.mpls, `FPL_MainFeature_R`) as an unnamed cut (R5)`; Reviews `unnamed_cut`; note `unlisted_label_cut`. `:290` gains `Ruling R5 (2026-10-17) adds: a Java-labelled cut none of whose titles is a main movie's is planned as an unnamed cut with unnamed_cut and the note unlisted_label_cut; the confidence stays 0.98.` `:387-389` gains the same sentence in its own words.
+- Spec line 270 becomes: "1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98. When the scan reported a Java runtime in use, a labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too, as an unnamed cut, with the review reason `unnamed_cut` and the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles; the title confidence stays 0.98 (ruling OR5, 2026-10-17; D2)."
+- `decision-core.md:131`: titles `title 41 (00756.mpls), edition `Unrated Cut` (from the Java label table, `FPL_MainFeature_UR`), then title 54 (00820.mpls, `FPL_MainFeature_R`) as an unnamed cut (OR5)`; Reviews `unnamed_cut`; note `unlisted_label_cut`. `:290` gains `Ruling OR5 (2026-10-17) adds: a Java-labelled cut none of whose titles is a main movie's is planned as an unnamed cut with unnamed_cut and the note unlisted_label_cut; the confidence stays 0.98.` `:387-389` gains the same sentence in its own words.
 
 - [ ] **Step 4: Run the workspace tests with the clone to verify they pass**
 
@@ -460,7 +460,7 @@ Expected: PASS, including `crates/dev/tests/plan.rs` and `clone_values.rs`.
 
 ```bash
 git add crates/core/src/review.rs crates/core/src/plan crates/core/src/decision.rs crates/dev/tests/plan.rs docs/superpowers/specs/2026-10-04-lazymkv-design.md docs/phase1/decision-core.md
-git commit -m "core::plan::movie: a Java-labelled cut TheDiscDB does not list is an unnamed cut beside the main movie at 0.98 (R5, R16)"
+git commit -m "core::plan::movie: a Java-labelled cut TheDiscDB does not list is an unnamed cut beside the main movie at 0.98 (OR5, OR16)"
 ```
 
 ---
@@ -484,7 +484,7 @@ Beside `with_non_english_default_audio_the_regular_subtitle_is_flagged_default_a
 ```rust
 #[test]
 fn with_non_english_default_audio_and_no_regular_track_the_sdh_subtitle_is_flagged_default() {
-    // R3: the SDH track is default when it is the only English dialogue track kept.
+    // OR3: the SDH track is default when it is the only English dialogue track kept.
     /* same construction as the test above, kept subtitles [Forced 5, Sdh 6] */
     assert_eq!(defaults, vec![(5, false), (6, true)]);
 }
@@ -498,7 +498,7 @@ Expected: PASS. (A pin of confirmed behaviour; the red step is skipped by design
 - [ ] **Step 3: Edit the documents**
 
 Design spec, one sentence each:
-- `:36` (D9): "recorded as a note on the job" becomes "recorded as the note `lossy_before_lossless` on the job, naming the lossy track (R8)".
+- `:36` (D9): "recorded as a note on the job" becomes "recorded as the note `lossy_before_lossless` on the job, naming the lossy track (OR8)".
 - `:45` (D15), last sentence becomes: "Until then a track with the commentary pattern is kept; a same-language commentary verdict sends the job to review with `commentary_detected` (the port's ruling RP7, 2026-10-14)."
 - `:197` and `:201`: "a note records the switch" becomes "the note `direct_mode_fallback` records the switch".
 - `:226`: "to be designed in phase 1" becomes "to be designed in phase 2 (the engine design)".
@@ -506,15 +506,15 @@ Design spec, one sentence each:
 - `:355`: "Whether it also sends the job to review (`commentary_detected`, row 13's fallback) is the owner's decision, still open under D15." becomes "A same-language commentary verdict sends the job to review with `commentary_detected` (RP7)."
 - `:363`: "the remedy to try first in phase 1" becomes "the remedy to try first in phase 2 (the engine design)".
 - `:397-407` (8.8 table): a row "| `commentary_detected` | 8.6 (the content rule's commentary verdict, D15, RP7) |" after the `audio_reference_unclear` row.
-- `:443` (8.9): "trailing spaces and periods trimmed" becomes "leading and trailing spaces and periods trimmed (a component beginning with a period would be hidden on the share: ruling R4)".
-- `:447` (8.10), after "the regular English track is default and the forced track is not": "; when no regular English track is kept, the SDH track is default (ruling R3)".
+- `:443` (8.9): "trailing spaces and periods trimmed" becomes "leading and trailing spaces and periods trimmed (a component beginning with a period would be hidden on the share: ruling OR4)".
+- `:447` (8.10), after "the regular English track is default and the forced track is not": "; when no regular English track is kept, the SDH track is default (ruling OR3)".
 - `:571` (10.2): "a note records why" becomes "the note `label_rule_unavailable` records why (not on a DVD, which carries no labels)".
-- `:700` (phase 2 row), appended before the closing `|`: ". The phase 2 design also settles D17's bundling table, the app's own recording format, the form of the tuning evidence, the decoding of bitmap subtitles for OCR (D22) and code signing (RP10, R11)".
+- `:700` (phase 2 row), appended before the closing `|`: ". The phase 2 design also settles D17's bundling table, the app's own recording format, the form of the tuning evidence, the decoding of bitmap subtitles for OCR (D22) and code signing (RP10, OR11)".
 - `:743`: "(phase 1 design; D17)" becomes "(phase 2 design; D17)".
 
-`layout.rs:105-106`: `and is a choice the owner may overturn` becomes `the owner's confirmed choice (ruling R3, 2026-10-17)`. `naming.rs:59-60`: `a choice beyond 8.9's list` becomes `the owner's confirmed addition to 8.9's list (ruling R4)`.
+`layout.rs:105-106`: `and is a choice the owner may overturn` becomes `the owner's confirmed choice (ruling OR3, 2026-10-17)`. `naming.rs:59-60`: `a choice beyond 8.9's list` becomes `the owner's confirmed addition to 8.9's list (ruling OR4)`.
 
-`decision-core.md`: `:271-275` (RP25) gains "(confirmed by ruling R9, 2026-10-17)" at its end; `:284-286` (RP27) becomes `- RP27. The four note names the design spec described only in words are confirmed (ruling R8, 2026-10-17) and the spec now names them: ...`; the three open-question bullets `:371-381` become `- Ruling R2 (2026-10-17): two cuts named alike ... keep 0.60 with title_ambiguous.`, `- Ruling R3: ... the SDH track is the default subtitle.`, `- Ruling R4: ... leading periods and spaces are dropped.`; `:398-399` gains `(ruling R7: kept provisional)`.
+`decision-core.md`: `:271-275` (RP25) gains "(confirmed by ruling OR9, 2026-10-17)" at its end; `:284-286` (RP27) becomes `- RP27. The four note names the design spec described only in words are confirmed (ruling OR8, 2026-10-17) and the spec now names them: ...`; the three open-question bullets `:371-381` become `- Ruling OR2 (2026-10-17): two cuts named alike ... keep 0.60 with title_ambiguous.`, `- Ruling OR3: ... the SDH track is the default subtitle.`, `- Ruling OR4: ... leading periods and spaces are dropped.`; `:398-399` gains `(ruling OR7: kept provisional)`.
 
 - [ ] **Step 4: Check the spec reads consistently**
 
@@ -525,7 +525,7 @@ Expected: only lines describing finished work (323, 680, 688, 690).
 
 ```bash
 git add docs crates/core/src/tracks/layout.rs crates/core/src/naming.rs
-git commit -m "spec: the owner's rulings R2 to R4, R7, R8 and R11 written into the design; the four note names named"
+git commit -m "spec: the owner's rulings OR2 to OR4, OR7, OR8 and OR11 written into the design; the four note names named"
 ```
 
 ---
@@ -827,7 +827,7 @@ git commit -m "dev: a given TMDb record clears the pending flag; one TEXT_HINT; 
 - Modify: `README.md:22-23`
 
 **Interfaces:**
-- Consumes: the rulings R1 to R16 and SR1 to SR9 of this plan; the mini PC's `cargo test --workspace -- --list` counts.
+- Consumes: the rulings OR1 to OR16 and SR1 to SR9 of this plan; the mini PC's `cargo test --workspace -- --list` counts.
 - Produces: nothing in code.
 
 - [ ] **Step 1: Run the full suite with the clone and list the tests**
@@ -837,8 +837,8 @@ Expected: 0 failed; counts above 1986 in total.
 
 - [ ] **Step 2: Write the rulings block and the counts**
 
-- After F15 (`:358`), a block `### The owner's rulings of 2026-10-17` opening `After the merge the owner ruled on the open questions and the follow-ups (R1 to R16); the controller's sub-rulings SR1 to SR9 settled what the readers found while planning. The owner may overturn any of them.` followed by one bullet per ruling in the words of this plan's Rulings section.
-- `:360-364`: the intro of "Choices the owner should confirm" becomes `The plan settled these where the spec leaves a choice open; each is pinned by a test, and each can be changed by changing that test and its rule. The four open questions were ruled on 2026-10-17 (R1 to R4 above).`
+- After F15 (`:358`), a block `### The owner's rulings of 2026-10-17` opening `After the merge the owner ruled on the open questions and the follow-ups (OR1 to OR16); the controller's sub-rulings SR1 to SR9 settled what the readers found while planning. The owner may overturn any of them.` followed by one bullet per ruling in the words of this plan's Rulings section.
+- `:360-364`: the intro of "Choices the owner should confirm" becomes `The plan settled these where the spec leaves a choice open; each is pinned by a test, and each can be changed by changing that test and its rule. The four open questions were ruled on 2026-10-17 (OR1 to OR4 above).`
 - `:439-445`: a sentence `After the rulings pull request the same command lists N: a in lazymkv-core, b in lazymkv-dev, 8 in lazymkv-capture and 3 in fake-tools.` with the counts of Step 1.
 - `README.md:22-23`: `what the owner may still overturn` becomes `the owner's rulings and what may still be overturned`.
 
