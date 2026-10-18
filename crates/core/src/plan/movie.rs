@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::disc::{Disc, StreamKind, Title};
-use crate::lang::{Wanted, ISO639};
+use crate::lang::{is_english, Wanted, ISO639};
 use crate::lookup::discdb::DiscDbRecord;
 use crate::lookup::within;
 use crate::review::{sorted_unique, Note, Noted, ReviewReason};
@@ -437,12 +437,13 @@ fn label_text(cut: &Suffix) -> String {
     }
 }
 
-/// How many of the wanted languages a title's audio covers: English when an audio stream carries an English code, and the
-/// original language when it is not English and an audio stream carries one of its codes (8.3 rule 2, 8.6 "Languages").
+/// How many of the wanted languages a title's audio covers: English when an audio stream carries an English code
+/// (`lang::is_english`, "eng" or "en" in any case, SR4), and the original language when it is not English and an audio
+/// stream carries one of its codes (8.3 rule 2, 8.6 "Languages").
 fn coverage(title: &Title, wanted: &Wanted) -> usize {
     let audio = title.streams_of(StreamKind::Audio);
     let languages: Vec<&str> = audio.iter().filter_map(|stream| stream.language.as_deref()).collect();
-    let english = languages.iter().any(|code| wanted.english.iter().any(|english| english == code));
+    let english = languages.iter().any(|code| is_english(code));
     let original = !wanted.original_is_english && languages.iter().any(|code| wanted.is_original(code));
     usize::from(english) + usize::from(original)
 }
@@ -1166,6 +1167,17 @@ mod tests {
         let disc = java_disc(&[(3, "FPL_MainFeature_JPN", &[ENG_AC3]), (5, "FPL_MainFeature_SPA", &[ENG_AC3])]);
         let plan = by_labels(&disc, &wanted_languages(None)).expect("rule 2 applies");
         assert_eq!(plan.features, vec![feature(3, Some("Theatrical Cut"), true, &[5])]);
+    }
+
+    /// A two-letter English stream, as a disc's attribute 3 can carry it (`lang::is_english`).
+    const EN_AC3: &[(u32, &str)] = &[(1, "Audio"), (3, "en"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "6")];
+
+    #[test]
+    fn a_two_letter_english_code_counts_as_english_when_a_cut_chooses_its_variant() {
+        // SR4: `coverage` reads English through `lang::is_english`, so "en" counts as "eng" does.
+        let disc = java_disc(&[(1, "FPL_MainFeature", &[JPN_AC3]), (2, "FPL_MainFeature_SPA", &[EN_AC3])]);
+        let plan = by_labels(&disc, &wanted_languages(None)).expect("rule 2 applies");
+        assert_eq!(plan.features, vec![feature(2, Some("Theatrical Cut"), true, &[1])]);
     }
 
     #[test]
