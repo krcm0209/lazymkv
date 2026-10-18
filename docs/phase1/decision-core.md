@@ -128,7 +128,7 @@ recordings' rows skip without the clone):
 |---|---|---|---|---|---|
 | John Wick UHD, `disc01.txt` | discdb_one 0.95, movie 245891 | movie | database: title 0 (00001.mpls; title 8 has the same segment map), key `t00-00001` | 0.98, Direct | none |
 | John Wick Blu-ray, `disc02.txt` | discdb_one 0.95, movie 245891 | movie | database: title 0 (00001.mpls), key `t00-00001` | 0.98, Direct | none |
-| Expendables 3, `disc01.txt` | discdb_one 0.95, movie 138103 | movie | database: title 41 (00756.mpls), edition `Unrated Cut` (from the Java label table, `FPL_MainFeature_UR`; see Choices the owner should confirm) | 0.98, Direct | none |
+| Expendables 3, `disc01.txt` | discdb_one 0.95, movie 138103 | movie | database: title 41 (00756.mpls), edition `Unrated Cut` (from the Java label table, `FPL_MainFeature_UR`; see Choices the owner should confirm), then title 54 (00820.mpls, `FPL_MainFeature_R`) as an unnamed cut (OR5) | 0.98, Direct | `unnamed_cut`; note `unlisted_label_cut` |
 | Smile, `disc01.txt` | discdb_one 0.95, movie 882598 | movie | database: title 14 (00040.mpls) | 0.98, Direct | none |
 | Knowing DVD, `disc01.txt` | discdb_one 0.95, movie 13811 | movie | database: title 0 (attribute 24 `"01"`), key `t00-title01` | 0.98, Direct | none |
 | Chernobyl disc 1, `disc01.txt` | discdb_one 0.95, tv 87108 | tv | mapped: title 1 S01E01, title 8 S01E02, title 7 S01E03 | 0.98, Direct | none; name `CHERNOBYL_D1`, disc 1, no season |
@@ -287,7 +287,7 @@ The plan recorded these rulings (RP1 to RP9 are the port's, in its design). The 
 
 ### Rulings made during execution
 
-Task 5: under 8.3 rule 1, a TheDiscDB-marked main movie whose Java label has an unrecognised suffix keeps 0.98 with no `unnamed_cut` (the label table belongs to rule 2). Task 14 (amended by F12 below): in an approved `Decided`, a decision whose reasons include `path_collision` or a reason the owner did not approve, or whose `DecisionDone.has_path` is false, holds the job again at the disposition gate, while a low confidence alone never holds an approved job again (design spec 7, 6.4 step 12 and 11 under Approve). Task 18: the row 14 harness of `retune --subtitles` reads `subs/index.json` through `verify::subs_index`, the one reader of that file (the one-copy rule).
+Task 5: under 8.3 rule 1, a TheDiscDB-marked main movie whose Java label has an unrecognised suffix keeps 0.98 with no `unnamed_cut` (the label table belongs to rule 2). Ruling OR5 (2026-10-17) adds: a Java-labelled cut none of whose titles is a main movie's is planned as an unnamed cut with unnamed_cut and the note unlisted_label_cut; the confidence stays 0.98. Task 14 (amended by F12 below): in an approved `Decided`, a decision whose reasons include `path_collision` or a reason the owner did not approve, or whose `DecisionDone.has_path` is false, holds the job again at the disposition gate, while a low confidence alone never holds an approved job again (design spec 7, 6.4 step 12 and 11 under Approve). Task 18: the row 14 harness of `retune --subtitles` reads `subs/index.json` through `verify::subs_index`, the one reader of that file (the one-copy rule).
 
 The final review of the branch added these, which the owner may also overturn:
 
@@ -384,7 +384,10 @@ the plan keeps the reading given.
   the identity's evidence.
 - 8.3 rule 1 ("reconciles with the scan") means every `MainMovie` title of TheDiscDB's record matches a scan title;
   if one matches none, the record falls to rule 2. A `MainMovie`'s edition comes from its item title, else from the
-  Java label table (Expendables 3's `FPL_MainFeature_UR` gives `Unrated Cut`).
+  Java label table (Expendables 3's `FPL_MainFeature_UR` gives `Unrated Cut`). Ruling OR5 (2026-10-17): a Java-labelled
+  cut that no `MainMovie`'s scan title belongs to is not dropped; rule 1 plans it beside the main movies as an unnamed
+  cut with `unnamed_cut` and the note `unlisted_label_cut`, so the owner names it with Assign titles, and the title
+  confidence stays 0.98.
 - 8.3 rule 2 runs before identification with English only, and again with the original language once TMDb gives it;
   only the variant chosen within a cut can change between the two passes.
 - On a DVD, TheDiscDB's `source_file` is the DVD title number (attribute 24), compared as a number; DVD title groups

@@ -267,7 +267,7 @@ At planning time nothing has been ripped, so any use of the audio ranking in 8.6
 
 First applicable rule:
 
-1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98.
+1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98. When the scan reported a Java runtime in use, a labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too, as an unnamed cut, with the review reason `unnamed_cut` and the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles; the title confidence stays 0.98 (ruling OR5, 2026-10-17; D2).
 2. **Labels.** Used only when the scan reported a Java runtime in use. Not yet verified (EXP-12-java-labels.md: not answered, leaning no): on a UHD with Java menus, with Java 8 installed and MakeMKV's `app_Java` unset, the scan printed no `3344` and no label; setting `app_Java` to the installed Java is the one change left to try. If no later UHD shows labels, this rule is unavailable and titles are chosen by database and structure only (section 17, row 12). A label is a title comment that starts `FPL_MainFeature` (optionally preceded by `SEG_`). Its suffix is read from this table:
 
    | Suffix | Meaning | Edition name |

@@ -102,7 +102,8 @@ fn file_stem(source_file: &str) -> &str {
 pub enum PlannedRole {
     /// A feature or cut (8.3, 8.4); `edition` is the name `movie::edition_names` gives it; `theatrical` is the planner's
     /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (8.3 rule 2's Other suffix,
-    /// edition None) and for one of two or more structural rivals, which keep no edition until the owner names them.
+    /// edition None; also rule 1's Java-labelled cut that TheDiscDB does not list, OR5) and for one of two or more
+    /// structural rivals, which keep no edition until the owner names them.
     Feature { edition: Option<String>, theatrical: bool },
     /// An episode title (8.5).
     Episode(Episode),
@@ -655,10 +656,10 @@ struct Entry {
     remembered: bool,
 }
 
-/// The movie titles in feature order (database index order for rule 1, each cut's lowest title number for rule 2, group
-/// order for rule 3) with 8.4's edition names over the library facts and the planner's theatrical flag. Two or more
-/// structural rivals carry no edition name and are not theatrical: rule 3 names no cut, and such a plan is held for
-/// review, where the owner names the cuts (8.4).
+/// The movie titles in feature order (database index order for rule 1, then each labelled cut it does not list (OR5); each
+/// cut's lowest title number for rule 2; group order for rule 3) with 8.4's edition names over the library facts and the
+/// planner's theatrical flag. Two or more structural rivals carry no edition name and are not theatrical: rule 3 names no
+/// cut, and such a plan is held for review, where the owner names the cuts (8.4).
 fn movie_entries(found: &MoviePlan, library: &LibraryFacts) -> Vec<Entry> {
     let rivals = found.rule == TitleRule::Structure && found.features.len() >= 2;
     let editions =
@@ -1381,19 +1382,31 @@ mod tests {
         let plan = pinned_log(EXPENDABLES, EXPENDABLES_API).plan();
         assert_discdb_one(&plan, movie_id(138103), "The Expendables 3", 2014);
         assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Discdb));
-        // Open point 5: TheDiscDB's item title names no edition, so the label table names it (FPL_MainFeature_UR).
+        // Open point 5: TheDiscDB's item title names no edition, so the label table names it (FPL_MainFeature_UR). OR5:
+        // title 54 (FPL_MainFeature_R) is a labelled cut TheDiscDB does not list, planned beside it as an unnamed cut.
         assert_eq!(
             plan.titles,
-            vec![planned("t00-00756", 41, feature(Some("Unrated Cut")), 7891, 28_831_358_976, Some("00756.mpls"))]
+            vec![
+                planned("t00-00756", 41, feature(Some("Unrated Cut")), 7891, 28_831_358_976, Some("00756.mpls")),
+                planned("t01-00820", 54, cut(None), 7587, 27_736_528_896, Some("00820.mpls")),
+            ]
         );
         assert_eq!(
             plan.evidence.labels,
             vec![(41, "FPL_MainFeature_UR".to_string()), (54, "FPL_MainFeature_R".to_string())]
         );
         assert_eq!((plan.title_confidence, plan.mode), (0.98, Mode::Direct));
-        assert_eq!(plan.reviews, Vec::<ReviewReason>::new());
-        // MakeMKV reported Java (MSG:3344), and rule 1 chose anyway: no label-rule note.
-        assert_eq!(plan.notes, Vec::<Noted>::new());
+        assert_eq!(plan.reviews, vec![ReviewReason::UnnamedCut]);
+        // MakeMKV reported Java (MSG:3344), and rule 1 chose anyway: no label-rule note, only the unlisted cut's.
+        assert_eq!(
+            plan.notes,
+            vec![Noted {
+                note: Note::UnlistedLabelCut,
+                stream: None,
+                detail: "title 54's label FPL_MainFeature_R names a cut TheDiscDB does not list; name it with Assign titles"
+                    .to_string(),
+            }]
+        );
     }
 
     #[test]

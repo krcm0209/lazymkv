@@ -454,10 +454,11 @@ fn filed_edition(
 
 /// The job's features and cuts for 8.4 (choice 2). The owner's Assign titles, when it names any title, wins whole: its
 /// features and cuts in title order through `plan::assigned_feature`, as Task 7's `assigned_entries` builds them. Else the
-/// plan's features in plan order, each with Task 7's filed name and the planner's theatrical flag
-/// (`PlannedRole::Feature.theatrical`): an unnamed cut (8.3 rule 2's Other suffix) or a structural rival is not
-/// theatrical, so it keeps no edition until the owner names it (8.4), even as the plan's only feature. An assigned title
-/// the scan lacks is left out, as Task 7's `assigned_entries` leaves it out (Open point 32).
+/// plan's features in plan order (for rule 1, TheDiscDB's main movies, then each Java-labelled cut it does not list, OR5),
+/// each with Task 7's filed name and the planner's theatrical flag (`PlannedRole::Feature.theatrical`): an unnamed cut
+/// (8.3 rule 2's Other suffix, or rule 1's unlisted labelled cut) or a structural rival is not theatrical, so it keeps no
+/// edition until the owner names it (8.4), even as the plan's only feature. An assigned title the scan lacks is left
+/// out, as Task 7's `assigned_entries` leaves it out (Open point 32).
 fn job_features(plan: &Plan, disc: &Disc, overrides: Option<&Overrides>) -> Vec<Feature> {
     if let Some(titles) = overrides.map(|given| &given.titles).filter(|titles| !titles.is_empty()) {
         // A title the scan lacks is left out, as Task 7's assigned_entries leaves it out (Open point 32).
