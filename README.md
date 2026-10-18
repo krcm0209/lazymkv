@@ -19,9 +19,9 @@ then built the rest of the decision core from the design spec: the disc model, i
 answers, the film and TV title rules, the audio and subtitle track rules, naming, the check of a rip against its scan,
 the confidences and the disposition, and the job state machine. `lazymkv-dev plan` prints a disc's plan (from a
 recording or a pinned public scan log) and `lazymkv-dev decide` a rip's decisions, as JSON, on any OS and without a
-disc or a network; [`docs/phase1/decision-core.md`](docs/phase1/decision-core.md) says how to run them, what the owner
-may still overturn, what is left for phase 2 and how many tests there are. The direct-mode engine comes next (the
-spec's phase 2), with a developer mode that keeps every rip's evidence for tuning.
+disc or a network; [`docs/phase1/decision-core.md`](docs/phase1/decision-core.md) says how to run them, the owner's
+rulings and what may still be overturned, what is left for phase 2 and how many tests there are. The direct-mode engine
+comes next (the spec's phase 2), with a developer mode that keeps every rip's evidence for tuning.
 
 Installing (planned; decision D17): one installer carries every tool the app needs except MakeMKV: mkvmerge and
 ffmpeg/ffprobe, and the ocrs OCR engine compiled in with its models (decision D22); nothing is downloaded at run time.

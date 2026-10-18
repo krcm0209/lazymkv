@@ -358,11 +358,92 @@ owner may still overturn any of them.
   once, into `disc::Stream.file_codec`; the verification and the audio names use it, so an LPCM stream the rip writes
   as FLAC is named "FLAC 5.1", and an attribute 41 value the table does not know expects its own text.
 
+### The owner's rulings of 2026-10-17
+
+After the merge the owner ruled on the open questions and the follow-ups (OR1 to OR16); the controller's sub-rulings SR1
+to SR9 settled what the readers found while planning. The owner may overturn any of them.
+
+- OR1. 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120 minutes, 8.2). OR15 limits
+  this to rule 3.1: 8.5's dropping of play-all titles from a TV disc keeps the literal shape (any concatenation of two
+  or more other groups' maps), so an extras play-all is never suggested as an episode. The whole group's own length is
+  unconstrained (SR1).
+- OR2. Two label cuts both named "Theatrical Cut" (the `none` and `_R` rows) keep the 0.60 `title_ambiguous` hold; two
+  TheDiscDB main movies that would share one name likewise. No code change; the spec says so (Task 4).
+- OR3. When the default audio is not English and no regular English track is kept, the SDH track is the default
+  subtitle. No code change; the spec says so (Task 4).
+- OR4. Leading periods and spaces are dropped from a path component as well as trailing ones. No code change; the spec
+  says so (Task 4).
+- OR5. C1: rule 1 still wins (TheDiscDB's main movies at 0.98, Direct), but a Java-labelled cut (rule 2's grouping) none
+  of whose titles is a main movie's scan title is planned too, as an unnamed cut (edition none, not theatrical), with
+  the review reason `unnamed_cut` and, per OR16, the note `unlisted_label_cut` naming the title and its label, so the
+  owner names it with Assign titles. The main movie's own label suffix, its dub variants and a Narrative variant name no
+  second cut (the Task 5 ruling stands).
+- OR6. Name cleaning: `S3D` and `3D` are format tags (never a season marker or a disc number); a region tag that is the
+  whole label is kept (`US` is the film Us). SR2 settles the scope: the whole-label rule applies to a single-token label
+  that is a region tag (`US`, `UK`, `EU`, `WW`, `DOM`, `INT`, `R1` to `R6`), with its brackets stripped (`(US)` gives
+  `US`); a format tag that is the whole label (`UHD`, `DVD`, `BLU-RAY`, `3D`) still cleans to nothing and stays generic;
+  a label of two or more tag tokens cleans to nothing. `S1M0NE`, `BLADE_RUNNER_2049` and `D2_THE_MIGHTY_DUCKS` stay as
+  they are.
+- OR7. The object-audio spellings (`Atmos`, `DTS:X`) stay provisional until experiment 6 runs. No change.
+- OR8. RP27's four note names are confirmed: `possible_audio_description`, `lossy_before_lossless`,
+  `direct_mode_fallback`, `label_rule_unavailable`; the spec names them (Task 4).
+- OR9. RP25's subtitle-label vocabulary is confirmed. No change.
+- OR10. The final review's six provisional rules are kept. No change.
+- OR11. RP10 is confirmed; the spec's three sentences still saying "phase 1" for phase 2 work (lines 226, 363, 743) are
+  edited now (Task 4).
+- OR12. Of the 95 deferred minors only the test gaps are pinned (Tasks 5 to 8); where a gap exposed a defect, the defect
+  is fixed with the test (SR4, SR5, SR6, SR8).
+- OR13. The four phase 2 leftovers (lookup answers outside AwaitingLookup, restart between answer and refresh, collision
+  answer by path, a relative root in `decide`) stay for phase 2.
+- OR14. The pull request runs subagent-driven.
+- OR15. (Scope of OR1.) The episode-length restriction applies to rule 3.1 only; 8.5 keeps dropping any concatenation
+  title.
+- OR16. (Form of OR5's note.) A new note `unlisted_label_cut`, the thirteenth of the closed set, with the title and
+  label in its detail, carried into `Plan.notes` and every `FileDecision.notes`; plus an evidence sentence.
+
+The controller made these sub-rulings while writing the plan from the readers' findings; the owner may overturn any of
+them.
+
+- SR1. Rule 3.1's parts are each checked against the 8.2 band; the whole group's length and the parts' mutual spread are
+  not checked.
+- SR2. The whole-label rule's scope, as written under OR6.
+- SR3. `by_database` takes `wanted: &Wanted` (the languages `movie_plan` already holds) so the unlisted cut's variant is
+  chosen as rule 2 chooses it; no second pass with the original language for rule 1 plans.
+- SR4. `plan::movie::coverage` uses `lang::is_english` (phase 1 plan decision 6: one English test); `Wanted.english`
+  stays, serialised as before.
+- SR5. `codec::dts_family` reads attribute 6, then attribute 7, as its doc says (a conflicting made-up pair follows
+  attribute 6); the DTS:X pre-check stays first.
+- SR6. `disc::character_reference` refuses a numeric reference outside XML 1.0's Char production (U+0000 to U+0008,
+  U+000B, U+000C, U+000E to U+001F, U+FFFE, U+FFFF, and the surrogates and values above U+10FFFF it already refuses),
+  leaving it as written like a refused entity.
+- SR7. Pinned as they are, no change: a tuning root inside the staging root is refused whatever `keep_tuning_evidence`
+  says; owner-assigned episodes join or create the season session under an unconfirmed search identity (the owner
+  assigned them); ffprobe's object extension wins over attribute 7's; a DTS:X track is named `DTS-HD MA DTS:X 7.1`
+  (display name, extension, layout, as `TrueHD Atmos 7.1`).
+- SR8. `lazymkv-dev plan`: a `--tmdb-record` file clears the pending flag a failed TMDb lookup set (the option replaces
+  the recording's record); `--tmdb-search` does not (a different lookup); a failed TheDiscDB lookup keeps the job
+  pending.
+- SR9. `TEXT_HINT` has one definition, `pub const` in `core::subtitle::labels` (its harness text already carries it);
+  the dev crate uses it.
+
+The controller made these rulings while executing the plan.
+
+- ER1. The owner's rulings are cited as OR1 to OR16 in every document and comment, because the design spec's R1 to R8
+  are its requirements (Task 1's first commit subject keeps "(R1, R15)"; history is not rewritten).
+- ER2. The second-label-pass test's disc gives each cut's two variants one shared segment map (two variants of one cut
+  play the same segments), since four distinct equal-length groups read as TV under 8.2.
+- ER3. The pending-flag test asserts on `plan.identity.evidence`, where `identify` writes the pending sentence; the
+  plan's `evidence.sentences` assertion was vacuous and was deleted.
+- ER4. Task 8's T18a pins `sub_clear_max_bytes` only: `subs_tolerance_ms` does not move the text rule's words on the
+  harness fixtures, so the call site passing `Settings::text_rule()` to the text run stays unpinned (a follow-up).
+- Open for the owner: under OR6 a title containing `3D` (`PIRANHA_3D`, `STEP_UP_3D`) now cleans to the bare title, so
+  TMDb's "Piranha 3D" is not a plausible result and identity rests on the runtime check against the same-named film; a
+  remedy would let plausibility also accept the name with its format tags kept.
+
 ## Choices the owner should confirm
 
 The plan settled these where the spec leaves a choice open; each is pinned by a test, and each can be changed by
-changing that test and its rule. The first four are open questions the plan puts to the owner; until the owner rules,
-the plan keeps the reading given.
+changing that test and its rule. The four open questions were ruled on 2026-10-17 (OR1 to OR4 above).
 
 - Ruling OR1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120
   minutes); a play-all of extras (Smile's deleted-scenes playlist, title 117) is an ordinary group, so a movie disc
@@ -443,6 +524,7 @@ the plan keeps the reading given.
 At `666fc16` (the merge of the port, where the decision core's branch starts) the same command listed 603, so the decision core added 1329.
 After the fixes of the branch's final review the same command lists 1965: 1557 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the fixes of the review of pull request #3 (F1 to F15) the same command lists 1986: 1578 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
+After the rulings pull request the same command lists 2030: 1617 in `lazymkv-core`, 402 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test compiled only on Unix is not.
 
 Design spec 15 asks for a test of every rule of section 8 for its normal case and for each guard, review reason and
