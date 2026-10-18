@@ -243,7 +243,7 @@ If the copy fails on a read error, the job fails with `MediaReadError`. When the
 
 - TheDiscDB is queried at `https://thediscdb.com/api/discid/{id}` (returns an array) and `https://thediscdb.com/api/dischash/{hash}` (returns one object); both are anonymous. A match supplies a TMDb ID. If the entry has no TMDb ID, TMDb is searched with the entry's title and year.
 - The TMDb record is fetched with its external IDs and supplies title, year, original language, runtime, the IMDb and TVDB IDs and, for TV, seasons and episodes with runtimes.
-- The disc's own name is the `bdmt` disc name, else the volume label. Before cleaning, a season number and a disc number are parsed from it and kept as evidence. Cleaning replaces underscores with spaces and removes disc numbers (`DISC 1`, `D1`), season markers, region and format tags, and trailing years.
+- The disc's own name is the `bdmt` disc name, else the volume label. Before cleaning, a season number and a disc number are parsed from it and kept as evidence. Cleaning replaces underscores with spaces and removes disc numbers (`DISC 1`, `D1`), season markers, region and format tags (`3D` and `S3D`, stereoscopic, are format tags; a region tag that is the whole name is kept, since a disc labelled `US` is the film Us: ruling OR6, 2026-10-17), and trailing years.
 - A TMDb search result is plausible when its title or original title equals the cleaned name after case-folding and removing punctuation. Only the first page of results is considered. Movies and TV are searched together, and a TMDb identity is always the pair of kind and ID, because the two kinds number their records separately.
 - A generic or placeholder name (for example `DVD_VIDEO`, `DISC_1`, `LOGICAL_VOLUME_ID`, `VOLUME_SET_ID`, or a name with no letters) is never searched; identity is then step 6.
 - Runtime check for movies: at least one planned feature or cut (8.3, 8.4), or the longest rival when none is planned, is within 3% of the TMDb runtime. For TV: the median episode runtime of the parsed season (of the whole series when no season was parsed) is within 15% of the median duration of the disc's episode-length groups (8.2).
@@ -257,7 +257,7 @@ If the copy fails on a read error, the job fails with `MediaReadError`. When the
 
 The **candidate filter** discards menu loops (titles with no audio stream, with more than one chapter every two minutes, or whose segment map repeats one clip) and titles shorter than `minlength_s`. The remaining titles are **grouped** by identical segment map; a group's duration is that of its titles.
 
-TheDiscDB states the kind when it knows the disc. Otherwise the disc is TV when three or more groups each last between 15 and 120 minutes and the longest of them is at most 15% longer than the shortest (the upper bound covers miniseries with feature-length episodes); or when the disc's name, before cleaning, contains a season marker (`season`, `series` or `s` followed by a number). A disc number alone never makes a disc TV. Otherwise it is a movie.
+TheDiscDB states the kind when it knows the disc. Otherwise the disc is TV when three or more groups each last between 15 and 120 minutes and the longest of them is at most 15% longer than the shortest (the upper bound covers miniseries with feature-length episodes); or when the disc's name, before cleaning, contains a season marker (`season`, `series` or `s` followed by a number); `S3D` and `3D` are format tags, not season markers (OR6). A disc number alone never makes a disc TV. Otherwise it is a movie.
 
 ### 8.3 Movie titles
 

@@ -8,8 +8,9 @@
 //! whitespace); each token splits on hyphens into parts; each part splits into pieces, the maximal runs of ASCII
 //! digits and of other characters. `EXAMPLE SHOW S3D3` has the pieces `EXAMPLE`, `SHOW`, `S`, `3`, `D`, `3`, and `Pan's`
 //! is one piece. A season marker is a piece `season`, `series` or `s` (any case) followed by a digit piece; a disc
-//! number is a piece `disc` or `d` followed by a digit piece. Cleaning drops a part whose every piece belongs to a
-//! marker, and the region and format tags.
+//! number is a piece `disc` or `d` followed by a digit piece. A piece of a tag token or of a tag part belongs to no
+//! marker, so the `S` and the `D` of the format tag `S3D` (stereoscopic 3D) start none (spec 8.2, ruling OR6). Cleaning
+//! drops a part whose every piece belongs to a marker, and the region and format tags.
 
 use std::collections::BTreeSet;
 
@@ -25,6 +26,9 @@ struct Piece {
     part: usize,
     text: String,
     digits: bool,
+    /// Whether the token or the hyphen part holding this piece is a region or format tag (`is_tag`); such a piece
+    /// belongs to no marker (spec 8.2, ruling OR6).
+    tag: bool,
 }
 
 /// The tokens of a name: underscores read as spaces (spec 8.1 "Cleaning replaces underscores with spaces"), then split
@@ -38,18 +42,19 @@ fn pieces(tokens: &[String]) -> Vec<Piece> {
     let mut found = Vec::new();
     for (token, word) in tokens.iter().enumerate() {
         for (part, text) in word.split('-').enumerate() {
+            let tag = is_tag(word) || is_tag(text);
             let mut run = String::new();
             let mut run_digits = false;
             for character in text.chars() {
                 let digit = character.is_ascii_digit();
                 if !run.is_empty() && digit != run_digits {
-                    found.push(Piece { token, part, text: std::mem::take(&mut run), digits: run_digits });
+                    found.push(Piece { token, part, text: std::mem::take(&mut run), digits: run_digits, tag });
                 }
                 run_digits = digit;
                 run.push(character);
             }
             if !run.is_empty() {
-                found.push(Piece { token, part, text: run, digits: run_digits });
+                found.push(Piece { token, part, text: run, digits: run_digits, tag });
             }
         }
     }
@@ -83,7 +88,7 @@ fn markers(pieces: &[Piece]) -> Vec<Marker> {
     let mut index = 0;
     while index + 1 < pieces.len() {
         let (word, next) = (&pieces[index], &pieces[index + 1]);
-        if !word.digits && next.digits {
+        if !word.digits && next.digits && !word.tag && !next.tag {
             let lower = word.text.to_ascii_lowercase();
             let kind = if SEASON_WORDS.contains(&lower.as_str()) {
                 Some(MarkerKind::Season)
@@ -122,15 +127,19 @@ pub fn parse_disc_number(raw: &str) -> Option<u32> {
 }
 
 /// Spec 8.2: the name contains `season`, `series` or `s` followed by a number (as `parse_season` finds it). A disc
-/// number alone never counts. Def: T4. Use: T4, T5.
+/// number alone never counts, and neither do the format tags `S3D` and `3D` (ruling OR6). Def: T4. Use: T4, T5.
 pub fn has_season_marker(raw: &str) -> bool {
     parse_season(raw).is_some()
 }
 
-/// The region and format tags spec 8.1's cleaning removes ("region and format tags"), upper-case.
-const TAGS: [&str; 24] = [
-    "UHD", "4K", "BD", "BD50", "BLURAY", "BLU-RAY", "BDROM", "DVD", "DVD9", "NTSC", "PAL", "US", "UK", "EU", "WW", "DOM",
-    "INT", "R1", "R2", "R3", "R4", "R5", "R6", "RETAIL",
+/// The region tags spec 8.1's cleaning removes ("region and format tags"), upper-case. A region tag that is the whole
+/// label is kept (ruling OR6 and sub-ruling SR2), since a disc labelled `US` is the film Us.
+const REGION_TAGS: [&str; 12] = ["US", "UK", "EU", "WW", "DOM", "INT", "R1", "R2", "R3", "R4", "R5", "R6"];
+
+/// The format tags spec 8.1's cleaning removes ("region and format tags"), upper-case, with `S3D` and `3D`
+/// (stereoscopic 3D) added by ruling OR6; the pieces of `S3D` belong to no season marker (spec 8.2).
+const FORMAT_TAGS: [&str; 14] = [
+    "UHD", "4K", "BD", "BD50", "BLURAY", "BLU-RAY", "BDROM", "DVD", "DVD9", "NTSC", "PAL", "RETAIL", "S3D", "3D",
 ];
 
 /// `token` without surrounding round or square brackets (`(UHD)`, `[2006]`).
@@ -138,9 +147,14 @@ fn unbracketed(token: &str) -> &str {
     token.trim_matches(|character: char| matches!(character, '(' | ')' | '[' | ']'))
 }
 
-/// A region or format tag, in any case, with or without brackets.
+/// A region tag, in any case, with or without brackets (spec 8.1, ruling OR6).
+fn is_region_tag(token: &str) -> bool {
+    REGION_TAGS.contains(&unbracketed(token).to_ascii_uppercase().as_str())
+}
+
+/// A region or format tag, in any case, with or without brackets (spec 8.1).
 fn is_tag(token: &str) -> bool {
-    TAGS.contains(&unbracketed(token).to_ascii_uppercase().as_str())
+    is_region_tag(token) || FORMAT_TAGS.contains(&unbracketed(token).to_ascii_uppercase().as_str())
 }
 
 /// A year from 1900 to 2099, with or without brackets (spec 8.1 "trailing years").
@@ -153,11 +167,13 @@ fn is_year(token: &str) -> bool {
 
 /// Spec 8.1 "Cleaning": underscores to spaces; disc numbers (`DISC 1`, `D1`, `DISC_1`), season markers (`SEASON 3`,
 /// `S3`, `S3D3`, `SERIES 2`), region and format tags (whole tokens, case-insensitive: UHD, 4K, BD, BD50, BLURAY,
-/// BLU-RAY, BDROM, DVD, DVD9, NTSC, PAL, US, UK, EU, WW, DOM, INT, R1 to R6, RETAIL) and a trailing year (1900 to 2099
-/// as the last token) removed; repeated spaces collapsed; trimmed. A bare number that is not a tag stays
-/// (`EXPENDABLES_3` gives `EXPENDABLES 3`). A marker or a tag that is a whole hyphen part goes too (`MOVIE-D2` gives
-/// `MOVIE`, `X-MEN-UHD` gives `X-MEN`); a tag may sit in round or square brackets; a year that is the only token left
-/// stays. Def: T4. Use: T4.
+/// BLU-RAY, BDROM, DVD, DVD9, NTSC, PAL, US, UK, EU, WW, DOM, INT, R1 to R6, RETAIL, and S3D and 3D, the stereoscopic
+/// 3D tags of ruling OR6) and a trailing year (1900 to 2099 as the last token) removed; repeated spaces collapsed;
+/// trimmed. A bare number that is not a tag stays (`EXPENDABLES_3` gives `EXPENDABLES 3`). A marker or a tag that is a
+/// whole hyphen part goes too (`MOVIE-D2` gives `MOVIE`, `X-MEN-UHD` gives `X-MEN`, `HUGO-S3D` gives `HUGO`); a tag
+/// may sit in round or square brackets; a year that is the only token left stays. A region tag that is the whole label
+/// stays, without its brackets (`US` gives `US`, `(UK)` gives `UK`, since a disc labelled `US` is the film Us), while a
+/// format tag alone, or two region tags, clean to nothing (rulings OR6 and SR2). Def: T4. Use: T4.
 pub fn clean(raw: &str) -> String {
     let tokens = tokens(raw);
     let pieces = pieces(&tokens);
@@ -188,6 +204,9 @@ pub fn clean(raw: &str) -> String {
     }
     if kept.len() > 1 && kept.last().is_some_and(|last| is_year(last)) {
         kept.pop();
+    }
+    if kept.is_empty() && tokens.len() == 1 && is_region_tag(&tokens[0]) {
+        return unbracketed(&tokens[0]).to_string();
     }
     kept.join(" ")
 }
@@ -475,7 +494,7 @@ mod tests {
     fn every_region_and_format_tag_is_removed_as_a_whole_token_in_any_case() {
         let tags = [
             "UHD", "4K", "BD", "BD50", "BLURAY", "BLU-RAY", "BDROM", "DVD", "DVD9", "NTSC", "PAL", "US", "UK", "EU", "WW",
-            "DOM", "INT", "R1", "R2", "R3", "R4", "R5", "R6", "RETAIL",
+            "DOM", "INT", "R1", "R2", "R3", "R4", "R5", "R6", "RETAIL", "S3D", "3D",
         ];
         for tag in tags {
             assert_eq!(clean(&format!("NAME_{tag}")), "NAME", "{tag}");
@@ -485,10 +504,11 @@ mod tests {
         assert_eq!(clean("NAME [4k]"), "NAME");
         assert_eq!(clean("X-MEN-UHD"), "X-MEN");
         assert_eq!(clean("Smile_WW"), "Smile");
-        // a tag token is removed wherever it sits, so a real word such as PAL or US is lost (listed for the owner)
+        // a tag token beside other words is removed, so a real word such as PAL is lost; alone, a region tag is the
+        // name (OR6)
         assert_eq!(clean("THE UK FILES"), "THE FILES");
         assert_eq!(clean("MY_PAL_GUS"), "MY GUS");
-        assert_eq!(clean("US"), "");
+        assert_eq!(clean("US"), "US");
     }
 
     #[test]
@@ -522,13 +542,35 @@ mod tests {
     }
 
     #[test]
-    fn a_3d_label_s3d_reads_as_season_3_by_spec_8_2s_literal_rule() {
-        // `S3D` (stereoscopic 3D) is the pieces `S`, `3`, `D`: spec 8.2's season marker read literally, so the movie
-        // disc has a season marker, and cleaning keeps `S3D` because its `D` piece belongs to no marker (listed for the
-        // owner; treating `S3D` and `3D` as format tags is the alternative).
-        assert_eq!(parse_season("HUGO_S3D"), Some(3));
-        assert!(has_season_marker("HUGO_S3D"));
-        assert_eq!(clean("HUGO_S3D"), "HUGO S3D");
+    fn s3d_and_3d_are_format_tags_not_a_season_marker() {
+        // OR6: `S3D` (stereoscopic 3D) is a format tag, so its pieces S, 3, D belong to no marker.
+        assert_eq!(parse_season("HUGO_S3D"), None);
+        assert_eq!(parse_disc_number("HUGO_S3D"), None);
+        assert!(!has_season_marker("HUGO_S3D"));
+        assert_eq!(clean("HUGO_S3D"), "HUGO");
+        assert_eq!(clean("AVATAR 3D"), "AVATAR");
+        assert_eq!(clean("HUGO-S3D"), "HUGO");
+        assert_eq!(clean("HUGO (3D)"), "HUGO");
+        assert_eq!(parse_disc_number("AVATAR 3D 2"), None, "the D of 3D does not reach across the token boundary");
+        // `S3D3` is not a tag: season 3, disc 3, as before.
+        assert_eq!((parse_season("EXAMPLE SHOW S3D3"), parse_disc_number("EXAMPLE SHOW S3D3")), (Some(3), Some(3)));
+        assert_eq!(clean("EXAMPLE SHOW S3D3"), "EXAMPLE SHOW");
+    }
+
+    #[test]
+    fn a_region_tag_that_is_the_whole_label_is_kept() {
+        // OR6 and SR2: a disc labelled US is the film Us; a format tag alone is still a placeholder.
+        assert_eq!(clean("US"), "US");
+        assert_eq!(clean("us"), "us");
+        assert_eq!(clean("(US)"), "US");
+        assert_eq!(clean("UK"), "UK");
+        assert_eq!(clean("US UK"), "");
+        assert_eq!(clean("UHD"), "");
+        assert_eq!(clean("BLU-RAY"), "");
+        assert!(!is_generic("US", &clean("US")));
+        assert!(is_generic("UHD", &clean("UHD")));
+        // a region tag beside other words is still removed
+        assert_eq!(clean("THE UK FILES"), "THE FILES");
     }
 
     #[test]
@@ -554,8 +596,7 @@ mod tests {
             assert!(is_generic(raw, &clean(raw)), "{raw:?}");
         }
         assert!(is_generic("KNOWING", ""));
-        // a disc labelled US (the film Us) cleans to nothing, so it is generic and never searched (listed for the owner)
-        assert!(is_generic("US", &clean("US")));
+        assert!(!is_generic("US", &clean("US")), "the film Us is searched (OR6)");
     }
 
     #[test]

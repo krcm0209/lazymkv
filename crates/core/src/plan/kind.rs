@@ -721,6 +721,14 @@ mod tests {
     }
 
     #[test]
+    fn a_3d_label_is_not_a_season_marker_for_the_kind() {
+        let hugo = disc_name(None, Some("HUGO_S3D")).expect("a name");
+        assert!(!hugo.season_marker);
+        let john_wick = groups_of(&pinned(JOHN_WICK_UHD));
+        assert_eq!(disc_kind(None, &john_wick, Some(&hugo)), (Kind::Movie, KindSource::Default));
+    }
+
+    #[test]
     fn a_disc_number_alone_never_makes_a_tv_disc() {
         let name = disc_name(None, Some("CHERNOBYL_D2")).expect("a name");
         assert!(!name.season_marker);
