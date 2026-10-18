@@ -947,6 +947,9 @@ pub(crate) mod fixtures {
     pub(crate) const DVD_VIDEO: &[(u32, &str)] = &[(1, "Video"), (5, "V_MPEG2"), (6, "Mpeg2"), (7, "Mpeg2")];
     pub(crate) const ENG_AC3: &[(u32, &str)] =
         &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "6")];
+    /// English stereo Dolby Digital: `ENG_AC3` with two channels.
+    pub(crate) const ENG_AC3_2CH: &[(u32, &str)] =
+        &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
     pub(crate) const SPA_AC3: &[(u32, &str)] =
         &[(1, "Audio"), (3, "spa"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "6")];
     pub(crate) const FRA_AC3: &[(u32, &str)] =
@@ -1603,6 +1606,7 @@ mod tests {
         // No second pass: an English original wants English only (`original_two_letter` keeps TMDb's "en").
         assert_eq!(plan.wanted, wanted_languages(Some("en")));
         assert!(plan.wanted.original_is_english && plan.wanted.original.is_empty());
+        assert!(!plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("8.3 rule 2 chose")));
 
         // Spanish original: the second pass picks the variant whose audio covers English and Spanish (title 2); the cut,
         // its edition and the confidence do not change.
@@ -1616,6 +1620,49 @@ mod tests {
         assert_eq!(plan.wanted.original, vec!["spa".to_string()]);
         assert_eq!(plan.reviews, Vec::<ReviewReason>::new());
         assert_eq!(plan.notes, Vec::<Noted>::new());
+        assert!(plan
+            .evidence
+            .sentences
+            .contains(&"8.3 rule 2 chose each cut's variant again with the original language (spa)".to_string()));
+    }
+
+    #[test]
+    fn a_second_label_pass_keeps_every_cut_and_changes_only_the_variant() {
+        // Two cuts, each in an English variant and an English and Spanish variant: the second pass (once TMDb says the
+        // film is Spanish) re-chooses the variant of each cut and nothing else. The two variants of a cut play the same
+        // clips (one segment map), so the disc has two groups, not the four equal-length groups that 8.2 reads as TV.
+        let disc = made_disc(
+            true,
+            "THE_ORPHANAGE",
+            &[
+                made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "FPL_MainFeature", ENG),
+                made(2, "1:40:00", "16", "00002.mpls", "1", "31000000000", "FPL_MainFeature_SPA", ENG_SPA),
+                made(3, "1:40:00", "16", "00003.mpls", "3", "32000000000", "FPL_MainFeature_UR", ENG),
+                made(4, "1:40:00", "16", "00004.mpls", "3", "33000000000", "FPL_MainFeature_UR_SPA", ENG_SPA),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let search = orphanage_search();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let roles = |plan: &Plan| plan.titles.iter().map(|title| (title.title, title.role.clone())).collect::<Vec<_>>();
+        let cuts = |first: u32, second: u32| {
+            vec![(first, feature(Some("Theatrical Cut"))), (second, cut(Some("Unrated Cut")))]
+        };
+
+        let english = orphanage_record("en", Some(100));
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, Some(&english)), &settings, &library));
+        assert_eq!(roles(&plan), cuts(1, 3));
+        assert!(!plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("8.3 rule 2 chose")));
+
+        let spanish = orphanage_record("es", Some(100));
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, Some(&spanish)), &settings, &library));
+        assert_eq!(roles(&plan), cuts(2, 4));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Labels));
+        assert_eq!((plan.title_confidence, plan.mode), (0.90, Mode::Direct));
+        assert!(plan
+            .evidence
+            .sentences
+            .contains(&"8.3 rule 2 chose each cut's variant again with the original language (spa)".to_string()));
     }
 
     #[test]
@@ -1639,6 +1686,13 @@ mod tests {
         assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous]);
         // The mode follows the title confidence only (6.2, 6.3); the review reason holds the job later (8.8).
         assert_eq!((plan.title_confidence, plan.mode), (0.90, Mode::Direct));
+        assert_eq!(plan.evidence.sentences.last().map(String::as_str), Some("title confidence 0.90: Direct mode (6.2)"));
+    }
+
+    #[test]
+    fn mode_sentences_name_the_confidence_and_the_mode() {
+        assert_eq!(mode_sentence(0.90, Mode::Direct), "title confidence 0.90: Direct mode (6.2)");
+        assert_eq!(mode_sentence(0.6, Mode::Copy), "title confidence 0.60: whole-disc copy mode (6.3)");
     }
 
     #[test]
@@ -1746,6 +1800,10 @@ mod tests {
         );
         assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
         assert_eq!(plan.reviews, vec![ReviewReason::IdentityUnknown, ReviewReason::UnnamedCut]);
+        assert_eq!(
+            plan.evidence.sentences.last().map(String::as_str),
+            Some("title confidence 0.60: whole-disc copy mode (6.3)")
+        );
     }
 
     #[test]
@@ -2189,6 +2247,7 @@ mod tests {
         let plan = run(&inputs(&disc, lookups, &settings, &library));
         assert_eq!(plan.titles.iter().map(|planned| planned.role.clone()).collect::<Vec<_>>(), vec![cut(None)]);
         assert!(plan.reviews.contains(&ReviewReason::UnnamedCut), "{:?}", plan.reviews);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
         let decision = crate::decision::decide(&crate::decision::DecisionInputs {
             plan: &plan,
             disc: &disc,
@@ -2720,6 +2779,56 @@ mod tests {
                 episode_count: None,
                 closed: false,
             })
+        );
+    }
+
+    #[test]
+    fn assigned_episodes_join_the_season_session_even_under_an_unconfirmed_search_identity() {
+        // SR7: spec 8.5 lets "episodes assigned in review" join the session whatever the identity step; only an
+        // unmapped disc needs a confirmed identity to be attached.
+        let disc = episodes_disc("SHOW", false);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let search = show_search();
+        let record = show_record(2);
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let overrides = Overrides {
+            titles: (1..=3)
+                .map(|title| TitleOverrideEntry { title, role: TitleRole::Episodes { season: 2, episodes: vec![title] } })
+                .collect(),
+            ..Overrides::default()
+        };
+        let mut planned_inputs = inputs(&disc, searched(name.as_ref(), &search, Some(&record)), &settings, &library);
+        planned_inputs.overrides = Some(&overrides);
+        planned_inputs.fingerprint = Some("FP");
+        let plan = run(&planned_inputs);
+        assert_eq!((plan.identity.step, plan.identity_confidence), (IdentityStep::TmdbOne, 0.90));
+        assert_eq!(plan.kind, Kind::Tv);
+        assert!(plan.titles.iter().all(|title| title.remembered), "{:?}", plan.titles);
+        assert_eq!(
+            plan.session,
+            Some(SeasonSession {
+                show_id: 99,
+                season: 2,
+                discs: vec!["FP".to_string()],
+                assigned: vec![assigned_episode(1, "FP", 1), assigned_episode(2, "FP", 2), assigned_episode(3, "FP", 3)],
+                episode_count: Some(6),
+                closed: false,
+            })
+        );
+
+        // The same assignment with no search and no record names no show, so there is no session to join.
+        let mut unidentified = inputs(&disc, LookupInputs { name: name.as_ref(), ..LookupInputs::default() }, &settings, &library);
+        unidentified.overrides = Some(&overrides);
+        unidentified.fingerprint = Some("FP");
+        assert_eq!(run(&unidentified).session, None);
+    }
+
+    #[test]
+    fn an_assigned_cut_named_theatrical_version_is_flagged_theatrical() {
+        let role = TitleRole::Cut { edition: "Theatrical Version".to_string() };
+        assert_eq!(
+            assigned_feature(1, &role),
+            Some(Feature { title: 1, edition: Some("Theatrical Version".to_string()), theatrical: true, siblings: Vec::new() })
         );
     }
 

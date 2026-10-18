@@ -475,8 +475,8 @@ mod tests {
     use crate::lookup::discdb::{match_titles, parse_dischash};
     use crate::lookup::tmdb::parse_tv;
     use crate::plan::fixtures::{
-        api_record, pinned, CHERNOBYL_1, CHERNOBYL_1_API, CHERNOBYL_2, CHERNOBYL_2_API, FIREFLY_1, FIREFLY_1_API, FIREFLY_2,
-        FIREFLY_2_API,
+        api_record, pinned, CHERNOBYL_1, CHERNOBYL_1_API, CHERNOBYL_2, CHERNOBYL_2_API, ENG_AC3_2CH, FIREFLY_1,
+        FIREFLY_1_API, FIREFLY_2, FIREFLY_2_API,
     };
     use crate::plan::kind::{candidate_filter, groups};
     use crate::robot::parse;
@@ -517,9 +517,6 @@ mod tests {
     fn play_all_sentence(title: u32) -> String {
         format!("play-all title {title} dropped (8.5): its segment map is the concatenation of other groups' maps")
     }
-
-    /// English stereo Dolby Digital: one audio stream, so the candidate filter keeps the title.
-    const ENGLISH_STEREO: &[(u32, &str)] = &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
 
     /// A made-up season 2 disc 3 shaped like the-office-2005-s3d3-bluray (RP21: no value is copied from the clone):
     /// number, playlist (attribute 16), segment map (26), duration (9), size (11) and chapters (8).
@@ -580,7 +577,7 @@ mod tests {
             .zip(&sizes)
             .map(|(row, size)| vec![(8, row.5), (9, row.3), (11, size.as_str()), (16, row.1), (26, row.2)])
             .collect();
-        let streams: &[(u32, &[(u32, &str)])] = &[(0, ENGLISH_STEREO)];
+        let streams: &[(u32, &[(u32, &str)])] = &[(0, ENG_AC3_2CH)];
         let titles: Vec<(u32, &[(u32, &str)], &[(u32, &[(u32, &str)])])> =
             SHOW_TITLES.iter().zip(&attrs).map(|(row, attrs)| (row.0, attrs.as_slice(), streams)).collect();
         let text = scan_text(&[(1, "Blu-ray disc"), (2, "EXAMPLE SHOW S2D3"), (32, "EXAMPLE SHOW S2D3")], &titles);
@@ -775,6 +772,26 @@ mod tests {
         let plan = by_discdb(&record, &BTreeMap::from([(0, 0), (1, 1), (2, 5)]), &groups, false).unwrap();
         assert_eq!(plan.episodes.iter().map(|e| e.title).collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(plan.dropped_play_all, vec![4, 5]);
+    }
+
+    #[test]
+    fn without_play_all_returns_the_groups_that_remain_and_the_dropped_titles() {
+        // The groups of `every_play_all_title_is_dropped`: titles 4 and 5 are play-all shaped, found one after the other.
+        let groups = vec![
+            group(0, &[12], 1320),
+            group(1, &[13], 1320),
+            group(4, &[10, 11], 600),
+            group(5, &[12, 13], 2640),
+            group(6, &[10], 300),
+            group(7, &[11], 300),
+        ];
+        assert_eq!(
+            without_play_all(&groups, false),
+            (vec![group(0, &[12], 1320), group(1, &[13], 1320), group(6, &[10], 300), group(7, &[11], 300)], vec![4, 5])
+        );
+        assert_eq!(without_play_all(&groups, true), (groups.clone(), vec![]), "a DVD never drops");
+        let plain = vec![group(0, &[1], 1320), group(1, &[2], 1320)];
+        assert_eq!(without_play_all(&plain, false), (plain.clone(), vec![]));
     }
 
     #[test]

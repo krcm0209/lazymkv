@@ -1136,6 +1136,24 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_cut_with_an_other_suffix_is_unnamed_at_0_60() {
+        // Spec 8.3 rule 2: a suffix the table does not name (`_IMAX`) is a cut with no edition name, even when it is the only cut.
+        assert_eq!(
+            by_labels(&java_disc(&[(1, "FPL_MainFeature_IMAX", &[ENG_AC3])]), &wanted_languages(None)),
+            Some(MoviePlan {
+                rule: TitleRule::Labels,
+                features: vec![feature(1, None, false, &[])],
+                feature_seconds: vec![Some(6000)],
+                confidence: 0.60,
+                reviews: vec![ReviewReason::UnnamedCut],
+                notes: vec![],
+                rivals: vec![],
+                evidence: strings(&["label cut FPL_MainFeature_IMAX: titles [1], title 1 chosen"]),
+            })
+        );
+    }
+
+    #[test]
     fn within_a_cut_the_variant_covering_most_wanted_languages_is_used() {
         let disc = java_disc(&[
             (1, "FPL_MainFeature", &[ENG_AC3]),

@@ -441,6 +441,12 @@ fn dts_hd_ma(language: &'static str, channels: &'static str) -> Attrs {
     with(audio(language, "A_DTS", "DTS-HD MA", "DTS-HD Master Audio", channels, ""), 18, "24")
 }
 
+/// A DTS-HD Master Audio stream carrying DTS:X: attribute 6 `DTS-HD MA` (the core), attribute 7 naming the extension,
+/// 24-bit.
+fn dts_x(language: &'static str, channels: &'static str) -> Attrs {
+    with(audio(language, "A_DTS", "DTS-HD MA", "DTS-HD Master Audio DTS:X", channels, ""), 18, "24")
+}
+
 /// A DTS stream.
 fn dts(language: &'static str, channels: &'static str, bitrate: &'static str) -> Attrs {
     audio(language, "A_DTS", "DTS", "DTS", channels, bitrate)
@@ -916,6 +922,52 @@ fn an_object_based_track_ranks_first_when_ffprobe_reports_it_and_not_at_planning
     assert_eq!(order_of(&decision), vec![1, 2]);
     assert_eq!(names(&decision), vec!["TrueHD 7.1", "TrueHD Atmos 7.1"]);
     assert_eq!(decision.kept[1].object, Some(ObjectAudio::Atmos));
+}
+
+#[test]
+fn an_ffprobe_extension_wins_over_attribute_7_for_the_object_and_the_name() {
+    // Attribute 7 names no extension on either TrueHD stream; ffprobe's profile names Atmos on stream 2, which then
+    // ranks first and is named after it (SR7).
+    let title = title_of(&[video(), truehd("eng", "8"), truehd("eng", "8")]);
+    let probed = AudioFacts {
+        ffprobe_profile: BTreeMap::from([(1, "TrueHD".to_string()), (2, "Dolby TrueHD + Dolby Atmos".to_string())]),
+        ..AudioFacts::default()
+    };
+    let decision = decide_audio(&title, &wanted_languages(Some("en")), &probed, &Settings::default());
+    assert_eq!(order_of(&decision), vec![2, 1]);
+    assert_eq!(names(&decision), vec!["TrueHD Atmos 7.1", "TrueHD 7.1"]);
+    assert_eq!(decision.kept[0].object, Some(ObjectAudio::Atmos));
+
+    // Attribute 7 says Atmos but ffprobe's profile says DTS:X: ffprobe's extension wins for the object and the name.
+    // At planning time (no facts) attribute 7's Atmos stands.
+    let title = title_of(&[video(), with(audio("eng", "A_TRUEHD", "TrueHD", "TrueHD Atmos", "8", ""), 18, "24")]);
+    let planned = decide(&title, Some("en"));
+    assert_eq!(names(&planned), vec!["TrueHD Atmos 7.1"]);
+    assert_eq!(planned.kept[0].object, Some(ObjectAudio::Atmos));
+    let probed = AudioFacts { ffprobe_profile: BTreeMap::from([(1, "DTS:X".to_string())]), ..AudioFacts::default() };
+    let decision = decide_audio(&title, &wanted_languages(Some("en")), &probed, &Settings::default());
+    assert_eq!(decision.kept[0].object, Some(ObjectAudio::DtsX));
+    assert_eq!(names(&decision), vec!["TrueHD DTS:X 7.1"]);
+}
+
+#[test]
+fn a_dts_x_track_is_named_after_the_dts_hd_ma_core_its_extension_and_its_layout() {
+    // Attribute 6 reads DTS-HD MA and attribute 7 the extension (SR5): the family is the core's, the object is DTS:X.
+    let title = title_of(&[video(), dts_hd_ma("eng", "8"), dts_x("eng", "8")]);
+    let planned = decide(&title, Some("en"));
+    assert_eq!(order_of(&planned), vec![1, 2]);
+    assert_eq!(names(&planned), vec!["DTS-HD MA 7.1", "DTS-HD MA DTS:X 7.1"]);
+    assert_eq!(planned.kept[1].object, Some(ObjectAudio::DtsX));
+    // ffprobe names the extension: the DTS:X track ranks first.
+    let probed = AudioFacts {
+        ffprobe_profile: BTreeMap::from([(1, "DTS-HD MA".to_string()), (2, "DTS-HD MA + DTS:X".to_string())]),
+        ..AudioFacts::default()
+    };
+    let decision = decide_audio(&title, &wanted_languages(Some("en")), &probed, &Settings::default());
+    assert_eq!(order_of(&decision), vec![2, 1]);
+    // The layout is the stream's own: six channels read 5.1.
+    let five_one = title_of(&[video(), dts_x("eng", "6")]);
+    assert_eq!(names(&decide(&five_one, Some("en"))), vec!["DTS-HD MA DTS:X 5.1"]);
 }
 
 #[test]

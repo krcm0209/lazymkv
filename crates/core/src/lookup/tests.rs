@@ -1004,6 +1004,23 @@ fn the_runtime_check_is_the_one_of_the_results_own_kind() {
 }
 
 #[test]
+fn the_runtime_check_of_a_movie_result_reads_the_features_even_when_the_structure_says_tv() {
+    // The structure said TV, but the one plausible result is a film: its movie check runs over the planned features.
+    let name = label("EXAMPLE_FILM");
+    let results = search(&[("movie", 1001, "Example Film", "Example Film", "1986-05-09")]);
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let held = identify(&inputs, Kind::Tv, &episode_groups(&[6000]), &Settings::default());
+    assert_eq!(
+        (held.step, held.confidence, held.tmdb, held.runtime_check, held.review),
+        (IdentityStep::TmdbSeveral, 0.50, Some(movie(1001)), Some(false), Some(ReviewReason::IdentityAmbiguous))
+    );
+    assert_eq!(held.evidence.last().map(String::as_str), Some("the runtime check fails"));
+    let found = identify(&inputs, Kind::Tv, &features(&[6000]), &Settings::default());
+    assert_eq!((found.step, found.confidence, found.runtime_check), (IdentityStep::TmdbOne, 0.90, Some(true)));
+}
+
+#[test]
 fn the_tv_runtime_check_reads_the_parsed_season_else_the_whole_series() {
     let record = tv_record(2316, "Example Show", &[(1, &OFFICE_SEASON_1[..]), (3, &OFFICE_SEASON_3[..])]);
     let results = search(&[("tv", 2316, "Example Show", "Example Show", "2005-03-24")]);
