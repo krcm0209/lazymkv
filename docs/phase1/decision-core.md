@@ -322,7 +322,7 @@ owner may still overturn any of them.
   Episode item: a multi-clip episode playlist whose clips carry no item is the episode, not a play-all title.
 - F4. On a disc TheDiscDB states is a movie, rule 3.1 is skipped and a play-all-shaped group is an ordinary rule 3
   group (`movie::by_structure_as_movie`); the open question on extras play-all titles below now concerns only discs
-  TheDiscDB does not know; ruling R1 then settled it.
+  TheDiscDB does not know; ruling OR1 then settled it.
 - F5. Resolve collision answers a path: `Overrides.collision` lists the plain final paths the owner was shown, each
   with its action, and Keep both or Replace resolves only a decision whose own plain path is one of them (compared
   whole and case-insensitively); any other collision raises `path_collision` again.
@@ -363,9 +363,9 @@ The plan settled these where the spec leaves a choice open; each is pinned by a 
 changing that test and its rule. The first four are open questions the plan puts to the owner; until the owner rules,
 the plan keeps the reading given.
 
-- Ruling R1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120
+- Ruling OR1 (2026-10-17): 8.3 rule 3.1 counts a play-all title only when every part is episode-length (15 to 120
   minutes); a play-all of extras (Smile's deleted-scenes playlist, title 117) is an ordinary group, so a movie disc
-  with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (R15).
+  with one stays a movie without TheDiscDB. 8.5 still drops any concatenation title from a TV disc (OR15).
 - Open question: two label cuts with the same edition name. 8.3 rule 2's table names both the plain `FPL_MainFeature`
   row and the `_R` row "Theatrical Cut". A disc carrying both is planned at 0.60 with `title_ambiguous` ("two cuts are
   both named Theatrical Cut") rather than 0.90; two TheDiscDB main movies that would be filed under one name get the

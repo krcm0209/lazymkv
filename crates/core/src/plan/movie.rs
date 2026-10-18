@@ -411,13 +411,13 @@ fn coverage(title: &Title, wanted: &Wanted) -> usize {
 /// What rule 3 found. Def: T5. Use: T7.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StructureOutcome {
-    /// Rule 3.1 under R1: the group at this index of the groups is a "play all" title of episode-length parts, so the disc
+    /// Rule 3.1 under OR1: the group at this index of the groups is a "play all" title of episode-length parts, so the disc
     /// is TV (8.5).
     PlayAll { group: usize },
     Plan(MoviePlan),
 }
 
-/// Rule 3 on the groups: 3.1 under R1 (a "play all" title of episode-length parts, `kind::play_all_of_episodes`; the disc
+/// Rule 3 on the groups: 3.1 under OR1 (a "play all" title of episode-length parts, `kind::play_all_of_episodes`; the disc
 /// is TV); then `by_structure_as_movie`'s 3.2 to 3.7. A play-all of shorter parts, such as an extras playlist, is an
 /// ordinary group here. Reads `settings.feature_min_minutes` only. Def: T5. Use: T5, T7.
 pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> StructureOutcome {
@@ -1374,7 +1374,7 @@ mod tests {
 
     #[test]
     fn an_extras_play_all_is_not_rule_3_1s_play_all_title() {
-        // R1: the pinned logs' play-all titles (a deleted-scenes playlist, two extras playlists) have parts of a few minutes.
+        // OR1: the pinned logs' play-all titles (a deleted-scenes playlist, two extras playlists) have parts of a few minutes.
         for log in [CHERNOBYL_1, CHERNOBYL_2, SMILE] {
             let disc = pinned(log);
             let settings = Settings::default();

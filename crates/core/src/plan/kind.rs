@@ -2,7 +2,7 @@
 //! of titles with identical segment maps (on a DVD keyed by the title number too, since its segments restart in
 //! every title), the episode-length groups and the structural TV test, TheDiscDB's kind and the disc name's season
 //! marker, and the "play all" title (a group whose segments are two or more other groups' in order) in its two readings:
-//! 8.3 rule 3.1's (every part episode-length, ruling R1) and 8.5's (any parts, ruling R15).
+//! 8.3 rule 3.1's (every part episode-length, ruling OR1) and 8.5's (any parts, ruling OR15).
 //! `Kind` itself lives in `lookup` (identification is kind-aware) and is re-exported here. Used by `plan::movie`
 //! (Task 5), `plan::tv` and `remembered` (Task 6) and the planner (Task 7).
 
@@ -110,7 +110,7 @@ pub const EPISODE_MAX_S: u32 = 120 * 60;
 pub const TV_SPREAD: f64 = 0.15;
 
 /// True when the group lasts between 15 and 120 minutes inclusive. Spec 8.2; the part test of 8.3 rule 3.1's play-all title
-/// under ruling R1. Def: this plan. Use: `episode_length_groups`, `play_all_of_episodes`.
+/// under ruling OR1. Def: this plan. Use: `episode_length_groups`, `play_all_of_episodes`.
 pub fn is_episode_length(group: &Group) -> bool {
     (EPISODE_MIN_S..=EPISODE_MAX_S).contains(&group.seconds)
 }
@@ -133,7 +133,7 @@ pub fn structure_says_tv(groups: &[Group]) -> bool {
     f64::from(longest) <= f64::from(shortest) * (1.0 + TV_SPREAD)
 }
 
-/// Spec 8.5's play-all title, ruling R15: the index of a group whose segment list is the concatenation of two or more other
+/// Spec 8.5's play-all title, ruling OR15: the index of a group whose segment list is the concatenation of two or more other
 /// groups' lists, whose segments follow one another in the whole list (the parts may be any other groups of any length in
 /// any group order, each used once; truncated groups never count); None when none is. Not applied on a DVD (segments
 /// restart per title). A truncated group is never the play-all title either. The first such group in group order is
@@ -142,7 +142,7 @@ pub fn play_all(groups: &[Group], dvd: bool) -> Option<usize> {
     play_all_where(groups, dvd, &|_| true)
 }
 
-/// Spec 8.3 rule 3.1 under ruling R1: a play-all title whose every part is episode-length (15 to 120 minutes, 8.2); a
+/// Spec 8.3 rule 3.1 under ruling OR1: a play-all title whose every part is episode-length (15 to 120 minutes, 8.2); a
 /// concatenation of shorter extras is not one. Same search as `play_all` with the parts held to `is_episode_length`.
 /// Def: this plan. Use: `movie::by_structure`.
 pub fn play_all_of_episodes(groups: &[Group], dvd: bool) -> Option<usize> {
@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(play_all_of_episodes(&two_parts(899, 1320), false), None);
         assert_eq!(play_all_of_episodes(&two_parts(7201, 1320), false), None);
         assert_eq!(play_all_of_episodes(&two_parts(1320, 1320), true), None, "never on a DVD");
-        // 8.5's reading (R15) is unchanged: any parts.
+        // 8.5's reading (OR15) is unchanged: any parts.
         assert_eq!(play_all(&two_parts(1320, 600), false), Some(2));
     }
 
