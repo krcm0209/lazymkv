@@ -1427,7 +1427,7 @@ mod tests {
             vec![Noted {
                 note: Note::UnlistedLabelCut,
                 stream: None,
-                detail: "title 54's label FPL_MainFeature_R names a cut TheDiscDB does not list; name it with Assign titles"
+                detail: "title 54's label FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie"
                     .to_string(),
             }]
         );

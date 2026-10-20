@@ -136,8 +136,9 @@ pub enum Note {
     /// Spec 8.3 rule 2 and 10.2 ToolMissing: MakeMKV did not report Java, so the label rule does not apply ("a note
     /// records why").
     LabelRuleUnavailable,
-    /// Spec 8.3 rule 1 under ruling OR5 (2026-10-17): a Java label names a cut TheDiscDB does not list as a main movie;
-    /// names the title and its label.
+    /// Spec 8.3 rule 1 under ruling OR5 (2026-10-17): a Java label names a cut TheDiscDB does not list as a main movie.
+    /// The detail states only that fact, naming the title and its label as the scan wrote it ("title 54's label
+    /// FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie", ruling H3).
     UnlistedLabelCut,
 }
 

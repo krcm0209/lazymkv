@@ -211,21 +211,22 @@ pub struct MoviePlan {
 /// make it 0.60 with title_ambiguous (Review Focus 8). None when TheDiscDB marks no main movie or any MainMovie title does
 /// not reconcile.
 ///
-/// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted)`, so only when `disc.java_in_use`;
-/// `wanted` is the languages `movie_plan` holds, SR3) none of whose titles, chosen or sibling, is a main movie's scan title
-/// is a cut TheDiscDB does not list. Each is planned after the main movies, in rule 2's cut order, as an unnamed cut
-/// (edition None, `theatrical` false, its chosen title the variant `wanted` prefers, its other titles its siblings), with
-/// the review reason unnamed_cut, one note UnlistedLabelCut naming the title and its label as the scan wrote it, and one
-/// evidence sentence, so the owner names it with Assign titles. The confidence stays what the main movies alone give (0.98
-/// when they raise no reason): an unlisted cut has no name to share, so it never makes title_ambiguous. The main movie's
-/// own label suffix, its dub variants and a Narrative variant belong to its cut and name no second one. Ruling G4: a
-/// cut whose chosen title and every sibling fail the 8.2 candidate filter (`kind::candidate_filter(disc, settings)`: a
-/// menu loop, a title shorter than `settings.minlength_s` or without a duration) is not planned, with no note and no
-/// evidence; `settings.minlength_s` is the only setting read. Ruling H2 (2026-10-19): when such a cut is planned, a
-/// main movie whose edition is None because its own label suffix is Other or it carries no label is marked theatrical
-/// false, with an evidence sentence, so `edition_names` gives it no "Theatrical Cut" and the owner names both cuts; a
-/// main movie the label table names "Theatrical Cut" (the bare `FPL_MainFeature` and `_R` rows) stays theatrical, and
-/// without an unlisted cut the Task 5 ruling stands. Def: T5. Use: T5, T7.
+/// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted)`, so only when
+/// `disc.java_in_use`; `wanted` is the languages `movie_plan` holds, SR3) none of whose titles, chosen or sibling, is a
+/// main movie's scan title is a cut TheDiscDB does not list. Each is planned after the main movies, in rule 2's cut
+/// order, as an unnamed cut (edition None, `theatrical` false, its chosen title the variant `wanted` prefers, its other
+/// titles its siblings), with the review reason unnamed_cut, one note UnlistedLabelCut whose detail states only the
+/// fact, naming the title and its label as the scan wrote it (ruling H3), and one evidence sentence, so the owner names
+/// it with Assign titles. The confidence stays what the main movies alone give (0.98 when they raise no reason): an
+/// unlisted cut has no name to share, so it never makes title_ambiguous. The main movie's own label suffix, its dub
+/// variants and a Narrative variant belong to its cut and name no second one. Ruling G4: a cut whose chosen title and
+/// every sibling fail the 8.2 candidate filter (`kind::candidate_filter(disc, settings)`: a menu loop, a title shorter
+/// than `settings.minlength_s` or without a duration) is not planned, with no note and no evidence;
+/// `settings.minlength_s` is the only setting read. Ruling H2 (2026-10-19): when such a cut is planned, a main movie
+/// whose edition is None because its own label suffix is Other or it carries no label is marked theatrical false, with
+/// an evidence sentence, so `edition_names` gives it no "Theatrical Cut" and the owner names both cuts; a main movie
+/// the label table names "Theatrical Cut" (the bare `FPL_MainFeature` and `_R` rows) stays theatrical, and without an
+/// unlisted cut the Task 5 ruling stands. Def: T5. Use: T5, T7.
 pub fn by_database(
     record: &DiscDbRecord,
     matches: &BTreeMap<u32, u32>,
@@ -318,7 +319,7 @@ pub fn by_database(
             notes.push(Noted {
                 note: Note::UnlistedLabelCut,
                 stream: None,
-                detail: format!("title {number}'s label {comment} names a cut TheDiscDB does not list; name it with Assign titles"),
+                detail: format!("title {number}'s label {comment} names a cut TheDiscDB does not list as a main movie"),
             });
             features.push(Feature { title: number, edition: None, theatrical: false, siblings: cut.siblings });
             feature_seconds.push(seconds);
@@ -936,7 +937,7 @@ mod tests {
                 notes: vec![Noted {
                     note: Note::UnlistedLabelCut,
                     stream: None,
-                    detail: "title 54's label FPL_MainFeature_R names a cut TheDiscDB does not list; name it with Assign titles"
+                    detail: "title 54's label FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie"
                         .to_string(),
                 }],
                 rivals: vec![],
@@ -1067,7 +1068,8 @@ mod tests {
             vec![Noted {
                 note: Note::UnlistedLabelCut,
                 stream: None,
-                detail: "title 2's label FPL_MainFeature_R names a cut TheDiscDB does not list; name it with Assign titles".to_string(),
+                detail: "title 2's label FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie"
+                    .to_string(),
             }]
         );
         assert_eq!(
