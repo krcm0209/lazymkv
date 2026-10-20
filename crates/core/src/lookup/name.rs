@@ -582,7 +582,8 @@ mod tests {
         assert_eq!(clean("1917"), "1917");
         assert_eq!(clean("ALIEN 1899"), "ALIEN 1899");
         assert_eq!(clean("ALIEN 2100"), "ALIEN 2100");
-        // Spec 8.1's rule read literally: a title that ends in a year loses it; the owner ruled it stays (OR6).
+        // Spec 8.1's rule read literally: a title that ends in a year loses it; the owner ruled the year still goes
+        // (OR6).
         assert_eq!(clean("BLADE_RUNNER_2049"), "BLADE RUNNER");
     }
 
