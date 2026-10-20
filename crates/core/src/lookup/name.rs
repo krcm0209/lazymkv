@@ -10,7 +10,8 @@
 //! is one piece. A season marker is a piece `season`, `series` or `s` (any case) followed by a digit piece; a disc
 //! number is a piece `disc` or `d` followed by a digit piece. A piece of a tag token or of a tag part belongs to no
 //! marker, so the `S` and the `D` of the format tag `S3D` (stereoscopic 3D) start none (spec 8.2, ruling OR6). Cleaning
-//! drops a part whose every piece belongs to a marker, and the region and format tags.
+//! drops a part whose every piece belongs to a marker, and the region and format tags; the name with its tags kept
+//! (`tagged`, ruling H1) drops the same parts but keeps the tags.
 
 use std::collections::BTreeSet;
 
@@ -165,6 +166,51 @@ fn is_year(token: &str) -> bool {
         && matches!(digits.parse::<u32>(), Ok(1900..=2099))
 }
 
+/// What cleaning keeps of `tokens`, token by token: the token's index, its text without its region and format tags (the
+/// cleaned text, empty for a token that is a tag) and its text with them (ruling H1). A hyphen part whose every piece
+/// belongs to a marker is dropped from both. The trailing year is dropped from both too: the last token with a cleaned
+/// text, when that text is a year and an earlier token has one as well, so a year before a trailing tag
+/// (`ALIEN_1979_UHD`) goes as cleaning removes it. Spec 8.1 "Cleaning".
+fn kept_tokens(tokens: &[String]) -> Vec<(usize, String, String)> {
+    let pieces = pieces(tokens);
+    let in_marker: BTreeSet<usize> =
+        markers(&pieces).iter().flat_map(|marker| [marker.word, marker.digits]).collect();
+    let mut kept: Vec<(usize, String, String)> = Vec::new();
+    for (token, word) in tokens.iter().enumerate() {
+        if is_tag(word) {
+            kept.push((token, String::new(), word.clone()));
+            continue;
+        }
+        let mut untagged: Vec<&str> = Vec::new();
+        let mut with_tags: Vec<&str> = Vec::new();
+        for (part, text) in word.split('-').enumerate() {
+            let of_part: Vec<usize> = pieces
+                .iter()
+                .enumerate()
+                .filter(|(_, piece)| piece.token == token && piece.part == part)
+                .map(|(index, _)| index)
+                .collect();
+            if !of_part.is_empty() && of_part.iter().all(|index| in_marker.contains(index)) {
+                continue;
+            }
+            with_tags.push(text);
+            if !is_tag(text) {
+                untagged.push(text);
+            }
+        }
+        if !with_tags.is_empty() {
+            kept.push((token, untagged.join("-"), with_tags.join("-")));
+        }
+    }
+    let cleaned: Vec<usize> = (0..kept.len()).filter(|&index| !kept[index].1.is_empty()).collect();
+    if let [_, .., last] = cleaned.as_slice() {
+        if is_year(&kept[*last].1) {
+            kept.remove(*last);
+        }
+    }
+    kept
+}
+
 /// Spec 8.1 "Cleaning": underscores to spaces; disc numbers (`DISC 1`, `D1`, `DISC_1`), season markers (`SEASON 3`,
 /// `S3`, `S3D3`, `SERIES 2`), region and format tags (whole tokens, case-insensitive: UHD, 4K, BD, BD50, BLURAY,
 /// BLU-RAY, BDROM, DVD, DVD9, NTSC, PAL, US, UK, EU, WW, DOM, INT, R1 to R6, RETAIL, and S3D and 3D, the stereoscopic
@@ -177,39 +223,16 @@ fn is_year(token: &str) -> bool {
 /// and `US_D1` give `US`, and `Us (2019)` gives `Us` (rulings OR6 and G8, which replaces SR2's single-token scope; G8a
 /// adds "nothing kept before it", so `1917_US` gives `1917` and stays generic). A format tag alone (`UHD`) or a name of
 /// two region tags (`US UK`) cleans to nothing, and a region tag beside a word is removed (`THE UK FILES` gives
-/// `THE FILES`). Def: T4. Use: T4.
+/// `THE FILES`). A title whose tags are part of it (`PIRANHA_3D`, Piranha 3D) loses them here; `tagged` keeps them for
+/// plausibility (ruling H1). Def: T4. Use: T4.
 pub fn clean(raw: &str) -> String {
     let tokens = tokens(raw);
-    let pieces = pieces(&tokens);
-    let in_marker: BTreeSet<usize> =
-        markers(&pieces).iter().flat_map(|marker| [marker.word, marker.digits]).collect();
-    // Each kept piece with the index of the token it came from (G8a reads the order).
-    let mut kept: Vec<(usize, String)> = Vec::new();
-    for (token, word) in tokens.iter().enumerate() {
-        if is_tag(word) {
-            continue;
-        }
-        let mut parts: Vec<&str> = Vec::new();
-        for (part, text) in word.split('-').enumerate() {
-            let of_part: Vec<usize> = pieces
-                .iter()
-                .enumerate()
-                .filter(|(_, piece)| piece.token == token && piece.part == part)
-                .map(|(index, _)| index)
-                .collect();
-            let marker_only = !of_part.is_empty() && of_part.iter().all(|index| in_marker.contains(index));
-            if !marker_only && !is_tag(text) {
-                parts.push(text);
-            }
-        }
-        let joined = parts.join("-");
-        if !joined.is_empty() {
-            kept.push((token, joined));
-        }
-    }
-    if kept.len() > 1 && kept.last().is_some_and(|(_, last)| is_year(last)) {
-        kept.pop();
-    }
+    // Each kept token's cleaned text with the index of its token (G8a reads the order).
+    let kept: Vec<(usize, String)> = kept_tokens(&tokens)
+        .into_iter()
+        .filter(|(_, cleaned, _)| !cleaned.is_empty())
+        .map(|(token, cleaned, _)| (token, cleaned))
+        .collect();
     // G8: a region tag that cleaning leaves with nothing else of letters is the name (`US_UHD`, `US_2019`: the film Us);
     // G8a: only when nothing kept comes before it, so a title of digits (`1917_US`) is not renamed.
     let regions: Vec<usize> = (0..tokens.len()).filter(|&index| is_region_tag(&tokens[index])).collect();
@@ -221,6 +244,16 @@ pub fn clean(raw: &str) -> String {
         }
     }
     kept.into_iter().map(|(_, piece)| piece).collect::<Vec<String>>().join(" ")
+}
+
+/// Spec 8.1, ruling H1 (2026-10-19): the disc's own name with its region and format tags kept, which plausibility tries
+/// before the cleaned name. Underscores read as spaces, and the disc numbers, season markers and trailing year that
+/// `clean` removes go as it removes them; every region and format tag stays as written (with its brackets), and the
+/// whole-label rule of G8 is not applied. `PIRANHA_3D` gives `PIRANHA 3D`, `The Last of Us` gives itself,
+/// `ALIEN_1979_UHD` gives `ALIEN UHD`, `US_UHD` gives `US UHD`; a name without tags gives its cleaned form. Def: H1.
+/// Use: H1 (`disc_name`).
+pub fn tagged(raw: &str) -> String {
+    kept_tokens(&tokens(raw)).into_iter().map(|(_, _, with_tags)| with_tags).collect::<Vec<String>>().join(" ")
 }
 
 /// Spec 8.1's generic or placeholder names ("for example `DVD_VIDEO`, `DISC_1`, `LOGICAL_VOLUME_ID`, `VOLUME_SET_ID`")
@@ -253,7 +286,9 @@ pub fn fold_name(text: &str) -> String {
 /// A result is plausible when `fold_name` of its title or original title equals `fold_name(cleaned)` (spec 8.1 "A TMDb
 /// search result is plausible when its title or original title equals the cleaned name after case-folding and
 /// removing punctuation"); a cleaned name that folds to nothing makes no result plausible. `display_title` and
-/// `original` give `name` and `original_name` for a TV result. Def: T4. Use: T4.
+/// `original` give `name` and `original_name` for a TV result. The disc name's search (`lookup::identify`) compares
+/// with the name with its tags kept (`DiscName.tagged`) first: when that differs from the cleaned name and some result
+/// matches it, only those results are plausible (spec 8.1, ruling H1). Def: T4. Use: T4, H1.
 pub fn plausible(result: &TmdbSearchResult, cleaned: &str) -> bool {
     let wanted = fold_name(cleaned);
     !wanted.is_empty() && (fold_name(result.display_title()) == wanted || fold_name(result.original()) == wanted)
@@ -294,8 +329,8 @@ impl std::str::FromStr for NameSource {
     }
 }
 
-/// The disc's own name with the evidence parsed from it before cleaning. Spec 8.1, 8.2. Def: T4. Use: T4 (identify),
-/// T5 (season marker), T6 (season), T7.
+/// The disc's own name with the evidence parsed from it before cleaning, its cleaned form and its form with its tags
+/// kept (ruling H1). Spec 8.1, 8.2. Def: T4. Use: T4 (identify), T5 (season marker), T6 (season), T7.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiscName {
     /// The name as given, trimmed.
@@ -307,6 +342,9 @@ pub struct DiscName {
     pub disc: Option<u32>,
     /// `clean(raw)`.
     pub cleaned: String,
+    /// `tagged(raw)`: the name with its region and format tags kept, which plausibility tries before `cleaned` (spec
+    /// 8.1, ruling H1); equal to `cleaned` for a name without tags.
+    pub tagged: String,
     /// `is_generic(raw, cleaned)`.
     pub generic: bool,
     /// `has_season_marker(raw)` (8.2).
@@ -337,6 +375,7 @@ pub fn disc_name(bdmt: Option<&str>, volume_label: Option<&str>) -> Option<DiscN
         generic: is_generic(raw, &cleaned),
         season_marker: has_season_marker(raw),
         cleaned,
+        tagged: tagged(raw),
     })
 }
 
@@ -403,27 +442,29 @@ mod tests {
         assert_eq!(parse_disc_number("SHOW D99999999999"), None);
     }
 
-    /// The volume label of each pinned log and recording, and its cleaned form (spec 8.1 "Cleaning").
-    const THIRTEEN: [(&str, &str); 13] = [
-        ("JOHN_WICK_UHD", "JOHN WICK"),
-        ("JOHN_WICK", "JOHN WICK"),
-        ("KNOWING", "KNOWING"),
-        ("SMILE", "SMILE"),
-        ("EXPENDABLES_3", "EXPENDABLES 3"),
-        ("CHERNOBYL_D1", "CHERNOBYL"),
-        ("CHERNOBYL_D2", "CHERNOBYL"),
-        ("FIREFLY_D1", "FIREFLY"),
-        ("FIREFLY_D2", "FIREFLY"),
-        ("PANS_LABYRINTH", "PANS LABYRINTH"),
-        ("EXAMPLE SHOW S3D3", "EXAMPLE SHOW"),
-        ("EXAMPLE_FILM", "EXAMPLE FILM"),
-        ("DVD_VIDEO", "VIDEO"),
+    /// The volume label of each pinned log and recording, its cleaned form (spec 8.1 "Cleaning") and its form with its
+    /// region and format tags kept (ruling H1), which is the cleaned form for a name without tags.
+    const THIRTEEN: [(&str, &str, &str); 13] = [
+        ("JOHN_WICK_UHD", "JOHN WICK", "JOHN WICK UHD"),
+        ("JOHN_WICK", "JOHN WICK", "JOHN WICK"),
+        ("KNOWING", "KNOWING", "KNOWING"),
+        ("SMILE", "SMILE", "SMILE"),
+        ("EXPENDABLES_3", "EXPENDABLES 3", "EXPENDABLES 3"),
+        ("CHERNOBYL_D1", "CHERNOBYL", "CHERNOBYL"),
+        ("CHERNOBYL_D2", "CHERNOBYL", "CHERNOBYL"),
+        ("FIREFLY_D1", "FIREFLY", "FIREFLY"),
+        ("FIREFLY_D2", "FIREFLY", "FIREFLY"),
+        ("PANS_LABYRINTH", "PANS LABYRINTH", "PANS LABYRINTH"),
+        ("EXAMPLE SHOW S3D3", "EXAMPLE SHOW", "EXAMPLE SHOW"),
+        ("EXAMPLE_FILM", "EXAMPLE FILM", "EXAMPLE FILM"),
+        ("DVD_VIDEO", "VIDEO", "DVD VIDEO"),
     ];
 
     #[test]
     fn the_thirteen_recorded_and_pinned_names_clean_to_these() {
-        for (raw, cleaned) in THIRTEEN {
+        for (raw, cleaned, kept) in THIRTEEN {
             assert_eq!(clean(raw), cleaned, "{raw}");
+            assert_eq!(tagged(raw), kept, "{raw} with its tags kept");
         }
     }
 
@@ -455,7 +496,7 @@ mod tests {
             assert_eq!(clean(label), cleaned_label, "{relative}");
             assert_eq!(clean(name), cleaned_name, "{relative}");
             assert_eq!(
-                THIRTEEN.iter().find(|(raw, _)| *raw == label).map(|(_, cleaned)| *cleaned),
+                THIRTEEN.iter().find(|(raw, _, _)| *raw == label).map(|(_, cleaned, _)| *cleaned),
                 Some(cleaned_label),
                 "{relative}"
             );
@@ -609,6 +650,32 @@ mod tests {
     }
 
     #[test]
+    fn the_name_with_its_tags_kept_loses_only_its_markers_and_its_trailing_year() {
+        // H1: what cleaning keeps, with the region and format tags put back where they stood and no whole-label rule.
+        assert_eq!(tagged("PIRANHA_3D"), "PIRANHA 3D");
+        assert_eq!(tagged("The Last of Us"), "The Last of Us");
+        assert_eq!(tagged("HUGO_S3D"), "HUGO S3D");
+        assert_eq!(tagged("HUGO-S3D"), "HUGO-S3D");
+        assert_eq!(tagged("X-MEN-UHD"), "X-MEN-UHD");
+        assert_eq!(tagged("NAME (UHD)"), "NAME (UHD)");
+        assert_eq!(tagged("THE UK FILES"), "THE UK FILES");
+        // Markers go as cleaning removes them, and so does the year cleaning removes, even before a tag.
+        assert_eq!(tagged("SHOW_S3D3_UHD"), "SHOW UHD");
+        assert_eq!(tagged("MOVIE_D2_BLU-RAY"), "MOVIE BLU-RAY");
+        assert_eq!(tagged("ALIEN_1979_UHD"), "ALIEN UHD");
+        assert_eq!(tagged("PIRANHA_3D_2010"), "PIRANHA 3D");
+        // No whole-label rule: a lone region tag stays beside what cleaning keeps.
+        assert_eq!((clean("US_UHD"), tagged("US_UHD")), ("US".to_string(), "US UHD".to_string()));
+        assert_eq!((clean("1917_US"), tagged("1917_US")), ("1917".to_string(), "1917 US".to_string()));
+        assert_eq!(tagged("US"), "US");
+        assert_eq!(tagged("UHD"), "UHD");
+        // A name without tags is its cleaned form.
+        for raw in ["SMILE", "Pan's Labyrinth", "EXPENDABLES_3", "BLADE_RUNNER_2049", "2001 A SPACE ODYSSEY", ""] {
+            assert_eq!(tagged(raw), clean(raw), "{raw}");
+        }
+    }
+
+    #[test]
     fn the_generic_names_are_spec_8_1s_list() {
         assert_eq!(
             GENERIC_NAMES,
@@ -643,7 +710,7 @@ mod tests {
 
     #[test]
     fn the_twelve_named_discs_are_not_generic() {
-        for (raw, cleaned) in THIRTEEN.iter().filter(|(raw, _)| *raw != "DVD_VIDEO") {
+        for (raw, cleaned, _) in THIRTEEN.iter().filter(|(raw, _, _)| *raw != "DVD_VIDEO") {
             assert!(!is_generic(raw, cleaned), "{raw}");
         }
         assert!(!is_generic("Pan's Labyrinth", &clean("Pan's Labyrinth")));
@@ -729,23 +796,23 @@ mod tests {
 
     #[test]
     fn the_thirteen_names_give_this_evidence() {
-        // (raw, cleaned, season, disc, generic, season marker)
-        let expected: [(&str, &str, Option<u32>, Option<u32>, bool, bool); 13] = [
-            ("JOHN_WICK_UHD", "JOHN WICK", None, None, false, false),
-            ("JOHN_WICK", "JOHN WICK", None, None, false, false),
-            ("KNOWING", "KNOWING", None, None, false, false),
-            ("SMILE", "SMILE", None, None, false, false),
-            ("EXPENDABLES_3", "EXPENDABLES 3", None, None, false, false),
-            ("CHERNOBYL_D1", "CHERNOBYL", None, Some(1), false, false),
-            ("CHERNOBYL_D2", "CHERNOBYL", None, Some(2), false, false),
-            ("FIREFLY_D1", "FIREFLY", None, Some(1), false, false),
-            ("FIREFLY_D2", "FIREFLY", None, Some(2), false, false),
-            ("PANS_LABYRINTH", "PANS LABYRINTH", None, None, false, false),
-            ("EXAMPLE SHOW S3D3", "EXAMPLE SHOW", Some(3), Some(3), false, true),
-            ("EXAMPLE_FILM", "EXAMPLE FILM", None, None, false, false),
-            ("DVD_VIDEO", "VIDEO", None, None, true, false),
+        // (raw, cleaned, tagged (H1), season, disc, generic, season marker)
+        let expected: [(&str, &str, &str, Option<u32>, Option<u32>, bool, bool); 13] = [
+            ("JOHN_WICK_UHD", "JOHN WICK", "JOHN WICK UHD", None, None, false, false),
+            ("JOHN_WICK", "JOHN WICK", "JOHN WICK", None, None, false, false),
+            ("KNOWING", "KNOWING", "KNOWING", None, None, false, false),
+            ("SMILE", "SMILE", "SMILE", None, None, false, false),
+            ("EXPENDABLES_3", "EXPENDABLES 3", "EXPENDABLES 3", None, None, false, false),
+            ("CHERNOBYL_D1", "CHERNOBYL", "CHERNOBYL", None, Some(1), false, false),
+            ("CHERNOBYL_D2", "CHERNOBYL", "CHERNOBYL", None, Some(2), false, false),
+            ("FIREFLY_D1", "FIREFLY", "FIREFLY", None, Some(1), false, false),
+            ("FIREFLY_D2", "FIREFLY", "FIREFLY", None, Some(2), false, false),
+            ("PANS_LABYRINTH", "PANS LABYRINTH", "PANS LABYRINTH", None, None, false, false),
+            ("EXAMPLE SHOW S3D3", "EXAMPLE SHOW", "EXAMPLE SHOW", Some(3), Some(3), false, true),
+            ("EXAMPLE_FILM", "EXAMPLE FILM", "EXAMPLE FILM", None, None, false, false),
+            ("DVD_VIDEO", "VIDEO", "DVD VIDEO", None, None, true, false),
         ];
-        for (raw, cleaned, season, disc, generic, season_marker) in expected {
+        for (raw, cleaned, kept, season, disc, generic, season_marker) in expected {
             assert_eq!(
                 disc_name(None, Some(raw)),
                 Some(DiscName {
@@ -754,6 +821,7 @@ mod tests {
                     season,
                     disc,
                     cleaned: cleaned.to_string(),
+                    tagged: kept.to_string(),
                     generic,
                     season_marker,
                 }),
@@ -772,6 +840,7 @@ mod tests {
                 season: None,
                 disc: None,
                 cleaned: "Pan's Labyrinth".to_string(),
+                tagged: "Pan's Labyrinth".to_string(),
                 generic: false,
                 season_marker: false,
             })
@@ -815,7 +884,7 @@ mod tests {
         let text = serde_json::to_string(&name).unwrap();
         assert_eq!(
             text,
-            r#"{"raw":"EXAMPLE SHOW S3D3","source":"volume_label","season":3,"disc":3,"cleaned":"EXAMPLE SHOW","generic":false,"season_marker":true}"#
+            r#"{"raw":"EXAMPLE SHOW S3D3","source":"volume_label","season":3,"disc":3,"cleaned":"EXAMPLE SHOW","tagged":"EXAMPLE SHOW","generic":false,"season_marker":true}"#
         );
         assert_eq!(serde_json::from_str::<DiscName>(&text).unwrap(), name);
     }
