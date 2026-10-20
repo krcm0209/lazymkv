@@ -606,14 +606,15 @@ fn plausible_results<'a>(
 }
 
 /// The results plausible for the disc's own name (spec 8.1, ruling H1): when the name with its tags kept differs from
-/// the cleaned name and some result matches it, only those results (the more specific name wins: `PIRANHA_3D` is
-/// Piranha 3D, not Piranha); otherwise the results matching the cleaned name. Writes one evidence sentence.
+/// the cleaned name once both are folded (`name::fold_name`, so `(US)` and `US` are one name) and some result matches
+/// it, only those results (the more specific name wins: `PIRANHA_3D` is Piranha 3D, not Piranha); otherwise the results
+/// matching the cleaned name. Writes one evidence sentence.
 fn plausible_by_name<'a>(
     search: &'a tmdb::TmdbSearch,
     disc_name: &name::DiscName,
     evidence: &mut Vec<String>,
 ) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
-    if disc_name.tagged != disc_name.cleaned {
+    if name::fold_name(&disc_name.tagged) != name::fold_name(&disc_name.cleaned) {
         let found = plausible_for(search, &disc_name.tagged);
         if !found.is_empty() {
             evidence.push(plausible_sentence(&found, search, Some(&disc_name.tagged)));

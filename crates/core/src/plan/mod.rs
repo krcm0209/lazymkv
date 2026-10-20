@@ -101,9 +101,10 @@ fn file_stem(source_file: &str) -> &str {
 #[serde(rename_all = "snake_case", tag = "role")]
 pub enum PlannedRole {
     /// A feature or cut (8.3, 8.4); `edition` is the name `movie::edition_names` gives it; `theatrical` is the planner's
-    /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (8.3 rule 2's Other suffix,
-    /// edition None; also rule 1's Java-labelled cut that TheDiscDB does not list, OR5) and for one of two or more
-    /// structural rivals, which keep no edition until the owner names them.
+    /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (edition None: rule 2's Other
+    /// suffix, a later TheDiscDB main movie with no edition (c1:F1), a Java-labelled cut TheDiscDB does not list (OR5),
+    /// and a main movie with an Other or absent label beside such a cut (H2)) and for one of two or more structural
+    /// rivals, which keep no edition until the owner names them.
     Feature { edition: Option<String>, theatrical: bool },
     /// An episode title (8.5).
     Episode(Episode),

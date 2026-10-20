@@ -1217,6 +1217,15 @@ fn a_name_without_tags_is_matched_by_its_cleaned_name_as_before() {
     let identity = identify(&inputs, Kind::Movie, &features(&[6900]), &Settings::default());
     assert_eq!((identity.tmdb, identity.plausible), (Some(movie(5501)), vec![movie(5501)]));
     assert_eq!(identity.evidence[1], "1 of 2 search results are plausible: movie 5501");
+    // `(US)` cleans to `US` and keeps `(US)` with its tags: one name once folded, so the cleaned name decides and the
+    // evidence does not speak of the name with its tags kept.
+    let bracketed = label("(US)");
+    assert_eq!((bracketed.cleaned.as_str(), bracketed.tagged.as_str()), ("US", "(US)"));
+    let us = search(&[("movie", 5503, "Us", "Us", "2019-03-22")]);
+    let inputs = LookupInputs { name: Some(&bracketed), search: Some(&us), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6960]), &Settings::default());
+    assert_eq!(identity.plausible, vec![movie(5503)]);
+    assert_eq!(identity.evidence[1], "1 of 1 search results are plausible: movie 5503");
 }
 
 #[test]
