@@ -38,24 +38,31 @@ pub enum Suffix {
     Other(String),
 }
 
-/// One parsed FPL_MainFeature label (8.3 rule 2): the scan title it is on, its suffix, and the three-letter language code
-/// split off its end (lower-cased). Def: T5. Use: T5.
+/// One parsed FPL_MainFeature label (8.3 rule 2): the scan title it is on, its suffix, the three-letter language code
+/// split off its end (lower-cased), and whether a `Narrative` token followed another suffix (`_UR_Narrative`: the UR
+/// cut's audio-description variant, ruling G5). Def: T5. Use: T5.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Label {
     pub title: u32,
     pub suffix: Suffix,
     pub language: Option<String>,
+    /// A trailing `Narrative` token after another suffix (G5); the bare `FPL_MainFeature_Narrative` is
+    /// `Suffix::Narrative` with this false.
+    pub narrative: bool,
 }
 
 /// A title comment (attribute 49) starting `FPL_MainFeature` (optionally preceded by `SEG_` or `SEG `): its suffix, with a
-/// trailing `_XXX` three-letter language code split off as `language`. None for any other comment. One `_` after the prefix
-/// is dropped; `R`, `UR`, `EXT` and `Narrative` are compared ignoring ASCII case; a three-letter code counts when it is one
-/// of `lang::ISO639`'s. Def: T5. Use: T5.
+/// trailing `_XXX` three-letter language code split off as `language`, then a trailing `_Narrative` token (any ASCII
+/// case) after another suffix split off as `narrative` (8.3 rule 2's table, ruling G5: `FPL_MainFeature_UR_Narrative`
+/// is suffix UR with `narrative` true). None for any other comment. One `_` after the prefix is dropped; `R`, `UR`,
+/// `EXT` and `Narrative` are compared ignoring ASCII case; a three-letter code counts when it is one of
+/// `lang::ISO639`'s. Def: T5. Use: T5.
 pub fn parse_label(title: u32, comment: &str) -> Option<Label> {
     let text = comment.strip_prefix("SEG_").or_else(|| comment.strip_prefix("SEG ")).unwrap_or(comment);
     let rest = text.strip_prefix(LABEL_PREFIX)?;
     let rest = rest.strip_prefix('_').unwrap_or(rest);
     let (body, language) = split_language(rest);
+    let (body, narrative) = split_narrative(body);
     let suffix = match body.to_ascii_lowercase().as_str() {
         "" => match &language {
             Some(code) => Suffix::Language(code.clone()),
@@ -67,7 +74,16 @@ pub fn parse_label(title: u32, comment: &str) -> Option<Label> {
         "narrative" => Suffix::Narrative,
         _ => Suffix::Other(body.to_string()),
     };
-    Some(Label { title, suffix, language })
+    Some(Label { title, suffix, language, narrative })
+}
+
+/// The suffix without a trailing `_Narrative` token (any ASCII case) and whether it had one (G5); the bare `Narrative`
+/// suffix has no `_` before it and stays whole.
+fn split_narrative(body: &str) -> (&str, bool) {
+    match body.rfind('_') {
+        Some(at) if body[at + 1..].eq_ignore_ascii_case("narrative") => (&body[..at], true),
+        _ => (body, false),
+    }
 }
 
 /// The suffix without its trailing language code, and that code lower-cased: the whole suffix when it is a code, else the
@@ -360,7 +376,8 @@ fn find_word_ignoring_ascii_case(haystack: &str, needle: &str) -> Option<usize> 
 
 /// Rule 2: only when `disc.java_in_use`; labels grouped by suffix without the language code, one cut per group, in order of
 /// each cut's lowest title number; within a cut the variant whose audio covers the most of `wanted`'s languages, then the
-/// one without a language suffix, then the lower title number; Narrative variants ignored. Exactly one cut 0.90; several
+/// one without a language suffix, then the lower title number; Narrative variants ignored (the `_Narrative` suffix, and
+/// a trailing Narrative token after another suffix, `Label.narrative`, ruling G5). Exactly one cut 0.90; several
 /// with recognised suffixes 0.90 as editions, except that two cuts given the same edition name (the `none` and `_R` rows
 /// are both "Theatrical Cut") make it 0.60 with title_ambiguous (Review Focus 8); any Other suffix 0.60 with unnamed_cut.
 /// None when no label is found. When Java was not reported, returns None and plan::plan adds the note
@@ -373,7 +390,7 @@ pub fn by_labels(disc: &Disc, wanted: &Wanted) -> Option<MoviePlan> {
         .titles
         .values()
         .filter_map(|title| parse_label(title.number, title.comment.as_deref()?).map(|label| (label, title)))
-        .filter(|(label, _)| label.suffix != Suffix::Narrative)
+        .filter(|(label, _)| label.suffix != Suffix::Narrative && !label.narrative)
         .collect();
     if labels.is_empty() {
         return None;
@@ -720,9 +737,9 @@ mod tests {
         parse_label(7, comment)
     }
 
-    /// The label `label` should give.
+    /// The label `label` should give, with no trailing Narrative token.
     fn expected(suffix: Suffix, language: Option<&str>) -> Option<Label> {
-        Some(Label { title: 7, suffix, language: language.map(str::to_string) })
+        Some(Label { title: 7, suffix, language: language.map(str::to_string), narrative: false })
     }
 
     #[test]
@@ -754,6 +771,21 @@ mod tests {
     fn the_narrative_suffix_is_an_audio_description_variant_with_no_edition() {
         assert_eq!(label("FPL_MainFeature_Narrative"), expected(Suffix::Narrative, None));
         assert_eq!(edition_of(&Suffix::Narrative), None);
+    }
+
+    #[test]
+    fn a_trailing_narrative_token_is_the_audio_description_variant_of_its_cut() {
+        // G5: `_UR_Narrative` is the UR cut's audio-description variant, read as the language code is split off.
+        assert_eq!(label("FPL_MainFeature_UR_Narrative"), Some(Label { title: 7, suffix: Suffix::Ur, language: None, narrative: true }));
+        assert_eq!(label("FPL_MainFeature_ur_NARRATIVE"), Some(Label { title: 7, suffix: Suffix::Ur, language: None, narrative: true }));
+        // The language code is split off first, so it may follow the Narrative token.
+        assert_eq!(
+            label("FPL_MainFeature_UR_Narrative_JPN"),
+            Some(Label { title: 7, suffix: Suffix::Ur, language: Some("jpn".to_string()), narrative: true })
+        );
+        // The bare suffix keeps its own row, and so does its dub variant.
+        assert_eq!(label("FPL_MainFeature_Narrative"), expected(Suffix::Narrative, None));
+        assert_eq!(label("FPL_MainFeature_Narrative_JPN"), expected(Suffix::Narrative, Some("jpn")));
     }
 
     #[test]
@@ -798,11 +830,11 @@ mod tests {
         assert_eq!(
             labels_of(&pinned(EXPENDABLES)),
             vec![
-                Label { title: 41, suffix: Suffix::Ur, language: None },
-                Label { title: 54, suffix: Suffix::R, language: None },
+                Label { title: 41, suffix: Suffix::Ur, language: None, narrative: false },
+                Label { title: 54, suffix: Suffix::R, language: None, narrative: false },
             ]
         );
-        assert_eq!(labels_of(&pinned(SMILE)), vec![Label { title: 14, suffix: Suffix::None, language: None }]);
+        assert_eq!(labels_of(&pinned(SMILE)), vec![Label { title: 14, suffix: Suffix::None, language: None, narrative: false }]);
     }
 
     /// One feature as the rules build it.
@@ -1022,6 +1054,11 @@ mod tests {
         ]);
         let plan = by_database(&one, &main_is_title_1, &own, &english, &Settings::default()).expect("rule 1 applies");
         assert_eq!(plan.features, vec![feature(1, None, true, &[])]);
+        assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]));
+        // G5: a Narrative token after the main movie's own suffix marks its audio-description variant, no second cut.
+        let narrated = java_disc(&[(1, "FPL_MainFeature_UR", &[ENG_AC3]), (3, "FPL_MainFeature_UR_Narrative", &[ENG_AC3])]);
+        let plan = by_database(&one, &main_is_title_1, &narrated, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(1, Some("Unrated Cut"), false, &[])]);
         assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]));
         // Labels are trusted only when Java is in use (9.4): without MSG:3344 the labelled title 0 is not a second cut.
         let plain = by_database(&one, &main_is_title_1, &two_titles(false, "FPL_MainFeature_R"), &english, &Settings::default()).expect("rule 1 applies");
