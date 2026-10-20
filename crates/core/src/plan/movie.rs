@@ -178,8 +178,9 @@ pub struct Feature {
     /// True when `edition` is None or names the theatrical cut (contains the word Theatrical; `is_theatrical`), except an
     /// unnamed cut (rule 2's Other label suffix, a later TheDiscDB MainMovie with no edition, or a Java-labelled cut
     /// TheDiscDB does not list, OR5), which has edition None and theatrical false. A rule 1 main movie whose own label
-    /// suffix is Other has edition None and stays theatrical unless it is a later main movie (c1:F1). Spec 8.3, 8.4;
-    /// ruling G9.
+    /// suffix is Other, or which carries no label, has edition None and stays theatrical unless it is a later main movie
+    /// (c1:F1) or a cut TheDiscDB does not list is planned beside it, which leaves it unnamed too, so the owner names
+    /// both (ruling H2). Spec 8.3, 8.4; rulings G9 and H2.
     pub theatrical: bool,
     /// The titles of its group (rule 3) or cut (rule 2) that were not chosen.
     pub siblings: Vec<u32>,
@@ -220,7 +221,11 @@ pub struct MoviePlan {
 /// own label suffix, its dub variants and a Narrative variant belong to its cut and name no second one. Ruling G4: a
 /// cut whose chosen title and every sibling fail the 8.2 candidate filter (`kind::candidate_filter(disc, settings)`: a
 /// menu loop, a title shorter than `settings.minlength_s` or without a duration) is not planned, with no note and no
-/// evidence; `settings.minlength_s` is the only setting read. Def: T5. Use: T5, T7.
+/// evidence; `settings.minlength_s` is the only setting read. Ruling H2 (2026-10-19): when such a cut is planned, a
+/// main movie whose edition is None because its own label suffix is Other or it carries no label is marked theatrical
+/// false, with an evidence sentence, so `edition_names` gives it no "Theatrical Cut" and the owner names both cuts; a
+/// main movie the label table names "Theatrical Cut" (the bare `FPL_MainFeature` and `_R` rows) stays theatrical, and
+/// without an unlisted cut the Task 5 ruling stands. Def: T5. Use: T5, T7.
 pub fn by_database(
     record: &DiscDbRecord,
     matches: &BTreeMap<u32, u32>,
@@ -237,12 +242,16 @@ pub fn by_database(
     let mut feature_seconds = Vec::new();
     let mut evidence = Vec::new();
     let mut unnamed = false;
+    // H2: the main movies (by position) whose edition is None because they carry no label or their own label suffix is
+    // Other; beside an unlisted cut they are left unnamed too.
+    let mut nameless = Vec::new();
     for (position, main_movie) in main_movies.iter().enumerate() {
         let number = *matches.get(&main_movie.index)?;
         let title = disc.titles.get(&number)?;
         evidence.push(format!("TheDiscDB's main movie {} is scan title {number}", main_movie.index));
         let item_title = main_movie.item.as_ref().map_or("", |item| item.title.as_str());
         let mut edition = item_edition(item_title, media_title);
+        let mut suffix = None;
         if let Some(name) = &edition {
             evidence.push(format!("edition '{name}' from TheDiscDB's item title '{item_title}'"));
         } else if disc.java_in_use {
@@ -252,8 +261,12 @@ pub fn by_database(
                     if let Some(name) = &edition {
                         evidence.push(format!("edition '{name}' from the label {comment} of title {number}"));
                     }
+                    suffix = Some(label.suffix);
                 }
             }
+        }
+        if edition.is_none() && matches!(suffix, None | Some(Suffix::Other(_))) {
+            nameless.push(position);
         }
         let later_unnamed = position > 0 && edition.is_none();
         if later_unnamed {
@@ -280,6 +293,7 @@ pub fn by_database(
     // OR5: a labelled cut none of whose titles is a main movie's is one TheDiscDB does not list. It joins the plan as an
     // unnamed cut and holds the job for review, but the confidence above stays: it came from the main movies alone.
     let main_titles: BTreeSet<u32> = features.iter().map(|feature| feature.title).collect();
+    let main_count = features.len();
     let mut notes = Vec::new();
     if let Some(labelled) = by_labels(disc, wanted) {
         let candidates = candidate_filter(disc, settings);
@@ -309,6 +323,22 @@ pub fn by_database(
             features.push(Feature { title: number, edition: None, theatrical: false, siblings: cut.siblings });
             feature_seconds.push(seconds);
             reviews.push(ReviewReason::UnnamedCut);
+        }
+    }
+    // H2: beside an unlisted cut, a main movie whose own label names no edition (an Other suffix, or no label) is not
+    // the theatrical cut either: the owner names both. The bare `FPL_MainFeature` and `_R` rows named it "Theatrical
+    // Cut", so it is not among them.
+    if features.len() > main_count {
+        for position in nameless {
+            let feature = &mut features[position];
+            if feature.theatrical {
+                feature.theatrical = false;
+                evidence.push(format!(
+                    "scan title {} is a main movie with no edition name beside a cut TheDiscDB does not list, so it is \
+                     left unnamed too",
+                    feature.title
+                ));
+            }
         }
     }
     Some(MoviePlan {
@@ -1069,6 +1099,47 @@ mod tests {
         let unnamed_main = record(Some("Film"), &["Film"]);
         let plan = by_database(&unnamed_main, &main_is_title_1, &java_disc(&[(1, "FPL_MainFeature", &[ENG_AC3]), (2, "FPL_MainFeature_R", &[ENG_AC3])]), &english, &Settings::default()).expect("rule 1 applies");
         assert_eq!((plan.confidence, plan.reviews), (0.98, vec![ReviewReason::UnnamedCut]));
+    }
+
+    #[test]
+    fn beside_an_unlisted_cut_a_main_movie_whose_label_names_no_edition_is_left_unnamed_too() {
+        // H2: the main movie's own label suffix is Other (`_DC`) or it carries no label, so it has no edition; beside a
+        // cut TheDiscDB does not list it is no longer the theatrical cut, and the owner names both cuts.
+        let one = record(Some("Film"), &["Film"]);
+        let main_is_title_1 = BTreeMap::from([(0, 1)]);
+        let english = wanted_languages(None);
+        let other = java_disc(&[(1, "FPL_MainFeature_DC", &[ENG_AC3]), (2, "FPL_MainFeature", &[ENG_AC3])]);
+        let unlabelled = java_disc(&[(1, "", &[ENG_AC3]), (2, "FPL_MainFeature_R", &[ENG_AC3])]);
+        for disc in [&other, &unlabelled] {
+            let plan = by_database(&one, &main_is_title_1, disc, &english, &Settings::default()).expect("rule 1 applies");
+            assert_eq!(plan.features, vec![feature(1, None, false, &[]), feature(2, None, false, &[])]);
+            assert_eq!((plan.confidence, plan.reviews.clone()), (0.98, vec![ReviewReason::UnnamedCut]));
+            assert_eq!(plan.notes.iter().map(|noted| noted.note).collect::<Vec<Note>>(), vec![Note::UnlistedLabelCut]);
+            let unnamed = "scan title 1 is a main movie with no edition name beside a cut TheDiscDB does not list, so it is \
+                           left unnamed too";
+            assert!(plan.evidence.contains(&unnamed.to_string()), "{:?}", plan.evidence);
+            assert_eq!(edition_names(&plan.features, &LibraryFacts::default()), names(&[None, None]));
+        }
+        // A main movie whose label is the bare `FPL_MainFeature` or `_R` row is named "Theatrical Cut" by the label table
+        // and stays the theatrical cut beside an unlisted one.
+        for main_label in ["FPL_MainFeature", "FPL_MainFeature_R"] {
+            let disc = java_disc(&[(1, main_label, &[ENG_AC3]), (2, "FPL_MainFeature_UR", &[ENG_AC3])]);
+            let plan = by_database(&one, &main_is_title_1, &disc, &english, &Settings::default()).expect("rule 1 applies");
+            assert_eq!(
+                plan.features,
+                vec![feature(1, Some("Theatrical Cut"), true, &[]), feature(2, None, false, &[])],
+                "{main_label}"
+            );
+            assert_eq!(
+                edition_names(&plan.features, &LibraryFacts::default()),
+                names(&[Some("Theatrical Cut"), None]),
+                "{main_label}"
+            );
+        }
+        // Without an unlisted cut the Task 5 ruling stands: the main movie with an Other suffix stays theatrical.
+        let alone = java_disc(&[(1, "FPL_MainFeature_DC", &[ENG_AC3])]);
+        let plan = by_database(&one, &main_is_title_1, &alone, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(1, None, true, &[])]);
     }
 
     #[test]
