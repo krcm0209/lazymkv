@@ -386,8 +386,8 @@ as Task 5 in OR5, is the phase 1 plan's.
   whole label is kept (`US` is the film Us). SR2 settles the scope: the whole-label rule applies to a single-token label
   that is a region tag (`US`, `UK`, `EU`, `WW`, `DOM`, `INT`, `R1` to `R6`), with its brackets stripped (`(US)` gives
   `US`); a format tag that is the whole label (`UHD`, `DVD`, `BLU-RAY`, `3D`) still cleans to nothing and stays generic;
-  a label of two or more tag tokens cleans to nothing. `S1M0NE`, `BLADE_RUNNER_2049` and `D2_THE_MIGHTY_DUCKS` stay as
-  they are.
+  a label of two or more tag tokens cleans to nothing (superseded by G8 and G8a: `US_UHD` is the film Us). `S1M0NE`,
+  `BLADE_RUNNER_2049` and `D2_THE_MIGHTY_DUCKS` stay as they are.
 - OR7. The object-audio spellings (`Atmos`, `DTS:X`) stay provisional until experiment 6 runs. No change.
 - OR8. RP27's four note names are confirmed: `possible_audio_description`, `lossy_before_lossless`,
   `direct_mode_fallback`, `label_rule_unavailable`; the spec names them (the rulings plan's Task 4).
@@ -590,7 +590,7 @@ At `666fc16` (the merge of the port, where the decision core's branch starts) th
 After the fixes of the branch's final review the same command lists 1965: 1557 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the fixes of the review of pull request #3 (F1 to F15) the same command lists 1986: 1578 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the rulings pull request the same command lists 2030: 1617 in `lazymkv-core`, 402 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
-After the fixes of the review of pull request #4 (G1 to G15) the same command lists 2037: 1623 in `lazymkv-core`, 403 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
+After the fixes of the review of pull request #4 (G1 to G15 and G8a) the same command lists 2038: 1624 in `lazymkv-core`, 403 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test compiled only on Unix is not.
 
 Design spec 15 asks for a test of every rule of section 8 for its normal case and for each guard, review reason and

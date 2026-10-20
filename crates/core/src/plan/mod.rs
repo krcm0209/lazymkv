@@ -2284,6 +2284,46 @@ mod tests {
     }
 
     #[test]
+    fn a_thediscdb_movies_sole_play_all_shaped_feature_is_not_held() {
+        // F4 beside G1: the feature (title 3, segments 1,2) plays an 80-minute body clip and a 10-minute credits clip
+        // that MakeMKV also lists (titles 1 and 2). The body clip is not within 10% of the feature, so title 3 is rule
+        // 3's one rival, and it is 8.5's play-all shape. TheDiscDB knows the disc as a movie (its record lists no
+        // title), so the feature is an ordinary rival at 0.85; without TheDiscDB, G1 holds the same plan at 0.60.
+        let disc = made_disc(
+            false,
+            "FILM_DISC",
+            &[
+                made(1, "1:20:00", "16", "00001.m2ts", "1", "24000000000", "", ENG),
+                made(2, "0:10:00", "1", "00002.m2ts", "2", "3000000000", "", ENG),
+                made(3, "1:30:00", "17", "00800.mpls", "1,2", "27000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let record: DiscDbRecord = serde_json::from_value(json!({
+            "media": {"title": "Film", "year": 2010, "type": "Movie", "external_ids": {"tmdb": "77"}},
+            "titles": []
+        }))
+        .unwrap();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let known = LookupInputs { name: name.as_ref(), discdb_by_fingerprint: Some(&record), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, known, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Discdb));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![3]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(!plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(!plan.evidence.sentences.contains(&held_play_all_sentence(3)), "{:?}", plan.evidence.sentences);
+        // The same disc without TheDiscDB: G1 holds it.
+        let unknown = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, unknown, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![3]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert!(plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(plan.evidence.sentences.contains(&held_play_all_sentence(3)), "{:?}", plan.evidence.sentences);
+    }
+
+    #[test]
     fn smiles_feature_is_not_a_play_all_so_it_stays_at_0_85_without_thediscdb() {
         // G1's hold reads 8.5's dropped titles only: SMILE's extras play-all is dropped, but its feature is not a
         // play-all, so rule 3 keeps it at 0.85 in Direct mode. SMILE's scan reports Java, which would let its label
