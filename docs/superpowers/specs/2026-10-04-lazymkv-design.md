@@ -245,7 +245,7 @@ If the copy fails on a read error, the job fails with `MediaReadError`. When the
 
 - TheDiscDB is queried at `https://thediscdb.com/api/discid/{id}` (returns an array) and `https://thediscdb.com/api/dischash/{hash}` (returns one object); both are anonymous. A match supplies a TMDb ID. If the entry has no TMDb ID, TMDb is searched with the entry's title and year.
 - The TMDb record is fetched with its external IDs and supplies title, year, original language, runtime, the IMDb and TVDB IDs and, for TV, seasons and episodes with runtimes.
-- The disc's own name is the `bdmt` disc name, else the volume label. Before cleaning, a season number and a disc number are parsed from it and kept as evidence. Cleaning replaces underscores with spaces and removes disc numbers (`DISC 1`, `D1`), season markers, region and format tags (`3D` and `S3D`, stereoscopic, are format tags, neither a season nor a disc number; a region tag that is the whole name is kept, since a disc labelled `US` is the film Us: ruling OR6, 2026-10-17), and trailing years.
+- The disc's own name is the `bdmt` disc name, else the volume label. Before cleaning, a season number and a disc number are parsed from it and kept as evidence. Cleaning replaces underscores with spaces and removes disc numbers (`DISC 1`, `D1`), season markers, region and format tags (`3D` and `S3D`, stereoscopic, are format tags, neither a season nor a disc number; a region tag that cleaning leaves alone, with nothing else of letters, is the name: `US`, `US_UHD`, `US_2019` are the film Us: rulings OR6, 2026-10-17, and G8, 2026-10-19), and trailing years.
 - A TMDb search result is plausible when its title or original title equals the cleaned name after case-folding and removing punctuation. Only the first page of results is considered. Movies and TV are searched together, and a TMDb identity is always the pair of kind and ID, because the two kinds number their records separately.
 - A generic or placeholder name (for example `DVD_VIDEO`, `DISC_1`, `LOGICAL_VOLUME_ID`, `VOLUME_SET_ID`, or a name with no letters) is never searched; identity is then step 6.
 - Runtime check for movies: at least one planned feature or cut (8.3, 8.4), or the longest rival when none is planned, is within 3% of the TMDb runtime. For TV: the median episode runtime of the parsed season (of the whole series when no season was parsed) is within 15% of the median duration of the disc's episode-length groups (8.2).
@@ -269,7 +269,7 @@ At planning time nothing has been ripped, so any use of the audio ranking in 8.6
 
 First applicable rule:
 
-1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98. When the scan reported a Java runtime in use, a labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too, as an unnamed cut (its variant chosen with English only and not chosen again once the original language is known, SR3) that gets no edition name whatever its label's suffix, with the review reason `unnamed_cut` and the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles; the title confidence stays 0.98 (ruling OR5, 2026-10-17; D2). Two main movies that would be filed under one edition name give 0.60 with the review reason `title_ambiguous` instead (ruling OR2, 2026-10-17).
+1. **Database.** TheDiscDB marks the main movie and it reconciles with the scan: title confidence 0.98. When the scan reported a Java runtime in use, a labelled cut (rule 2's grouping) none of whose titles is a main movie's scan title is planned too (a labelled cut whose titles the candidate filter of 8.2 excludes is not planned: ruling G4, 2026-10-19), as an unnamed cut (its variant chosen with English only and not chosen again once the original language is known, SR3) that gets no edition name whatever its label's suffix, with the review reason `unnamed_cut` and the note `unlisted_label_cut` naming the title and its label, so the owner names it with Assign titles; the title confidence stays 0.98 (ruling OR5, 2026-10-17; D2). Two main movies that would be filed under one edition name give 0.60 with the review reason `title_ambiguous` instead (ruling OR2, 2026-10-17).
 2. **Labels.** Used only when the scan reported a Java runtime in use. Not yet verified (EXP-12-java-labels.md: not answered, leaning no): on a UHD with Java menus, with Java 8 installed and MakeMKV's `app_Java` unset, the scan printed no `3344` and no label; setting `app_Java` to the installed Java is the one change left to try. If no later UHD shows labels, this rule is unavailable and titles are chosen by database and structure only (section 17, row 12). A label is a title comment that starts `FPL_MainFeature` (optionally preceded by `SEG_`). Its suffix is read from this table:
 
    | Suffix | Meaning | Edition name |
@@ -278,7 +278,7 @@ First applicable rule:
    | `_R` | theatrical cut (observed on one disc) | Theatrical Cut |
    | `_UR` | unrated cut | Unrated Cut |
    | `_EXT` | extended cut | Extended Cut |
-   | `_Narrative` | audio-description variant: ignored | |
+   | `_Narrative` | audio-description variant: ignored (also as a trailing token after another suffix: `_UR_Narrative`; ruling G5, 2026-10-19) | |
    | a trailing language code such as `_JPN` | dub variant of the same cut | |
    | anything else | an unnamed cut | |
 
@@ -295,7 +295,7 @@ First applicable rule:
    2. Keep groups at least `feature_min_minutes` long (default 45). If none, keep the longest group.
    3. Call a kept group a rival if its duration is within 10% of the longest kept group's. Shorter groups are extras and are ignored.
    4. Within each rival group, choose the title to rip: the one with chapters (R2); then the one whose audio and subtitle streams are a superset of every other title's in the group. If no title is such a superset (the titles carry different audio), the group is ambiguous: 0.60, review reason `title_ambiguous`.
-   5. One rival: it is the feature, 0.85.
+   5. One rival: it is the feature, 0.85, unless that one feature is itself a play-all of other titles (8.5's reading), which holds the plan at 0.60 with the review reason `title_ambiguous` (ruling G1, 2026-10-19); a disc TheDiscDB knows as a movie is exempt (F4).
    6. Several rivals. The segment difference of two maps is the number of segments in exactly one of them divided by the length of the longer. If every pair of rivals differs by at most 0.25, they are cuts or decoys that cannot be told apart without rule 1 or 2: 0.60, review reason `title_ambiguous`.
    7. Otherwise the rivals are largely different content: 0.60, review reason `multiple_features`.
 4. **Runtime sanity.** Once TMDb is known, a feature chosen by rule 3 whose duration is more than 10% from the TMDb runtime drops to 0.60 with `title_ambiguous`.
@@ -574,7 +574,7 @@ Resuming after a restart: `Ripping` and `Extracting` empty the title's directory
 | `NeedsNetwork` | MakeMKV cannot fetch a key it needs for this disc | `AwaitingNetwork` |
 | `Output` | share unreachable, out of space, or a write error (the messages of a share drop are not yet verified: EXP-04: not run) | `AwaitingShare` or `AwaitingSpace` |
 | `LookupUnavailable` | TheDiscDB or TMDb unreachable | `AwaitingLookup` |
-| `ToolMissing` | a required program is not found or too old | `AwaitingTool`. Without `mkvmerge` no disc is started. Without `ffprobe` the disc phase runs and the file phase waits. Without Java, or when MakeMKV did not report using it, label rule 8.3.2 does not apply and, when the movie planner reached rule 2 (not on a DVD, which carries no labels), the note `label_rule_unavailable` records why; on the one UHD with Java menus recorded, MakeMKV did not report it with Java 8 installed (EXP-12, not answered) |
+| `ToolMissing` | a required program is not found or too old | `AwaitingTool`. Without `mkvmerge` no disc is started. Without `ffprobe` the disc phase runs and the file phase waits. Without Java, or when MakeMKV did not report using it, label rule 8.3.2 does not apply and the note `label_rule_unavailable` records why: the planner records it when the movie planner reached rule 2 (not on a DVD, which carries no labels), and the job reducer records it on a missing-Java event whatever the plan (10.1; ruling G7, 2026-10-19); on the one UHD with Java menus recorded, MakeMKV did not report it with Java 8 installed (EXP-12, not answered) |
 | `Unknown` | anything else, including a `makemkvcon` run that exits without its completion message (9.2, D18), except the copy's scan of 6.3 step 6a | `Failed`, with the full log and the exit code attached |
 
 When a title fails, the staging share's reachability and any write error are checked first: those make it `Output`. Only a failure with the share healthy and read errors seen is `MediaReadError`.

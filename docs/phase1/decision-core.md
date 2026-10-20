@@ -410,7 +410,9 @@ overturn any of them.
 
 - SR1. Rule 3.1's parts are each checked against the 8.2 band; the whole group's length and the parts' mutual spread are
   not checked.
-- SR2. The whole-label rule's scope, as written under OR6.
+- SR2. The whole-label rule's scope, as written under OR6. Superseded by G8 (the owner, 2026-10-19): when exactly one
+  token of the name is a region tag and nothing kept holds a letter, that tag is the name, so `US_UHD`, `US_2019` and
+  `US_D1` give `US`.
 - SR3. `by_database` takes `wanted: &Wanted` (the languages `movie_plan` already holds) so the unlisted cut's variant is
   chosen as rule 2 chooses it; no second pass with the original language for rule 1 plans; so a rule 1 plan's unlisted
   cut keeps the variant chosen with English only, and for a non-English film its original-language variant may need
@@ -428,7 +430,7 @@ overturn any of them.
   (display name, extension, layout, as `TrueHD Atmos 7.1`).
 - SR8. `lazymkv-dev plan`: a `--tmdb-record` file clears the pending flag a failed TMDb lookup set (the option replaces
   the recording's record); `--tmdb-search` does not (a different lookup); a failed TheDiscDB lookup keeps the job
-  pending.
+  pending. Narrowed by G3 (the owner, 2026-10-19): only a record of the planned identity clears it.
 - SR9. `TEXT_HINT` has one definition, `pub const` in `core::subtitle::labels` (its harness text already carries it);
   the dev crate uses it.
 
@@ -447,6 +449,51 @@ The controller made these rulings while executing the rulings plan.
 - Open for the owner: under OR6 a title containing `3D` (`PIRANHA_3D`, `STEP_UP_3D`) now cleans to the bare title, so
   TMDb's "Piranha 3D" is not a plausible result and identity rests on the runtime check against the same-named film; a
   remedy would let plausibility also accept the name with its format tags kept.
+
+### The review of pull request #4
+
+The review of pull request krcm0209/lazymkv#4 posted fifteen comments; the owner ruled on G1, G3, G7 and G8 and the
+controller applied the rest as written (G1 to G15). The owner may overturn any of them.
+
+- G1 (the owner). On a disc TheDiscDB does not know as a movie, rule 3's one feature that is itself a play-all of other
+  titles (8.5's reading: a concatenation of two or more other groups' maps, any parts) is held at 0.60 with
+  `title_ambiguous`, so the disc is copied whole: a play-all of short parts, or an extras play-all longer than the film,
+  is no longer ripped as the feature at 0.85 in Direct mode. F4 keeps a TheDiscDB movie's play-all-shaped feature an
+  ordinary rival. Left to the owner: two episodes more than 10% apart beside an extras play-all still rip the longer one
+  at 0.85 in Direct mode (Chernobyl disc 2 is held only because its two episodes are rivals).
+- G2. `kind::structure_says_tv` compares in integers (`longest * 100 <= shortest * 115`), so a pair exactly 15% apart
+  (1300 s and 1495 s) is TV; `TV_SPREAD` became `TV_SPREAD_PERCENT` (15).
+- G3 (the owner). `lazymkv-dev plan` clears the pending flag of a failed TMDb lookup for a `--tmdb-record` only when the
+  record's identity is the planned one; otherwise it plans a second time with the flag the lookups set. Without
+  TheDiscDB's answer the plan has no TMDb identity, so a given record then leaves the TMDb lookup pending too.
+- G4. Rule 1 does not plan an unlisted labelled cut whose chosen title and every sibling fail the 8.2 candidate filter
+  (a menu loop, a title shorter than `minlength_s` or without a duration); `movie::by_database` takes the settings.
+- G5. `movie::parse_label` reads a trailing `Narrative` token after another suffix (`FPL_MainFeature_UR_Narrative` is
+  the UR cut with `Label.narrative`), and rule 2's grouping drops it as it drops the bare `_Narrative` suffix, so it
+  names no unlisted cut.
+- G6. `SHOW_S3D_1` keeps OR6's reading: `S3D` is the format tag, so the name has no season marker or disc number and
+  cleans to `SHOW 1`, while `SHOW_S2D_1` is season 2, disc 1. Pinned as it is and listed for the owner.
+- G7 (the owner). Spec 10.2 widens back: the planner records `label_rule_unavailable` when the movie planner reached
+  rule 2 (not on a DVD), and the job reducer records it on a missing-Java event whatever the plan (10.1). No code
+  change.
+- G8 (the owner). The whole-label rule becomes general and supersedes SR2: when exactly one token of the raw name is a
+  region tag and nothing kept holds a letter, the name is that tag without its brackets (`US_UHD`, `US_2019`, `US_D1`
+  and `(US)` give `US`; `Us (2019)` gives `Us`). `US UK` and `UHD` still clean to nothing, and `THE UK FILES` gives
+  `THE FILES`. The `US_2019` owner question is answered.
+- G9. `Feature.theatrical`'s doc limits the Other suffix to rule 2 and says that a rule 1 main movie whose own label
+  suffix is Other has no edition and stays theatrical unless it is a later main movie (c1:F1).
+- G10. The `AVATAR 3D 2` assertion names the guard that holds: the D of the 3D tag starts no marker, even beside a
+  following number.
+- G11. `kind::is_episode_length` and `kind::play_all_of_episodes` name the rulings plan's Task 1 (OR1) as their
+  definition.
+- G12. `movie::by_database` drops its `unlisted` flag (each unlisted cut pushes `unnamed_cut` beside its note) and
+  expects the chosen title's label instead of defaulting to an empty one.
+- G13. The two tests of a tuning root inside the staging root are one,
+  `a_tuning_root_inside_the_staging_root_is_refused_whatever_keep_tuning_evidence_says`.
+- G14. The two play-all tests of `plan::tv` share one fixture, `two_play_all_groups`.
+- G15. `READING` (`subs-ocr`) has one definition, `pub const` in `core::subtitle::text`, beside the text rule that reads
+  it (`subtitle::labels` already depends on `subtitle::text`, so the constant sits below it), re-exported from
+  `subtitle::labels` beside `TEXT_HINT`; `decide`, `golden`, `subs` and `subtitle::text::load_title` use it.
 
 ## Choices the owner should confirm
 
@@ -540,6 +587,7 @@ At `666fc16` (the merge of the port, where the decision core's branch starts) th
 After the fixes of the branch's final review the same command lists 1965: 1557 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the fixes of the review of pull request #3 (F1 to F15) the same command lists 1986: 1578 in `lazymkv-core`, 397 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the rulings pull request the same command lists 2030: 1617 in `lazymkv-core`, 402 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
+After the fixes of the review of pull request #4 (G1 to G15) the same command lists 2037: 1623 in `lazymkv-core`, 403 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test compiled only on Unix is not.
 
 Design spec 15 asks for a test of every rule of section 8 for its normal case and for each guard, review reason and
