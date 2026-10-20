@@ -558,10 +558,21 @@ mod tests {
         assert_eq!(clean("AVATAR 3D"), "AVATAR");
         assert_eq!(clean("HUGO-S3D"), "HUGO");
         assert_eq!(clean("HUGO (3D)"), "HUGO");
-        assert_eq!(parse_disc_number("AVATAR 3D 2"), None, "the D of 3D does not reach across the token boundary");
+        assert_eq!(parse_disc_number("AVATAR 3D 2"), None, "the D of the 3D tag starts no marker, even beside a following number");
         // `S3D3` is not a tag: season 3, disc 3, as before.
         assert_eq!((parse_season("EXAMPLE SHOW S3D3"), parse_disc_number("EXAMPLE SHOW S3D3")), (Some(3), Some(3)));
         assert_eq!(clean("EXAMPLE SHOW S3D3"), "EXAMPLE SHOW");
+    }
+
+    #[test]
+    fn a_separator_split_s3d_marker_is_read_as_the_3d_tag() {
+        // OR6 reads `S3D` as the stereoscopic format tag wherever it stands, so `SHOW_S3D_1` has no season marker and no
+        // disc number, and cleans to `SHOW 1`; `SHOW_S2D_1` is season 2, disc 1 (listed for the owner, G6).
+        assert_eq!(parse_season("SHOW_S3D_1"), None);
+        assert_eq!(parse_disc_number("SHOW_S3D_1"), None);
+        assert_eq!(clean("SHOW_S3D_1"), "SHOW 1");
+        assert_eq!((parse_season("SHOW_S2D_1"), parse_disc_number("SHOW_S2D_1")), (Some(2), Some(1)));
+        assert_eq!(clean("SHOW_S2D_1"), "SHOW");
     }
 
     #[test]

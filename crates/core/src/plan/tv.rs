@@ -510,6 +510,18 @@ mod tests {
         Group { key: map.clone(), segment_map: map, segments: segments.to_vec(), titles: vec![title], seconds, truncated: false }
     }
 
+    /// The groups of a disc with two play-all titles (4: extras, 5: episodes), in group order.
+    fn two_play_all_groups() -> Vec<Group> {
+        vec![
+            group(0, &[12], 1320),
+            group(1, &[13], 1320),
+            group(4, &[10, 11], 600),
+            group(5, &[12, 13], 2640),
+            group(6, &[10], 300),
+            group(7, &[11], 300),
+        ]
+    }
+
     /// A TheDiscDB record holding only these titles (the API's snake_case keys).
     fn record(titles: Value) -> DiscDbRecord {
         serde_json::from_value(json!({ "titles": titles })).unwrap()
@@ -762,14 +774,7 @@ mod tests {
             {"index": 1, "item": {"title": "Fourth", "type": "Episode", "season": "1", "episode": "4"}},
             {"index": 2, "item": {"title": "Play All", "type": "Episode", "season": "1", "episode": "3-4"}}
         ]));
-        let groups = vec![
-            group(0, &[12], 1320),
-            group(1, &[13], 1320),
-            group(4, &[10, 11], 600),
-            group(5, &[12, 13], 2640),
-            group(6, &[10], 300),
-            group(7, &[11], 300),
-        ];
+        let groups = two_play_all_groups();
         let plan = by_discdb(&record, &BTreeMap::from([(0, 0), (1, 1), (2, 5)]), &groups, false).unwrap();
         assert_eq!(plan.episodes.iter().map(|e| e.title).collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(plan.dropped_play_all, vec![4, 5]);
@@ -777,15 +782,8 @@ mod tests {
 
     #[test]
     fn without_play_all_returns_the_groups_that_remain_and_the_dropped_titles() {
-        // The groups of `every_play_all_title_is_dropped`: titles 4 and 5 are play-all shaped, found one after the other.
-        let groups = vec![
-            group(0, &[12], 1320),
-            group(1, &[13], 1320),
-            group(4, &[10, 11], 600),
-            group(5, &[12, 13], 2640),
-            group(6, &[10], 300),
-            group(7, &[11], 300),
-        ];
+        // Titles 4 and 5 are play-all shaped, found one after the other.
+        let groups = two_play_all_groups();
         assert_eq!(
             without_play_all(&groups, false),
             (vec![group(0, &[12], 1320), group(1, &[13], 1320), group(6, &[10], 300), group(7, &[11], 300)], vec![4, 5])

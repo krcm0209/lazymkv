@@ -775,35 +775,21 @@ mod tests {
     }
 
     #[test]
-    fn a_tuning_root_inside_the_staging_root_is_refused() {
+    fn a_tuning_root_inside_the_staging_root_is_refused_whatever_keep_tuning_evidence_says() {
         let settings = Settings {
             staging_root: root(r"\\unas-pro\media\lazymkv-staging"),
             tuning_root: root(r"\\unas-pro\media\lazymkv-staging\tuning"),
             ..Settings::default()
         };
+        let expected = vec![problem_of(
+            "tuning_root",
+            r"tuning_root \\unas-pro\media\lazymkv-staging\tuning is inside staging_root \\unas-pro\media\lazymkv-staging: the tuning root may not be inside the staging root or a library root (spec 7)"
+        )];
+        assert_eq!(settings.validate(), expected);
         assert_eq!(
-            settings.validate(),
-            vec![problem_of(
-                "tuning_root",
-                r"tuning_root \\unas-pro\media\lazymkv-staging\tuning is inside staging_root \\unas-pro\media\lazymkv-staging: the tuning root may not be inside the staging root or a library root (spec 7)"
-            )]
-        );
-    }
-
-    #[test]
-    fn a_tuning_root_inside_the_staging_root_is_refused_even_with_keep_tuning_evidence_off() {
-        let settings = Settings {
-            staging_root: root(r"\\unas-pro\media\lazymkv-staging"),
-            tuning_root: root(r"\\unas-pro\media\lazymkv-staging\tuning"),
-            keep_tuning_evidence: false,
-            ..Settings::default()
-        };
-        assert_eq!(
-            settings.validate(),
-            vec![problem_of(
-                "tuning_root",
-                r"tuning_root \\unas-pro\media\lazymkv-staging\tuning is inside staging_root \\unas-pro\media\lazymkv-staging: the tuning root may not be inside the staging root or a library root (spec 7)"
-            )]
+            Settings { keep_tuning_evidence: false, ..settings }.validate(),
+            expected,
+            "a set tuning_root is checked whatever keep_tuning_evidence says"
         );
     }
 

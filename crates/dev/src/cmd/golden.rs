@@ -25,7 +25,7 @@ use lazymkv_core::recording::files::{rip_labels, MkvmergeIdent, RipLabel};
 use lazymkv_core::recording::{py_repr_str, read_json, read_text, sha1_hex, Encoding, Errors, PathKey, Tree};
 use lazymkv_core::robot::{parse, scan_json};
 use lazymkv_core::subtitle::align::align_subs_dir;
-use lazymkv_core::subtitle::labels::TEXT_HINT;
+use lazymkv_core::subtitle::labels::{READING, TEXT_HINT};
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Rule as TextRule};
 use serde_json::Value;
 
@@ -37,8 +37,6 @@ use crate::{usage_error, Args};
 /// The folder name reserved for goldens. Every walker skips it (Tree::list and Tree::glob, Task 1), so the goldens
 /// are found and read here through the file system.
 pub const GOLDEN_DIR: &str = "golden";
-/// The OCR reading the goldens use: the folder tuning-fetch.ps1 -Text copies, <TuningData>\<slug>\<label>\subs-ocr.
-const READING: &str = "subs-ocr";
 /// subtitle_alignment's defaults (--clear-max-bytes 64, --tolerance-ms 300), which align.json is written with.
 const ALIGN_CLEAR_MAX_BYTES: i64 = 64;
 const ALIGN_TOLERANCE_MS: i64 = 300;

@@ -176,8 +176,10 @@ pub struct Feature {
     /// None for the theatrical or only cut); `edition_names` turns it into the filed name.
     pub edition: Option<String>,
     /// True when `edition` is None or names the theatrical cut (contains the word Theatrical; `is_theatrical`), except an
-    /// unnamed cut (an Other label suffix, a later TheDiscDB MainMovie with no edition, or a Java-labelled cut TheDiscDB
-    /// does not list, OR5), which has edition None and theatrical false.
+    /// unnamed cut (rule 2's Other label suffix, a later TheDiscDB MainMovie with no edition, or a Java-labelled cut
+    /// TheDiscDB does not list, OR5), which has edition None and theatrical false. A rule 1 main movie whose own label
+    /// suffix is Other has edition None and stays theatrical unless it is a later main movie (c1:F1). Spec 8.3, 8.4;
+    /// ruling G9.
     pub theatrical: bool,
     /// The titles of its group (rule 3) or cut (rule 2) that were not chosen.
     pub siblings: Vec<u32>,
@@ -279,7 +281,6 @@ pub fn by_database(
     // unnamed cut and holds the job for review, but the confidence above stays: it came from the main movies alone.
     let main_titles: BTreeSet<u32> = features.iter().map(|feature| feature.title).collect();
     let mut notes = Vec::new();
-    let mut unlisted = false;
     if let Some(labelled) = by_labels(disc, wanted) {
         let candidates = candidate_filter(disc, settings);
         for (cut, seconds) in labelled.features.into_iter().zip(labelled.feature_seconds) {
@@ -292,7 +293,11 @@ pub fn by_database(
                 continue;
             }
             let number = cut.title;
-            let comment = disc.titles.get(&number).and_then(|title| title.comment.as_deref()).unwrap_or_default();
+            let comment = disc
+                .titles
+                .get(&number)
+                .and_then(|title| title.comment.as_deref())
+                .expect("by_labels yields only titles whose comment parsed as a label");
             evidence.push(format!(
                 "scan title {number} carries the label {comment}, a cut TheDiscDB does not list as a main movie"
             ));
@@ -303,11 +308,8 @@ pub fn by_database(
             });
             features.push(Feature { title: number, edition: None, theatrical: false, siblings: cut.siblings });
             feature_seconds.push(seconds);
-            unlisted = true;
+            reviews.push(ReviewReason::UnnamedCut);
         }
-    }
-    if unlisted {
-        reviews.push(ReviewReason::UnnamedCut);
     }
     Some(MoviePlan {
         rule: TitleRule::Database,

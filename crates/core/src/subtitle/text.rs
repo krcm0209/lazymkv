@@ -1986,6 +1986,13 @@ pub fn before_yes(v: &Decision, today: &str) -> String {
 use crate::recording::files::{read_jsonl, FrameEntry, PacketsFile, SubsIndexEntry, Tmdb};
 use crate::recording::{read_json, read_text, sha1_hex, Encoding, Errors, PathKey, Tree};
 
+/// The OCR reading folder's name: in a recording beside `subs/` (`<rec>/subs-ocr/sub-<n>.frames.json`, which
+/// `load_title` reads) and under the OCR text (`<text>/<slug>/<label>/subs-ocr/`: the goldens' layout, the folder
+/// ocr-subs.ps1 writes and `lazymkv-dev decide` reads first). One definition for the harness, `decide`, `golden` and
+/// `subs`, re-exported from `subtitle::labels` beside `TEXT_HINT` (spec 15 "Rules against the stored evidence", ruling
+/// G15).
+pub const READING: &str = "subs-ocr";
+
 /// The table analyse prints, header and rule. Py: analyse's two literal lines.
 const TABLE_HEADER: &str = "| Stream | Tag | Events | Class | Rule | Review | Note | 8.7 today | Before yes |";
 const TABLE_RULE: &str = "|---|---|---|---|---|---|---|---|---|";
@@ -2253,7 +2260,7 @@ pub fn load_title(
         let jsonl = text.join(&format!("sub-{n}.ocr.jsonl"));
         if text_tree.exists(&jsonl) {
             let records = read_jsonl(&read_text(text_tree, &jsonl, Encoding::Utf8Sig, Errors::Strict)?)?;
-            let counts = frame_counts(rec_tree, &rec.join(&format!("subs-ocr/sub-{n}.frames.json")))?;
+            let counts = frame_counts(rec_tree, &rec.join(&format!("{READING}/sub-{n}.frames.json")))?;
             let recs = ocr_records(&records, &counts)?;
             let (method, left) = pair_text(&mut events, &recs);
             t.pairing = Some(format!("text by {}, {} frames with text, {} unmatched", method.as_str(), recs.len(), left));

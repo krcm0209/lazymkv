@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use lazymkv_core::recording::{py_int, py_repr_str, MemTree, PathKey, Tree};
+use lazymkv_core::subtitle::labels::READING;
 use lazymkv_core::subtitle::text::{subs_run, Rule};
 
 use crate::evidence::{insert_disk_file, ocr_text_dir, pathlib_split, resolve_recording, Ctx};
@@ -134,7 +135,7 @@ fn rec_folder_tree(ctx: &Ctx, arg: &str) -> (Box<dyn Tree>, PathKey) {
     if tmdb.is_file() {
         insert_disk_file(&mut tree, &rec.parent().join("tmdb.json"), &tmdb);
     }
-    for folder in ["subs", "subs-ocr"] {
+    for folder in ["subs", READING] {
         add_folder_files(&mut tree, &rec.join(folder), &rec_dir.join(folder));
     }
     (Box::new(tree), rec)

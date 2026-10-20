@@ -111,7 +111,7 @@ pub const EPISODE_MAX_S: u32 = 120 * 60;
 pub const TV_SPREAD_PERCENT: u64 = 15;
 
 /// True when the group lasts between 15 and 120 minutes inclusive. Spec 8.2; the part test of 8.3 rule 3.1's play-all title
-/// under ruling OR1. Def: this plan. Use: `episode_length_groups`, `play_all_of_episodes`.
+/// under ruling OR1. Def: the rulings plan, Task 1 (OR1). Use: `episode_length_groups`, `play_all_of_episodes`.
 pub fn is_episode_length(group: &Group) -> bool {
     (EPISODE_MIN_S..=EPISODE_MAX_S).contains(&group.seconds)
 }
@@ -146,7 +146,7 @@ pub fn play_all(groups: &[Group], dvd: bool) -> Option<usize> {
 
 /// Spec 8.3 rule 3.1 under ruling OR1: a play-all title whose every part is episode-length (15 to 120 minutes, 8.2); a
 /// concatenation of shorter extras is not one. Same search as `play_all` with the parts held to `is_episode_length`.
-/// Def: this plan. Use: `movie::by_structure`.
+/// Def: the rulings plan, Task 1 (OR1). Use: `movie::by_structure`.
 pub fn play_all_of_episodes(groups: &[Group], dvd: bool) -> Option<usize> {
     play_all_where(groups, dvd, &is_episode_length)
 }
