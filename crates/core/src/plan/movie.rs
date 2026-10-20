@@ -1515,9 +1515,11 @@ mod tests {
     }
 
     #[test]
-    fn a_tv_disc_known_only_by_an_extras_play_all_is_held_as_a_movie_in_copy_mode() {
+    fn chernobyl_2_without_thediscdb_is_held_because_its_two_episodes_are_rivals() {
         // Ruling OR1: without TheDiscDB, labels or a season marker, CHERNOBYL_2's extras play-all no longer makes it
-        // TV.
+        // TV. The disc is held in copy mode only because its two episodes (65 and 72 minutes) are within 10% of each
+        // other, so rule 3 finds two rivals; episodes further apart beside an extras play-all would plan the longer one
+        // alone at 0.85 (left to the owner, G1).
         let disc = pinned(CHERNOBYL_2);
         let settings = Settings::default();
         let found = groups_of(&disc, &settings);

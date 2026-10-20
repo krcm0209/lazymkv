@@ -211,12 +211,14 @@ pub struct PlanInputs<'a> {
 /// over every group, `movie::by_structure_as_movie`, so a play-all-shaped group is an ordinary rival; a play-all of
 /// shorter parts, such as an extras playlist or a feature and its 10-minute credits clip, is not rule 3.1's play-all
 /// title, and rule 3 runs directly, as TheDiscDB's movie kind would make it anyway; every play-all group of any parts is
-/// left out of the episode-length groups, 8.5 "play all titles are dropped", OR15); identify (8.1) over `inputs.lookups` with
-/// `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to `inputs.overrides.and_then(|o|
-/// o.identity)`; when `identity.original_language` is Some and not English, by_labels runs again with
-/// `wanted_languages(identity.original_language)` for a rule 2 plan only (a rule 1 plan's unlisted cut keeps the
-/// variant chosen with English only, SR3) and its features replace the first pass's (cuts, editions and confidence
-/// never change between the passes, only the variant chosen within a cut); `Plan.wanted` is
+/// left out of the episode-length groups, 8.5 "play all titles are dropped", OR15; when TheDiscDB does not state the
+/// kind and rule 3 plans exactly one feature that is one of those play-all titles, the plan is held at 0.60 with
+/// title_ambiguous and an evidence sentence, so the disc is copied whole, 8.3 rule 3.5 under ruling G1); identify (8.1)
+/// over `inputs.lookups` with `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to
+/// `inputs.overrides.and_then(|o| o.identity)`; when `identity.original_language` is Some and not English, by_labels
+/// runs again with `wanted_languages(identity.original_language)` for a rule 2 plan only (a rule 1 plan's unlisted cut
+/// keeps the variant chosen with English only, SR3) and its features replace the first pass's (cuts, editions and
+/// confidence never change between the passes, only the variant chosen within a cut); `Plan.wanted` is
 /// `wanted_languages(identity.original_language)` for every title rule (English only when the original language is
 /// unknown or English); rule 4; a remembered decision (`remembered::apply_titles`) or the owner's Assign titles
 /// (`overrides.titles`, which win) replace the planned titles and set title confidence to 1.00, and Set identity or a
@@ -269,7 +271,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let (mut planned_kind, mut kind_source) = kind::disc_kind(discdb, &groups, name);
     sentences.push(format!("the disc is {}: {}", kind_words(planned_kind), kind_source_words(kind_source)));
     // 8.5 "play all titles are dropped" (OR15: any parts): no play-all group is an episode, so each is left out until none is.
-    let (episode_groups, _) = tv::without_play_all(&groups, disc.is_dvd);
+    let (episode_groups, play_all_titles) = tv::without_play_all(&groups, disc.is_dvd);
 
     // 8.3 rules 1 to 3 with English only (the original language comes with the identity), or 8.5's map.
     let english = wanted_languages(None);
@@ -277,8 +279,25 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let mut label_rule_reached = false;
     if planned_kind == Kind::Movie {
         match movie::movie_plan(disc, discdb, &matches, &groups, &english, settings) {
-            StructureOutcome::Plan(found) => {
+            StructureOutcome::Plan(mut found) => {
                 label_rule_reached = found.rule != TitleRule::Database;
+                // G1: rule 3's only feature is itself 8.5's play-all shape (a play-all of short parts, or extras longer
+                // than the film), so ripping it alone may file the wrong content; the plan is held for whole-disc copy
+                // mode. A disc TheDiscDB knows as a movie keeps such a feature as an ordinary rival (F4).
+                if kind_source != KindSource::Discdb && found.rule == TitleRule::Structure {
+                    if let [feature] = found.features.as_slice() {
+                        if play_all_titles.contains(&feature.title) {
+                            let title = feature.title;
+                            found.confidence = movie::AMBIGUOUS_TITLE_CONFIDENCE;
+                            found.reviews.push(ReviewReason::TitleAmbiguous);
+                            found.reviews = sorted_unique(found.reviews);
+                            found.evidence.push(format!(
+                                "8.3 rule 3: the only feature, title {title}, is a play-all of other titles, so the plan \
+                                 is held (G1)"
+                            ));
+                        }
+                    }
+                }
                 found_movie = Some(found);
             }
             StructureOutcome::PlayAll { group } => {
@@ -2201,6 +2220,81 @@ mod tests {
         assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
         assert_eq!(plan.reviews, vec![ReviewReason::MultipleFeatures]);
+    }
+
+    /// The sentence G1 adds when the only feature rule 3 found is a play-all of other titles.
+    fn held_play_all_sentence(title: u32) -> String {
+        format!("8.3 rule 3: the only feature, title {title}, is a play-all of other titles, so the plan is held (G1)")
+    }
+
+    #[test]
+    fn a_play_all_of_short_parts_that_would_be_the_only_feature_holds_the_plan() {
+        // G1: four 11-minute titles (segments 1 to 4) and their 44-minute play-all (title 5), with no TheDiscDB answer,
+        // no Java and no season marker. The parts are not episode-length, so under OR1 the play-all is not rule 3.1's
+        // and the disc stays a movie; no group lasts feature_min_minutes, so rule 3 keeps the longest, the play-all, as
+        // its one rival. It is 8.5's play-all shape, so the plan is held at 0.60 and the disc is copied whole.
+        let disc = made_disc(
+            false,
+            "EXAMPLE_SHORTS",
+            &[
+                made(1, "0:11:00", "3", "00001.mpls", "1", "3000000000", "", ENG),
+                made(2, "0:11:00", "3", "00002.mpls", "2", "3000000000", "", ENG),
+                made(3, "0:11:00", "3", "00003.mpls", "3", "3000000000", "", ENG),
+                made(4, "0:11:00", "3", "00004.mpls", "4", "3000000000", "", ENG),
+                made(5, "0:44:00", "12", "00005.mpls", "1,2,3,4", "12000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![5]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert!(plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(plan.evidence.sentences.contains(&held_play_all_sentence(5)), "{:?}", plan.evidence.sentences);
+    }
+
+    #[test]
+    fn an_extras_play_all_longer_than_the_feature_holds_the_plan_instead_of_ripping_the_extras() {
+        // G1: a 95-minute feature (title 1), twelve 10-minute extras (titles 2 to 13, segments 2 to 13) and their
+        // 120-minute play-all (title 14). Before OR1 the play-all made this disc TV; under OR1 rule 3 keeps both long
+        // groups, and the feature is not within 10% of the play-all, so the play-all is the one rival. Ripping it alone
+        // would file the extras as the film: the plan is held at 0.60 and the disc is copied whole instead.
+        let playlists: Vec<String> = (1..=14).map(|number| format!("{number:05}.mpls")).collect();
+        let parts: Vec<String> = (2..=13).map(|segment| segment.to_string()).collect();
+        let play_all = parts.join(",");
+        let mut titles = vec![made(1, "1:35:00", "16", &playlists[0], "1", "28000000000", "", ENG)];
+        for (index, segment) in parts.iter().enumerate() {
+            titles.push(made(index as u32 + 2, "0:10:00", "2", &playlists[index + 1], segment, "1500000000", "", ENG));
+        }
+        titles.push(made(14, "2:00:00", "24", &playlists[13], &play_all, "18000000000", "", ENG));
+        let disc = made_disc(false, "EXAMPLE_FILM", &titles);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![14]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert!(plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(plan.evidence.sentences.contains(&held_play_all_sentence(14)), "{:?}", plan.evidence.sentences);
+    }
+
+    #[test]
+    fn smiles_feature_is_not_a_play_all_so_it_stays_at_0_85_without_thediscdb() {
+        // G1's hold reads 8.5's dropped titles only: SMILE's extras play-all is dropped, but its feature is not a
+        // play-all, so rule 3 keeps it at 0.85 in Direct mode. SMILE's scan reports Java, which would let its label
+        // decide (rule 2, 0.90), so the scan is read here as if MakeMKV had not reported Java, and rule 3 runs.
+        let log = pinned_log(SMILE, SMILE_API);
+        let disc = Disc { java_in_use: false, ..log.disc.clone() };
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let plan = run(&inputs(&disc, log.name_only(), &settings, &library));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(!plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
     }
 
     #[test]
