@@ -106,8 +106,9 @@ fn group_key(title: &Title, dvd: bool) -> String {
 pub const EPISODE_MIN_S: u32 = 15 * 60;
 /// Spec 8.2: the longest episode length, 120 minutes, included.
 pub const EPISODE_MAX_S: u32 = 120 * 60;
-/// Spec 8.2: the longest episode-length group is at most 15% longer than the shortest.
-pub const TV_SPREAD: f64 = 0.15;
+/// Spec 8.2: the longest episode-length group is at most 15% longer than the shortest, as a whole percentage so the test
+/// is exact in integers (ruling G2).
+pub const TV_SPREAD_PERCENT: u64 = 15;
 
 /// True when the group lasts between 15 and 120 minutes inclusive. Spec 8.2; the part test of 8.3 rule 3.1's play-all title
 /// under ruling OR1. Def: this plan. Use: `episode_length_groups`, `play_all_of_episodes`.
@@ -121,8 +122,9 @@ pub fn episode_length_groups(groups: &[Group]) -> Vec<&Group> {
     groups.iter().filter(|group| is_episode_length(group)).collect()
 }
 
-/// Three or more episode-length groups and the longest at most 15% longer than the shortest (`longest <= shortest * 1.15`).
-/// Spec 8.2. Def: T5. Use: T5.
+/// Three or more episode-length groups and the longest at most 15% longer than the shortest, compared in integers
+/// (`longest * 100 <= shortest * 115`, so a pair exactly 15% apart such as 1300 s and 1495 s counts; ruling G2). Spec
+/// 8.2. Def: T5. Use: T5.
 pub fn structure_says_tv(groups: &[Group]) -> bool {
     let episodes = episode_length_groups(groups);
     if episodes.len() < 3 {
@@ -130,7 +132,7 @@ pub fn structure_says_tv(groups: &[Group]) -> bool {
     }
     let shortest = episodes.iter().map(|group| group.seconds).min().unwrap_or(0);
     let longest = episodes.iter().map(|group| group.seconds).max().unwrap_or(0);
-    f64::from(longest) <= f64::from(shortest) * (1.0 + TV_SPREAD)
+    u64::from(longest) * 100 <= u64::from(shortest) * (100 + TV_SPREAD_PERCENT)
 }
 
 /// Spec 8.5's play-all title, ruling OR15: the index of a group whose segment list is the concatenation of two or more other
@@ -573,6 +575,13 @@ mod tests {
     }
 
     #[test]
+    fn the_15_percent_spread_is_exact_at_its_boundary() {
+        // G2: 1495 is exactly 115% of 1300, which `1300.0 * 1.15` (1494.9999999999998) missed in floating point.
+        assert!(structure_says_tv(&[bd("1", &[0], 1300), bd("2", &[1], 1300), bd("3", &[2], 1495)]));
+        assert!(!structure_says_tv(&[bd("1", &[0], 1300), bd("2", &[1], 1300), bd("3", &[2], 1496)]));
+    }
+
+    #[test]
     fn firefly_disc_1_is_not_tv_by_structure_since_its_pilot_is_double_length() {
         let found = groups_of(&pinned(FIREFLY_1));
         assert_eq!(episode_length_groups(&found).len(), 3);
@@ -751,6 +760,6 @@ mod tests {
 
     #[test]
     fn the_episode_length_constants_are_the_spec_values() {
-        assert_eq!((EPISODE_MIN_S, EPISODE_MAX_S, TV_SPREAD), (900, 7200, 0.15));
+        assert_eq!((EPISODE_MIN_S, EPISODE_MAX_S, TV_SPREAD_PERCENT), (900, 7200, 15));
     }
 }
