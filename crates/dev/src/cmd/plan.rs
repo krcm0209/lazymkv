@@ -168,7 +168,10 @@ struct Found {
 /// lookup stays pending, and --tmdb-search, a different lookup, does not clear the flag) and --remembered (refused
 /// when it remembers another fingerprint); the disc name with
 /// `lookup::name::disc_name(bdmt, disc.volume_label)`; PlanInputs with no sessions, no overrides and default
-/// LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). Def: T15. Use: T15, T16.
+/// LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). The flag stays cleared only
+/// when the given record is the planned identity's (spec 8.1, ruling G3): when the plan's `identity.tmdb` is not the
+/// record's identity, `plan::plan` dropped the record, so it runs a second time with the pending flag the lookups set.
+/// Def: T15. Use: T15, T16.
 pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Result<PlanDoc, Refused> {
     let found = match source {
         PlanSource::Recording(rec) => recording_inputs(rec)?,
@@ -217,7 +220,8 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
             search: search.as_ref().map(|(_, search)| search),
             record,
             // SR8: a record the owner gives replaces the lookup's answer, so a failed TMDb lookup no longer leaves the
-            // job pending; --tmdb-search is a different lookup and does not clear the flag.
+            // job pending; --tmdb-search is a different lookup and does not clear the flag. G3: only a record of the
+            // planned identity does, which the plan below checks.
             tmdb_pending: found.tmdb_pending && given_record.is_none(),
             remembered: None,
             reviewed: None,
@@ -228,7 +232,15 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
         library: &library,
         settings: &settings,
     };
-    let planned = plan(&inputs).map_err(|sentence| refused(format!("{}: {}", found.scan, sentence)))?;
+    let mut planned = plan(&inputs).map_err(|sentence| refused(format!("{}: {}", found.scan, sentence)))?;
+    // G3: a given record of another identity than the planned one is dropped by `plan::plan`, so it answers nothing and
+    // the failed lookup stays pending: plan again with the flag the lookups set.
+    if let Some((_, given)) = &given_record {
+        if planned.identity.tmdb != Some(given.identity) {
+            let again = PlanInputs { lookups: LookupInputs { tmdb_pending: found.tmdb_pending, ..inputs.lookups }, ..inputs };
+            planned = plan(&again).map_err(|sentence| refused(format!("{}: {}", found.scan, sentence)))?;
+        }
+    }
     Ok(PlanDoc {
         slug: found.slug,
         inputs: PlanInputsSummary {
@@ -970,12 +982,30 @@ mod tests {
         assert!(!doc.plan.identity.lookup_pending);
         assert!(!doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
         assert_eq!(doc.plan.identity.original_language.as_deref(), Some("fr"));
-        // A failed TheDiscDB lookup keeps the job pending whatever record is given (SR8).
+        // A failed TheDiscDB lookup keeps the job pending whatever record is given (SR8). Without TheDiscDB's answer the
+        // plan has no TMDb identity, so the record is not the planned identity's and the TMDb lookup stays pending too
+        // (G3).
         tmp.write("rec/lookup-status.txt", "dischash 500\ndiscid 404\ntmdb movie/6537 500\n");
         let doc = planned(&tmp, &PlanOptions { tmdb_record: Some(PathBuf::from("movie.json")), ..PlanOptions::default() });
         assert!(doc.plan.identity.lookup_pending);
+        assert_eq!(doc.plan.identity.tmdb, None);
         assert!(doc.plan.identity.evidence.iter().any(|s| s == "the TheDiscDB lookup is pending"), "{:?}", doc.plan.identity.evidence);
-        assert!(!doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
+        assert!(doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
+    }
+
+    #[test]
+    fn a_tmdb_record_for_another_identity_leaves_the_failed_lookup_pending() {
+        // G3: TheDiscDB names movie 6537 and its TMDb lookup failed. A record for movie 999 is not the planned
+        // identity's, so `plan::plan` drops it, and the job stays pending until 6537's record is in hand.
+        let tmp = Scratch::new("plan-other-record-pending");
+        film_recording(&tmp, "rec");
+        tmp.write("rec/lookup-status.txt", "dischash 200\ndiscid 404\ntmdb movie/6537 500\n");
+        tmp.write("other.json", tmdb_movie_json(999, "Another Film", "Otro Film", "2001-01-01", "fr", Some(90)));
+        let doc = planned(&tmp, &PlanOptions { tmdb_record: Some(PathBuf::from("other.json")), ..PlanOptions::default() });
+        assert_eq!(doc.inputs.tmdb_record.as_deref(), Some("other.json"));
+        assert!(doc.plan.identity.lookup_pending);
+        assert!(doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
+        assert_ne!(doc.plan.identity.original_language.as_deref(), Some("fr"));
     }
 
     #[test]
