@@ -410,9 +410,9 @@ overturn any of them.
 
 - SR1. Rule 3.1's parts are each checked against the 8.2 band; the whole group's length and the parts' mutual spread are
   not checked.
-- SR2. The whole-label rule's scope, as written under OR6. Superseded by G8 (the owner, 2026-10-19): when exactly one
-  token of the name is a region tag and nothing kept holds a letter, that tag is the name, so `US_UHD`, `US_2019` and
-  `US_D1` give `US`.
+- SR2. The whole-label rule's scope, as written under OR6. Superseded by G8 (the owner, 2026-10-19) and G8a: when
+  exactly one token of the name is a region tag, nothing kept holds a letter and nothing kept comes before it, that tag
+  is the name, so `US_UHD`, `US_2019` and `US_D1` give `US`.
 - SR3. `by_database` takes `wanted: &Wanted` (the languages `movie_plan` already holds) so the unlisted cut's variant is
   chosen as rule 2 chooses it; no second pass with the original language for rule 1 plans; so a rule 1 plan's unlisted
   cut keeps the variant chosen with English only, and for a non-English film its original-language variant may need
@@ -477,9 +477,12 @@ controller applied the rest as written (G1 to G15). The owner may overturn any o
   rule 2 (not on a DVD), and the job reducer records it on a missing-Java event whatever the plan (10.1). No code
   change.
 - G8 (the owner). The whole-label rule becomes general and supersedes SR2: when exactly one token of the raw name is a
-  region tag and nothing kept holds a letter, the name is that tag without its brackets (`US_UHD`, `US_2019`, `US_D1`
-  and `(US)` give `US`; `Us (2019)` gives `Us`). `US UK` and `UHD` still clean to nothing, and `THE UK FILES` gives
-  `THE FILES`. The `US_2019` owner question is answered.
+  region tag, nothing kept holds a letter and nothing kept comes before the tag, the name is that tag without its
+  brackets (`US_UHD`, `US_2019`, `US_D1` and `(US)` give `US`; `Us (2019)` gives `Us`). `US UK` and `UHD` still clean to
+  nothing, and `THE UK FILES` gives `THE FILES`. The `US_2019` owner question is answered. The condition "nothing kept
+  before the tag" is the controller's G8a (2026-10-19): without it a title of digits was renamed (`1917_US` gave `US`,
+  and Us's 116 minutes sit within 3% of 1917's 119), so `1917_US` gives `1917` and `2012_UK` gives `2012`, which stay
+  generic as before.
 - G9. `Feature.theatrical`'s doc limits the Other suffix to rule 2 and says that a rule 1 main movie whose own label
   suffix is Other has no edition and stays theatrical unless it is a later main movie (c1:F1).
 - G10. The `AVATAR 3D 2` assertion names the guard that holds: the D of the 3D tag starts no marker, even beside a

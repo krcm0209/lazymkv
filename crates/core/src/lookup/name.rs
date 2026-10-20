@@ -172,17 +172,19 @@ fn is_year(token: &str) -> bool {
 /// trimmed. A bare number that is not a tag stays (`EXPENDABLES_3` gives `EXPENDABLES 3`). A marker or a tag that is a
 /// whole hyphen part goes too (`MOVIE-D2` gives `MOVIE`, `X-MEN-UHD` gives `X-MEN`, `HUGO-S3D` gives `HUGO`); a tag
 /// may sit in round or square brackets; a year that is the only token left stays. When exactly one token of the name is
-/// a region tag and nothing kept holds a letter (after the trailing-year step), the name is that tag without its
-/// brackets, since a disc labelled `US` is the film Us: `US`, `(US)`, `US_UHD`, `US_2019` and `US_D1` give `US`, and
-/// `Us (2019)` gives `Us` (rulings OR6 and G8, which replaces SR2's single-token scope). A format tag alone (`UHD`) or a
-/// name of two region tags (`US UK`) cleans to nothing, and a region tag beside a word is removed (`THE UK FILES` gives
+/// a region tag, nothing kept holds a letter (after the trailing-year step) and nothing kept comes before the tag, the
+/// name is that tag without its brackets, since a disc labelled `US` is the film Us: `US`, `(US)`, `US_UHD`, `US_2019`
+/// and `US_D1` give `US`, and `Us (2019)` gives `Us` (rulings OR6 and G8, which replaces SR2's single-token scope; G8a
+/// adds "nothing kept before it", so `1917_US` gives `1917` and stays generic). A format tag alone (`UHD`) or a name of
+/// two region tags (`US UK`) cleans to nothing, and a region tag beside a word is removed (`THE UK FILES` gives
 /// `THE FILES`). Def: T4. Use: T4.
 pub fn clean(raw: &str) -> String {
     let tokens = tokens(raw);
     let pieces = pieces(&tokens);
     let in_marker: BTreeSet<usize> =
         markers(&pieces).iter().flat_map(|marker| [marker.word, marker.digits]).collect();
-    let mut kept: Vec<String> = Vec::new();
+    // Each kept piece with the index of the token it came from (G8a reads the order).
+    let mut kept: Vec<(usize, String)> = Vec::new();
     for (token, word) in tokens.iter().enumerate() {
         if is_tag(word) {
             continue;
@@ -202,20 +204,23 @@ pub fn clean(raw: &str) -> String {
         }
         let joined = parts.join("-");
         if !joined.is_empty() {
-            kept.push(joined);
+            kept.push((token, joined));
         }
     }
-    if kept.len() > 1 && kept.last().is_some_and(|last| is_year(last)) {
+    if kept.len() > 1 && kept.last().is_some_and(|(_, last)| is_year(last)) {
         kept.pop();
     }
-    // G8: a region tag that cleaning leaves with nothing else of letters is the name (`US_UHD`, `US_2019`: the film Us).
-    let regions: Vec<&String> = tokens.iter().filter(|token| is_region_tag(token)).collect();
+    // G8: a region tag that cleaning leaves with nothing else of letters is the name (`US_UHD`, `US_2019`: the film Us);
+    // G8a: only when nothing kept comes before it, so a title of digits (`1917_US`) is not renamed.
+    let regions: Vec<usize> = (0..tokens.len()).filter(|&index| is_region_tag(&tokens[index])).collect();
     if let [region] = regions.as_slice() {
-        if !kept.iter().any(|piece| piece.chars().any(char::is_alphabetic)) {
-            return unbracketed(region).to_string();
+        let lettered = kept.iter().any(|(_, piece)| piece.chars().any(char::is_alphabetic));
+        let before = kept.iter().any(|(token, _)| token < region);
+        if !lettered && !before {
+            return unbracketed(&tokens[*region]).to_string();
         }
     }
-    kept.join(" ")
+    kept.into_iter().map(|(_, piece)| piece).collect::<Vec<String>>().join(" ")
 }
 
 /// Spec 8.1's generic or placeholder names ("for example `DVD_VIDEO`, `DISC_1`, `LOGICAL_VOLUME_ID`, `VOLUME_SET_ID`")
@@ -588,6 +593,11 @@ mod tests {
         assert_eq!(clean("US_D1"), "US");
         assert_eq!(clean("Us (2019)"), "Us");
         assert!(!is_generic("US_UHD", &clean("US_UHD")));
+        // G8a: a region tag after a kept piece is not the name, so a title of digits keeps it and stays generic.
+        assert_eq!(clean("1917_US"), "1917");
+        assert_eq!(clean("2012_UK"), "2012");
+        assert_eq!(clean("24_S1_D1_US"), "24");
+        assert!(is_generic("1917_US", &clean("1917_US")));
         // Two region tags name no film, and a format tag alone is a placeholder.
         assert_eq!(clean("US UK"), "");
         assert_eq!(clean("UHD"), "");
