@@ -2188,6 +2188,37 @@ mod tests {
     }
 
     #[test]
+    fn two_unequal_episodes_beside_an_extras_play_all_plan_the_longer_one_alone_h6() {
+        // H6 (accepted as OR1's consequence): two episodes of 50 and 60 minutes (titles 1 and 2) and two 5-minute extras
+        // with their 10-minute play-all (title 5, segments 3,4), without TheDiscDB, labels or a season marker. The
+        // episodes differ by more than 15%, so 8.2 says movie; the play-all's parts are not episode-length, so it is not
+        // rule 3.1's; the 50-minute group is more than 10% short of the 60-minute one, so rule 3 keeps title 2 alone at
+        // 0.85 in Direct mode. The identity guards hold the job.
+        let disc = made_disc(
+            false,
+            "EXAMPLE_EPISODES",
+            &[
+                made(1, "0:50:00", "8", "00001.mpls", "1", "15000000000", "", ENG),
+                made(2, "1:00:00", "10", "00002.mpls", "2", "18000000000", "", ENG),
+                made(3, "0:05:00", "2", "00003.mpls", "3", "1500000000", "", ENG),
+                made(4, "0:05:00", "2", "00004.mpls", "4", "1500000000", "", ENG),
+                made(5, "0:10:00", "4", "00005.mpls", "3,4", "3000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![2]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(!plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        // Without an identity the job is held for review all the same.
+        assert!(plan.reviews.contains(&ReviewReason::IdentityUnknown), "{:?}", plan.reviews);
+    }
+
+    #[test]
     fn a_play_all_shaped_feature_on_a_disc_thediscdb_calls_a_movie_is_an_ordinary_rival() {
         // The feature (title 3, 00800.mpls) plays a 100-minute body clip and a 10-minute credits clip, which MakeMKV also
         // lists as titles 1 and 2 (00001.m2ts, 00002.m2ts). The 10-minute clip is not episode-length, so under OR1 the

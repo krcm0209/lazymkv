@@ -639,6 +639,10 @@ mod tests {
         assert_eq!(clean("2012_UK"), "2012");
         assert_eq!(clean("24_S1_D1_US"), "24");
         assert!(is_generic("1917_US", &clean("1917_US")));
+        // A region tag before a number is still the name, so these read as the film Us (G8a's residual, accepted by the
+        // owner, H5).
+        assert_eq!(clean("US 1917"), "US");
+        assert_eq!(clean("US_300"), "US");
         // Two region tags name no film, and a format tag alone is a placeholder.
         assert_eq!(clean("US UK"), "");
         assert_eq!(clean("UHD"), "");
