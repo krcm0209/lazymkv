@@ -132,8 +132,8 @@ pub fn has_season_marker(raw: &str) -> bool {
     parse_season(raw).is_some()
 }
 
-/// The region tags spec 8.1's cleaning removes ("region and format tags"), upper-case. A region tag that is the whole
-/// label is kept (ruling OR6 and sub-ruling SR2), since a disc labelled `US` is the film Us.
+/// The region tags spec 8.1's cleaning removes ("region and format tags"), upper-case. A region tag that cleaning leaves
+/// with nothing else of letters is the name (rulings OR6 and G8), since a disc labelled `US` or `US_UHD` is the film Us.
 const REGION_TAGS: [&str; 12] = ["US", "UK", "EU", "WW", "DOM", "INT", "R1", "R2", "R3", "R4", "R5", "R6"];
 
 /// The format tags spec 8.1's cleaning removes ("region and format tags"), upper-case, with `S3D` and `3D`
@@ -171,10 +171,12 @@ fn is_year(token: &str) -> bool {
 /// 3D tags of ruling OR6) and a trailing year (1900 to 2099 as the last token) removed; repeated spaces collapsed;
 /// trimmed. A bare number that is not a tag stays (`EXPENDABLES_3` gives `EXPENDABLES 3`). A marker or a tag that is a
 /// whole hyphen part goes too (`MOVIE-D2` gives `MOVIE`, `X-MEN-UHD` gives `X-MEN`, `HUGO-S3D` gives `HUGO`); a tag
-/// may sit in round or square brackets; a year that is the only token left stays. A region tag that is the whole label
-/// stays, without its brackets (`US` gives `US`, `(UK)` gives `UK`, since a disc labelled `US` is the film Us), while a
-/// format tag alone, or a name of two or more tags (`US UK`, `US_UHD`), cleans to nothing (rulings OR6 and SR2).
-/// Def: T4. Use: T4.
+/// may sit in round or square brackets; a year that is the only token left stays. When exactly one token of the name is
+/// a region tag and nothing kept holds a letter (after the trailing-year step), the name is that tag without its
+/// brackets, since a disc labelled `US` is the film Us: `US`, `(US)`, `US_UHD`, `US_2019` and `US_D1` give `US`, and
+/// `Us (2019)` gives `Us` (rulings OR6 and G8, which replaces SR2's single-token scope). A format tag alone (`UHD`) or a
+/// name of two region tags (`US UK`) cleans to nothing, and a region tag beside a word is removed (`THE UK FILES` gives
+/// `THE FILES`). Def: T4. Use: T4.
 pub fn clean(raw: &str) -> String {
     let tokens = tokens(raw);
     let pieces = pieces(&tokens);
@@ -206,8 +208,12 @@ pub fn clean(raw: &str) -> String {
     if kept.len() > 1 && kept.last().is_some_and(|last| is_year(last)) {
         kept.pop();
     }
-    if kept.is_empty() && tokens.len() == 1 && is_region_tag(&tokens[0]) {
-        return unbracketed(&tokens[0]).to_string();
+    // G8: a region tag that cleaning leaves with nothing else of letters is the name (`US_UHD`, `US_2019`: the film Us).
+    let regions: Vec<&String> = tokens.iter().filter(|token| is_region_tag(token)).collect();
+    if let [region] = regions.as_slice() {
+        if !kept.iter().any(|piece| piece.chars().any(char::is_alphabetic)) {
+            return unbracketed(region).to_string();
+        }
     }
     kept.join(" ")
 }
@@ -559,12 +565,19 @@ mod tests {
     }
 
     #[test]
-    fn a_region_tag_that_is_the_whole_label_is_kept() {
-        // OR6 and SR2: a disc labelled US is the film Us; a format tag alone is still a placeholder.
+    fn a_region_tag_left_alone_by_cleaning_is_the_name() {
+        // OR6 and G8: a disc labelled US is the film Us, and so is one whose other tokens cleaning removes or leaves
+        // without a letter (a format tag, a year, a disc number); a format tag alone is still a placeholder.
         assert_eq!(clean("US"), "US");
         assert_eq!(clean("us"), "us");
         assert_eq!(clean("(US)"), "US");
         assert_eq!(clean("UK"), "UK");
+        assert_eq!(clean("US_UHD"), "US");
+        assert_eq!(clean("US_2019"), "US");
+        assert_eq!(clean("US_D1"), "US");
+        assert_eq!(clean("Us (2019)"), "Us");
+        assert!(!is_generic("US_UHD", &clean("US_UHD")));
+        // Two region tags name no film, and a format tag alone is a placeholder.
         assert_eq!(clean("US UK"), "");
         assert_eq!(clean("UHD"), "");
         assert_eq!(clean("BLU-RAY"), "");
