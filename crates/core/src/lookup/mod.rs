@@ -356,7 +356,11 @@ pub struct LookupInputs<'a> {
     /// `/api/dischash/{hash}`.
     pub discdb_by_fingerprint: Option<&'a discdb::DiscDbRecord>,
     pub discdb_pending: bool,
-    /// The search 8.1 runs on the cleaned name (or on TheDiscDB's title and year when the entry has no TMDb ID).
+    /// The search 8.1 runs on the cleaned name (or on TheDiscDB's title and year when the entry has no TMDb ID). When
+    /// the disc name's `tagged` differs from its `cleaned` once both are folded (`name::fold_name`), the caller searches
+    /// TMDb with both names and passes the two answer pages merged in order, the cleaned name's results first and then
+    /// the tagged name's results not already among them, so the tagged match can be found (H1) and `PIRANHA_3D` keeps its
+    /// fallback to Piranha. Spec 8.1, ruling J8.
     pub search: Option<&'a tmdb::TmdbSearch>,
     /// The record fetched for the identity in hand.
     pub record: Option<&'a tmdb::TmdbRecord>,

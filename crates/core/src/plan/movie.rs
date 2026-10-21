@@ -193,15 +193,18 @@ pub const RUNTIME_SANITY_BAND: f64 = 0.10;
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Feature {
     pub title: u32,
-    /// The edition name as the evidence gives it (TheDiscDB's item title beyond the media title, else the label table, or
-    /// None for the theatrical or only cut); `edition_names` turns it into the filed name.
+    /// The edition name as the evidence gives it (TheDiscDB's item title beyond the media title, else the label table
+    /// over the title's own label or, for a rule 1 main movie, a label of its 8.2 group, J2; or None for the theatrical
+    /// or only cut); `edition_names` turns it into the filed name.
     pub edition: Option<String>,
     /// True when `edition` is None or names the theatrical cut (contains the word Theatrical; `is_theatrical`), except an
-    /// unnamed cut (rule 2's Other label suffix, a later TheDiscDB MainMovie with no edition, or a Java-labelled cut
-    /// TheDiscDB does not list, OR5), which has edition None and theatrical false. A rule 1 main movie whose own label
-    /// suffix is Other, or which carries no label, has edition None and stays theatrical unless it is a later main movie
-    /// (the Task 5 ruling) or a cut TheDiscDB does not list is planned beside it, which leaves it unnamed too, so the
-    /// owner names both (ruling H2). Spec 8.3, 8.4; rulings G9 and H2.
+    /// unnamed cut, which has edition None and theatrical false. The unnamed cuts are: rule 2's Other label suffix; a
+    /// later TheDiscDB main movie with no edition (the Task 5 ruling); a Java-labelled cut TheDiscDB does not list (OR5);
+    /// and, beside such a cut, a rule 1 main movie whose edition is None (TheDiscDB's item title, its own label and the
+    /// labels of its 8.2 group name none, J2) and whose own label suffix is Other or which carries no label, so the owner
+    /// names both (ruling H2). Without such a cut, that main movie stays theatrical (the Task 5 ruling). This is the one
+    /// list of the unnamed cuts: `plan::PlannedRole::Feature` and `decision::job_features` point here. Spec 8.3, 8.4;
+    /// rulings G9, H2 and J11.
     pub theatrical: bool,
     /// The titles of its group (rule 3) or cut (rule 2) that were not chosen.
     pub siblings: Vec<u32>,
@@ -249,24 +252,23 @@ impl MoviePlan {
 ///
 /// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted, candidates)`, so only when
 /// `disc.java_in_use` and over the 8.2 candidates only, J5; `wanted` is the languages `movie_plan` holds, SR3, and
-/// `candidates` the titles of its groups, J10) none of whose titles, chosen or sibling, is,
-/// or shares its 8.2 group with, a main movie's scan title (ruling H4: `groups` are the 8.2 groups `movie_plan` holds,
-/// and a title in the same group as a main movie's title plays the same segments, unless the group's segment map is
-/// truncated, J4) is a cut TheDiscDB does not list.
-/// Each is planned after the main movies, in rule 2's cut order, as an unnamed cut (edition None, `theatrical` false,
-/// its chosen title the variant `wanted` prefers, its other titles its siblings), with the review reason unnamed_cut,
-/// one note UnlistedLabelCut whose detail states only the fact, naming the title and its label as the scan wrote it
-/// (ruling H3), and one evidence sentence, so the owner names it with Assign titles. The confidence stays what the main
-/// movies alone give (0.98 when they raise no reason): an unlisted cut has no name to share, so it never makes
-/// title_ambiguous. The main movie's own label suffix, its dub variants and a Narrative variant belong to its cut and
-/// name no second one. Rulings G4 and J3: a labelled title that fails the 8.2 candidate filter (a menu loop, a title
-/// shorter than `minlength_s` or without a duration) is in no cut, since `by_labels` drops it before grouping, so a cut
-/// all of whose titles fail is not planned (no note, no evidence) and a cut's chosen title always passes. Ruling H2
-/// (2026-10-19): when such a cut is planned, a main movie whose edition is None because its own label suffix is Other
-/// or it carries no label is marked theatrical false, with an evidence sentence, so `edition_names` gives it no
-/// "Theatrical Cut" and the owner names both cuts; a main movie the label table names "Theatrical Cut" (the bare
-/// `FPL_MainFeature` and `_R` rows) stays theatrical, and without an unlisted cut the Task 5 ruling stands. Def: T5.
-/// Use: T5, T7.
+/// `candidates` the titles of its groups, J10) none of whose titles, chosen or sibling, is, or shares its 8.2 group
+/// with, a main movie's scan title (ruling H4: `groups` are the 8.2 groups `movie_plan` holds, and a title in the same
+/// group as a main movie's title plays the same segments, unless the group's segment map is truncated, J4) is a cut
+/// TheDiscDB does not list. Each is planned after the main movies, in rule 2's cut order, as an unnamed cut (edition
+/// None, `theatrical` false, its chosen title the variant `wanted` prefers, its other titles its siblings), with the
+/// review reason unnamed_cut, one note UnlistedLabelCut whose detail states only the fact, naming the title and its
+/// label as the scan wrote it (ruling H3), and one evidence sentence, so the owner names it with Assign titles. The
+/// confidence stays what the main movies alone give (0.98 when they raise no reason): an unlisted cut has no name to
+/// share, so it never makes title_ambiguous. The main movie's own label suffix, its dub variants and a Narrative
+/// variant belong to its cut and name no second one. Rulings G4 and J3: a labelled title that fails the 8.2 candidate
+/// filter (a menu loop, a title shorter than `minlength_s` or without a duration) is in no cut, since `by_labels` drops
+/// it before grouping, so a cut all of whose titles fail is not planned (no note, no evidence) and a cut's chosen title
+/// always passes. Ruling H2 (2026-10-19): when such a cut is planned, a main movie whose edition is None because its
+/// own label suffix is Other or it carries no label is marked theatrical false, with an evidence sentence, so
+/// `edition_names` gives it no "Theatrical Cut" and the owner names both cuts; a main movie the label table names
+/// "Theatrical Cut" (the bare `FPL_MainFeature` and `_R` rows) stays theatrical, and without an unlisted cut the Task 5
+/// ruling stands. Def: T5. Use: T5, T7.
 pub fn by_database(
     record: &DiscDbRecord,
     matches: &BTreeMap<u32, u32>,

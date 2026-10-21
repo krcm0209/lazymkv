@@ -360,9 +360,10 @@ fn given(text: Option<&str>) -> Option<&str> {
 }
 
 /// The bdmt name when Some and not blank, else the volume label when Some and not blank, else None. The caller builds
-/// it once (`disc_name(bdmt, disc.volume_label.as_deref())`), searches TMDb with its `cleaned`, and passes it as
-/// `LookupInputs.name`; `plan::plan` reads it from there and copies it into `PlanEvidence.name`. Spec 8.1 "The disc's
-/// own name is the `bdmt` disc name, else the volume label". Def: T4. Use: T7 (tests), T15.
+/// it once (`disc_name(bdmt, disc.volume_label.as_deref())`), searches TMDb with its `cleaned` (and with its `tagged`
+/// too when the two differ once folded, passing both answer pages merged as `LookupInputs.search` says, ruling J8), and
+/// passes it as `LookupInputs.name`; `plan::plan` reads it from there and copies it into `PlanEvidence.name`. Spec 8.1
+/// "The disc's own name is the `bdmt` disc name, else the volume label". Def: T4. Use: T7 (tests), T15.
 pub fn disc_name(bdmt: Option<&str>, volume_label: Option<&str>) -> Option<DiscName> {
     let (raw, source) = match (given(bdmt), given(volume_label)) {
         (Some(name), _) => (name, NameSource::Bdmt),

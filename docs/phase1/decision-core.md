@@ -463,6 +463,8 @@ controller applied the rest as written (G1 to G15). The owner may overturn any o
   is no longer ripped as the feature at 0.85 in Direct mode. F4 keeps a TheDiscDB movie's play-all-shaped feature an
   ordinary rival. Left to the owner: two episodes more than 10% apart beside an extras play-all still rip the longer one
   at 0.85 in Direct mode (Chernobyl disc 2 is held only because its two episodes are rivals); the owner accepts it (H6).
+  The hold's evidence sentence reads `8.3 rule 3.5: the only feature, title {n}, is a play-all of other titles (8.5),
+  so the plan is held at 0.60 and the disc is copied whole` (J13).
 - G2. `kind::structure_says_tv` compares in integers (`longest * 100 <= shortest * 115`), so a pair exactly 15% apart
   (1300 s and 1495 s) is TV; `TV_SPREAD` became `TV_SPREAD_PERCENT` (15).
 - G3 (the owner). `lazymkv-dev plan` clears the pending flag of a failed TMDb lookup for a `--tmdb-record` only when the
@@ -470,6 +472,8 @@ controller applied the rest as written (G1 to G15). The owner may overturn any o
   TheDiscDB's answer the plan has no TMDb identity, so a given record then leaves the TMDb lookup pending too.
 - G4. Rule 1 does not plan an unlisted labelled cut whose chosen title and every sibling fail the 8.2 candidate filter
   (a menu loop, a title shorter than `minlength_s` or without a duration); `movie::by_database` takes the settings.
+  J3, J5 and J10 replace the check: `movie::by_labels` drops such a title before grouping, and `by_database` no longer
+  takes the settings.
 - G5. `movie::parse_label` reads a trailing `Narrative` token after another suffix (`FPL_MainFeature_UR_Narrative` is
   the UR cut with `Label.narrative`), and rule 2's grouping drops it as it drops the bare `_Narrative` suffix, so it
   names no unlisted cut.
@@ -486,7 +490,7 @@ controller applied the rest as written (G1 to G15). The owner may overturn any o
   and Us's 116 minutes sit within 3% of 1917's 119), so `1917_US` gives `1917` and `2012_UK` gives `2012`, which stay
   generic as before.
 - G9. `Feature.theatrical`'s doc limits the Other suffix to rule 2 and says that a rule 1 main movie whose own label
-  suffix is Other has no edition and stays theatrical unless it is a later main movie (c1:F1).
+  suffix is Other has no edition and stays theatrical unless it is a later main movie (the Task 5 ruling).
 - G10. The `AVATAR 3D 2` assertion names the guard that holds: the D of the 3D tag starts no marker, even beside a
   following number.
 - G11. `kind::is_episode_length` and `kind::play_all_of_episodes` name the rulings plan's Task 1 (OR1) as their
@@ -531,6 +535,61 @@ wording residuals applied (H7) and settled the bookkeeping (H8). The owner may o
   TheDiscDB does not list (on a disc TheDiscDB knows).
 - H8. This block and the test count below. G6 stays pinned as it is (`SHOW_S3D_1` has no season marker and cleans to
   `SHOW 1`), and the 3D plausibility question left open under the OR rulings is closed by H1.
+
+### The second review of pull request #4 (J1 to J15)
+
+A second review posted fifteen comments at 68b5d59; the controller applied them as J1 to J15 (J2 and J5 are behaviour
+choices made on spec 8.4 and 8.2, reported to the owner). The owner may overturn any of them.
+
+- J1. `movie::by_database` plans the unlisted cuts and applies H2 before the same-name check, which then reads the main
+  movies only. With TheDiscDB's main movies "Film" and "Film (Theatrical Cut)" beside an unlisted `_UR` cut, the first
+  main movie is left unnamed and no longer clashes with the second, so the plan stays 0.98 with `unnamed_cut` alone;
+  the confidence is 0.60 when a later main movie has no edition or two main movies share a name, else 0.98 (an
+  unlisted cut alone keeps 0.98, OR5). Two main movies named alike with no unlisted cut stay 0.60 `title_ambiguous`.
+- J2 (a behaviour choice on spec 8.4). A labelled title in a main movie's 8.2 group (H4) whose label the table names
+  (`_UR`, `_EXT`, or the bare and `_R` rows' "Theatrical Cut") names the main movie's edition when TheDiscDB's item
+  title and the main movie's own label name none, with the evidence sentence `edition '{name}' from the label
+  {comment} of title {n}, the same content as main movie {m}`, where {m} is TheDiscDB's main movie index; a suffix the
+  table does not name gives nothing, as on the main movie's own label. A main movie without a label whose same-map
+  playlist carries `FPL_MainFeature_UR` is now the Unrated Cut rather than an unnamed theatrical cut, and H4's main
+  movie beside a bare `FPL_MainFeature` duplicate is now "Theatrical Cut". Spec 8.3 rule 1 says so.
+- J3 and J5 (J5 a behaviour choice on spec 8.2). `movie::by_labels` takes the 8.2 candidates and drops every labelled
+  title outside them before grouping, so a cut whose titles all fail the filter is not planned and a cut's variant is
+  chosen among its candidate titles. Without TheDiscDB, G4's disc (title 1 `_UR`, title 2 `_R` with no audio stream)
+  plans the unrated cut alone at 0.90 rather than filing the menu loop as the theatrical cut; with TheDiscDB, an
+  unlisted `_R` cut whose only candidate is its `_R_JPN` dub is planned by the dub, with no sibling, rather than by
+  the menu loop. G4's separate check in `by_database` is gone. The labelled features of the pinned logs (The
+  Expendables 3's titles 41 and 54, Smile's title 14) remain candidates. Spec 8.3 rules 1 and 2 say so.
+- J4. A truncated 8.2 group (a segment map ending in `...`) lists no cut and names no main movie's edition, since its
+  members may differ after the known prefix (`kind::play_all` already refuses truncated groups); the main titles
+  themselves stay listed.
+- J6. `name::tagged` tests a token's joined text, so a token whose only part left is empty keeps nothing: `SHOW D1- X`
+  gives `SHOW X`, as `clean` does.
+- J7. `movie::parse_label` takes the language code and the Narrative token off the end in either order, each at most
+  once: `FPL_MainFeature_JPN_Narrative` is the dub suffix jpn with `narrative`, and `_UR_JPN_Narrative` the UR cut's
+  Japanese narrative variant, as `_UR_Narrative_JPN` was. The label table row says so.
+- J8. Documents only: `LookupInputs.search`, `name::disc_name` and spec 8.1 state the client contract. When the disc
+  name's `tagged` differs from its `cleaned` once folded, the caller searches TMDb with both and passes the two answer
+  pages merged in order, the cleaned name's results first and then the tagged name's results not already present, so
+  the tagged match can be found and `PIRANHA_3D` keeps its fallback to Piranha. Listed under "Left for phase 2".
+- J9. `MoviePlan::hold_ambiguous` holds a plan (confidence at most 0.60, `title_ambiguous`, an evidence sentence);
+  `runtime_sanity` and the G1 hold in `plan::plan`, now one condition, use it, and the docs of
+  `ReviewReason::TitleAmbiguous` and `movie::by_structure_as_movie` name rule 3.5's hold.
+- J10. `movie::by_database` drops its `settings`: `movie_plan` reads the candidates once from the groups (exactly the
+  candidates, as `plan::plan` builds the groups from them) and gives them to rules 1 and 2; a main title that fails the
+  filter is in no group, so `listed` still chains the main titles in.
+- J11. The H2 condition is stated with "edition is None" everywhere (spec 8.3 rule 1: a main movie "whose edition
+  TheDiscDB's item title does not name"); the list of unnamed cuts lives only in `movie::Feature.theatrical`'s doc,
+  and the docs of `PlannedRole::Feature` and `decision::job_features` point at it.
+- J12. "(c1:F1)" became "(the Task 5 ruling)" in `movie::Feature.theatrical`'s doc and the G9 bullet (the copies in
+  `PlannedRole::Feature` and `job_features` went with J11), and the Chernobyl disc 2 test says the longer of two
+  unequal episodes alone at 0.85 was accepted by the owner (H6).
+- J13. The G1 evidence sentence cites the spec clause instead of a review id, as the G1 bullet quotes it.
+- J14. The G3 test asserts that the planned identity stays TheDiscDB's movie 6537 and that the other record lends it
+  no original language, and `PlanOptions.tmdb_record`'s doc says the record clears the pending flag only when it is
+  the planned identity's (G3).
+- J15. `by_database`'s `nameless` list became `first_nameless`: only the first main movie can be left unnamed by H2,
+  since a later one with no edition is an unnamed cut already.
 
 ## Choices the owner should confirm
 
@@ -607,6 +666,9 @@ changing that test and its rule.
   perform the job reducer's actions and fold `plan`, `decide` and `retune` into `lazymkvctl`.
 - Keeping remembered decisions, season sessions and jobs; reading the library for `LibraryFacts` and path collisions.
 - The TheDiscDB and TMDb clients, and the live check of the TMDb shapes that phase 1's synthetic answers follow.
+- The TMDb client's query rule (J8): when the disc name's `tagged` differs from its `cleaned` once folded, search with
+  both and pass `plan::plan` the two first pages merged in order, the cleaned name's results first and then the tagged
+  name's results not already among them.
 - The DVD disc ID, the decoding of bitmap subtitles for OCR (decision D22), the app's own recording format and the
   form of the tuning evidence, D17's bundling table and code signing (RP10, RP13).
 - Performing the reducer's `RefreshIdentity` (persisting the plan `plan::refresh_identity` gives and passing it to
@@ -626,6 +688,7 @@ After the fixes of the review of pull request #3 (F1 to F15) the same command li
 After the rulings pull request the same command lists 2030: 1617 in `lazymkv-core`, 402 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the fixes of the review of pull request #4 (G1 to G15 and G8a) the same command lists 2038: 1624 in `lazymkv-core`, 403 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 After the owner's answers of 2026-10-19 (H1 to H8) the same command lists 2046: 1632 in `lazymkv-core`, 403 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
+After the fixes of the second review of pull request #4 (J1 to J15) the same command lists 2051: 1637 in `lazymkv-core`, 403 in `lazymkv-dev`, 8 in `lazymkv-capture` and 3 in `fake-tools`.
 The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test compiled only on Unix is not.
 
 Design spec 15 asks for a test of every rule of section 8 for its normal case and for each guard, review reason and
