@@ -208,18 +208,19 @@ pub struct MoviePlan {
 /// media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and the scan
 /// title's comment (attribute 49) parses as a label, `edition_of(label.suffix)` (8.4 "else from the label table":
 /// Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); when that leaves nothing too, the label of another
-/// title of its 8.2 group that the table names, the first in title order, with an evidence sentence (ruling J2: that
-/// title plays the same segments, so its label names the main movie's cut; an Other suffix there names nothing, as on
-/// the main movie's own label); `theatrical` as Feature's doc says. Two or more
-/// MainMovies of which a later one still has no edition: 0.60 with unnamed_cut; two main movies given the same edition
-/// name make it 0.60 with title_ambiguous (Review Focus 8), checked after H2's unnaming below, so a main movie H2 leaves
-/// unnamed shares no name (ruling J1). None when TheDiscDB marks no main movie or any MainMovie title does not reconcile.
+/// title of its 8.2 group (an untruncated one, J4) that the table names, the first in title order, with an evidence
+/// sentence (ruling J2: that title plays the same segments, so its label names the main movie's cut; an Other suffix
+/// there names nothing, as on the main movie's own label); `theatrical` as Feature's doc says. Two or more MainMovies of
+/// which a later one still has no edition: 0.60 with unnamed_cut; two main movies given the same edition name make it
+/// 0.60 with title_ambiguous (Review Focus 8), checked after H2's unnaming below, so a main movie H2 leaves unnamed
+/// shares no name (ruling J1). None when TheDiscDB marks no main movie or any MainMovie title does not reconcile.
 ///
 /// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted, candidates)`, so only when
 /// `disc.java_in_use` and over the 8.2 candidates only, J5; `wanted` is the languages `movie_plan` holds, SR3, and
 /// `candidates` the titles of its groups, J10) none of whose titles, chosen or sibling, is,
 /// or shares its 8.2 group with, a main movie's scan title (ruling H4: `groups` are the 8.2 groups `movie_plan` holds,
-/// and a title in the same group as a main movie's title plays the same segments) is a cut TheDiscDB does not list.
+/// and a title in the same group as a main movie's title plays the same segments, unless the group's segment map is
+/// truncated, J4) is a cut TheDiscDB does not list.
 /// Each is planned after the main movies, in rule 2's cut order, as an unnamed cut (edition None, `theatrical` false,
 /// its chosen title the variant `wanted` prefers, its other titles its siblings), with the review reason unnamed_cut,
 /// one note UnlistedLabelCut whose detail states only the fact, naming the title and its label as the scan wrote it
@@ -304,11 +305,13 @@ pub fn by_database(
     // OR5: a labelled cut none of whose titles is a main movie's is one TheDiscDB does not list. It joins the plan as an
     // unnamed cut and holds the job for review, but the confidence stays what the main movies alone give.
     // H4: a title in the same 8.2 group as a main movie's title (the same segment map) is listed too.
+    // J4: a truncated group's members are not known to play the same segments, so it lists no cut.
     let main_titles: BTreeSet<u32> = features.iter().map(|feature| feature.title).collect();
-    // The main titles themselves are chained in: a main title that fails the 8.2 candidate filter is in no group.
-    let listed: BTreeSet<u32> = groups
+    // The main titles themselves are chained in: a main title that fails the 8.2 candidate filter is in no group, and
+    // one in a truncated group is still listed.
+    let listed: BTreeSet<u32> = main_titles
         .iter()
-        .filter(|group| group.titles.iter().any(|number| main_titles.contains(number)))
+        .filter_map(|&number| same_content(groups, number))
         .flat_map(|group| group.titles.iter().copied())
         .chain(main_titles.iter().copied())
         .collect();
@@ -369,11 +372,19 @@ pub fn by_database(
     })
 }
 
-/// Ruling J2: the first other title, in title order, of the 8.2 group holding scan title `number` whose comment parses as
-/// a label the table names (`edition_of`: the bare and `_R` rows' "Theatrical Cut", `_UR`, `_EXT`), with that comment and
-/// the edition name. A label whose suffix the table does not name (Other, Narrative, a language code alone) names none.
+/// The 8.2 group holding scan title `number`, when its segment map is whole: its members play the same segments (ruling
+/// H4). A truncated map (ending in "...") may hide a difference after its known prefix, so a truncated group is none
+/// (ruling J4), as `kind::play_all` never counts one either.
+fn same_content(groups: &[Group], number: u32) -> Option<&Group> {
+    groups.iter().find(|group| !group.truncated && group.titles.contains(&number))
+}
+
+/// Ruling J2: the first other title, in title order, of the 8.2 group holding scan title `number` (`same_content`, so
+/// never a truncated group, J4) whose comment parses as a label the table names (`edition_of`: the bare and `_R` rows'
+/// "Theatrical Cut", `_UR`, `_EXT`), with that comment and the edition name. A label whose suffix the table does not
+/// name (Other, Narrative, a language code alone) names none.
 fn edition_from_same_content<'a>(disc: &'a Disc, groups: &[Group], number: u32) -> Option<(u32, &'a str, &'static str)> {
-    let group = groups.iter().find(|group| group.titles.contains(&number))?;
+    let group = same_content(groups, number)?;
     group.titles.iter().filter(|&&other| other != number).find_map(|&other| {
         let comment = disc.titles.get(&other)?.comment.as_deref()?;
         let label = parse_label(other, comment)?;
@@ -1404,6 +1415,33 @@ mod tests {
         let groups = groups_of(&apart, &settings);
         assert_eq!(groups.iter().map(|group| group.titles.clone()).collect::<Vec<_>>(), vec![vec![0], vec![8]]);
         let plan = by_database(&one, &main_is_title_0, &apart, &groups, &english, &candidates_of(&groups)).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, None, false, &[]), feature(8, None, false, &[])]);
+        assert_eq!((plan.confidence, plan.reviews), (0.98, vec![ReviewReason::UnnamedCut]));
+        assert_eq!(
+            plan.notes,
+            vec![Noted {
+                note: Note::UnlistedLabelCut,
+                stream: None,
+                detail: "title 8's label FPL_MainFeature names a cut TheDiscDB does not list as a main movie".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_truncated_group_lists_no_labelled_cut() {
+        // J4: MakeMKV truncated both titles' segment maps ("1,2,3..."), so they share an 8.2 group, but the maps may
+        // differ after the known prefix: title 8 (FPL_MainFeature) is not known to play the main movie's segments. It
+        // is a cut TheDiscDB does not list, planned as an unnamed cut, and its label names no edition for the main
+        // movie (J2), which carries no label and so is left unnamed too (H2).
+        let one = record(Some("Film"), &["Film"]);
+        let main_is_title_0 = BTreeMap::from([(0, 0)]);
+        let disc = java_mapped_disc(&[(0, "1,2,3...", ""), (8, "1,2,3...", "FPL_MainFeature")]);
+        let groups = groups_of(&disc, &Settings::default());
+        assert_eq!(
+            groups.iter().map(|group| (group.titles.clone(), group.truncated)).collect::<Vec<_>>(),
+            vec![(vec![0, 8], true)]
+        );
+        let plan = rule_1_plan(&one, &main_is_title_0, &disc, &wanted_languages(None)).expect("rule 1 applies");
         assert_eq!(plan.features, vec![feature(0, None, false, &[]), feature(8, None, false, &[])]);
         assert_eq!((plan.confidence, plan.reviews), (0.98, vec![ReviewReason::UnnamedCut]));
         assert_eq!(
