@@ -53,17 +53,37 @@ pub struct Label {
 }
 
 /// A title comment (attribute 49) starting `FPL_MainFeature` (optionally preceded by `SEG_` or `SEG `): its suffix, with a
-/// trailing `_XXX` three-letter language code split off as `language`, then a trailing `_Narrative` token (any ASCII
+/// trailing `_XXX` three-letter language code split off as `language` and a trailing `_Narrative` token (any ASCII
 /// case) after another suffix split off as `narrative` (8.3 rule 2's table, ruling G5: `FPL_MainFeature_UR_Narrative`
-/// is suffix UR with `narrative` true). None for any other comment. One `_` after the prefix is dropped; `R`, `UR`,
-/// `EXT` and `Narrative` are compared ignoring ASCII case; a three-letter code counts when it is one of
-/// `lang::ISO639`'s. Def: T5. Use: T5.
+/// is suffix UR with `narrative` true). The two come off the end in either order, each at most once, the language code
+/// tried first each time (ruling J7): `_UR_Narrative_JPN` and `_UR_JPN_Narrative` are both suffix UR, language jpn,
+/// narrative, and `_JPN_Narrative` is the dub suffix jpn, narrative. None for any other comment. One `_` after the
+/// prefix is dropped; `R`, `UR`, `EXT` and `Narrative` are compared ignoring ASCII case; a three-letter code counts when
+/// it is one of `lang::ISO639`'s. Def: T5. Use: T5.
 pub fn parse_label(title: u32, comment: &str) -> Option<Label> {
     let text = comment.strip_prefix("SEG_").or_else(|| comment.strip_prefix("SEG ")).unwrap_or(comment);
     let rest = text.strip_prefix(LABEL_PREFIX)?;
-    let rest = rest.strip_prefix('_').unwrap_or(rest);
-    let (body, language) = split_language(rest);
-    let (body, narrative) = split_narrative(body);
+    let mut body = rest.strip_prefix('_').unwrap_or(rest);
+    // J7: the language code and the Narrative token come off the end in either order, each at most once.
+    let mut language = None;
+    let mut narrative = false;
+    loop {
+        if language.is_none() {
+            if let (rest, Some(code)) = split_language(body) {
+                body = rest;
+                language = Some(code);
+                continue;
+            }
+        }
+        if !narrative {
+            if let (rest, true) = split_narrative(body) {
+                body = rest;
+                narrative = true;
+                continue;
+            }
+        }
+        break;
+    }
     let suffix = match body.to_ascii_lowercase().as_str() {
         "" => match &language {
             Some(code) => Suffix::Language(code.clone()),
@@ -860,11 +880,25 @@ mod tests {
         // G5: `_UR_Narrative` is the UR cut's audio-description variant, read as the language code is split off.
         assert_eq!(label("FPL_MainFeature_UR_Narrative"), Some(Label { title: 7, suffix: Suffix::Ur, language: None, narrative: true }));
         assert_eq!(label("FPL_MainFeature_ur_NARRATIVE"), Some(Label { title: 7, suffix: Suffix::Ur, language: None, narrative: true }));
-        // The language code is split off first, so it may follow the Narrative token.
+        // J7: the language code and the Narrative token come off the end in either order, each at most once.
         assert_eq!(
             label("FPL_MainFeature_UR_Narrative_JPN"),
             Some(Label { title: 7, suffix: Suffix::Ur, language: Some("jpn".to_string()), narrative: true })
         );
+        assert_eq!(
+            label("FPL_MainFeature_UR_JPN_Narrative"),
+            Some(Label { title: 7, suffix: Suffix::Ur, language: Some("jpn".to_string()), narrative: true })
+        );
+        assert_eq!(
+            label("FPL_MainFeature_JPN_Narrative"),
+            Some(Label {
+                title: 7,
+                suffix: Suffix::Language("jpn".to_string()),
+                language: Some("jpn".to_string()),
+                narrative: true
+            })
+        );
+        assert_eq!(label("FPL_MainFeature_JPN_JPN"), expected(Suffix::Other("JPN".to_string()), Some("jpn")));
         // The bare suffix keeps its own row, and so does its dub variant.
         assert_eq!(label("FPL_MainFeature_Narrative"), expected(Suffix::Narrative, None));
         assert_eq!(label("FPL_MainFeature_Narrative_JPN"), expected(Suffix::Narrative, Some("jpn")));
