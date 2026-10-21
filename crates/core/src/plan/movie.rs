@@ -207,9 +207,9 @@ pub struct MoviePlan {
 /// media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and the scan
 /// title's comment (attribute 49) parses as a label, `edition_of(label.suffix)` (8.4 "else from the label table":
 /// Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); `theatrical` as Feature's doc says. Two or more
-/// MainMovies of which a later one still has no edition: 0.60 with unnamed_cut; two features given the same edition name
-/// make it 0.60 with title_ambiguous (Review Focus 8). None when TheDiscDB marks no main movie or any MainMovie title does
-/// not reconcile.
+/// MainMovies of which a later one still has no edition: 0.60 with unnamed_cut; two main movies given the same edition
+/// name make it 0.60 with title_ambiguous (Review Focus 8), checked after H2's unnaming below, so a main movie H2 leaves
+/// unnamed shares no name (ruling J1). None when TheDiscDB marks no main movie or any MainMovie title does not reconcile.
 ///
 /// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted)`, so only when
 /// `disc.java_in_use`; `wanted` is the languages `movie_plan` holds, SR3) none of whose titles, chosen or sibling, is,
@@ -246,9 +246,9 @@ pub fn by_database(
     let mut feature_seconds = Vec::new();
     let mut evidence = Vec::new();
     let mut unnamed = false;
-    // H2: the main movies (by position) whose edition is None because they carry no label or their own label suffix is
-    // Other; beside an unlisted cut they are left unnamed too.
-    let mut nameless = Vec::new();
+    // H2: the first main movie's edition is None because it carries no label or its own label suffix is Other; beside
+    // an unlisted cut it is left unnamed too. A later main movie with no edition is an unnamed cut already (J15).
+    let mut first_nameless = false;
     for (position, main_movie) in main_movies.iter().enumerate() {
         let number = *matches.get(&main_movie.index)?;
         let title = disc.titles.get(&number)?;
@@ -269,8 +269,8 @@ pub fn by_database(
                 }
             }
         }
-        if edition.is_none() && matches!(suffix, None | Some(Suffix::Other(_))) {
-            nameless.push(position);
+        if position == 0 && edition.is_none() && matches!(suffix, None | Some(Suffix::Other(_))) {
+            first_nameless = true;
         }
         let later_unnamed = position > 0 && edition.is_none();
         if later_unnamed {
@@ -281,21 +281,12 @@ pub fn by_database(
         features.push(Feature { title: number, edition, theatrical, siblings: Vec::new() });
         feature_seconds.push(title.seconds);
     }
-    // Two main movies given the same edition name would file to one path (Review Focus 8).
-    let same_name = same_edition_name(&features);
-    if let Some(name) = &same_name {
-        evidence.push(format!("two cuts are both named {name}"));
-    }
     let mut reviews = Vec::new();
     if unnamed {
         reviews.push(ReviewReason::UnnamedCut);
     }
-    if same_name.is_some() {
-        reviews.push(ReviewReason::TitleAmbiguous);
-    }
-    let confidence = if reviews.is_empty() { DATABASE_TITLE_CONFIDENCE } else { AMBIGUOUS_TITLE_CONFIDENCE };
     // OR5: a labelled cut none of whose titles is a main movie's is one TheDiscDB does not list. It joins the plan as an
-    // unnamed cut and holds the job for review, but the confidence above stays: it came from the main movies alone.
+    // unnamed cut and holds the job for review, but the confidence stays what the main movies alone give.
     // H4: a title in the same 8.2 group as a main movie's title (the same segment map) is listed too.
     let main_titles: BTreeSet<u32> = features.iter().map(|feature| feature.title).collect();
     let listed: BTreeSet<u32> = groups
@@ -304,7 +295,6 @@ pub fn by_database(
         .flat_map(|group| group.titles.iter().copied())
         .chain(main_titles.iter().copied())
         .collect();
-    let main_count = features.len();
     let mut notes = Vec::new();
     if let Some(labelled) = by_labels(disc, wanted) {
         let candidates = candidate_filter(disc, settings);
@@ -338,20 +328,24 @@ pub fn by_database(
     }
     // H2: beside an unlisted cut, a main movie whose own label names no edition (an Other suffix, or no label) is not
     // the theatrical cut either: the owner names both. The bare `FPL_MainFeature` and `_R` rows named it "Theatrical
-    // Cut", so it is not among them.
-    if features.len() > main_count {
-        for position in nameless {
-            let feature = &mut features[position];
-            if feature.theatrical {
-                feature.theatrical = false;
-                evidence.push(format!(
-                    "scan title {} is a main movie with no edition name beside a cut TheDiscDB does not list, so it is \
-                     left unnamed too",
-                    feature.title
-                ));
-            }
-        }
+    // Cut", so it is not among them. Only the first main movie can be such a one (J15).
+    if first_nameless && !notes.is_empty() {
+        features[0].theatrical = false;
+        evidence.push(format!(
+            "scan title {} is a main movie with no edition name beside a cut TheDiscDB does not list, so it is left \
+             unnamed too",
+            features[0].title
+        ));
     }
+    // Two main movies given the same edition name would file to one path (Review Focus 8). Checked after H2, which may
+    // have left the first main movie unnamed (J1); an unlisted cut has no name to share, so only the main movies count.
+    let same_name = same_edition_name(&features[..main_movies.len()]);
+    if let Some(name) = &same_name {
+        evidence.push(format!("two cuts are both named {name}"));
+        reviews.push(ReviewReason::TitleAmbiguous);
+    }
+    let confidence =
+        if unnamed || same_name.is_some() { AMBIGUOUS_TITLE_CONFIDENCE } else { DATABASE_TITLE_CONFIDENCE };
     Some(MoviePlan {
         rule: TitleRule::Database,
         features,
@@ -1164,6 +1158,35 @@ mod tests {
         let alone = java_disc(&[(1, "FPL_MainFeature_DC", &[ENG_AC3])]);
         let plan = rule_1_plan(&one, &main_is_title_1, &alone, &english, &Settings::default()).expect("rule 1 applies");
         assert_eq!(plan.features, vec![feature(1, None, true, &[])]);
+    }
+
+    #[test]
+    fn the_same_name_check_reads_the_main_movies_after_one_is_left_unnamed_beside_an_unlisted_cut() {
+        // J1: TheDiscDB's main movies are titles 1 ("Film", no edition) and 2 ("Film (Theatrical Cut)"); title 3 carries
+        // FPL_MainFeature_UR, a cut TheDiscDB does not list. Under H2 title 1 is left unnamed, so only title 2 would be
+        // filed as "Theatrical Cut": no two cuts share a name, and the plan stays 0.98 with unnamed_cut alone.
+        let two = record(Some("Film"), &["Film", "Film (Theatrical Cut)"]);
+        let matches = BTreeMap::from([(0, 1), (1, 2)]);
+        let english = wanted_languages(None);
+        let unlabelled = java_disc(&[(1, "", &[ENG_AC3]), (2, "", &[ENG_AC3]), (3, "FPL_MainFeature_UR", &[ENG_AC3])]);
+        let other = java_disc(&[
+            (1, "FPL_MainFeature_DC", &[ENG_AC3]),
+            (2, "", &[ENG_AC3]),
+            (3, "FPL_MainFeature_UR", &[ENG_AC3]),
+        ]);
+        for disc in [&unlabelled, &other] {
+            let plan = rule_1_plan(&two, &matches, disc, &english, &Settings::default()).expect("rule 1 applies");
+            assert_eq!(
+                plan.features,
+                vec![feature(1, None, false, &[]), feature(2, Some("Theatrical Cut"), true, &[]), feature(3, None, false, &[])]
+            );
+            assert_eq!((plan.confidence, plan.reviews.clone()), (0.98, vec![ReviewReason::UnnamedCut]));
+            assert!(!plan.evidence.iter().any(|sentence| sentence.starts_with("two cuts are both named")), "{:?}", plan.evidence);
+            assert_eq!(
+                edition_names(&plan.features, &LibraryFacts::default()),
+                names(&[None, Some("Theatrical Cut"), None])
+            );
+        }
     }
 
     #[test]
