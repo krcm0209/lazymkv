@@ -168,9 +168,10 @@ fn is_year(token: &str) -> bool {
 
 /// What cleaning keeps of `tokens`, token by token: the token's index, its text without its region and format tags (the
 /// cleaned text, empty for a token that is a tag) and its text with them (ruling H1). A hyphen part whose every piece
-/// belongs to a marker is dropped from both. The trailing year is dropped from both too: the last token with a cleaned
-/// text, when that text is a year and an earlier token has one as well, so a year before a trailing tag
-/// (`ALIEN_1979_UHD`) goes as cleaning removes it. Spec 8.1 "Cleaning".
+/// belongs to a marker is dropped from both, and a token whose text with its tags is then empty is not kept (`D1-` in
+/// `SHOW D1- X`, ruling J6). The trailing year is dropped from both too: the last token with a cleaned text, when that
+/// text is a year and an earlier token has one as well, so a year before a trailing tag (`ALIEN_1979_UHD`) goes as
+/// cleaning removes it. Spec 8.1 "Cleaning".
 fn kept_tokens(tokens: &[String]) -> Vec<(usize, String, String)> {
     let pieces = pieces(tokens);
     let in_marker: BTreeSet<usize> =
@@ -198,8 +199,10 @@ fn kept_tokens(tokens: &[String]) -> Vec<(usize, String, String)> {
                 untagged.push(text);
             }
         }
+        // J6: the joined text is tested, so a token whose only part left is empty (`D1-`) keeps nothing.
+        let with_tags = with_tags.join("-");
         if !with_tags.is_empty() {
-            kept.push((token, untagged.join("-"), with_tags.join("-")));
+            kept.push((token, untagged.join("-"), with_tags));
         }
     }
     let cleaned: Vec<usize> = (0..kept.len()).filter(|&index| !kept[index].1.is_empty()).collect();
@@ -250,8 +253,8 @@ pub fn clean(raw: &str) -> String {
 /// before the cleaned name. Underscores read as spaces, and the disc numbers, season markers and trailing year that
 /// `clean` removes go as it removes them; every region and format tag stays as written (with its brackets), and the
 /// whole-label rule of G8 is not applied. `PIRANHA_3D` gives `PIRANHA 3D`, `The Last of Us` gives itself,
-/// `ALIEN_1979_UHD` gives `ALIEN UHD`, `US_UHD` gives `US UHD`; a name without tags gives its cleaned form. Def: H1.
-/// Use: H1 (`disc_name`).
+/// `ALIEN_1979_UHD` gives `ALIEN UHD`, `US_UHD` gives `US UHD`; a name without tags gives its cleaned form, also when a
+/// marker leaves an empty hyphen part (`SHOW D1- X` gives `SHOW X`, ruling J6). Def: H1. Use: H1 (`disc_name`).
 pub fn tagged(raw: &str) -> String {
     kept_tokens(&tokens(raw)).into_iter().map(|(_, _, with_tags)| with_tags).collect::<Vec<String>>().join(" ")
 }
@@ -674,8 +677,9 @@ mod tests {
         assert_eq!((clean("1917_US"), tagged("1917_US")), ("1917".to_string(), "1917 US".to_string()));
         assert_eq!(tagged("US"), "US");
         assert_eq!(tagged("UHD"), "UHD");
-        // A name without tags is its cleaned form.
-        for raw in ["SMILE", "Pan's Labyrinth", "EXPENDABLES_3", "BLADE_RUNNER_2049", "2001 A SPACE ODYSSEY", ""] {
+        // A name without tags is its cleaned form, also when a marker leaves an empty hyphen part (`D1-`, J6).
+        assert_eq!((clean("SHOW D1- X"), tagged("SHOW D1- X")), ("SHOW X".to_string(), "SHOW X".to_string()));
+        for raw in ["SMILE", "Pan's Labyrinth", "EXPENDABLES_3", "BLADE_RUNNER_2049", "2001 A SPACE ODYSSEY", "", "SHOW D1- X"] {
             assert_eq!(tagged(raw), clean(raw), "{raw}");
         }
     }
