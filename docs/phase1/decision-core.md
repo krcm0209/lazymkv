@@ -583,8 +583,8 @@ choices made on spec 8.4 and 8.2, reported to the owner). The owner may overturn
   candidates, as `plan::plan` builds the groups from them) and gives them to rules 1 and 2; a main title that fails the
   filter is in no group, so `listed` still chains the main titles in.
 - J11. The H2 condition is stated with "edition is None" everywhere (spec 8.3 rule 1: a main movie "whose edition
-  TheDiscDB's item title does not name"); the list of unnamed cuts lives only in `movie::Feature.theatrical`'s doc,
-  and the docs of `PlannedRole::Feature` and `decision::job_features` point at it.
+  neither TheDiscDB's item title nor its group's agreeing labels name"); the list of unnamed cuts lives only in
+  `movie::Feature.theatrical`'s doc, and the docs of `PlannedRole::Feature` and `decision::job_features` point at it.
 - J12. "(c1:F1)" became "(the Task 5 ruling)" in `movie::Feature.theatrical`'s doc and the G9 bullet (the copies in
   `PlannedRole::Feature` and `job_features` went with J11), and the Chernobyl disc 2 test says the longer of two
   unequal episodes alone at 0.85 was accepted by the owner (H6).
@@ -594,6 +594,10 @@ choices made on spec 8.4 and 8.2, reported to the owner). The owner may overturn
   the planned identity's (G3).
 - J15. `by_database`'s `nameless` list became `first_nameless`: only the first main movie can be left unnamed by H2,
   since a later one with no edition is an unnamed cut already.
+- J16 (the controller's re-review). `by_database` gives `by_labels` the candidates and the main titles, so a main title
+  the 8.2 filter leaves out (a menu loop labelled `_UR`) still anchors its own label cut and its candidate dub
+  (`_UR_JPN`) is not planned as a cut TheDiscDB does not list. Spec 8.3 rule 1 states J4's truncated groups and J2's
+  agreeing labels in the H4 and H2 clauses, and the docs of `lookup::tmdb` follow J8.
 
 ## Choices the owner should confirm
 

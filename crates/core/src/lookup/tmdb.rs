@@ -1,11 +1,12 @@
 //! TMDb's answers as spec 8.1 reads them, `core::lookup::tmdb`: the identity (TMDb numbers movies and TV shows
-//! separately, so an identity is always the pair of kind and ID), the first page of `/search/multi` ("Only the first page
-//! of results is considered"; "Movies and TV are searched together"), the record of `/movie/{id}` or `/tv/{id}` with its
-//! external IDs ("title, year, original language, runtime, the IMDb and TVDB IDs and, for TV, seasons and episodes with
-//! runtimes"), a season answer of `/tv/{id}/season/{n}`, the recording's slim `tmdb.json`, and `Work`, the title, year
-//! and IDs spec 8.9 names a file with. No TMDb search answer and no full record is recorded anywhere, so the tests use
-//! synthetic answers in TMDb's documented shapes; phase 2's client verifies the shapes live. A runtime of 0 minutes,
-//! which TMDb writes for an unknown runtime as often as null, reads as None. Used by Tasks 4 to 7, 11, 13 and 15.
+//! separately, so an identity is always the pair of kind and ID), the first page of each `/search/multi` search (the
+//! cleaned name's, then the tagged name's results not already present, J8; "Movies and TV are searched together"), the
+//! record of `/movie/{id}` or `/tv/{id}` with its external IDs ("title, year, original language, runtime, the IMDb and
+//! TVDB IDs and, for TV, seasons and episodes with runtimes"), a season answer of `/tv/{id}/season/{n}`, the
+//! recording's slim `tmdb.json`, and `Work`, the title, year and IDs spec 8.9 names a file with. No TMDb search answer
+//! and no full record is recorded anywhere, so the tests use synthetic answers in TMDb's documented shapes; phase 2's
+//! client verifies the shapes live. A runtime of 0 minutes, which TMDb writes for an unknown runtime as often as null,
+//! reads as None. Used by Tasks 4 to 7, 11, 13 and 15.
 
 use std::str::FromStr;
 
@@ -117,8 +118,8 @@ impl TmdbSearchResult {
     }
 }
 
-/// The first page of `/search/multi` (8.1 "Only the first page of results is considered"). Spec 8.1. Def: T3. Use: T4,
-/// T15.
+/// The first page of each `/search/multi` search (the cleaned name's, then the tagged name's results not already
+/// present, J8). Spec 8.1. Def: T3. Use: T4, T15.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TmdbSearch {
     #[serde(default)]

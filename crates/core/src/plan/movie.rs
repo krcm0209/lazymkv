@@ -253,25 +253,26 @@ impl MoviePlan {
 /// unnaming below, so a main movie H2 leaves unnamed shares no name (ruling J1). None when TheDiscDB marks no main
 /// movie or any MainMovie title does not reconcile.
 ///
-/// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted, candidates)`, so only when
-/// `disc.java_in_use` and over the 8.2 candidates only, J5; `wanted` is the languages `movie_plan` holds, SR3, and
-/// `candidates` the titles of its groups, J10) none of whose titles, chosen or sibling, is, or shares its 8.2 group
-/// with, a main movie's scan title (ruling H4: `groups` are the 8.2 groups `movie_plan` holds, and a title in the same
-/// group as a main movie's title plays the same segments, unless the group's segment map is truncated, J4) is a cut
-/// TheDiscDB does not list. Each is planned after the main movies, in rule 2's cut order, as an unnamed cut (edition
-/// None, `theatrical` false, its chosen title the variant `wanted` prefers, its other titles its siblings), with the
-/// review reason unnamed_cut, one note UnlistedLabelCut whose detail states only the fact, naming the title and its
-/// label as the scan wrote it (ruling H3), and one evidence sentence, so the owner names it with Assign titles. The
-/// confidence stays what the main movies alone give (0.98 when they raise no reason): an unlisted cut has no name to
-/// share, so it never makes title_ambiguous. The main movie's own label suffix, its dub variants and a Narrative
-/// variant belong to its cut and name no second one. Rulings G4 and J3: a labelled title that fails the 8.2 candidate
-/// filter (a menu loop, a title shorter than `minlength_s` or without a duration) is in no cut, since `by_labels` drops
-/// it before grouping, so a cut all of whose titles fail is not planned (no note, no evidence) and a cut's chosen title
-/// always passes. Ruling H2 (2026-10-19): when such a cut is planned, a main movie whose edition is None because its
-/// own label suffix is Other or it carries no label is marked theatrical false, with an evidence sentence, so
-/// `edition_names` gives it no "Theatrical Cut" and the owner names both cuts; a main movie the label table names
-/// "Theatrical Cut" (the bare `FPL_MainFeature` and `_R` rows) stays theatrical, and without an unlisted cut the Task 5
-/// ruling stands. Def: T5. Use: T5, T7.
+/// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels` over `candidates` and the main titles, so
+/// only when `disc.java_in_use` and over the 8.2 candidates only, J5, except that a main title the filter leaves out
+/// still anchors its own label cut, J16; `wanted` is the languages `movie_plan` holds, SR3, and `candidates` the titles
+/// of its groups, J10) none of whose titles, chosen or sibling, is, or shares its 8.2 group with, a main movie's scan
+/// title (ruling H4: `groups` are the 8.2 groups `movie_plan` holds, and a title in the same group as a main movie's
+/// title plays the same segments, unless the group's segment map is truncated, J4) is a cut TheDiscDB does not list.
+/// Each is planned after the main movies, in rule 2's cut order, as an unnamed cut (edition None, `theatrical` false,
+/// its chosen title the variant `wanted` prefers, its other titles its siblings), with the review reason unnamed_cut,
+/// one note UnlistedLabelCut whose detail states only the fact, naming the title and its label as the scan wrote it
+/// (ruling H3), and one evidence sentence, so the owner names it with Assign titles. The confidence stays what the main
+/// movies alone give (0.98 when they raise no reason): an unlisted cut has no name to share, so it never makes
+/// title_ambiguous. The main movie's own label suffix, its dub variants and a Narrative variant belong to its cut and
+/// name no second one. Rulings G4 and J3: a labelled title that fails the 8.2 candidate filter (a menu loop, a title
+/// shorter than `minlength_s` or without a duration) is in no cut, since `by_labels` drops it before grouping, so a cut
+/// all of whose titles fail is not planned (no note, no evidence) and a cut's chosen title always passes. Ruling H2
+/// (2026-10-19): when such a cut is planned, a main movie whose edition is None because its own label suffix is Other
+/// or it carries no label is marked theatrical false, with an evidence sentence, so `edition_names` gives it no
+/// "Theatrical Cut" and the owner names both cuts; a main movie the label table names "Theatrical Cut" (the bare
+/// `FPL_MainFeature` and `_R` rows) stays theatrical, and without an unlisted cut the Task 5 ruling stands. Def: T5.
+/// Use: T5, T7.
 pub fn by_database(
     record: &DiscDbRecord,
     matches: &BTreeMap<u32, u32>,
@@ -355,7 +356,10 @@ pub fn by_database(
         .chain(main_titles.iter().copied())
         .collect();
     let mut notes = Vec::new();
-    if let Some(labelled) = by_labels(disc, wanted, candidates) {
+    // J16: the main titles join the candidates here, so a main title the 8.2 filter leaves out still anchors its own
+    // label cut, and its dub variants are not taken for a cut TheDiscDB does not list.
+    let anchored: BTreeSet<u32> = candidates.union(&main_titles).copied().collect();
+    if let Some(labelled) = by_labels(disc, wanted, &anchored) {
         for (cut, seconds) in labelled.features.into_iter().zip(labelled.feature_seconds) {
             if std::iter::once(&cut.title).chain(&cut.siblings).any(|number| listed.contains(number)) {
                 continue;
@@ -1329,6 +1333,20 @@ mod tests {
                     .to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn a_main_title_outside_the_candidate_filter_still_anchors_its_label_cut() {
+        // J16: TheDiscDB's main movie is title 1 (FPL_MainFeature_UR), a menu loop by the 8.2 filter (no audio stream);
+        // title 2, FPL_MainFeature_UR_JPN, is its Japanese dub and a candidate. The dub belongs to the main movie's cut,
+        // which TheDiscDB lists, so no cut is taken for one it does not list.
+        let one = record(Some("Film"), &["Film"]);
+        let main_is_title_1 = BTreeMap::from([(0, 1)]);
+        let disc = java_disc(&[(1, "FPL_MainFeature_UR", &[]), (2, "FPL_MainFeature_UR_JPN", &[JPN_AC3])]);
+        assert_eq!(candidate_filter(&disc, &Settings::default()), vec![2]);
+        let plan = rule_1_plan(&one, &main_is_title_1, &disc, &wanted_languages(None)).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(1, Some("Unrated Cut"), false, &[])]);
+        assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]));
     }
 
     #[test]
