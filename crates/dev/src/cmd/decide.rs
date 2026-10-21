@@ -40,6 +40,7 @@ use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, S
 use lazymkv_core::recording::{py_repr_str, read_json, read_text, text_mode, Encoding, Errors, PathKey, Tree};
 use lazymkv_core::reconcile::{reconcile, Report, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::settings::Settings;
+use lazymkv_core::subtitle::labels::{READING, TEXT_HINT};
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Decision as TextDecision, Rule as TextRule, SubsJson};
 use lazymkv_core::tracks::audio::AudioFacts;
 use lazymkv_core::tracks::subtitle::{step10_runs, SubtitleFacts};
@@ -84,11 +85,6 @@ mkvmerge.json, or a label that is not a rip label; 3 when the evidence clone is 
 ";
 /// The level folders of a label: the folders the tuning harness measures. Py: audio_dataset.find_folders' glob.
 const LEVEL_FOLDERS: &str = "audio-levels-20ms-*";
-/// The reading folder decide looks for first under --text DIR, in the goldens' layout DIR/<slug>/<label>/<reading>/
-/// (port spec 5): the one ocr-subs.ps1 writes.
-const READING: &str = "subs-ocr";
-/// How to give decide the OCR text, at the end of every no-text reason.
-const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 /// The review reasons decide raises (design spec 8.6, 8.7 and 8.8).
 const AUDIO_REFERENCE_UNCLEAR: &str = "audio_reference_unclear";
 const COMMENTARY_DETECTED: &str = "commentary_detected";

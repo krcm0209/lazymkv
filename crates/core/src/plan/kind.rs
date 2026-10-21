@@ -1,7 +1,8 @@
 //! Spec 8.2, the disc kind: the candidate filter (menu loops and titles shorter than `minlength_s` out), the groups
 //! of titles with identical segment maps (on a DVD keyed by the title number too, since its segments restart in
 //! every title), the episode-length groups and the structural TV test, TheDiscDB's kind and the disc name's season
-//! marker, and 8.3 rule 3.1's "play all" title (a group whose segments are two or more other groups' in order).
+//! marker, and the "play all" title (a group whose segments are two or more other groups' in order) in its two readings:
+//! 8.3 rule 3.1's (every part episode-length, ruling OR1) and 8.5's (any parts, ruling OR15).
 //! `Kind` itself lives in `lookup` (identification is kind-aware) and is re-exported here. Used by `plan::movie`
 //! (Task 5), `plan::tv` and `remembered` (Task 6) and the planner (Task 7).
 
@@ -105,17 +106,25 @@ fn group_key(title: &Title, dvd: bool) -> String {
 pub const EPISODE_MIN_S: u32 = 15 * 60;
 /// Spec 8.2: the longest episode length, 120 minutes, included.
 pub const EPISODE_MAX_S: u32 = 120 * 60;
-/// Spec 8.2: the longest episode-length group is at most 15% longer than the shortest.
-pub const TV_SPREAD: f64 = 0.15;
+/// Spec 8.2: the longest episode-length group is at most 15% longer than the shortest, as a whole percentage so the test
+/// is exact in integers (ruling G2).
+pub const TV_SPREAD_PERCENT: u64 = 15;
+
+/// True when the group lasts between 15 and 120 minutes inclusive. Spec 8.2; the part test of 8.3 rule 3.1's play-all title
+/// under ruling OR1. Def: the rulings plan, Task 1 (OR1). Use: `episode_length_groups`, `play_all_of_episodes`.
+pub fn is_episode_length(group: &Group) -> bool {
+    (EPISODE_MIN_S..=EPISODE_MAX_S).contains(&group.seconds)
+}
 
 /// The groups lasting between 15 and 120 minutes inclusive, in group order. Spec 8.2. Def: T5. Use: T5, T6, T7 (fills
 /// RuntimeFacts.episode_group_seconds).
 pub fn episode_length_groups(groups: &[Group]) -> Vec<&Group> {
-    groups.iter().filter(|group| (EPISODE_MIN_S..=EPISODE_MAX_S).contains(&group.seconds)).collect()
+    groups.iter().filter(|group| is_episode_length(group)).collect()
 }
 
-/// Three or more episode-length groups and the longest at most 15% longer than the shortest (`longest <= shortest * 1.15`).
-/// Spec 8.2. Def: T5. Use: T5.
+/// Three or more episode-length groups and the longest at most 15% longer than the shortest, compared in integers
+/// (`longest * 100 <= shortest * 115`, so a pair exactly 15% apart such as 1300 s and 1495 s counts; ruling G2). Spec
+/// 8.2. Def: T5. Use: T5.
 pub fn structure_says_tv(groups: &[Group]) -> bool {
     let episodes = episode_length_groups(groups);
     if episodes.len() < 3 {
@@ -123,14 +132,27 @@ pub fn structure_says_tv(groups: &[Group]) -> bool {
     }
     let shortest = episodes.iter().map(|group| group.seconds).min().unwrap_or(0);
     let longest = episodes.iter().map(|group| group.seconds).max().unwrap_or(0);
-    f64::from(longest) <= f64::from(shortest) * (1.0 + TV_SPREAD)
+    u64::from(longest) * 100 <= u64::from(shortest) * (100 + TV_SPREAD_PERCENT)
 }
 
-/// Spec 8.3 rule 3.1: the index of a group whose segment list is the concatenation of two or more other groups' lists, whose
-/// segments follow one another in the whole list (the parts may be any other groups in any group order, each used once;
-/// truncated groups never count); None when none is. Not applied on a DVD (segments restart per title). A truncated group
-/// is never the play-all title either. The first such group in group order is returned. Def: T5. Use: T5, T6.
+/// Spec 8.5's play-all title, ruling OR15: the index of a group whose segment list is the concatenation of two or more other
+/// groups' lists, whose segments follow one another in the whole list (the parts may be any other groups of any length in
+/// any group order, each used once; truncated groups never count); None when none is. Not applied on a DVD (segments
+/// restart per title). A truncated group is never the play-all title either. The first such group in group order is
+/// returned. 8.3 rule 3.1 reads it more narrowly, see `play_all_of_episodes`. Def: T5. Use: T6 (`tv::without_play_all`).
 pub fn play_all(groups: &[Group], dvd: bool) -> Option<usize> {
+    play_all_where(groups, dvd, &|_| true)
+}
+
+/// Spec 8.3 rule 3.1 under ruling OR1: a play-all title whose every part is episode-length (15 to 120 minutes, 8.2); a
+/// concatenation of shorter extras is not one. Same search as `play_all` with the parts held to `is_episode_length`.
+/// Def: the rulings plan, Task 1 (OR1). Use: `movie::by_structure`.
+pub fn play_all_of_episodes(groups: &[Group], dvd: bool) -> Option<usize> {
+    play_all_where(groups, dvd, &is_episode_length)
+}
+
+/// The search behind both readings: the first group that is the concatenation of two or more other groups each passing `part`.
+fn play_all_where(groups: &[Group], dvd: bool, part: &dyn Fn(&Group) -> bool) -> Option<usize> {
     if dvd {
         return None;
     }
@@ -141,22 +163,27 @@ pub fn play_all(groups: &[Group], dvd: bool) -> Option<usize> {
         }
         let mut used = vec![false; groups.len()];
         used[index] = true;
-        concatenates(&whole.segments, groups, &mut used, 0)
+        concatenates(&whole.segments, groups, part, &mut used, 0)
     })
 }
 
 /// True when `rest` is the segments of two or more (counting `parts` already taken) unused, untruncated, non-empty groups
-/// one after another.
-fn concatenates(rest: &[i64], groups: &[Group], used: &mut [bool], parts: usize) -> bool {
+/// passing `part`, one after another.
+fn concatenates(rest: &[i64], groups: &[Group], part: &dyn Fn(&Group) -> bool, used: &mut [bool], parts: usize) -> bool {
     if rest.is_empty() {
         return parts >= 2;
     }
     for (index, group) in groups.iter().enumerate() {
-        if used[index] || group.truncated || group.segments.is_empty() || !rest.starts_with(&group.segments) {
+        if used[index]
+            || group.truncated
+            || group.segments.is_empty()
+            || !part(group)
+            || !rest.starts_with(&group.segments)
+        {
             continue;
         }
         used[index] = true;
-        if concatenates(&rest[group.segments.len()..], groups, used, parts + 1) {
+        if concatenates(&rest[group.segments.len()..], groups, part, used, parts + 1) {
             return true;
         }
         used[index] = false;
@@ -548,6 +575,13 @@ mod tests {
     }
 
     #[test]
+    fn the_15_percent_spread_is_exact_at_its_boundary() {
+        // G2: 1495 is exactly 115% of 1300, which `1300.0 * 1.15` (1494.9999999999998) missed in floating point.
+        assert!(structure_says_tv(&[bd("1", &[0], 1300), bd("2", &[1], 1300), bd("3", &[2], 1495)]));
+        assert!(!structure_says_tv(&[bd("1", &[0], 1300), bd("2", &[1], 1300), bd("3", &[2], 1496)]));
+    }
+
+    #[test]
     fn firefly_disc_1_is_not_tv_by_structure_since_its_pilot_is_double_length() {
         let found = groups_of(&pinned(FIREFLY_1));
         assert_eq!(episode_length_groups(&found).len(), 3);
@@ -617,12 +651,40 @@ mod tests {
     }
 
     #[test]
+    fn a_play_all_of_episodes_counts_only_parts_of_episode_length() {
+        let two_parts = |a: u32, b: u32| vec![bd("1", &[1], a), bd("2", &[2], b), bd("1,2", &[3], a + b)];
+        assert_eq!(play_all_of_episodes(&two_parts(1320, 1320), false), Some(2));
+        assert_eq!(play_all_of_episodes(&two_parts(900, 7200), false), Some(2), "the band is inclusive");
+        assert_eq!(play_all_of_episodes(&two_parts(1320, 600), false), None, "a ten-minute part");
+        assert_eq!(play_all_of_episodes(&two_parts(899, 1320), false), None);
+        assert_eq!(play_all_of_episodes(&two_parts(7201, 1320), false), None);
+        assert_eq!(play_all_of_episodes(&two_parts(1320, 1320), true), None, "never on a DVD");
+        // 8.5's reading (OR15) is unchanged: any parts.
+        assert_eq!(play_all(&two_parts(1320, 600), false), Some(2));
+    }
+
+    #[test]
+    fn a_whole_with_only_an_extras_decomposition_is_a_play_all_for_8_5_but_not_for_rule_3_1() {
+        let groups = vec![bd("1", &[1], 1320), bd("5", &[2], 300), bd("1,5", &[3], 1620)];
+        assert_eq!(play_all(&groups, false), Some(2));
+        assert_eq!(play_all_of_episodes(&groups, false), None);
+    }
+
+    #[test]
+    fn is_episode_length_is_15_to_120_minutes_inclusive() {
+        for (seconds, expected) in [(899, false), (900, true), (7200, true), (7201, false)] {
+            assert_eq!(is_episode_length(&bd("1", &[1], seconds)), expected, "{seconds}");
+        }
+    }
+
+    #[test]
     fn the_pinned_logs_play_all_groups() {
         for (log, key, title) in [(CHERNOBYL_1, "4,11,12", 6), (CHERNOBYL_2, "11,12", 7), (SMILE, "596,597", 117)] {
             let disc = pinned(log);
             let found = groups_of(&disc);
             let index = play_all(&found, disc.is_dvd).unwrap_or_else(|| panic!("{log}: no play-all group"));
             assert_eq!((found[index].key.as_str(), found[index].titles.clone()), (key, vec![title]), "{log}");
+            assert_eq!(play_all_of_episodes(&found, false), None, "{log}: its parts are short extras");
         }
         assert_eq!(play_all(&groups_of(&pinned(CHERNOBYL_1)), false), Some(1));
         assert_eq!(play_all(&groups_of(&pinned(SMILE)), false), Some(5));
@@ -668,6 +730,14 @@ mod tests {
     }
 
     #[test]
+    fn a_3d_label_is_not_a_season_marker_for_the_kind() {
+        let hugo = disc_name(None, Some("HUGO_S3D")).expect("a name");
+        assert!(!hugo.season_marker);
+        let john_wick = groups_of(&pinned(JOHN_WICK_UHD));
+        assert_eq!(disc_kind(None, &john_wick, Some(&hugo)), (Kind::Movie, KindSource::Default));
+    }
+
+    #[test]
     fn a_disc_number_alone_never_makes_a_tv_disc() {
         let name = disc_name(None, Some("CHERNOBYL_D2")).expect("a name");
         assert!(!name.season_marker);
@@ -690,6 +760,6 @@ mod tests {
 
     #[test]
     fn the_episode_length_constants_are_the_spec_values() {
-        assert_eq!((EPISODE_MIN_S, EPISODE_MAX_S, TV_SPREAD), (900, 7200, 0.15));
+        assert_eq!((EPISODE_MIN_S, EPISODE_MAX_S, TV_SPREAD_PERCENT), (900, 7200, 15));
     }
 }

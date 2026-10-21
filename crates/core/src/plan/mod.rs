@@ -101,8 +101,9 @@ fn file_stem(source_file: &str) -> &str {
 #[serde(rename_all = "snake_case", tag = "role")]
 pub enum PlannedRole {
     /// A feature or cut (8.3, 8.4); `edition` is the name `movie::edition_names` gives it; `theatrical` is the planner's
-    /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (8.3 rule 2's Other suffix,
-    /// edition None) and for one of two or more structural rivals, which keep no edition until the owner names them.
+    /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (edition None; the cases are
+    /// listed at `movie::Feature.theatrical`, ruling J11) and for one of two or more structural rivals, which keep no
+    /// edition until the owner names them.
     Feature { edition: Option<String>, theatrical: bool },
     /// An episode title (8.5).
     Episode(Episode),
@@ -205,21 +206,28 @@ pub struct PlanInputs<'a> {
 }
 
 /// 6.1 step 5 in order: candidates and groups (8.2); the kind; the structural pass (8.3 rules 1 to 3, or 8.5) to fill
-/// RuntimeFacts, running by_labels with `wanted_languages(None)` (8.3 rule 3.1's play-all makes the disc TV unless
-/// TheDiscDB states it is a movie, 8.2, when rule 3 runs without 3.1 over every group, `movie::by_structure_as_movie`,
-/// so a play-all-shaped group is an ordinary rival; every play-all group is left out of the episode-length groups, 8.5
-/// "play all titles are dropped"); identify (8.1) over `inputs.lookups` with
-/// `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to `inputs.overrides.and_then(|o|
-/// o.identity)`; when `identity.original_language` is Some and not English, by_labels runs again with
-/// `wanted_languages(identity.original_language)` and its features replace the first pass's (cuts, editions and
-/// confidence never change between the passes, only the variant chosen within a cut); `Plan.wanted` is
+/// RuntimeFacts, running by_labels with `wanted_languages(None)` (8.3 rule 3.1's play-all, a group whose every part is
+/// episode-length under OR1, makes the disc TV unless TheDiscDB states it is a movie, 8.2, when rule 3 runs without 3.1
+/// over every group, `movie::by_structure_as_movie`, so a play-all-shaped group is an ordinary rival; a play-all of
+/// shorter parts, such as an extras playlist or a feature and its 10-minute credits clip, is not rule 3.1's play-all
+/// title, and rule 3 runs directly, as TheDiscDB's movie kind would make it anyway; every play-all group of any parts is
+/// left out of the episode-length groups, 8.5 "play all titles are dropped", OR15; when TheDiscDB does not state the
+/// kind and rule 3 plans exactly one feature that is one of those play-all titles, the plan is held at 0.60 with
+/// title_ambiguous and an evidence sentence, so the disc is copied whole, 8.3 rule 3.5 under ruling G1); identify (8.1)
+/// over `inputs.lookups` with `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to
+/// `inputs.overrides.and_then(|o| o.identity)`; when `identity.original_language` is Some and not English, by_labels
+/// runs again, over the same candidates (J5), with `wanted_languages(identity.original_language)` for a rule 2 plan
+/// only (a rule 1 plan's unlisted cut keeps the variant chosen with English only, SR3) and its features replace the
+/// first pass's (cuts, editions and confidence never change between the passes, only the variant chosen within a cut);
+/// `Plan.wanted` is
 /// `wanted_languages(identity.original_language)` for every title rule (English only when the original language is
 /// unknown or English); rule 4; a remembered decision (`remembered::apply_titles`) or the owner's Assign titles
 /// (`overrides.titles`, which win) replace the planned titles and set title confidence to 1.00, and Set identity or a
 /// remembered identity sets identity confidence to 1.00; `overrides.season` fills a planned episode whose season is
 /// None (else the disc name's season does); the mode; reviews and notes gathered (8.8: identity and title confidence
 /// are fixed here). `Plan.titles` order (which fixes the keys' NN through `title_key(position, ..)`): movies in feature
-/// order (database index order for rule 1, each cut's lowest title number for rule 2, group order for rule 3), TV by
+/// order (database index order for rule 1, then each labelled cut TheDiscDB does not list in rule 2's cut order (OR5);
+/// each cut's lowest title number for rule 2; group order for rule 3), TV by
 /// (season, first episode) with season None last in title order. The identity is confirmed when its step is Reviewed,
 /// Remembered, DiscdbBoth or DiscdbOne (8.5 "when its identity is confirmed (by TheDiscDB or in review)"). With a mapped
 /// TV plan and the identity confirmed (or assigned episodes), a TMDb show identity and a season, `Plan.session` is
@@ -263,8 +271,8 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     ));
     let (mut planned_kind, mut kind_source) = kind::disc_kind(discdb, &groups, name);
     sentences.push(format!("the disc is {}: {}", kind_words(planned_kind), kind_source_words(kind_source)));
-    // 8.5 "play all titles are dropped": no play-all group (8.3 rule 3.1) is an episode, so each is left out until none is.
-    let (episode_groups, _) = tv::without_play_all(&groups, disc.is_dvd);
+    // 8.5 "play all titles are dropped" (OR15: any parts): no play-all group is an episode, so each is left out until none is.
+    let (episode_groups, play_all_titles) = tv::without_play_all(&groups, disc.is_dvd);
 
     // 8.3 rules 1 to 3 with English only (the original language comes with the identity), or 8.5's map.
     let english = wanted_languages(None);
@@ -272,8 +280,21 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let mut label_rule_reached = false;
     if planned_kind == Kind::Movie {
         match movie::movie_plan(disc, discdb, &matches, &groups, &english, settings) {
-            StructureOutcome::Plan(found) => {
+            StructureOutcome::Plan(mut found) => {
                 label_rule_reached = found.rule != TitleRule::Database;
+                // G1: rule 3's only feature is itself 8.5's play-all shape (a play-all of short parts, or extras longer
+                // than the film), so ripping it alone may file the wrong content; the plan is held for whole-disc copy
+                // mode. A disc TheDiscDB knows as a movie keeps such a feature as an ordinary rival (F4).
+                if kind_source != KindSource::Discdb
+                    && found.rule == TitleRule::Structure
+                    && matches!(found.features.as_slice(), [feature] if play_all_titles.contains(&feature.title))
+                {
+                    let title = found.features[0].title;
+                    found.hold_ambiguous(format!(
+                        "8.3 rule 3.5: the only feature, title {title}, is a play-all of other titles (8.5), so the plan \
+                         is held at 0.60 and the disc is copied whole"
+                    ));
+                }
                 found_movie = Some(found);
             }
             StructureOutcome::PlayAll { group } => {
@@ -328,7 +349,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let wanted = wanted_languages(identity.original_language.as_deref());
     if let Some(found) = found_movie.as_mut() {
         if found.rule == TitleRule::Labels && !wanted.original_is_english {
-            if let Some(again) = movie::by_labels(disc, &wanted) {
+            if let Some(again) = movie::by_labels(disc, &wanted, &candidates.iter().copied().collect()) {
                 sentences.push(format!(
                     "8.3 rule 2 chose each cut's variant again with the original language ({})",
                     wanted.original.join(", ")
@@ -653,10 +674,10 @@ struct Entry {
     remembered: bool,
 }
 
-/// The movie titles in feature order (database index order for rule 1, each cut's lowest title number for rule 2, group
-/// order for rule 3) with 8.4's edition names over the library facts and the planner's theatrical flag. Two or more
-/// structural rivals carry no edition name and are not theatrical: rule 3 names no cut, and such a plan is held for
-/// review, where the owner names the cuts (8.4).
+/// The movie titles in feature order (database index order for rule 1, then each labelled cut it does not list (OR5); each
+/// cut's lowest title number for rule 2; group order for rule 3) with 8.4's edition names over the library facts and the
+/// planner's theatrical flag. Two or more structural rivals carry no edition name and are not theatrical: rule 3 names no
+/// cut, and such a plan is held for review, where the owner names the cuts (8.4).
 fn movie_entries(found: &MoviePlan, library: &LibraryFacts) -> Vec<Entry> {
     let rivals = found.rule == TitleRule::Structure && found.features.len() >= 2;
     let editions =
@@ -944,6 +965,9 @@ pub(crate) mod fixtures {
     pub(crate) const DVD_VIDEO: &[(u32, &str)] = &[(1, "Video"), (5, "V_MPEG2"), (6, "Mpeg2"), (7, "Mpeg2")];
     pub(crate) const ENG_AC3: &[(u32, &str)] =
         &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "6")];
+    /// English stereo Dolby Digital: `ENG_AC3` with two channels.
+    pub(crate) const ENG_AC3_2CH: &[(u32, &str)] =
+        &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
     pub(crate) const SPA_AC3: &[(u32, &str)] =
         &[(1, "Audio"), (3, "spa"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "6")];
     pub(crate) const FRA_AC3: &[(u32, &str)] =
@@ -1379,19 +1403,31 @@ mod tests {
         let plan = pinned_log(EXPENDABLES, EXPENDABLES_API).plan();
         assert_discdb_one(&plan, movie_id(138103), "The Expendables 3", 2014);
         assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Discdb));
-        // Open point 5: TheDiscDB's item title names no edition, so the label table names it (FPL_MainFeature_UR).
+        // Open point 5: TheDiscDB's item title names no edition, so the label table names it (FPL_MainFeature_UR). OR5:
+        // title 54 (FPL_MainFeature_R) is a labelled cut TheDiscDB does not list, planned beside it as an unnamed cut.
         assert_eq!(
             plan.titles,
-            vec![planned("t00-00756", 41, feature(Some("Unrated Cut")), 7891, 28_831_358_976, Some("00756.mpls"))]
+            vec![
+                planned("t00-00756", 41, feature(Some("Unrated Cut")), 7891, 28_831_358_976, Some("00756.mpls")),
+                planned("t01-00820", 54, cut(None), 7587, 27_736_528_896, Some("00820.mpls")),
+            ]
         );
         assert_eq!(
             plan.evidence.labels,
             vec![(41, "FPL_MainFeature_UR".to_string()), (54, "FPL_MainFeature_R".to_string())]
         );
         assert_eq!((plan.title_confidence, plan.mode), (0.98, Mode::Direct));
-        assert_eq!(plan.reviews, Vec::<ReviewReason>::new());
-        // MakeMKV reported Java (MSG:3344), and rule 1 chose anyway: no label-rule note.
-        assert_eq!(plan.notes, Vec::<Noted>::new());
+        assert_eq!(plan.reviews, vec![ReviewReason::UnnamedCut]);
+        // MakeMKV reported Java (MSG:3344), and rule 1 chose anyway: no label-rule note, only the unlisted cut's.
+        assert_eq!(
+            plan.notes,
+            vec![Noted {
+                note: Note::UnlistedLabelCut,
+                stream: None,
+                detail: "title 54's label FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie"
+                    .to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -1588,6 +1624,7 @@ mod tests {
         // No second pass: an English original wants English only (`original_two_letter` keeps TMDb's "en").
         assert_eq!(plan.wanted, wanted_languages(Some("en")));
         assert!(plan.wanted.original_is_english && plan.wanted.original.is_empty());
+        assert!(!plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("8.3 rule 2 chose")));
 
         // Spanish original: the second pass picks the variant whose audio covers English and Spanish (title 2); the cut,
         // its edition and the confidence do not change.
@@ -1601,6 +1638,49 @@ mod tests {
         assert_eq!(plan.wanted.original, vec!["spa".to_string()]);
         assert_eq!(plan.reviews, Vec::<ReviewReason>::new());
         assert_eq!(plan.notes, Vec::<Noted>::new());
+        assert!(plan
+            .evidence
+            .sentences
+            .contains(&"8.3 rule 2 chose each cut's variant again with the original language (spa)".to_string()));
+    }
+
+    #[test]
+    fn a_second_label_pass_keeps_every_cut_and_changes_only_the_variant() {
+        // Two cuts, each in an English variant and an English and Spanish variant: the second pass (once TMDb says the
+        // film is Spanish) re-chooses the variant of each cut and nothing else. The two variants of a cut play the same
+        // clips (one segment map), so the disc has two groups, not the four equal-length groups that 8.2 reads as TV.
+        let disc = made_disc(
+            true,
+            "THE_ORPHANAGE",
+            &[
+                made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "FPL_MainFeature", ENG),
+                made(2, "1:40:00", "16", "00002.mpls", "1", "31000000000", "FPL_MainFeature_SPA", ENG_SPA),
+                made(3, "1:40:00", "16", "00003.mpls", "3", "32000000000", "FPL_MainFeature_UR", ENG),
+                made(4, "1:40:00", "16", "00004.mpls", "3", "33000000000", "FPL_MainFeature_UR_SPA", ENG_SPA),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let search = orphanage_search();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let roles = |plan: &Plan| plan.titles.iter().map(|title| (title.title, title.role.clone())).collect::<Vec<_>>();
+        let cuts = |first: u32, second: u32| {
+            vec![(first, feature(Some("Theatrical Cut"))), (second, cut(Some("Unrated Cut")))]
+        };
+
+        let english = orphanage_record("en", Some(100));
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, Some(&english)), &settings, &library));
+        assert_eq!(roles(&plan), cuts(1, 3));
+        assert!(!plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("8.3 rule 2 chose")));
+
+        let spanish = orphanage_record("es", Some(100));
+        let plan = run(&inputs(&disc, searched(name.as_ref(), &search, Some(&spanish)), &settings, &library));
+        assert_eq!(roles(&plan), cuts(2, 4));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Labels));
+        assert_eq!((plan.title_confidence, plan.mode), (0.90, Mode::Direct));
+        assert!(plan
+            .evidence
+            .sentences
+            .contains(&"8.3 rule 2 chose each cut's variant again with the original language (spa)".to_string()));
     }
 
     #[test]
@@ -1624,6 +1704,13 @@ mod tests {
         assert_eq!(plan.reviews, vec![ReviewReason::IdentityAmbiguous]);
         // The mode follows the title confidence only (6.2, 6.3); the review reason holds the job later (8.8).
         assert_eq!((plan.title_confidence, plan.mode), (0.90, Mode::Direct));
+        assert_eq!(plan.evidence.sentences.last().map(String::as_str), Some("title confidence 0.90: Direct mode (6.2)"));
+    }
+
+    #[test]
+    fn mode_sentences_name_the_confidence_and_the_mode() {
+        assert_eq!(mode_sentence(0.90, Mode::Direct), "title confidence 0.90: Direct mode (6.2)");
+        assert_eq!(mode_sentence(0.6, Mode::Copy), "title confidence 0.60: whole-disc copy mode (6.3)");
     }
 
     #[test]
@@ -1731,6 +1818,10 @@ mod tests {
         );
         assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
         assert_eq!(plan.reviews, vec![ReviewReason::IdentityUnknown, ReviewReason::UnnamedCut]);
+        assert_eq!(
+            plan.evidence.sentences.last().map(String::as_str),
+            Some("title confidence 0.60: whole-disc copy mode (6.3)")
+        );
     }
 
     #[test]
@@ -2018,8 +2109,10 @@ mod tests {
 
     #[test]
     fn a_play_all_title_on_a_disc_thediscdb_calls_a_movie_leaves_it_a_movie() {
-        // An extras play-all (title 4, segments 1,2,3) beside a 100-minute feature (title 5), without Java. TheDiscDB
-        // knows the disc as a movie but lists no title, so rule 1 gives no plan and rule 3 decides (8.3).
+        // A play-all of three episode-length titles (title 4, segments 1,2,3: rule 3.1's play-all under OR1) beside a
+        // 100-minute feature (title 5), without Java. TheDiscDB knows the disc as a movie but lists no title, so rule 1
+        // gives no plan and rule 3 decides (8.3). This is the test that keeps plan::plan's TheDiscDB-movie branch
+        // covered under OR1.
         let disc = made_disc(
             false,
             "FILM_DISC",
@@ -2063,12 +2156,74 @@ mod tests {
     }
 
     #[test]
+    fn an_extras_play_all_on_a_disc_without_thediscdb_leaves_it_a_movie() {
+        // OR1: a 100-minute feature and two 5-minute extras with their 10-minute play-all (title 4, segments 2,3). The
+        // parts are not episode-length, so the group is not 8.3 rule 3.1's play-all title and the disc stays a movie.
+        let disc = made_disc(
+            false,
+            "EXAMPLE_FILM",
+            &[
+                made(1, "1:40:00", "16", "00001.mpls", "1", "30000000000", "", ENG),
+                made(2, "0:05:00", "2", "00002.mpls", "2", "1500000000", "", ENG),
+                made(3, "0:05:00", "2", "00003.mpls", "3", "1500000000", "", ENG),
+                made(4, "0:10:00", "4", "00004.mpls", "2,3", "3000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![1]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(
+            !plan.evidence.sentences.iter().any(|sentence| sentence.starts_with("8.3 rule 3.1")),
+            "{:?}",
+            plan.evidence.sentences
+        );
+    }
+
+    #[test]
+    fn two_unequal_episodes_beside_an_extras_play_all_plan_the_longer_one_alone_h6() {
+        // H6 (accepted as OR1's consequence): two episodes of 50 and 60 minutes (titles 1 and 2) and two 5-minute extras
+        // with their 10-minute play-all (title 5, segments 3,4), without TheDiscDB, labels or a season marker. The
+        // episodes differ by more than 15%, so 8.2 says movie; the play-all's parts are not episode-length, so it is not
+        // rule 3.1's; the 50-minute group is more than 10% short of the 60-minute one, so rule 3 keeps title 2 alone at
+        // 0.85 in Direct mode. The identity guards hold the job.
+        let disc = made_disc(
+            false,
+            "EXAMPLE_EPISODES",
+            &[
+                made(1, "0:50:00", "8", "00001.mpls", "1", "15000000000", "", ENG),
+                made(2, "1:00:00", "10", "00002.mpls", "2", "18000000000", "", ENG),
+                made(3, "0:05:00", "2", "00003.mpls", "3", "1500000000", "", ENG),
+                made(4, "0:05:00", "2", "00004.mpls", "4", "1500000000", "", ENG),
+                made(5, "0:10:00", "4", "00005.mpls", "3,4", "3000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![2]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(!plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        // Without an identity the job is held for review all the same.
+        assert!(plan.reviews.contains(&ReviewReason::IdentityUnknown), "{:?}", plan.reviews);
+    }
+
+    #[test]
     fn a_play_all_shaped_feature_on_a_disc_thediscdb_calls_a_movie_is_an_ordinary_rival() {
         // The feature (title 3, 00800.mpls) plays a 100-minute body clip and a 10-minute credits clip, which MakeMKV also
-        // lists as titles 1 and 2 (00001.m2ts, 00002.m2ts). TheDiscDB knows the disc as a movie but lists no title, so
-        // rule 1 gives no plan and rule 3 decides without 3.1: the 110-minute "1,2" and the 100-minute "1" are rivals
-        // (within 10%), whose segments differ by half, so the plan is 0.60 multiple_features in copy mode. Dropping the
-        // play-all-shaped group would have planned the body clip alone at 0.85 and filed the movie without its last clip.
+        // lists as titles 1 and 2 (00001.m2ts, 00002.m2ts). The 10-minute clip is not episode-length, so under OR1 the
+        // group is not rule 3.1's play-all title. TheDiscDB knows the disc as a movie but lists no title, so rule 1 gives
+        // no plan and rule 3 runs directly (as TheDiscDB's movie kind would make it anyway): the 110-minute "1,2" and the
+        // 100-minute "1" are rivals (within 10%), whose segments differ by half, so the plan is 0.60 multiple_features in
+        // copy mode. Dropping the play-all-shaped group would have planned the body clip alone at 0.85 and filed the movie
+        // without its last clip.
         let disc = made_disc(
             false,
             "FILM_DISC",
@@ -2093,6 +2248,124 @@ mod tests {
         assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
         assert_eq!(plan.reviews, vec![ReviewReason::MultipleFeatures]);
+    }
+
+    /// The sentence G1 adds when the only feature rule 3 found is a play-all of other titles (its wording J13's).
+    fn held_play_all_sentence(title: u32) -> String {
+        format!(
+            "8.3 rule 3.5: the only feature, title {title}, is a play-all of other titles (8.5), so the plan is held at \
+             0.60 and the disc is copied whole"
+        )
+    }
+
+    #[test]
+    fn a_play_all_of_short_parts_that_would_be_the_only_feature_holds_the_plan() {
+        // G1: four 11-minute titles (segments 1 to 4) and their 44-minute play-all (title 5), with no TheDiscDB answer,
+        // no Java and no season marker. The parts are not episode-length, so under OR1 the play-all is not rule 3.1's
+        // and the disc stays a movie; no group lasts feature_min_minutes, so rule 3 keeps the longest, the play-all, as
+        // its one rival. It is 8.5's play-all shape, so the plan is held at 0.60 and the disc is copied whole.
+        let disc = made_disc(
+            false,
+            "EXAMPLE_SHORTS",
+            &[
+                made(1, "0:11:00", "3", "00001.mpls", "1", "3000000000", "", ENG),
+                made(2, "0:11:00", "3", "00002.mpls", "2", "3000000000", "", ENG),
+                made(3, "0:11:00", "3", "00003.mpls", "3", "3000000000", "", ENG),
+                made(4, "0:11:00", "3", "00004.mpls", "4", "3000000000", "", ENG),
+                made(5, "0:44:00", "12", "00005.mpls", "1,2,3,4", "12000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![5]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert!(plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(plan.evidence.sentences.contains(&held_play_all_sentence(5)), "{:?}", plan.evidence.sentences);
+    }
+
+    #[test]
+    fn an_extras_play_all_longer_than_the_feature_holds_the_plan_instead_of_ripping_the_extras() {
+        // G1: a 95-minute feature (title 1), twelve 10-minute extras (titles 2 to 13, segments 2 to 13) and their
+        // 120-minute play-all (title 14). Before OR1 the play-all made this disc TV; under OR1 rule 3 keeps both long
+        // groups, and the feature is not within 10% of the play-all, so the play-all is the one rival. Ripping it alone
+        // would file the extras as the film: the plan is held at 0.60 and the disc is copied whole instead.
+        let playlists: Vec<String> = (1..=14).map(|number| format!("{number:05}.mpls")).collect();
+        let parts: Vec<String> = (2..=13).map(|segment| segment.to_string()).collect();
+        let play_all = parts.join(",");
+        let mut titles = vec![made(1, "1:35:00", "16", &playlists[0], "1", "28000000000", "", ENG)];
+        for (index, segment) in parts.iter().enumerate() {
+            titles.push(made(index as u32 + 2, "0:10:00", "2", &playlists[index + 1], segment, "1500000000", "", ENG));
+        }
+        titles.push(made(14, "2:00:00", "24", &playlists[13], &play_all, "18000000000", "", ENG));
+        let disc = made_disc(false, "EXAMPLE_FILM", &titles);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let lookups = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, lookups, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![14]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert!(plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(plan.evidence.sentences.contains(&held_play_all_sentence(14)), "{:?}", plan.evidence.sentences);
+    }
+
+    #[test]
+    fn a_thediscdb_movies_sole_play_all_shaped_feature_is_not_held() {
+        // F4 beside G1: the feature (title 3, segments 1,2) plays an 80-minute body clip and a 10-minute credits clip
+        // that MakeMKV also lists (titles 1 and 2). The body clip is not within 10% of the feature, so title 3 is rule
+        // 3's one rival, and it is 8.5's play-all shape. TheDiscDB knows the disc as a movie (its record lists no
+        // title), so the feature is an ordinary rival at 0.85; without TheDiscDB, G1 holds the same plan at 0.60.
+        let disc = made_disc(
+            false,
+            "FILM_DISC",
+            &[
+                made(1, "1:20:00", "16", "00001.m2ts", "1", "24000000000", "", ENG),
+                made(2, "0:10:00", "1", "00002.m2ts", "2", "3000000000", "", ENG),
+                made(3, "1:30:00", "17", "00800.mpls", "1,2", "27000000000", "", ENG),
+            ],
+        );
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let record: DiscDbRecord = serde_json::from_value(json!({
+            "media": {"title": "Film", "year": 2010, "type": "Movie", "external_ids": {"tmdb": "77"}},
+            "titles": []
+        }))
+        .unwrap();
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let known = LookupInputs { name: name.as_ref(), discdb_by_fingerprint: Some(&record), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, known, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Discdb));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![3]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(!plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(!plan.evidence.sentences.contains(&held_play_all_sentence(3)), "{:?}", plan.evidence.sentences);
+        // The same disc without TheDiscDB: G1 holds it.
+        let unknown = LookupInputs { name: name.as_ref(), ..LookupInputs::default() };
+        let plan = run(&inputs(&disc, unknown, &settings, &library));
+        assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Default));
+        assert_eq!(plan.titles.iter().map(|planned| planned.title).collect::<Vec<_>>(), vec![3]);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
+        assert!(plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
+        assert!(plan.evidence.sentences.contains(&held_play_all_sentence(3)), "{:?}", plan.evidence.sentences);
+    }
+
+    #[test]
+    fn smiles_feature_is_not_a_play_all_so_it_stays_at_0_85_without_thediscdb() {
+        // G1's hold reads 8.5's dropped titles only: SMILE's extras play-all is dropped, but its feature is not a
+        // play-all, so rule 3 keeps it at 0.85 in Direct mode. SMILE's scan reports Java, which would let its label
+        // decide (rule 2, 0.90), so the scan is read here as if MakeMKV had not reported Java, and rule 3 runs.
+        let log = pinned_log(SMILE, SMILE_API);
+        let disc = Disc { java_in_use: false, ..log.disc.clone() };
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let plan = run(&inputs(&disc, log.name_only(), &settings, &library));
+        assert_eq!(plan.evidence.title_rule, Some(TitleRule::Structure));
+        assert_eq!((plan.title_confidence, plan.mode), (0.85, Mode::Direct));
+        assert!(!plan.reviews.contains(&ReviewReason::TitleAmbiguous), "{:?}", plan.reviews);
     }
 
     #[test]
@@ -2143,6 +2416,7 @@ mod tests {
         let plan = run(&inputs(&disc, lookups, &settings, &library));
         assert_eq!(plan.titles.iter().map(|planned| planned.role.clone()).collect::<Vec<_>>(), vec![cut(None)]);
         assert!(plan.reviews.contains(&ReviewReason::UnnamedCut), "{:?}", plan.reviews);
+        assert_eq!((plan.title_confidence, plan.mode), (0.60, Mode::Copy));
         let decision = crate::decision::decide(&crate::decision::DecisionInputs {
             plan: &plan,
             disc: &disc,
@@ -2674,6 +2948,57 @@ mod tests {
                 episode_count: None,
                 closed: false,
             })
+        );
+    }
+
+    #[test]
+    fn assigned_episodes_join_the_season_session_even_under_an_unconfirmed_search_identity() {
+        // SR7: owner-assigned episodes join or create the season session whatever the identity step, since the owner
+        // assigned them (8.5 joins a disc "when its identity is confirmed"); only an unmapped disc needs a confirmed
+        // identity to be attached.
+        let disc = episodes_disc("SHOW", false);
+        let name = disc_name(None, disc.volume_label.as_deref());
+        let search = show_search();
+        let record = show_record(2);
+        let (settings, library) = (Settings::default(), LibraryFacts::default());
+        let overrides = Overrides {
+            titles: (1..=3)
+                .map(|title| TitleOverrideEntry { title, role: TitleRole::Episodes { season: 2, episodes: vec![title] } })
+                .collect(),
+            ..Overrides::default()
+        };
+        let mut planned_inputs = inputs(&disc, searched(name.as_ref(), &search, Some(&record)), &settings, &library);
+        planned_inputs.overrides = Some(&overrides);
+        planned_inputs.fingerprint = Some("FP");
+        let plan = run(&planned_inputs);
+        assert_eq!((plan.identity.step, plan.identity_confidence), (IdentityStep::TmdbOne, 0.90));
+        assert_eq!(plan.kind, Kind::Tv);
+        assert!(plan.titles.iter().all(|title| title.remembered), "{:?}", plan.titles);
+        assert_eq!(
+            plan.session,
+            Some(SeasonSession {
+                show_id: 99,
+                season: 2,
+                discs: vec!["FP".to_string()],
+                assigned: vec![assigned_episode(1, "FP", 1), assigned_episode(2, "FP", 2), assigned_episode(3, "FP", 3)],
+                episode_count: Some(6),
+                closed: false,
+            })
+        );
+
+        // The same assignment with no search and no record names no show, so there is no session to join.
+        let mut unidentified = inputs(&disc, LookupInputs { name: name.as_ref(), ..LookupInputs::default() }, &settings, &library);
+        unidentified.overrides = Some(&overrides);
+        unidentified.fingerprint = Some("FP");
+        assert_eq!(run(&unidentified).session, None);
+    }
+
+    #[test]
+    fn an_assigned_cut_named_theatrical_version_is_flagged_theatrical() {
+        let role = TitleRole::Cut { edition: "Theatrical Version".to_string() };
+        assert_eq!(
+            assigned_feature(1, &role),
+            Some(Feature { title: 1, edition: Some("Theatrical Version".to_string()), theatrical: true, siblings: Vec::new() })
         );
     }
 

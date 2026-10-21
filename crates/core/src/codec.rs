@@ -228,19 +228,26 @@ fn family_of(id: &str, short: &str, long: &str) -> Family {
     }
 }
 
-/// An `A_DTS` stream's family: DTS:X (in attribute 6 or 7) rides on DTS-HD MA; else attribute 6 "DTS-HD MA",
-/// "DTS-HD HR" or "DTS", else attribute 7 "DTS-HD Master Audio", "DTS-HD High Resolution Audio" or "DTS"; DTS Express
-/// when attribute 6 or 7 is "DTS-HD LBR" or "DTS Express" (spelling not yet seen in a recording); else Unknown.
+/// An `A_DTS` stream's family (spec 8.6 "Codecs", SR5): DTS:X (in attribute 6 or 7) rides on DTS-HD MA; else the family
+/// attribute 6 names (`dts_named`), and only when attribute 6 names none, the family attribute 7 names, so a pair that
+/// disagrees is read by attribute 6; else Unknown.
 fn dts_family(short: &str, long: &str) -> Family {
     if short.contains("DTS:X") || long.contains("DTS:X") {
         return Family::DtsHdMa;
     }
-    match (short, long) {
-        ("DTS-HD MA", _) | (_, "DTS-HD Master Audio") => Family::DtsHdMa,
-        ("DTS-HD HR", _) | (_, "DTS-HD High Resolution Audio") => Family::DtsHdHr,
-        ("DTS-HD LBR" | "DTS Express", _) | (_, "DTS-HD LBR" | "DTS Express") => Family::DtsExpress,
-        ("DTS", _) | (_, "DTS") => Family::Dts,
-        _ => Family::Unknown,
+    dts_named(short).or_else(|| dts_named(long)).unwrap_or(Family::Unknown)
+}
+
+/// The DTS family one attribute's text names exactly: "DTS-HD MA" or "DTS-HD Master Audio" is DTS-HD MA, "DTS-HD HR" or
+/// "DTS-HD High Resolution Audio" is DTS-HD HR, "DTS-HD LBR" or "DTS Express" is DTS Express (spelling not yet seen in a
+/// recording), "DTS" is DTS; None for any other text, the empty text included. SR5.
+fn dts_named(text: &str) -> Option<Family> {
+    match text {
+        "DTS-HD MA" | "DTS-HD Master Audio" => Some(Family::DtsHdMa),
+        "DTS-HD HR" | "DTS-HD High Resolution Audio" => Some(Family::DtsHdHr),
+        "DTS-HD LBR" | "DTS Express" => Some(Family::DtsExpress),
+        "DTS" => Some(Family::Dts),
+        _ => None,
     }
 }
 
@@ -534,6 +541,24 @@ mod tests {
     #[test]
     fn plain_dts_reads_as_lossy_dts() {
         assert_eq!(codec("A_DTS", "DTS", "DTS"), known(Family::Dts, "DTS", None, false));
+    }
+
+    #[test]
+    fn a_dts_stream_named_by_one_attribute_only_reads_by_that_attribute() {
+        assert_eq!(codec("A_DTS", "", "DTS-HD Master Audio"), known(Family::DtsHdMa, "DTS-HD MA", None, true));
+        assert_eq!(codec("A_DTS", "", "DTS"), known(Family::Dts, "DTS", None, false));
+        assert_eq!(codec("A_DTS", "DTS-HD MA", ""), known(Family::DtsHdMa, "DTS-HD MA", None, true));
+        assert_eq!(codec("A_DTS", "DTS-HD HR", ""), known(Family::DtsHdHr, "DTS-HD HR", None, false));
+        assert_eq!(codec("A_DTS", "DTS", ""), known(Family::Dts, "DTS", None, false));
+    }
+
+    #[test]
+    fn a_conflicting_dts_pair_is_read_by_attribute_6_then_7() {
+        assert_eq!(codec("A_DTS", "DTS", "DTS-HD Master Audio").family, Family::Dts);
+        assert_eq!(codec("A_DTS", "DTS-HD HR", "DTS-HD Master Audio").family, Family::DtsHdHr);
+        assert_eq!(codec("A_DTS", "DTS-HD LBR", "DTS-HD Master Audio").family, Family::DtsExpress);
+        assert_eq!(codec("A_DTS", "DTS-HD MA", "DTS").family, Family::DtsHdMa);
+        assert_eq!(codec("A_DTS", "DTS", "DTS:X").family, Family::DtsHdMa, "DTS:X in either attribute wins");
     }
 
     #[test]

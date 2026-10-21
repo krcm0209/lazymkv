@@ -1010,6 +1010,71 @@ mod runs {
         );
     }
 
+    /// The word the text rule gave each track of the Tracks section: what follows "; text " up to the next "; ".
+    fn text_words(h: &SubtitleHarness) -> Vec<&str> {
+        section(h, "Tracks (")
+            .into_iter()
+            .map(|line| {
+                let word = line.split("; text ").nth(1).unwrap_or_else(|| panic!("no text word in {line}"));
+                word.split("; ").next().unwrap_or(word)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_text_rule_judges_the_events_sub_clear_max_bytes_gives_when_ocr_text_is_given() {
+        // With the OCR text given, the harness judges each track by the text rule too. This pins the rule line's
+        // settings and that the text run sees the events sub_clear_max_bytes yields; it does not pin that
+        // Settings::text_rule reaches the text rule (TextRule::default() would pass; ER4, a follow-up). The words below
+        // were taken from the first mini PC run and checked by reading them.
+        //
+        // subs_tolerance_ms on the fixtures of the test above, both streams read: 8.7 moves with the tolerance (0.5 s
+        // apart is one group only at 600 ms), while the text rule says "regular (review)" of both streams at both
+        // settings, so the tolerance is not what moves the text words here.
+        let mut later = starts(40, 10.5, 3.0);
+        later.extend(starts(4, 300.0, 3.0));
+        let subs = [("eng", starts(40, 10.0, 3.0), false, true), ("eng", later, false, true)];
+        let labels = vec![("eng-only", 1, "regular", "read", true), ("eng-only", 2, "sdh", "read", true)];
+        let (evidence, text) = trees(&[bluray("disc-t", None, "eng-only", ENG_ONLY, &subs, labels)]);
+        let narrow = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&narrow, "Tracks ("),
+            [
+                "  disc-t/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text regular (review); reviewed",
+                "  disc-t/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 regular (review); text regular (review); reviewed",
+            ]
+        );
+        let wide = judge(&evidence, Some(&text), &spec_row14(), &Settings { subs_tolerance_ms: 600, ..Settings::default() });
+        assert!(wide.lines[1].starts_with("rule: 8.7 with sub_clear_max_bytes 64, subs_tolerance_ms 600,"), "{}", wide.lines[1]);
+        assert_eq!(
+            section(&wide, "Tracks ("),
+            [
+                "  disc-t/eng-only stream 1 (scan stream 1, 40 events): labelled regular (read); 8.7 regular (review); text regular (review); reviewed",
+                "  disc-t/eng-only stream 2 (scan stream 2, 44 events): labelled sdh (read); 8.7 sdh (review); text regular (review); reviewed",
+            ]
+        );
+        // sub_clear_max_bytes on the read disc-a: at 29 bytes the 30-byte clear packets are events too, and the text
+        // rule's word for the track changes with them, from regular (a costly verdict against the owner's sdh) to
+        // regular under a review.
+        let (evidence, text) = trees(&[disc_a("disc-a", vec![("eng-only", 1, "sdh", "read", true)], true)]);
+        let default = judge(&evidence, Some(&text), &spec_row14(), &Settings::default());
+        assert_eq!(
+            section(&default, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 40 events): labelled sdh (read); 8.7 regular; text regular; COSTLY sdh_as_regular"]
+        );
+        assert_eq!((default.costly.len(), default.exit_code), (1, 1));
+        let low = judge(&evidence, Some(&text), &spec_row14(), &Settings { sub_clear_max_bytes: 29, ..Settings::default() });
+        assert!(low.lines[1].starts_with("rule: 8.7 with sub_clear_max_bytes 29,"), "{}", low.lines[1]);
+        assert_eq!(
+            section(&low, "Tracks ("),
+            ["  disc-a/eng-only stream 1 (scan stream 1, 80 events): labelled sdh (read); 8.7 regular; text regular (review); reviewed"]
+        );
+        assert_eq!((low.costly.len(), low.exit_code), (0, 0));
+        assert_eq!(text_words(&default), ["regular"]);
+        assert_eq!(text_words(&low), ["regular (review)"]);
+        assert_ne!(text_words(&default), text_words(&low));
+    }
+
     #[test]
     fn subs_same_min_decides_when_a_share_joins_one_group() {
         let mut half = starts(20, 10.0, 3.0);

@@ -144,6 +144,11 @@ fn feature(edition: Option<&str>) -> PlannedRole {
     PlannedRole::Feature { edition: edition.map(str::to_string), theatrical: edition.is_none() || is_theatrical(edition) }
 }
 
+/// A planned feature the planner did not flag theatrical: an unnamed cut, or a named cut.
+fn cut(edition: Option<&str>) -> PlannedRole {
+    PlannedRole::Feature { edition: edition.map(str::to_string), theatrical: false }
+}
+
 fn episode(season: u32, episodes: &[u32], name: &str) -> PlannedRole {
     PlannedRole::Episode(Episode { season: Some(season), episodes: episodes.to_vec(), name: Some(name.to_string()) })
 }
@@ -190,13 +195,19 @@ fn expendables_3_plans_title_41_as_the_unrated_cut() {
     let plan = pinned(EXPENDABLES, "545411B47060B18FD7F8D94599F24708");
     assert_discdb_one(&plan, movie(138103), "The Expendables 3", 2014);
     assert_eq!((plan.kind, plan.kind_source), (Kind::Movie, KindSource::Discdb));
-    // Open point 5: TheDiscDB's item title names no edition, so the label table names it (FPL_MainFeature_UR).
+    // Open point 5: TheDiscDB's item title names no edition, so the label table names it (FPL_MainFeature_UR). OR5: title
+    // 54 (FPL_MainFeature_R) is a labelled cut TheDiscDB does not list, planned beside it as an unnamed cut.
     assert_eq!(
         plan.titles,
-        vec![planned("t00-00756", 41, feature(Some("Unrated Cut")), 7891, 28_831_358_976, Some("00756.mpls"))]
+        vec![
+            planned("t00-00756", 41, feature(Some("Unrated Cut")), 7891, 28_831_358_976, Some("00756.mpls")),
+            planned("t01-00820", 54, cut(None), 7587, 27_736_528_896, Some("00820.mpls")),
+        ]
     );
     assert_eq!(plan.evidence.title_rule, Some(TitleRule::Database));
-    assert_filed_automatically(&plan);
+    assert_eq!((plan.title_confidence, plan.mode), (0.98, Mode::Direct));
+    assert_eq!(plan.reviews, vec![ReviewReason::UnnamedCut]);
+    assert_eq!(plan.notes.iter().map(|noted| (noted.note, noted.stream)).collect::<Vec<_>>(), vec![(Note::UnlistedLabelCut, None)]);
 }
 
 #[test]

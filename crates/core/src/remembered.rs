@@ -362,7 +362,7 @@ mod tests {
 
     use crate::disc::disc;
     use crate::lookup::tmdb::TmdbKind;
-    use crate::plan::fixtures::{pinned, CHERNOBYL_1, ENG_PGS, FIREFLY_1_API, FIREFLY_2, VIDEO};
+    use crate::plan::fixtures::{pinned, CHERNOBYL_1, ENG_AC3, ENG_AC3_2CH, ENG_PGS, FIREFLY_1_API, FIREFLY_2, VIDEO};
     use crate::robot::parse;
     use crate::testsupport::scan_text;
 
@@ -610,9 +610,7 @@ mod tests {
         assert!(discarded.discards());
     }
 
-    // VIDEO and ENG_PGS are Task 5's `plan::fixtures` streams (AVC video; English PGS subtitles).
-    const ENG_AC3_2CH: &[(u32, &str)] = &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
-    const ENG_AC3_6CH: &[(u32, &str)] = &[(1, "Audio"), (3, "eng"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "6")];
+    // VIDEO, ENG_AC3 (six channels), ENG_AC3_2CH and ENG_PGS are the `plan::fixtures` streams (AVC video; English PGS subtitles).
     const SPA_AC3_2CH: &[(u32, &str)] = &[(1, "Audio"), (3, "spa"), (5, "A_AC3"), (6, "DD"), (7, "Dolby Digital"), (14, "2")];
     const ENG_DTS_HD_MA_6CH: &[(u32, &str)] =
         &[(1, "Audio"), (3, "eng"), (5, "A_DTS"), (6, "DTS-HD MA"), (7, "DTS-HD Master Audio"), (14, "6")];
@@ -631,7 +629,7 @@ mod tests {
     #[test]
     fn a_stream_signature_counts_its_position_among_identical_streams() {
         let title =
-            title_with(&[VIDEO, ENG_AC3_2CH, ENG_DTS_HD_MA_6CH, ENG_AC3_2CH, SPA_AC3_2CH, ENG_PGS, ENG_PGS, ENG_AC3_6CH]);
+            title_with(&[VIDEO, ENG_AC3_2CH, ENG_DTS_HD_MA_6CH, ENG_AC3_2CH, SPA_AC3_2CH, ENG_PGS, ENG_PGS, ENG_AC3]);
         let streams = &title.streams;
         assert_eq!(
             signature(streams, 0),

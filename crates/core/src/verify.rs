@@ -1943,6 +1943,51 @@ mod tests {
         );
     }
 
+    /// The error of `subtitle_events` over the dvd fixture's index with `packets` as the text track's (n 0) file.
+    fn text_packets_error(packets: &str) -> String {
+        let tree = subs_tree(&[("subs/index.json", INDEX), ("subs/sub-0.packets.json", packets), ("subs/sub-1.packets.json", IMAGE_PACKETS)]);
+        subtitle_events(&tree, &PathKey::new("subs"), &dvd_report(), 64).unwrap_err()
+    }
+
+    #[test]
+    fn subtitle_events_prefix_a_packets_file_that_is_not_an_object_with_its_path() {
+        // For a top level that is not an object, load_packets returns Python's AttributeError text without the path;
+        // subtitle_events adds it.
+        assert_eq!(text_packets_error("[]"), "rec/subs/sub-0.packets.json: 'list' object has no attribute 'get'");
+    }
+
+    #[test]
+    fn subtitle_events_never_prefix_a_path_twice() {
+        // load_packets prefixes its own syntax and shape errors, so subtitle_events leaves those as they are.
+        for packets in ["{", r#"{"packets": 5}"#] {
+            let error = text_packets_error(packets);
+            assert!(error.starts_with("rec/subs/sub-0.packets.json: "), "{packets}: {error}");
+            assert_eq!(error.matches("rec/subs/sub-0.packets.json").count(), 1, "{packets}: {error}");
+        }
+    }
+
+    #[test]
+    fn subtitle_events_prefix_an_events_error_with_the_path() {
+        assert_eq!(
+            text_packets_error(r#"{"packets": [{"pts_time": "1.0", "size": "big"}]}"#),
+            "rec/subs/sub-0.packets.json: invalid literal for int() with base 10: 'big'"
+        );
+        assert_eq!(
+            text_packets_error(r#"{"packets": [{"pts_time": "soon", "size": "20"}]}"#),
+            "rec/subs/sub-0.packets.json: could not convert string to float: 'soon'"
+        );
+        // A packet without a pts_time is skipped before its size is read, so a bad size on it is no error.
+        let tree = subs_tree(&[
+            ("subs/index.json", INDEX),
+            ("subs/sub-0.packets.json", r#"{"packets": [{"size": "big"}, {"pts_time": "10.0", "size": "20"}]}"#),
+            ("subs/sub-1.packets.json", IMAGE_PACKETS),
+        ]);
+        assert_eq!(
+            subtitle_events(&tree, &PathKey::new("subs"), &dvd_report(), 64),
+            Ok(BTreeMap::from([(3, vec![21.0, 23.0]), (5, vec![10.0])]))
+        );
+    }
+
     #[test]
     fn removed_scan_streams_counts_msg_4047_over_the_selection() {
         let selection = [0, 1, 2, 5, 6];

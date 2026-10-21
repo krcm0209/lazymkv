@@ -27,6 +27,7 @@ use lazymkv_core::recording::files::rip_labels;
 use lazymkv_core::recording::{decode_text, Encoding, Errors};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_core::robot::parse;
+use lazymkv_core::subtitle::labels::TEXT_HINT;
 use lazymkv_core::subtitle::text::SubsJson;
 use lazymkv_core::tracks::audio::AudioDrop;
 use lazymkv_core::tracks::subtitle::SubtitleDrop;
@@ -48,8 +49,6 @@ const RECORDINGS: [&str; 4] =
     ["pans-labyrinth-2006-uhd", "short-circuit-1986-dvd", "short-circuit-2-1988-dvd", "the-office-2005-s3d3-bluray"];
 /// At most this many differences are reported per comparison.
 const SHOWN: usize = 20;
-/// How to give the OCR text, at the end of every no-text reason.
-const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 
 /// The context of a test run: the process's cwd (crates/dev under cargo test), no environment but the two
 /// variables these tests read.

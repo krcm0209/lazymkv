@@ -454,10 +454,11 @@ fn filed_edition(
 
 /// The job's features and cuts for 8.4 (choice 2). The owner's Assign titles, when it names any title, wins whole: its
 /// features and cuts in title order through `plan::assigned_feature`, as Task 7's `assigned_entries` builds them. Else the
-/// plan's features in plan order, each with Task 7's filed name and the planner's theatrical flag
-/// (`PlannedRole::Feature.theatrical`): an unnamed cut (8.3 rule 2's Other suffix) or a structural rival is not
-/// theatrical, so it keeps no edition until the owner names it (8.4), even as the plan's only feature. An assigned title
-/// the scan lacks is left out, as Task 7's `assigned_entries` leaves it out (Open point 32).
+/// plan's features in plan order (for rule 1, TheDiscDB's main movies, then each Java-labelled cut it does not list, OR5),
+/// each with Task 7's filed name and the planner's theatrical flag (`PlannedRole::Feature.theatrical`): an unnamed cut
+/// (the cases are listed at `movie::Feature.theatrical`, ruling J11) or a structural rival is not theatrical, so it
+/// keeps no edition until the owner names it (8.4), even as the plan's only feature. An assigned title the scan lacks
+/// is left out, as Task 7's `assigned_entries` leaves it out (Open point 32).
 fn job_features(plan: &Plan, disc: &Disc, overrides: Option<&Overrides>) -> Vec<Feature> {
     if let Some(titles) = overrides.map(|given| &given.titles).filter(|titles| !titles.is_empty()) {
         // A title the scan lacks is left out, as Task 7's assigned_entries leaves it out (Open point 32).
@@ -1326,6 +1327,54 @@ mod tests {
     }
 
     #[test]
+    fn a_feature_without_a_video_height_builds_no_path_and_is_held_without_a_review_reason() {
+        // 8.9's resolution label comes from the first video stream's attribute 19: without it a feature has no label to
+        // name its file by, so it has no path and is held (Open point 38) with no review reason of its own.
+        let mut disc = film_disc();
+        disc.titles.get_mut(&0).unwrap().streams[0].video_size = None;
+        assert_eq!(disc.title(0).unwrap().video_height(), None);
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let decision = decide(&inputs(&plan, &disc, 0, Some(&record), &library, &settings)).unwrap();
+        assert_eq!(decision.path, None);
+        assert_eq!(decision.resolution, None);
+        assert!(decision.reviews.is_empty(), "{:?}", decision.reviews);
+        assert_eq!(decision.disposition, Disposition::NeedsReview);
+
+        // An episode's file name has no resolution label, so the same missing height leaves its path built.
+        let mut office = office_disc();
+        office.titles.get_mut(&0).unwrap().streams[0].video_size = None;
+        let plan = plan_of(&office, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[15], Some("Example Fifteen")))]);
+        let record = office_record();
+        let decision = decide(&inputs(&plan, &office, 0, Some(&record), &library, &settings)).unwrap();
+        assert_eq!(decision.resolution, None);
+        assert_eq!(
+            path_of(&decision),
+            r"\\nas\media\Shows\The Office (2005) {tmdb-2316}\Season 03\The Office (2005) - S03E15 - Example Fifteen.mkv"
+        );
+        assert!(decision.reviews.is_empty(), "{:?}", decision.reviews);
+        assert_eq!(decision.disposition, Disposition::AutoFile);
+    }
+
+    #[test]
+    fn a_tmdb_record_given_without_an_identity_is_ignored() {
+        // The plan has no TMDb identity and the owner set none: the record names no file (8.9 takes title and year from
+        // the identity's own record) and brings no original language, so the plan's English-only wanted set stands.
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, None, &[(2, feature_role(None))]);
+        let mut record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        record.original_language = Some("es".to_string());
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let decision = decide(&inputs(&plan, &disc, 2, Some(&record), &library, &settings)).unwrap();
+        assert_eq!(decision.path, None);
+        assert_eq!(decision.disposition, Disposition::NeedsReview);
+        assert!(decision.audio.dropped.contains(&(2, AudioDrop::UnwantedLanguage)), "{:?}", decision.audio.dropped);
+    }
+
+    #[test]
     fn a_tmdb_record_of_another_identity_is_refused() {
         let disc = film_disc();
         let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
@@ -1906,6 +1955,33 @@ mod tests {
         let decision = decide(&inputs(&plan, &disc, 0, Some(&record), &library, &settings)).unwrap();
         assert_eq!(decision.path, None);
         assert_eq!(decision.reviews, vec![ReviewReason::TvUnmapped]);
+        assert_eq!(decision.disposition, Disposition::NeedsReview);
+    }
+
+    #[test]
+    fn an_episode_with_a_season_but_no_episode_numbers_builds_no_path_and_raises_tv_unmapped() {
+        let disc = office_disc();
+        let plan = plan_of(&disc, Kind::Tv, Some(OFFICE), &[(0, episode_role(Some(3), &[], Some("Example Fifteen")))]);
+        let record = office_record();
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let decision = decide(&inputs(&plan, &disc, 0, Some(&record), &library, &settings)).unwrap();
+        assert_eq!(decision.path, None);
+        assert_eq!(decision.reviews, vec![ReviewReason::TvUnmapped]);
+        assert_eq!(decision.disposition, Disposition::NeedsReview);
+
+        // The owner's Assign titles with a season and no episodes sets the title confidence to 1.00, but it answers only
+        // the plan's tv_unmapped: the naming step finds the title still has no episode number and raises it again.
+        let overrides = Overrides {
+            titles: vec![TitleOverrideEntry { title: 0, role: TitleRole::Episodes { season: 3, episodes: vec![] } }],
+            ..Overrides::default()
+        };
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &library, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(decision.path, None);
+        assert_eq!(decision.reviews, vec![ReviewReason::TvUnmapped]);
+        assert_eq!(decision.confidences.title, 1.00);
         assert_eq!(decision.disposition, Disposition::NeedsReview);
     }
 

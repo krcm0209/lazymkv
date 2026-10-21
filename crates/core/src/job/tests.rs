@@ -3,7 +3,11 @@
 //! ID and the job lookup. Every input is built here; nothing is read from a file.
 
 use crate::lookup::tmdb::{TmdbIdentity, TmdbKind};
-use crate::remembered::{AudioOverride, AudioTrackOverride, Collision, CollisionAnswer, TitleOverrideEntry, TitleRole};
+use crate::remembered::{
+    AudioOverride, AudioTrackOverride, Collision, CollisionAnswer, SubtitleOverride, SubtitleTrackOverride, TitleOverrideEntry,
+    TitleRole,
+};
+use crate::tracks::SubtitleRole;
 
 use super::*;
 
@@ -89,9 +93,38 @@ fn sample_states() -> Vec<State> {
     states
 }
 
+/// Overrides with an entry in every list: Set identity (a show), the season, Assign titles (episodes, a named cut, an
+/// ignored title), Override tracks (a kept audio track, a commentary one, a subtitle kept as forced, a dropped one) and
+/// one Resolve collision answer per `Collision` value.
+fn full_overrides() -> Overrides {
+    Overrides {
+        identity: Some(TmdbIdentity { kind: TmdbKind::Tv, id: 2316 }),
+        season: Some(3),
+        titles: vec![
+            TitleOverrideEntry { title: 3, role: TitleRole::Episodes { season: 3, episodes: vec![12, 13] } },
+            TitleOverrideEntry { title: 4, role: TitleRole::Cut { edition: "Extended Cut".into() } },
+            TitleOverrideEntry { title: 5, role: TitleRole::Ignored },
+        ],
+        audio: vec![
+            AudioTrackOverride { title: 3, stream: 1, action: AudioOverride::Keep { order: 0, default: true } },
+            AudioTrackOverride { title: 3, stream: 3, action: AudioOverride::Commentary },
+        ],
+        subtitles: vec![
+            SubtitleTrackOverride { title: 3, stream: 5, action: SubtitleOverride::Keep { role: SubtitleRole::Forced } },
+            SubtitleTrackOverride { title: 3, stream: 6, action: SubtitleOverride::Drop },
+        ],
+        collision: vec![
+            CollisionAnswer { path: r"\\nas\media\Movies\Film\Film - 2.mkv".to_string(), action: Collision::Replace },
+            CollisionAnswer { path: r"\\nas\media\Movies\Film\Film.mkv".to_string(), action: Collision::KeepBoth },
+            CollisionAnswer { path: r"\\nas\media\Movies\Other\Other.mkv".to_string(), action: Collision::Discard },
+        ],
+    }
+}
+
 /// One event of every variant, with every value of each boolean, mode, disposition and tool field, the failure events
 /// with a MediaReadError failure (CopyFailed also with Unknown), DecisionDone also with a path collision and with no
-/// final path, and ReviewApproved also with entries in the lists of `Overrides` (74 events).
+/// final path, and ReviewApproved also with entries in the lists of `Overrides` and with the entries of
+/// `full_overrides` (75 events).
 fn sample_events() -> Vec<Event> {
     let read = failure(FailureClass::MediaReadError);
     let mut events = vec![
@@ -169,6 +202,7 @@ fn sample_events() -> Vec<Event> {
             },
             approved_reasons: vec![ReviewReason::TitleAmbiguous],
         },
+        Event::ReviewApproved { overrides: full_overrides(), approved_reasons: vec![ReviewReason::TvUnmapped] },
         Event::ReviewDiscarded,
         Event::Retry,
         Event::RipAgain,
@@ -451,6 +485,33 @@ fn an_event_is_written_with_its_name_under_event_and_its_fields_beside_it() {
     assert_eq!(
         json(&Event::FingerprintFailed { failure: output(OutputCause::OutOfSpace) }),
         r#"{"event":"FingerprintFailed","failure":{"class":"Output","output":"out_of_space"}}"#
+    );
+    // The overrides nest the flattened entries of remembered.rs inside the tagged event: the name, then the fields in
+    // the order the types declare them.
+    let approved = Event::ReviewApproved {
+        overrides: Overrides {
+            identity: Some(TmdbIdentity { kind: TmdbKind::Tv, id: 2316 }),
+            season: Some(3),
+            titles: vec![TitleOverrideEntry { title: 3, role: TitleRole::Episodes { season: 3, episodes: vec![12, 13] } }],
+            audio: vec![AudioTrackOverride { title: 3, stream: 1, action: AudioOverride::Keep { order: 0, default: true } }],
+            subtitles: vec![SubtitleTrackOverride {
+                title: 3,
+                stream: 5,
+                action: SubtitleOverride::Keep { role: SubtitleRole::Forced },
+            }],
+            collision: vec![CollisionAnswer { path: "Film.mkv".to_string(), action: Collision::KeepBoth }],
+        },
+        approved_reasons: vec![ReviewReason::TvUnmapped],
+    };
+    assert_eq!(
+        json(&approved),
+        concat!(
+            r#"{"event":"ReviewApproved","overrides":{"identity":{"kind":"tv","id":2316},"season":3,"#,
+            r#""titles":[{"title":3,"role":"episodes","season":3,"episodes":[12,13]}],"#,
+            r#""audio":[{"title":3,"stream":1,"action":"keep","order":0,"default":true}],"#,
+            r#""subtitles":[{"title":3,"stream":5,"action":"keep","role":"forced"}],"#,
+            r#""collision":[{"path":"Film.mkv","action":"keep_both"}]},"approved_reasons":["tv_unmapped"]}"#
+        )
     );
 }
 

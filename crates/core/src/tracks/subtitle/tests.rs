@@ -274,6 +274,21 @@ fn no_language_streams_are_counted_and_their_forced_only_streams_take_a_no_langu
 }
 
 #[test]
+fn two_different_no_language_codes_are_one_language_for_a_forced_only_parent() {
+    // 8.7 "of the same language": every code that names no language is the same one, so a forced-only stream tagged with
+    // one no-language code takes a parent tagged with another (and "" is a stream with no attribute 3).
+    for (parent, child) in [("zxx", "und"), ("und", "zxx"), ("mul", "mis"), ("-", "und"), ("", "zxx")] {
+        let title = title_of(false, &[("video", "", 0), ("pgs", parent, 0), ("pgs", child, 6144)]);
+        let subtitles = title.streams_of(StreamKind::Subtitles);
+        assert_eq!(parent_of(&subtitles, 2), Some(1), "{parent:?} then {child:?}");
+        let aside = set_aside(&title);
+        assert_eq!(aside.forced_only, vec![(2, Some(1))], "{parent:?} then {child:?}");
+        assert_eq!(aside.counted, vec![1], "{parent:?} then {child:?}");
+        assert_eq!(aside.other_language, Vec::<u32>::new(), "{parent:?} then {child:?}");
+    }
+}
+
+#[test]
 fn another_languages_forced_only_stream_is_dropped_with_its_language() {
     let title = title_of(false, &[("video", "", 0), ("pgs", "spa", 0), ("pgs", "spa", 6144), ("pgs", "eng", 0)]);
     let aside = set_aside(&title);
@@ -380,6 +395,29 @@ fn only_the_first_closed_caption_stream_is_set_aside() {
     let french = title_of(true, &[("video", "", 0), ("vobsub", "eng", 0), ("cc", "fre", 0)]);
     assert_eq!(set_aside(&french).closed_captions, None);
     assert_eq!(set_aside(&french).other_language, vec![2]);
+}
+
+#[test]
+fn a_dvd_closed_caption_stream_flagged_directors_comments_is_set_aside_as_directors_comments() {
+    // The director's-comments test comes before the closed-caption one, so the flagged stream is not the title's closed
+    // captions and the next closed-caption stream is.
+    for flags in [1, 2] {
+        let title = title_of(true, &[("video", "", 0), ("vobsub", "eng", 0), ("cc", "eng", flags), ("cc", "eng", 0)]);
+        let aside = set_aside(&title);
+        assert_eq!(aside.directors_comments, vec![2], "flags {flags}");
+        assert_eq!(aside.closed_captions, Some(3), "flags {flags}");
+        assert_eq!(aside.counted, vec![1], "flags {flags}");
+    }
+}
+
+#[test]
+fn a_derived_forced_only_closed_caption_stream_is_set_aside_as_forced_only() {
+    // The forced-only test comes before the closed-caption one: the stream is not the title's closed captions.
+    let title = title_of(true, &[("video", "", 0), ("vobsub", "eng", 0), ("cc", "eng", 6144)]);
+    let aside = set_aside(&title);
+    assert_eq!(aside.forced_only, vec![(2, Some(1))]);
+    assert_eq!(aside.closed_captions, None);
+    assert_eq!(aside.counted, vec![1]);
 }
 
 #[test]
@@ -2183,6 +2221,54 @@ mod roles {
         assert_eq!(decision.notes, vec![]);
         assert_eq!(decision.reviews, vec![]);
         assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 1.00));
+    }
+
+    #[test]
+    fn a_stream_the_owner_decided_is_not_compared_with_the_text() {
+        // The text reads stream 1 as SDH, the counts keep it as regular. The owner decided stream 1 (a review override,
+        // then a remembered one), so the text is not compared on it: no note, no review. Stream 2 has no override, so the
+        // confidence stays the rule's.
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        let text = BTreeMap::from([(1, verdict(Role::Sdh))]);
+        let reviewed = BTreeMap::from([(1, SubtitleOverride::Keep { role: SubtitleRole::Regular })]);
+        let evidence = SubtitleFacts {
+            text: Some(&text),
+            reviewed: Some(&reviewed),
+            ..facts(vec![(1, regular_events()), (2, sdh_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!(decision.notes, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "reviewed"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+
+        // The same decision remembered: the entry matches stream 1 by its signature.
+        let remembered = [SubtitleOverrideEntry {
+            signature: signature(&title.streams, 1),
+            action: SubtitleOverride::Keep { role: SubtitleRole::Regular },
+        }];
+        let evidence = SubtitleFacts {
+            text: Some(&text),
+            remembered: Some(&remembered),
+            ..facts(vec![(1, regular_events()), (2, sdh_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(decision.reviews, vec![]);
+        assert_eq!(decision.notes, vec![]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "remembered"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
     }
 
     #[test]

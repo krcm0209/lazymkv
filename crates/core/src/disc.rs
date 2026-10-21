@@ -500,7 +500,8 @@ pub fn same_scan_title(a: &Title, b: &Title) -> bool {
 /// `&quot;`, `&apos;` decoded, surrounding whitespace trimmed, a leading byte-order mark ignored); None when the text has
 /// none, when that element is empty or holds only whitespace, or when it is not closed. A start tag with attributes
 /// (`<di:name xml:lang="en">`) counts; a longer tag name (`<di:names>`) does not; numeric character references
-/// (`&#233;`, `&#xE9;`) are decoded too, and any other entity (`&copy;`) is left as written. Spec 6.1 step 2, 8.1.
+/// (`&#233;`, `&#xE9;`) are decoded too, unless they name a character XML 1.0 forbids (U+0000, a surrogate, U+FFFE and
+/// the like, SR6), and any other entity (`&copy;`) is left as written. Spec 6.1 step 2, 8.1.
 pub fn bdmt_name(xml: &str) -> Option<String> {
     const OPEN: &str = "<di:name";
     let mut rest = xml.trim_start_matches('\u{feff}');
@@ -559,8 +560,10 @@ fn decode_entities(text: &str) -> String {
 }
 
 /// The character a numeric character reference at the start of `tail` names (`&#` and decimal digits, or `&#x` and
-/// hexadecimal digits, then `;`) and the reference's length in bytes; None when `tail` does not start with one, or when
-/// `char::from_u32` refuses its value (a surrogate, above U+10FFFF, or too many digits for a u32).
+/// hexadecimal digits, then `;`) and the reference's length in bytes; None when `tail` does not start with one, when
+/// `char::from_u32` refuses its value (a surrogate, above U+10FFFF, or too many digits for a u32), or when the
+/// character is outside XML 1.0's Char production (U+0009, U+000A, U+000D, U+0020 to U+D7FF, U+E000 to U+FFFD, U+10000
+/// to U+10FFFF): such a reference stays as written (SR6).
 fn character_reference(tail: &str) -> Option<(char, usize)> {
     let body = tail.strip_prefix("&#")?;
     let (marker, radix) = if body.starts_with('x') { (1, 16) } else { (0, 10) };
@@ -571,6 +574,9 @@ fn character_reference(tail: &str) -> Option<(char, usize)> {
         return None;
     }
     let character = char::from_u32(u32::from_str_radix(digits, radix).ok()?)?;
+    if !matches!(character, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}') {
+        return None;
+    }
     Some((character, "&#".len() + marker + end + 1))
 }
 
@@ -1256,8 +1262,7 @@ mod tests {
     fn feature(number: u32, source: &str, map: &str, duration: &str) -> Title {
         let text = scan_text(&[(1, "Blu-ray disc")], &[(number, &[(9, duration), (16, source), (26, map)], &[])]);
         let typed = disc(&parse(&text)).unwrap();
-        let title = typed.title(number).unwrap().clone();
-        title
+        typed.title(number).unwrap().clone()
     }
 
     /// Title `number` of a one-title DVD scan with this attribute 24 (None writes none), segment map "1-2" and 0:02:20.
@@ -1268,8 +1273,7 @@ mod tests {
         };
         let text = scan_text(&[(1, "DVD disc")], &[(number, &attrs, &[])]);
         let typed = disc(&parse(&text)).unwrap();
-        let title = typed.title(number).unwrap().clone();
-        title
+        typed.title(number).unwrap().clone()
     }
 
     #[test]
@@ -1345,6 +1349,30 @@ mod tests {
         );
         assert_eq!(bdmt_name("<di:name>A &amp;lt; B</di:name>").as_deref(), Some("A &lt; B"));
         assert_eq!(bdmt_name("<di:name>Caf&#233; &#xE9; &copy; &</di:name>").as_deref(), Some("Café é &copy; &"));
+    }
+
+    #[test]
+    fn character_reference_refuses_surrogates_overflow_a_missing_semicolon_and_empty_digits() {
+        for tail in ["&#xD800;", "&#55296;", "&#x110000;", "&#4294967296;", "&#233", "&#233 more; text", "&#;", "&#x;", "&#X41;"] {
+            assert_eq!(character_reference(tail), None, "{tail}");
+        }
+        assert_eq!(character_reference("&#65;"), Some(('A', 5)));
+        assert_eq!(character_reference("&#x41;"), Some(('A', 6)));
+        assert_eq!(character_reference("&#x10FFFF;"), Some(('\u{10FFFF}', 10)));
+    }
+
+    #[test]
+    fn bdmt_name_leaves_a_refused_reference_as_written() {
+        assert_eq!(bdmt_name("<di:name>A &#xD800; B &#X41; C&#;</di:name>").as_deref(), Some("A &#xD800; B &#X41; C&#;"));
+    }
+
+    #[test]
+    fn bdmt_name_does_not_decode_a_character_xml_forbids() {
+        // SR6: XML 1.0's Char production excludes U+0000, U+0001 to U+0008, U+000B, U+000C, U+000E to
+        // U+001F, U+FFFE and U+FFFF; such a reference stays as written, like a refused entity.
+        for (xml, name) in [("A&#0;B", "A&#0;B"), ("A&#x1F;B", "A&#x1F;B"), ("A&#xFFFE;B", "A&#xFFFE;B"), ("A&#9;B", "A\tB")] {
+            assert_eq!(bdmt_name(&format!("<di:name>{xml}</di:name>")).as_deref(), Some(name), "{xml}");
+        }
     }
 
     #[test]

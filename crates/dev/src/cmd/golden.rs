@@ -25,6 +25,7 @@ use lazymkv_core::recording::files::{rip_labels, MkvmergeIdent, RipLabel};
 use lazymkv_core::recording::{py_repr_str, read_json, read_text, sha1_hex, Encoding, Errors, PathKey, Tree};
 use lazymkv_core::robot::{parse, scan_json};
 use lazymkv_core::subtitle::align::align_subs_dir;
+use lazymkv_core::subtitle::labels::{READING, TEXT_HINT};
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Rule as TextRule};
 use serde_json::Value;
 
@@ -36,8 +37,6 @@ use crate::{usage_error, Args};
 /// The folder name reserved for goldens. Every walker skips it (Tree::list and Tree::glob, Task 1), so the goldens
 /// are found and read here through the file system.
 pub const GOLDEN_DIR: &str = "golden";
-/// The OCR reading the goldens use: the folder tuning-fetch.ps1 -Text copies, <TuningData>\<slug>\<label>\subs-ocr.
-const READING: &str = "subs-ocr";
 /// subtitle_alignment's defaults (--clear-max-bytes 64, --tolerance-ms 300), which align.json is written with.
 const ALIGN_CLEAR_MAX_BYTES: i64 = 64;
 const ALIGN_TOLERANCE_MS: i64 = 300;
@@ -363,17 +362,12 @@ fn holds_ocr_text(folder: &Path) -> bool {
 /// fail() stopped, and `golden check` skips with the run's lines, as there is nothing complete to compare.
 fn subs_goldens(tree: &dyn Tree, slug: &str, label: &str, text: Option<&Path>, writing: bool) -> [Production; 2] {
     let Some(root) = text else {
-        return both(NotProduced::Skipped(format!(
-            "no OCR text: {slug}/{label}/{READING} (give --text DIR or LAZYMKV_OCR_TEXT)"
-        )));
+        return both(NotProduced::Skipped(format!("no OCR text: {slug}/{label}/{READING} {TEXT_HINT}")));
     };
     let label_text = root.join(slug).join(label);
     let reading = label_text.join(READING);
     if !holds_ocr_text(&reading) {
-        return both(NotProduced::Skipped(format!(
-            "no OCR text: {} (give --text DIR or LAZYMKV_OCR_TEXT)",
-            reading.display()
-        )));
+        return both(NotProduced::Skipped(format!("no OCR text: {} {TEXT_HINT}", reading.display())));
     }
     let shown = format!("TEXT/{slug}/{label}");
     let text_tree = match DiskTree::open_sub(&label_text, &shown, READING) {

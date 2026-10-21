@@ -57,10 +57,11 @@ const BRACKETS: [char; 4] = ['[', ']', '{', '}'];
 /// Spec 8.9's sanitisation of one path component, in this order: Unicode NFC; `:` replaced by " -"; `/ \ | ? * " < >`
 /// and control characters removed; with `strip_brackets` (a title or an edition name), `[ ] { }` removed; runs of
 /// spaces collapsed to one; leading spaces and periods dropped (a name that begins with `.` is hidden on the NAS and
-/// skipped by the servers' scans; a choice beyond 8.9's list); trailing spaces and periods trimmed; a reserved device name
-/// (`RESERVED_NAMES`, judged on the stem before the first `.`, ignoring ASCII case and the stem's trailing spaces)
-/// gets `_` appended to its stem (`con.mkv` gives `con_.mkv`); capped at COMPONENT_MAX_BYTES on a character boundary,
-/// and trimmed again of the trailing spaces and periods the cap may leave.
+/// skipped by the servers' scans; the owner's confirmed addition to 8.9's list (ruling OR4)); trailing spaces and
+/// periods trimmed; a reserved device name (`RESERVED_NAMES`, judged on the stem before the first `.`, ignoring ASCII
+/// case and the stem's trailing spaces) gets `_` appended to its stem (`con.mkv` gives `con_.mkv`); capped at
+/// COMPONENT_MAX_BYTES on a character boundary, and trimmed again of the trailing spaces and periods the cap may
+/// leave.
 pub fn sanitise(component: &str, strip_brackets: bool) -> String {
     sanitise_within(component, strip_brackets, COMPONENT_MAX_BYTES)
 }

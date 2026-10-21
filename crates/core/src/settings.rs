@@ -252,9 +252,9 @@ impl Settings {
     /// (`configured_root`) or not absolute (`is_absolute_root`): a final path is never built under either (8.9);
     /// minlength_s 0; auto_threshold outside
     /// 0.0..=1.0 (not-a-number included); feature_min_minutes 0; subs_diff_max above subs_same_min; tuning_root
-    /// absent or blank (no path component, so it is inside nothing) while keep_tuning_evidence is on, else tuning_root
-    /// inside staging_root or a library root (one problem per root); file_phase_concurrency 0; makemkv_min_version not
-    /// `N.N.N` (`version_triple`). Empty when valid.
+    /// absent or blank (no path component, so it is inside nothing) while keep_tuning_evidence is on; a set tuning_root
+    /// inside staging_root or a library root, whatever keep_tuning_evidence says (one problem per root);
+    /// file_phase_concurrency 0; makemkv_min_version not `N.N.N` (`version_triple`). Empty when valid.
     /// `Settings::default().validate()` is exactly one problem, keyed `tuning_root` (spec 14's defaults turn
     /// keep_tuning_evidence on and leave tuning_root unset); `lazymkv-dev plan` prints the problems and plans with
     /// them. Spec 7, 14, Open point 21.
@@ -775,18 +775,21 @@ mod tests {
     }
 
     #[test]
-    fn a_tuning_root_inside_the_staging_root_is_refused() {
+    fn a_tuning_root_inside_the_staging_root_is_refused_whatever_keep_tuning_evidence_says() {
         let settings = Settings {
             staging_root: root(r"\\unas-pro\media\lazymkv-staging"),
             tuning_root: root(r"\\unas-pro\media\lazymkv-staging\tuning"),
             ..Settings::default()
         };
+        let expected = vec![problem_of(
+            "tuning_root",
+            r"tuning_root \\unas-pro\media\lazymkv-staging\tuning is inside staging_root \\unas-pro\media\lazymkv-staging: the tuning root may not be inside the staging root or a library root (spec 7)"
+        )];
+        assert_eq!(settings.validate(), expected);
         assert_eq!(
-            settings.validate(),
-            vec![problem_of(
-                "tuning_root",
-                r"tuning_root \\unas-pro\media\lazymkv-staging\tuning is inside staging_root \\unas-pro\media\lazymkv-staging: the tuning root may not be inside the staging root or a library root (spec 7)"
-            )]
+            Settings { keep_tuning_evidence: false, ..settings }.validate(),
+            expected,
+            "a set tuning_root is checked whatever keep_tuning_evidence says"
         );
     }
 

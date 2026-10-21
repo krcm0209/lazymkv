@@ -356,7 +356,11 @@ pub struct LookupInputs<'a> {
     /// `/api/dischash/{hash}`.
     pub discdb_by_fingerprint: Option<&'a discdb::DiscDbRecord>,
     pub discdb_pending: bool,
-    /// The search 8.1 runs on the cleaned name (or on TheDiscDB's title and year when the entry has no TMDb ID).
+    /// The search 8.1 runs on the cleaned name (or on TheDiscDB's title and year when the entry has no TMDb ID). When
+    /// the disc name's `tagged` differs from its `cleaned` once both are folded (`name::fold_name`), the caller searches
+    /// TMDb with both names and passes the two answer pages merged in order, the cleaned name's results first and then
+    /// the tagged name's results not already among them, so the tagged match can be found (H1) and `PIRANHA_3D` keeps its
+    /// fallback to Piranha. Spec 8.1, ruling J8.
     pub search: Option<&'a tmdb::TmdbSearch>,
     /// The record fetched for the identity in hand.
     pub record: Option<&'a tmdb::TmdbRecord>,
@@ -390,23 +394,24 @@ pub struct Identity {
     pub evidence: Vec<String>,
 }
 
-/// Spec 8.1 steps 1 to 6 in order, after the owner's review: `inputs.reviewed` is Some (Reviewed, 1.00, that
-/// identity); `inputs.remembered` is Some (Remembered, 1.00, that identity); TheDiscDB by both disc ID and fingerprint
-/// (0.99: both records present and their TMDb IDs equal, or one of them lacking an ID) or by one (0.95); else the
-/// search on a non-generic cleaned name: exactly one plausible result and the runtime check passes (0.90, or 0.84 plus
-/// identity_ambiguous when tmdb_only_autofile is off); several plausible results or a failed or impossible runtime
-/// check (0.50, identity_ambiguous); else nothing (0, identity_unknown). The runtime check run is the one for the
-/// plausible result's own TmdbKind (movie_runtime_ok for Movie, tv_runtime_ok for Tv), whatever `kind` is ("Movies and
-/// TV are searched together"); `kind` (the structural kind) is used only to prefer results of that kind when several
-/// are plausible. A generic name is never searched. A pending lookup does not lower the step reached by the answers in
-/// hand; it sets lookup_pending. A TheDiscDB entry without a TMDb ID is searched by its title (`inputs.search` is that
-/// search): exactly one plausible result after preferring TheDiscDB's kind and then its year keeps the TheDiscDB step
-/// with that result's identity, but one result whose kind or year contradicts TheDiscDB's is step 5 with that identity;
-/// several give step 5, none step 6; when neither TheDiscDB record has a TMDb ID the fingerprint's title is searched,
-/// unless only the disc ID record has one; an entry with neither a TMDb ID nor a title falls through to the disc name's
-/// search. In the disc name's search, preferring the structural kind only picks the result shown (`tmdb`, and the
-/// runtime check run on it): several plausible results stay step 5 (8.1 row 5), and `plausible` lists them all. Reads
-/// only `settings.tmdb_only_autofile`. Def: T4. Use: T7.
+/// Spec 8.1 steps 1 to 6 in order, after the owner's review: `inputs.reviewed` is Some (Reviewed, 1.00, that identity);
+/// `inputs.remembered` is Some (Remembered, 1.00, that identity); TheDiscDB by both disc ID and fingerprint (0.99: both
+/// records present and their TMDb IDs equal, or one of them lacking an ID) or by one (0.95); else the search on a
+/// non-generic cleaned name (where a result matching the name with its region and format tags kept, `DiscName.tagged`,
+/// is the only plausible one when there is such a result: spec 8.1, ruling H1): exactly one plausible result and the
+/// runtime check passes (0.90, or 0.84 plus identity_ambiguous when tmdb_only_autofile is off); several plausible
+/// results or a failed or impossible runtime check (0.50, identity_ambiguous); else nothing (0, identity_unknown). The
+/// runtime check run is the one for the plausible result's own TmdbKind (movie_runtime_ok for Movie, tv_runtime_ok for
+/// Tv), whatever `kind` is ("Movies and TV are searched together"); `kind` (the structural kind) is used only to prefer
+/// results of that kind when several are plausible. A generic name is never searched. A pending lookup does not lower
+/// the step reached by the answers in hand; it sets lookup_pending. A TheDiscDB entry without a TMDb ID is searched by
+/// its title (`inputs.search` is that search): exactly one plausible result after preferring TheDiscDB's kind and then
+/// its year keeps the TheDiscDB step with that result's identity, but one result whose kind or year contradicts
+/// TheDiscDB's is step 5 with that identity; several give step 5, none step 6; when neither TheDiscDB record has a TMDb
+/// ID the fingerprint's title is searched, unless only the disc ID record has one; an entry with neither a TMDb ID nor
+/// a title falls through to the disc name's search. In the disc name's search, preferring the structural kind only
+/// picks the result shown (`tmdb`, and the runtime check run on it): several plausible results stay step 5 (8.1 row 5),
+/// and `plausible` lists them all. Reads only `settings.tmdb_only_autofile`. Def: T4. Use: T7.
 pub fn identify(
     inputs: &LookupInputs<'_>,
     kind: Kind,
@@ -561,6 +566,37 @@ fn discdb_match<'a>(
     }
 }
 
+/// The search results with an identity (a movie or a show) that are plausible for `text`, in the answer's order.
+fn plausible_for<'a>(
+    search: &'a tmdb::TmdbSearch,
+    text: &str,
+) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
+    search
+        .results
+        .iter()
+        .filter_map(|result| result.identity().map(|identity| (identity, result)))
+        .filter(|(_, result)| name::plausible(result, text))
+        .collect()
+}
+
+/// The evidence sentence naming the plausible results `found` of `search`; `tagged` is the name with its tags kept
+/// when it decided which results are plausible (ruling H1).
+fn plausible_sentence(
+    found: &[(tmdb::TmdbIdentity, &tmdb::TmdbSearchResult)],
+    search: &tmdb::TmdbSearch,
+    tagged: Option<&str>,
+) -> String {
+    let mut sentence = format!("{} of {} search results are plausible", found.len(), search.results.len());
+    if let Some(tagged) = tagged {
+        sentence.push_str(&format!(" by the name with its tags kept, '{tagged}'"));
+    }
+    if !found.is_empty() {
+        sentence.push_str(": ");
+        sentence.push_str(&identity_list(found));
+    }
+    sentence
+}
+
 /// The search results with an identity (a movie or a show) that are plausible for `text`, in the answer's order, with
 /// the evidence sentence naming them.
 fn plausible_results<'a>(
@@ -568,19 +604,28 @@ fn plausible_results<'a>(
     text: &str,
     evidence: &mut Vec<String>,
 ) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
-    let found: Vec<(tmdb::TmdbIdentity, &tmdb::TmdbSearchResult)> = search
-        .results
-        .iter()
-        .filter_map(|result| result.identity().map(|identity| (identity, result)))
-        .filter(|(_, result)| name::plausible(result, text))
-        .collect();
-    let mut sentence = format!("{} of {} search results are plausible", found.len(), search.results.len());
-    if !found.is_empty() {
-        sentence.push_str(": ");
-        sentence.push_str(&identity_list(&found));
-    }
-    evidence.push(sentence);
+    let found = plausible_for(search, text);
+    evidence.push(plausible_sentence(&found, search, None));
     found
+}
+
+/// The results plausible for the disc's own name (spec 8.1, ruling H1): when the name with its tags kept differs from
+/// the cleaned name once both are folded (`name::fold_name`, so `(US)` and `US` are one name) and some result matches
+/// it, only those results (the more specific name wins: `PIRANHA_3D` is Piranha 3D, not Piranha); otherwise the results
+/// matching the cleaned name. Writes one evidence sentence.
+fn plausible_by_name<'a>(
+    search: &'a tmdb::TmdbSearch,
+    disc_name: &name::DiscName,
+    evidence: &mut Vec<String>,
+) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
+    if name::fold_name(&disc_name.tagged) != name::fold_name(&disc_name.cleaned) {
+        let found = plausible_for(search, &disc_name.tagged);
+        if !found.is_empty() {
+            evidence.push(plausible_sentence(&found, search, Some(&disc_name.tagged)));
+            return found;
+        }
+    }
+    plausible_results(search, &disc_name.cleaned, evidence)
 }
 
 /// Several plausible results narrowed to those of `kind`, then to those of `year`, each only when some but not all
@@ -664,6 +709,7 @@ fn search_by_entry<'a>(
 
 /// Steps 4 to 6: the search on the disc's own cleaned name. Step 4 needs exactly one plausible result (8.1 row 4):
 /// when several are plausible, preferring the structural kind may pick the one shown, but the step stays 5 (row 5).
+/// A result matching the name with its tags kept is the only plausible one (`plausible_by_name`, ruling H1).
 fn search_by_name<'a>(
     inputs: &LookupInputs<'a>,
     kind: Kind,
@@ -682,7 +728,7 @@ fn search_by_name<'a>(
         evidence.push("no TMDb search answer is in hand".to_string());
         return IdentityFound::at(IdentityStep::Nothing);
     };
-    let found = plausible_results(search, &disc_name.cleaned, evidence);
+    let found = plausible_by_name(search, disc_name, evidence);
     let several = found.len() > 1;
     let every_plausible: Vec<tmdb::TmdbIdentity> = found.iter().map(|(identity, _)| *identity).collect();
     let picked = prefer_results(found, Some(kind), None, evidence);

@@ -4,7 +4,8 @@
 //! these enums, never strings: a result's `reviews` field holds `ReviewReason`s sorted by the table's order and
 //! unique (`sorted_unique`), its `notes` field holds `Noted` entries in the order the rule raised them. The serde and
 //! `as_str` spellings are the spec's snake_case strings; four notes the spec describes only in words take this plan's
-//! spelling (`possible_audio_description`, `lossy_before_lossless`, `direct_mode_fallback`, `label_rule_unavailable`).
+//! spelling (`possible_audio_description`, `lossy_before_lossless`, `direct_mode_fallback`, `label_rule_unavailable`),
+//! which the owner confirmed (ruling OR8, 2026-10-17); the rulings plan adds a thirteenth, `unlisted_label_cut` (OR16).
 //! Written from the spec (RP20); used by Tasks 4 to 18.
 
 /// A reason that holds a job for review: spec 8.8's table in its order, with 8.6 "Content"'s commentary_detected placed
@@ -18,7 +19,8 @@ pub enum ReviewReason {
     /// Spec 8.1 step 5: several plausible TMDb results or a failed runtime check (0.50), or a TMDb-only identification
     /// with `tmdb_only_autofile` off (capped at 0.84).
     IdentityAmbiguous,
-    /// Spec 8.3 rules 3.4, 3.6 and 4: the feature cannot be told from its rivals, or its runtime is far from TMDb's.
+    /// Spec 8.3 rules 3.4, 3.5, 3.6 and 4: the feature cannot be told from its rivals, rule 3's lone feature is itself a
+    /// play-all of other titles (3.5's hold, ruling G1), or its runtime is far from TMDb's.
     TitleAmbiguous,
     /// Spec 8.3 rule 3.7: the rival titles are largely different content.
     MultipleFeatures,
@@ -104,8 +106,8 @@ impl std::str::FromStr for ReviewReason {
 }
 
 /// A note on a job: recorded with the decision, never holding the job (spec 8.6 step 6, 8.7, 8.9, 7, 6.3 step 6a,
-/// 10.2, D9, RP7). The serde and `as_str` spelling is the spec's snake_case string, or this plan's for the four the
-/// spec describes in words.
+/// 10.2, D9, RP7, and 8.3 rule 1 under OR5). The serde and `as_str` spelling is the spec's snake_case string, or this
+/// plan's for the four the spec describes in words and for `unlisted_label_cut` (OR16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Note {
@@ -135,11 +137,15 @@ pub enum Note {
     /// Spec 8.3 rule 2 and 10.2 ToolMissing: MakeMKV did not report Java, so the label rule does not apply ("a note
     /// records why").
     LabelRuleUnavailable,
+    /// Spec 8.3 rule 1 under ruling OR5 (2026-10-17): a Java label names a cut TheDiscDB does not list as a main movie.
+    /// The detail states only that fact, naming the title and its label as the scan wrote it ("title 54's label
+    /// FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie", ruling H3).
+    UnlistedLabelCut,
 }
 
 impl Note {
-    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7.
-    pub const ALL: [Note; 12] = [
+    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7, 8.3 rule 1 (OR5, OR16).
+    pub const ALL: [Note; 13] = [
         Note::PossibleCommentary,
         Note::PossibleAudioDescription,
         Note::LosslessOriginalAvailable,
@@ -152,6 +158,7 @@ impl Note {
         Note::TuningEvidencePending,
         Note::DirectModeFallback,
         Note::LabelRuleUnavailable,
+        Note::UnlistedLabelCut,
     ];
 
     /// The snake_case spelling, the same string serde writes. Spec 8.6, 8.7, 8.9, 7.
@@ -169,6 +176,7 @@ impl Note {
             Note::TuningEvidencePending => "tuning_evidence_pending",
             Note::DirectModeFallback => "direct_mode_fallback",
             Note::LabelRuleUnavailable => "label_rule_unavailable",
+            Note::UnlistedLabelCut => "unlisted_label_cut",
         }
     }
 }
@@ -273,6 +281,7 @@ mod tests {
         note_tuning_evidence_pending_round_trips: Note::TuningEvidencePending => "tuning_evidence_pending",
         note_direct_mode_fallback_round_trips: Note::DirectModeFallback => "direct_mode_fallback",
         note_label_rule_unavailable_round_trips: Note::LabelRuleUnavailable => "label_rule_unavailable",
+        note_unlisted_label_cut_round_trips: Note::UnlistedLabelCut => "unlisted_label_cut",
     });
 
     #[test]
@@ -313,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn all_notes_are_the_twelve_in_spec_order() {
+    fn all_notes_are_the_thirteen_in_spec_order() {
         let spellings: Vec<&str> = Note::ALL.iter().map(|note| note.as_str()).collect();
         assert_eq!(
             spellings,
@@ -330,6 +339,7 @@ mod tests {
                 "tuning_evidence_pending",
                 "direct_mode_fallback",
                 "label_rule_unavailable",
+                "unlisted_label_cut",
             ]
         );
         assert!(Note::ALL.windows(2).all(|pair| pair[0] < pair[1]), "ALL is in the enum's order");

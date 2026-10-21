@@ -1004,6 +1004,23 @@ fn the_runtime_check_is_the_one_of_the_results_own_kind() {
 }
 
 #[test]
+fn the_runtime_check_of_a_movie_result_reads_the_features_even_when_the_structure_says_tv() {
+    // The structure said TV, but the one plausible result is a film: its movie check runs over the planned features.
+    let name = label("EXAMPLE_FILM");
+    let results = search(&[("movie", 1001, "Example Film", "Example Film", "1986-05-09")]);
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let held = identify(&inputs, Kind::Tv, &episode_groups(&[6000]), &Settings::default());
+    assert_eq!(
+        (held.step, held.confidence, held.tmdb, held.runtime_check, held.review),
+        (IdentityStep::TmdbSeveral, 0.50, Some(movie(1001)), Some(false), Some(ReviewReason::IdentityAmbiguous))
+    );
+    assert_eq!(held.evidence.last().map(String::as_str), Some("the runtime check fails"));
+    let found = identify(&inputs, Kind::Tv, &features(&[6000]), &Settings::default());
+    assert_eq!((found.step, found.confidence, found.runtime_check), (IdentityStep::TmdbOne, 0.90, Some(true)));
+}
+
+#[test]
 fn the_tv_runtime_check_reads_the_parsed_season_else_the_whole_series() {
     let record = tv_record(2316, "Example Show", &[(1, &OFFICE_SEASON_1[..]), (3, &OFFICE_SEASON_3[..])]);
     let results = search(&[("tv", 2316, "Example Show", "Example Show", "2005-03-24")]);
@@ -1128,6 +1145,107 @@ fn a_person_result_is_never_plausible() {
     let identity = identify(&inputs, Kind::Movie, &features(&[JOHN_WICK_MAIN_S]), &Settings::default());
     assert_eq!(identity.step, IdentityStep::Nothing);
     assert_eq!(identity.evidence.last().map(String::as_str), Some("0 of 1 search results are plausible"));
+}
+
+/// Two films of one name, the later one in 3D (H1): Piranha 3D (2010, 88 minutes) and Piranha (1978, 94 minutes). The
+/// TMDb IDs are made up.
+const PIRANHA_RESULTS: [(&str, i64, &str, &str, &str); 2] = [
+    ("movie", 3301, "Piranha 3D", "Piranha 3D", "2010-08-20"),
+    ("movie", 3302, "Piranha", "Piranha", "1978-08-03"),
+];
+
+#[test]
+fn a_result_matching_the_name_with_its_tags_kept_is_the_only_plausible_one() {
+    // H1: `PIRANHA_3D` cleans to `PIRANHA`, which only the 1978 film matches; the name with its tags kept, `PIRANHA 3D`,
+    // matches the 2010 film, and the more specific name wins.
+    let name = label("PIRANHA_3D");
+    let results = search(&PIRANHA_RESULTS);
+    let record = movie_record(3301, "Piranha 3D", "2010-08-20", Some(88));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    assert_eq!(
+        identify(&inputs, Kind::Movie, &features(&[88 * 60]), &Settings::default()),
+        Identity {
+            step: IdentityStep::TmdbOne,
+            confidence: 0.90,
+            tmdb: Some(movie(3301)),
+            title: Some("Piranha 3D".to_string()),
+            year: Some(2010),
+            original_language: Some("en".to_string()),
+            review: None,
+            plausible: vec![movie(3301)],
+            runtime_check: Some(true),
+            lookup_pending: false,
+            evidence: sentences(&[
+                "name 'PIRANHA_3D' cleaned to 'PIRANHA'",
+                "1 of 2 search results are plausible by the name with its tags kept, 'PIRANHA 3D': movie 3301",
+                "the runtime check passes",
+            ]),
+        }
+    );
+}
+
+#[test]
+fn a_bdmt_name_ending_in_a_region_tag_word_matches_with_its_tags_kept() {
+    // H1: the word Us of `The Last of Us` is a region tag, so the name cleans to `The Last of`, which no result matches;
+    // with its tags kept it is itself, and only the show of that title is plausible, not "The Last".
+    let name = disc_name(Some("The Last of Us"), None).unwrap();
+    let results = search(&[
+        ("tv", 4401, "The Last of Us", "The Last of Us", "2023-01-15"),
+        ("movie", 4402, "The Last", "The Last", "2019-05-10"),
+    ]);
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
+    assert_eq!((identity.tmdb, identity.plausible), (Some(tv(4401)), vec![tv(4401)]));
+    assert_eq!(
+        identity.evidence[..2],
+        sentences(&[
+            "name 'The Last of Us' cleaned to 'The Last of'",
+            "1 of 2 search results are plausible by the name with its tags kept, 'The Last of Us': tv 4401",
+        ])
+    );
+}
+
+#[test]
+fn a_name_without_tags_is_matched_by_its_cleaned_name_as_before() {
+    // H1 changes nothing for a name without a region or format tag: `SMILE` matches "Smile" only.
+    let name = label("SMILE");
+    let results = search(&[
+        ("movie", 5501, "Smile", "Smile", "2022-09-23"),
+        ("movie", 5502, "Smile 2", "Smile 2", "2024-10-16"),
+    ]);
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6900]), &Settings::default());
+    assert_eq!((identity.tmdb, identity.plausible), (Some(movie(5501)), vec![movie(5501)]));
+    assert_eq!(identity.evidence[1], "1 of 2 search results are plausible: movie 5501");
+    // `(US)` cleans to `US` and keeps `(US)` with its tags: one name once folded, so the cleaned name decides and the
+    // evidence does not speak of the name with its tags kept.
+    let bracketed = label("(US)");
+    assert_eq!((bracketed.cleaned.as_str(), bracketed.tagged.as_str()), ("US", "(US)"));
+    let us = search(&[("movie", 5503, "Us", "Us", "2019-03-22")]);
+    let inputs = LookupInputs { name: Some(&bracketed), search: Some(&us), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6960]), &Settings::default());
+    assert_eq!(identity.plausible, vec![movie(5503)]);
+    assert_eq!(identity.evidence[1], "1 of 1 search results are plausible: movie 5503");
+}
+
+#[test]
+fn the_tagged_match_wins_over_the_cleaned_one_and_s3d_is_kept_as_written() {
+    // H1 with made-up titles: `EXAMPLE_3D` matches "Example 3D" with its tags kept, so "Example" is not plausible.
+    let results = search(&[
+        ("movie", 6601, "Example", "Example", "2001-01-01"),
+        ("movie", 6602, "Example 3D", "Example 3D", "2011-01-01"),
+    ]);
+    let three_d = label("EXAMPLE_3D");
+    let inputs = LookupInputs { name: Some(&three_d), search: Some(&results), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default());
+    assert_eq!((identity.tmdb, identity.plausible), (Some(movie(6602)), vec![movie(6602)]));
+    // The tag is kept as written: `EXAMPLE_S3D` with its tags kept is `EXAMPLE S3D`, which no title matches, so the
+    // cleaned name decides and "Example" is the plausible result.
+    let s3d = label("EXAMPLE_S3D");
+    let inputs = LookupInputs { name: Some(&s3d), search: Some(&results), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default());
+    assert_eq!((identity.tmdb, identity.plausible), (Some(movie(6601)), vec![movie(6601)]));
+    assert_eq!(identity.evidence[1], "1 of 2 search results are plausible: movie 6601");
 }
 
 #[test]

@@ -19,7 +19,7 @@ use crate::reconcile::RIP_LOG_NAMES;
 use crate::review::ReviewReason;
 use crate::robot::{parse, Scan};
 use crate::settings::Settings;
-use crate::subtitle::text::{subs_run, Decision, Role};
+use crate::subtitle::text::{subs_run, Decision, Role, READING};
 use crate::tracks::subtitle::{decide_subtitles, english_or_none, SubtitleDecision, SubtitleFacts};
 use crate::tracks::SubtitleRole;
 use crate::verify::{
@@ -248,11 +248,10 @@ pub fn costly(kind: SubtitleKind, outcome: &Outcome) -> Option<Costly> {
 
 // ------------------------------------------------------------------ the harness
 
-/// The reading folder of a rip label under the OCR text, `<text>/<slug>/<label>/subs-ocr/`: the goldens' layout, the
-/// folder ocr-subs.ps1 writes and `lazymkv-dev decide` reads first.
-const READING: &str = "subs-ocr";
-/// How to give the harness the OCR text, at the end of every reason that names none.
-const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
+/// How to give the OCR text, at the end of every reason that names none: the harness's own reasons here, and the
+/// refusals and skips of `lazymkv-dev retune`, `decide` and `golden`, which use this one text (spec 15 "Rules against
+/// the stored evidence", sub-ruling SR9).
+pub const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 /// The width the count block pads its names to.
 const COLUMN: usize = 22;
 

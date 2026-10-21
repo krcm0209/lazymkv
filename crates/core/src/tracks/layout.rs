@@ -101,9 +101,9 @@ pub fn layout(title: &Title, audio: &AudioDecision, subtitles: &SubtitleDecision
 }
 
 /// Spec 8.10's default subtitle: the forced track when the default audio is English; when it is not, the regular
-/// English track, or the SDH track when no regular track is kept (the forced track is then not default). 8.10 names
-/// only the regular track; the SDH fallback serves the title whose only English dialogue track is SDH, and is a choice
-/// the owner may overturn. None when the track the rule names does not exist.
+/// English track, or the SDH track when no regular track is kept (the forced track is then not default). 8.10 names the
+/// SDH fallback since ruling OR3 (2026-10-17); it serves the title whose only English dialogue track is SDH. None when
+/// the track the rule names does not exist.
 pub fn default_subtitle(default_audio_is_english: bool, subtitles: &SubtitleDecision) -> Option<u32> {
     let kept = |role: SubtitleRole| subtitles.kept.iter().find(|track| track.role == role).map(|track| track.stream);
     if default_audio_is_english {
@@ -536,6 +536,12 @@ mod tests {
             audio_track(4, Some("zxx"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
             audio_track(5, Some("mul"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
             audio_track(6, Some(""), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            // The tag drops only an empty code, "-" and "und" in any case; "mis" and "ZXX" keep theirs as written.
+            audio_track(7, Some("-"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(8, Some("UND"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(9, Some("Und"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(10, Some("mis"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
+            audio_track(11, Some("ZXX"), LangGroup::NoLanguage, AC3, 2, "Dolby Digital 2.0", false, false),
         ]);
         let languages: Vec<Option<String>> = layout(&film_title(), &kept, &subtitles(Vec::new()))
             .tracks
@@ -545,7 +551,19 @@ mod tests {
             .collect();
         assert_eq!(
             languages,
-            vec![Some("spa".to_string()), None, None, Some("zxx".to_string()), Some("mul".to_string()), None]
+            vec![
+                Some("spa".to_string()),
+                None,
+                None,
+                Some("zxx".to_string()),
+                Some("mul".to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some("mis".to_string()),
+                Some("ZXX".to_string()),
+            ]
         );
     }
 
@@ -587,6 +605,14 @@ mod tests {
     fn with_non_english_default_audio_the_regular_subtitle_is_flagged_default_and_the_forced_is_not() {
         let got = layout(&film_title(), &film_audio(), &film_subtitles());
         assert_eq!(subtitle_defaults(&got), vec![(5, false), (4, true), (6, false)]);
+    }
+
+    #[test]
+    fn with_non_english_default_audio_and_no_regular_track_the_sdh_subtitle_is_flagged_default() {
+        // OR3: the SDH track is default when it is the only English dialogue track kept.
+        let kept = subtitles(vec![subtitle(5, SubtitleRole::Forced), subtitle(6, SubtitleRole::Sdh)]);
+        let got = layout(&film_title(), &film_audio(), &kept);
+        assert_eq!(subtitle_defaults(&got), vec![(5, false), (6, true)]);
     }
 
     #[test]

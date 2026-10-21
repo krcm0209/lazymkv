@@ -25,7 +25,7 @@ use lazymkv_core::audio::dataset::{
 use lazymkv_core::audio::labels::exp13_requirements;
 use lazymkv_core::recording::{decode_text, Encoding, Errors, Tree};
 use lazymkv_core::settings::Settings;
-use lazymkv_core::subtitle::labels::{exp14_requirements, harness as subtitle_harness};
+use lazymkv_core::subtitle::labels::{exp14_requirements, harness as subtitle_harness, TEXT_HINT};
 
 use crate::evidence::{
     default_spec, ocr_text_dir, os_error_text, resolve_evidence, Ctx, DiskTree, Refused, EVIDENCE_SHOWN,
@@ -42,8 +42,6 @@ const SUBTITLES_ALONE: &str =
     "argument --subtitles: not allowed with --set, --snapshot, --compare or --allow-unmeasured";
 /// --text names the OCR text, which only the subtitle harness reads.
 const TEXT_NEEDS_SUBTITLES: &str = "argument --text: only with --subtitles";
-/// How to give the OCR text, at the end of the refusal of a folder that is not there.
-const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 
 pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut parsed = Args::new(args, &FLAGS);
