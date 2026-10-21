@@ -102,9 +102,9 @@ fn file_stem(source_file: &str) -> &str {
 pub enum PlannedRole {
     /// A feature or cut (8.3, 8.4); `edition` is the name `movie::edition_names` gives it; `theatrical` is the planner's
     /// `movie::Feature.theatrical` (the theatrical or main cut), false for an unnamed cut (edition None: rule 2's Other
-    /// suffix, a later TheDiscDB main movie with no edition (c1:F1), a Java-labelled cut TheDiscDB does not list (OR5),
-    /// and a main movie with an Other or absent label beside such a cut (H2)) and for one of two or more structural
-    /// rivals, which keep no edition until the owner names them.
+    /// suffix, a later TheDiscDB main movie with no edition (the Task 5 ruling), a Java-labelled cut TheDiscDB does not
+    /// list (OR5), and a main movie with an Other or absent label beside such a cut (H2)) and for one of two or more
+    /// structural rivals, which keep no edition until the owner names them.
     Feature { edition: Option<String>, theatrical: bool },
     /// An episode title (8.5).
     Episode(Episode),
@@ -292,8 +292,8 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
                 {
                     let title = found.features[0].title;
                     found.hold_ambiguous(format!(
-                        "8.3 rule 3: the only feature, title {title}, is a play-all of other titles, so the plan is held \
-                         (G1)"
+                        "8.3 rule 3.5: the only feature, title {title}, is a play-all of other titles (8.5), so the plan \
+                         is held at 0.60 and the disc is copied whole"
                     ));
                 }
                 found_movie = Some(found);
@@ -2251,9 +2251,12 @@ mod tests {
         assert_eq!(plan.reviews, vec![ReviewReason::MultipleFeatures]);
     }
 
-    /// The sentence G1 adds when the only feature rule 3 found is a play-all of other titles.
+    /// The sentence G1 adds when the only feature rule 3 found is a play-all of other titles (its wording J13's).
     fn held_play_all_sentence(title: u32) -> String {
-        format!("8.3 rule 3: the only feature, title {title}, is a play-all of other titles, so the plan is held (G1)")
+        format!(
+            "8.3 rule 3.5: the only feature, title {title}, is a play-all of other titles (8.5), so the plan is held at \
+             0.60 and the disc is copied whole"
+        )
     }
 
     #[test]

@@ -120,8 +120,8 @@ pub struct PlanOptions {
     pub settings: Option<PathBuf>,
     /// A TMDb `/search/multi` answer for the disc's name (8.1 steps 4 and 5; TMDb's documented shape).
     pub tmdb_search: Option<PathBuf>,
-    /// A TMDb `/movie/{id}` or `/tv/{id}` answer (8.1); it replaces the recording's tmdb.json, so a failed TMDb lookup
-    /// is no longer pending (SR8).
+    /// A TMDb `/movie/{id}` or `/tv/{id}` answer (8.1); it replaces the recording's tmdb.json, and it clears the pending
+    /// flag of a failed TMDb lookup only when it is the planned identity's record (SR8, narrowed by ruling G3; J14).
     pub tmdb_record: Option<PathBuf>,
     /// A remembered decision for this disc's fingerprint (spec 5, 8.1 step 1).
     pub remembered: Option<PathBuf>,
@@ -1005,7 +1005,9 @@ mod tests {
         assert_eq!(doc.inputs.tmdb_record.as_deref(), Some("other.json"));
         assert!(doc.plan.identity.lookup_pending);
         assert!(doc.plan.identity.evidence.iter().any(|s| s == "the TMDb lookup is pending"), "{:?}", doc.plan.identity.evidence);
-        assert_ne!(doc.plan.identity.original_language.as_deref(), Some("fr"));
+        // The planned identity is still TheDiscDB's movie 6537, and the other record lends it nothing (J14).
+        assert_eq!(doc.plan.identity.tmdb, Some(film_identity()));
+        assert_eq!(doc.plan.identity.original_language, None);
     }
 
     #[test]

@@ -200,8 +200,8 @@ pub struct Feature {
     /// unnamed cut (rule 2's Other label suffix, a later TheDiscDB MainMovie with no edition, or a Java-labelled cut
     /// TheDiscDB does not list, OR5), which has edition None and theatrical false. A rule 1 main movie whose own label
     /// suffix is Other, or which carries no label, has edition None and stays theatrical unless it is a later main movie
-    /// (c1:F1) or a cut TheDiscDB does not list is planned beside it, which leaves it unnamed too, so the owner names
-    /// both (ruling H2). Spec 8.3, 8.4; rulings G9 and H2.
+    /// (the Task 5 ruling) or a cut TheDiscDB does not list is planned beside it, which leaves it unnamed too, so the
+    /// owner names both (ruling H2). Spec 8.3, 8.4; rulings G9 and H2.
     pub theatrical: bool,
     /// The titles of its group (rule 3) or cut (rule 2) that were not chosen.
     pub siblings: Vec<u32>,
@@ -1972,7 +1972,7 @@ mod tests {
         // Ruling OR1: without TheDiscDB, labels or a season marker, CHERNOBYL_2's extras play-all no longer makes it
         // TV. The disc is held in copy mode only because its two episodes (65 and 72 minutes) are within 10% of each
         // other, so rule 3 finds two rivals; episodes further apart beside an extras play-all would plan the longer one
-        // alone at 0.85 (left to the owner, G1).
+        // alone at 0.85 (accepted by the owner, H6).
         let disc = pinned(CHERNOBYL_2);
         let settings = Settings::default();
         let found = groups_of(&disc, &settings);
