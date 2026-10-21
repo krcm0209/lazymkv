@@ -206,7 +206,10 @@ pub struct MoviePlan {
 /// `matches`; one Feature per MainMovie, in database index order (0.98). Each Feature's edition is its item title with the
 /// media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and the scan
 /// title's comment (attribute 49) parses as a label, `edition_of(label.suffix)` (8.4 "else from the label table":
-/// Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); `theatrical` as Feature's doc says. Two or more
+/// Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); when that leaves nothing too, the label of another
+/// title of its 8.2 group that the table names, the first in title order, with an evidence sentence (ruling J2: that
+/// title plays the same segments, so its label names the main movie's cut; an Other suffix there names nothing, as on
+/// the main movie's own label); `theatrical` as Feature's doc says. Two or more
 /// MainMovies of which a later one still has no edition: 0.60 with unnamed_cut; two main movies given the same edition
 /// name make it 0.60 with title_ambiguous (Review Focus 8), checked after H2's unnaming below, so a main movie H2 leaves
 /// unnamed shares no name (ruling J1). None when TheDiscDB marks no main movie or any MainMovie title does not reconcile.
@@ -266,6 +269,17 @@ pub fn by_database(
                         evidence.push(format!("edition '{name}' from the label {comment} of title {number}"));
                     }
                     suffix = Some(label.suffix);
+                }
+            }
+            // J2: a labelled title that plays the main movie's segments (its 8.2 group, H4) names the edition its label
+            // gives when nothing else does (8.4: a cut the evidence names carries its name).
+            if edition.is_none() {
+                if let Some((other, comment, name)) = edition_from_same_content(disc, groups, number) {
+                    evidence.push(format!(
+                        "edition '{name}' from the label {comment} of title {other}, the same content as main movie {}",
+                        main_movie.index
+                    ));
+                    edition = Some(name.to_string());
                 }
             }
         }
@@ -355,6 +369,18 @@ pub fn by_database(
         notes,
         rivals: Vec::new(),
         evidence,
+    })
+}
+
+/// Ruling J2: the first other title, in title order, of the 8.2 group holding scan title `number` whose comment parses as
+/// a label the table names (`edition_of`: the bare and `_R` rows' "Theatrical Cut", `_UR`, `_EXT`), with that comment and
+/// the edition name. A label whose suffix the table does not name (Other, Narrative, a language code alone) names none.
+fn edition_from_same_content<'a>(disc: &'a Disc, groups: &[Group], number: u32) -> Option<(u32, &'a str, &'static str)> {
+    let group = groups.iter().find(|group| group.titles.contains(&number))?;
+    group.titles.iter().filter(|&&other| other != number).find_map(|&other| {
+        let comment = disc.titles.get(&other)?.comment.as_deref()?;
+        let label = parse_label(other, comment)?;
+        edition_of(&label.suffix).map(|name| (other, comment, name))
     })
 }
 
@@ -1294,7 +1320,8 @@ mod tests {
     #[test]
     fn a_labelled_title_in_a_main_movies_group_is_a_cut_thediscdb_lists() {
         // H4: title 8 carries FPL_MainFeature and plays the main movie's segments (title 0, "1,2"), so it is in the main
-        // movie's 8.2 group: TheDiscDB lists that cut, and rule 1 plans the main movie alone.
+        // movie's 8.2 group: TheDiscDB lists that cut, and rule 1 plans the main movie alone, named by title 8's label
+        // since nothing else names it (J2).
         let one = record(Some("Film"), &["Film"]);
         let main_is_title_0 = BTreeMap::from([(0, 0)]);
         let english = wanted_languages(None);
@@ -1303,13 +1330,16 @@ mod tests {
         let groups = groups_of(&shared, &settings);
         assert_eq!(groups.iter().map(|group| group.titles.clone()).collect::<Vec<_>>(), vec![vec![0, 8]]);
         let plan = by_database(&one, &main_is_title_0, &shared, &groups, &english, &settings).expect("rule 1 applies");
-        assert_eq!(plan.features, vec![feature(0, None, true, &[])]);
+        assert_eq!(plan.features, vec![feature(0, Some("Theatrical Cut"), true, &[])]);
         assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]));
         let StructureOutcome::Plan(planned) = movie_plan(&shared, Some(&one), &main_is_title_0, &groups, &english, &settings)
         else {
             panic!("rule 1 gives a plan")
         };
-        assert_eq!((planned.rule, planned.features), (TitleRule::Database, vec![feature(0, None, true, &[])]));
+        assert_eq!(
+            (planned.rule, planned.features),
+            (TitleRule::Database, vec![feature(0, Some("Theatrical Cut"), true, &[])])
+        );
         // On a segment of its own, title 8 is a cut TheDiscDB does not list, planned beside the main movie as an unnamed
         // cut; the main movie carries no label, so under H2 it is left unnamed too.
         let apart = java_mapped_disc(&[(0, "1,2", ""), (8, "3", "FPL_MainFeature")]);
@@ -1326,6 +1356,45 @@ mod tests {
                 detail: "title 8's label FPL_MainFeature names a cut TheDiscDB does not list as a main movie".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn a_labelled_title_in_a_main_movies_group_names_the_main_movies_edition_when_nothing_else_does() {
+        // J2: title 8 plays the main movie's segments (title 0, "1,2", which carries no label) and carries
+        // FPL_MainFeature_UR, the playlist the Java menu calls: the main movie is the unrated cut, and it carries that
+        // name (8.4: a cut the evidence names as anything other than theatrical always carries its edition name).
+        let one = record(Some("Film"), &["Film"]);
+        let main_is_title_0 = BTreeMap::from([(0, 0)]);
+        let english = wanted_languages(None);
+        let unrated = java_mapped_disc(&[(0, "1,2", ""), (8, "1,2", "FPL_MainFeature_UR")]);
+        let plan = rule_1_plan(&one, &main_is_title_0, &unrated, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, Some("Unrated Cut"), false, &[])]);
+        assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]));
+        assert_eq!(
+            plan.evidence,
+            strings(&[
+                "TheDiscDB's main movie 0 is scan title 0",
+                "edition 'Unrated Cut' from the label FPL_MainFeature_UR of title 8, the same content as main movie 0",
+            ])
+        );
+        // A suffix the table does not name gives no edition and changes nothing, as the main movie's own Other suffix
+        // does not (the Task 5 ruling).
+        let other = java_mapped_disc(&[(0, "1,2", ""), (8, "1,2", "FPL_MainFeature_DC")]);
+        let plan = rule_1_plan(&one, &main_is_title_0, &other, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, None, true, &[])]);
+        assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]));
+        // TheDiscDB's item title and the main movie's own label come first.
+        let directors = record(Some("Film"), &["Film (Director's Cut)"]);
+        let plan = rule_1_plan(&directors, &main_is_title_0, &unrated, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, Some("Director's Cut"), false, &[])]);
+        let extended = java_mapped_disc(&[(0, "1,2", "FPL_MainFeature_EXT"), (8, "1,2", "FPL_MainFeature_UR")]);
+        let plan = rule_1_plan(&one, &main_is_title_0, &extended, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, Some("Extended Cut"), false, &[])]);
+        // Labels are read only when Java is in use (9.4).
+        let mut without_java = unrated.clone();
+        without_java.java_in_use = false;
+        let plan = rule_1_plan(&one, &main_is_title_0, &without_java, &english, &Settings::default()).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, None, true, &[])]);
     }
 
     #[test]
