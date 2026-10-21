@@ -194,17 +194,17 @@ pub const RUNTIME_SANITY_BAND: f64 = 0.10;
 pub struct Feature {
     pub title: u32,
     /// The edition name as the evidence gives it (TheDiscDB's item title beyond the media title, else the label table
-    /// over the title's own label or, for a rule 1 main movie, a label of its 8.2 group, J2; or None for the theatrical
-    /// or only cut); `edition_names` turns it into the filed name.
+    /// over the title's own label or, for a rule 1 main movie without a label, over the agreeing labels of its 8.2
+    /// group, J2 and J2a; or None for the theatrical or only cut); `edition_names` turns it into the filed name.
     pub edition: Option<String>,
-    /// True when `edition` is None or names the theatrical cut (contains the word Theatrical; `is_theatrical`), except an
-    /// unnamed cut, which has edition None and theatrical false. The unnamed cuts are: rule 2's Other label suffix; a
-    /// later TheDiscDB main movie with no edition (the Task 5 ruling); a Java-labelled cut TheDiscDB does not list (OR5);
-    /// and, beside such a cut, a rule 1 main movie whose edition is None (TheDiscDB's item title, its own label and the
-    /// labels of its 8.2 group name none, J2) and whose own label suffix is Other or which carries no label, so the owner
-    /// names both (ruling H2). Without such a cut, that main movie stays theatrical (the Task 5 ruling). This is the one
-    /// list of the unnamed cuts: `plan::PlannedRole::Feature` and `decision::job_features` point here. Spec 8.3, 8.4;
-    /// rulings G9, H2 and J11.
+    /// True when `edition` is None or names the theatrical cut (contains the word Theatrical; `is_theatrical`), except
+    /// an unnamed cut, which has edition None and theatrical false. The unnamed cuts are: rule 2's Other label suffix;
+    /// a later TheDiscDB main movie with no edition (the Task 5 ruling); a Java-labelled cut TheDiscDB does not list
+    /// (OR5); and, beside such a cut, a rule 1 main movie whose edition is None (TheDiscDB's item title, its own label
+    /// and the labels of its 8.2 group name none, J2, J2a) and whose own label suffix is Other or which carries no
+    /// label, so the owner names both (ruling H2). Without such a cut, that main movie stays theatrical (the Task 5
+    /// ruling). This is the one list of the unnamed cuts: `plan::PlannedRole::Feature` and `decision::job_features`
+    /// point here. Spec 8.3, 8.4; rulings G9, H2 and J11.
     pub theatrical: bool,
     /// The titles of its group (rule 3) or cut (rule 2) that were not chosen.
     pub siblings: Vec<u32>,
@@ -239,16 +239,19 @@ impl MoviePlan {
 }
 
 /// Rule 1: applies only when TheDiscDB marks at least one MainMovie and every MainMovie title matches a scan title in
-/// `matches`; one Feature per MainMovie, in database index order (0.98). Each Feature's edition is its item title with the
-/// media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and the scan
-/// title's comment (attribute 49) parses as a label, `edition_of(label.suffix)` (8.4 "else from the label table":
-/// Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); when that leaves nothing too, the label of another
-/// title of its 8.2 group (an untruncated one, J4) that the table names, the first in title order, with an evidence
-/// sentence (ruling J2: that title plays the same segments, so its label names the main movie's cut; an Other suffix
-/// there names nothing, as on the main movie's own label); `theatrical` as Feature's doc says. Two or more MainMovies of
-/// which a later one still has no edition: 0.60 with unnamed_cut; two main movies given the same edition name make it
-/// 0.60 with title_ambiguous (Review Focus 8), checked after H2's unnaming below, so a main movie H2 leaves unnamed
-/// shares no name (ruling J1). None when TheDiscDB marks no main movie or any MainMovie title does not reconcile.
+/// `matches`; one Feature per MainMovie, in database index order (0.98). Each Feature's edition is its item title with
+/// the media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and
+/// the scan title's comment (attribute 49) parses as a label, `edition_of(label.suffix)` (8.4 "else from the label
+/// table": Expendables 3's title 41 `FPL_MainFeature_UR` gets "Unrated Cut"); when the scan title carries no label at
+/// all, the edition the labels of the other titles of its 8.2 group (an untruncated one, J4) name, when every one the
+/// table names agrees, with the evidence sentence `edition '{name}' from the label {comment} of title {n}, the same
+/// content as main movie {m}`, where {n} is the first such title and {m} TheDiscDB's main movie index (rulings J2 and
+/// J2a: those titles play the same segments, so their labels name the main movie's cut; a suffix the table does not
+/// name counts for nothing, and a main movie with a label of its own keeps the Task 5 reading of it); `theatrical` as
+/// Feature's doc says. Two or more MainMovies of which a later one still has no edition: 0.60 with unnamed_cut; two
+/// main movies given the same edition name make it 0.60 with title_ambiguous (Review Focus 8), checked after H2's
+/// unnaming below, so a main movie H2 leaves unnamed shares no name (ruling J1). None when TheDiscDB marks no main
+/// movie or any MainMovie title does not reconcile.
 ///
 /// Ruling OR5 (2026-10-17) and OR16: a cut of rule 2's grouping (`by_labels(disc, wanted, candidates)`, so only when
 /// `disc.java_in_use` and over the 8.2 candidates only, J5; `wanted` is the languages `movie_plan` holds, SR3, and
@@ -308,9 +311,11 @@ pub fn by_database(
                     suffix = Some(label.suffix);
                 }
             }
-            // J2: a labelled title that plays the main movie's segments (its 8.2 group, H4) names the edition its label
-            // gives when nothing else does (8.4: a cut the evidence names carries its name).
-            if edition.is_none() {
+            // J2, J2a: the labelled titles that play the main movie's segments (its 8.2 group, H4) name the edition their
+            // labels give when the main movie carries no label of its own and every such label agrees (8.4: a cut the
+            // evidence names carries its name); a main movie with a label keeps the Task 5 reading of it. The sentence
+            // names the first such title and TheDiscDB's main movie index.
+            if edition.is_none() && suffix.is_none() {
                 if let Some((other, comment, name)) = edition_from_same_content(disc, groups, number) {
                     evidence.push(format!(
                         "edition '{name}' from the label {comment} of title {other}, the same content as main movie {}",
@@ -413,17 +418,21 @@ fn same_content(groups: &[Group], number: u32) -> Option<&Group> {
     groups.iter().find(|group| !group.truncated && group.titles.contains(&number))
 }
 
-/// Ruling J2: the first other title, in title order, of the 8.2 group holding scan title `number` (`same_content`, so
-/// never a truncated group, J4) whose comment parses as a label the table names (`edition_of`: the bare and `_R` rows'
-/// "Theatrical Cut", `_UR`, `_EXT`), with that comment and the edition name. A label whose suffix the table does not
-/// name (Other, Narrative, a language code alone) names none.
+/// Rulings J2 and J2a: the edition the other titles of the 8.2 group holding scan title `number` (`same_content`, so
+/// never a truncated group, J4) name through their labels (`edition_of`: the bare and `_R` rows' "Theatrical Cut",
+/// `_UR`, `_EXT`), when at least one names one and every one that names one names the same; with the first such title
+/// in title order and its comment, for the evidence. A label whose suffix the table does not name (Other, Narrative, a
+/// language code alone) is not counted; two labels naming different editions give None. `by_database` asks only for a
+/// main movie that carries no label of its own (J2a).
 fn edition_from_same_content<'a>(disc: &'a Disc, groups: &[Group], number: u32) -> Option<(u32, &'a str, &'static str)> {
     let group = same_content(groups, number)?;
-    group.titles.iter().filter(|&&other| other != number).find_map(|&other| {
+    let mut named = group.titles.iter().filter(|&&other| other != number).filter_map(|&other| {
         let comment = disc.titles.get(&other)?.comment.as_deref()?;
         let label = parse_label(other, comment)?;
         edition_of(&label.suffix).map(|name| (other, comment, name))
-    })
+    });
+    let first = named.next()?;
+    named.all(|(_, _, name)| name == first.2).then_some(first)
 }
 
 /// An edition name that names the theatrical or main cut (8.4): none at all, or a name containing the word Theatrical
@@ -1538,6 +1547,26 @@ mod tests {
         without_java.java_in_use = false;
         let plan = rule_1_plan(&one, &main_is_title_0, &without_java, &english).expect("rule 1 applies");
         assert_eq!(plan.features, vec![feature(0, None, true, &[])]);
+        // J2a: a main movie with a label of its own keeps the Task 5 reading, whatever its duplicates say: an Other
+        // suffix stays unnamed and theatrical, and a dub suffix (`_JPN`, the dub of the bare cut) stays the theatrical
+        // cut.
+        for main_label in ["FPL_MainFeature_DC", "FPL_MainFeature_JPN"] {
+            let disc = java_mapped_disc(&[(0, "1,2", main_label), (8, "1,2", "FPL_MainFeature_UR")]);
+            let plan = rule_1_plan(&one, &main_is_title_0, &disc, &english).expect("rule 1 applies");
+            assert_eq!(plan.features, vec![feature(0, None, true, &[])], "{main_label}");
+            assert_eq!((plan.confidence, plan.reviews, plan.notes), (0.98, vec![], vec![]), "{main_label}");
+        }
+        // J2a: the duplicates' labels must agree; two that name different editions name none.
+        let disagree = java_mapped_disc(&[(0, "1,2", ""), (8, "1,2", "FPL_MainFeature_UR"), (9, "1,2", "FPL_MainFeature_EXT")]);
+        let plan = rule_1_plan(&one, &main_is_title_0, &disagree, &english).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, None, true, &[])]);
+        let agree = java_mapped_disc(&[(0, "1,2", ""), (8, "1,2", "FPL_MainFeature_UR"), (9, "1,2", "FPL_MainFeature_UR")]);
+        let plan = rule_1_plan(&one, &main_is_title_0, &agree, &english).expect("rule 1 applies");
+        assert_eq!(plan.features, vec![feature(0, Some("Unrated Cut"), false, &[])]);
+        assert_eq!(
+            plan.evidence.last().map(String::as_str),
+            Some("edition 'Unrated Cut' from the label FPL_MainFeature_UR of title 8, the same content as main movie 0")
+        );
     }
 
     #[test]

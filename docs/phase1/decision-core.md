@@ -546,13 +546,17 @@ choices made on spec 8.4 and 8.2, reported to the owner). The owner may overturn
   main movie is left unnamed and no longer clashes with the second, so the plan stays 0.98 with `unnamed_cut` alone;
   the confidence is 0.60 when a later main movie has no edition or two main movies share a name, else 0.98 (an
   unlisted cut alone keeps 0.98, OR5). Two main movies named alike with no unlisted cut stay 0.60 `title_ambiguous`.
-- J2 (a behaviour choice on spec 8.4). A labelled title in a main movie's 8.2 group (H4) whose label the table names
-  (`_UR`, `_EXT`, or the bare and `_R` rows' "Theatrical Cut") names the main movie's edition when TheDiscDB's item
-  title and the main movie's own label name none, with the evidence sentence `edition '{name}' from the label
-  {comment} of title {n}, the same content as main movie {m}`, where {m} is TheDiscDB's main movie index; a suffix the
-  table does not name gives nothing, as on the main movie's own label. A main movie without a label whose same-map
-  playlist carries `FPL_MainFeature_UR` is now the Unrated Cut rather than an unnamed theatrical cut, and H4's main
-  movie beside a bare `FPL_MainFeature` duplicate is now "Theatrical Cut". Spec 8.3 rule 1 says so.
+- J2 (a behaviour choice on spec 8.4), narrowed by the controller as J2a. The labelled titles in a main movie's
+  untruncated 8.2 group (H4) whose labels the table names (`_UR`, `_EXT`, or the bare and `_R` rows' "Theatrical Cut")
+  name the main movie's edition only when TheDiscDB's item title names none, the main movie carries no label of its
+  own, and every such label gives the same edition, with the evidence sentence `edition '{name}' from the label
+  {comment} of title {n}, the same content as main movie {m}`, where {n} is the first such title and {m} TheDiscDB's
+  main movie index. A suffix the table does not name counts for nothing; two duplicates naming different editions
+  (`_UR` and `_EXT`) give none; a main movie with any label of its own (recognised, Other, a dub or Narrative) keeps
+  the Task 5 reading, so a `_DC` main movie beside a `_UR` duplicate stays unnamed and theatrical, and a `_JPN` main
+  movie (the dub of the bare cut) stays the theatrical cut. A main movie without a label whose same-map playlist
+  carries `FPL_MainFeature_UR` is now the Unrated Cut rather than an unnamed theatrical cut, and H4's main movie beside
+  a bare `FPL_MainFeature` duplicate is now "Theatrical Cut". Spec 8.3 rule 1 says so.
 - J3 and J5 (J5 a behaviour choice on spec 8.2). `movie::by_labels` takes the 8.2 candidates and drops every labelled
   title outside them before grouping, so a cut whose titles all fail the filter is not planned and a cut's variant is
   chosen among its candidate titles. Without TheDiscDB, G4's disc (title 1 `_UR`, title 2 `_R` with no audio stream)
