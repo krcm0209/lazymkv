@@ -286,19 +286,15 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
                 // G1: rule 3's only feature is itself 8.5's play-all shape (a play-all of short parts, or extras longer
                 // than the film), so ripping it alone may file the wrong content; the plan is held for whole-disc copy
                 // mode. A disc TheDiscDB knows as a movie keeps such a feature as an ordinary rival (F4).
-                if kind_source != KindSource::Discdb && found.rule == TitleRule::Structure {
-                    if let [feature] = found.features.as_slice() {
-                        if play_all_titles.contains(&feature.title) {
-                            let title = feature.title;
-                            found.confidence = movie::AMBIGUOUS_TITLE_CONFIDENCE;
-                            found.reviews.push(ReviewReason::TitleAmbiguous);
-                            found.reviews = sorted_unique(found.reviews);
-                            found.evidence.push(format!(
-                                "8.3 rule 3: the only feature, title {title}, is a play-all of other titles, so the plan \
-                                 is held (G1)"
-                            ));
-                        }
-                    }
+                if kind_source != KindSource::Discdb
+                    && found.rule == TitleRule::Structure
+                    && matches!(found.features.as_slice(), [feature] if play_all_titles.contains(&feature.title))
+                {
+                    let title = found.features[0].title;
+                    found.hold_ambiguous(format!(
+                        "8.3 rule 3: the only feature, title {title}, is a play-all of other titles, so the plan is held \
+                         (G1)"
+                    ));
                 }
                 found_movie = Some(found);
             }

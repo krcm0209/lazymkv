@@ -19,7 +19,8 @@ pub enum ReviewReason {
     /// Spec 8.1 step 5: several plausible TMDb results or a failed runtime check (0.50), or a TMDb-only identification
     /// with `tmdb_only_autofile` off (capped at 0.84).
     IdentityAmbiguous,
-    /// Spec 8.3 rules 3.4, 3.6 and 4: the feature cannot be told from its rivals, or its runtime is far from TMDb's.
+    /// Spec 8.3 rules 3.4, 3.5, 3.6 and 4: the feature cannot be told from its rivals, rule 3's lone feature is itself a
+    /// play-all of other titles (3.5's hold, ruling G1), or its runtime is far from TMDb's.
     TitleAmbiguous,
     /// Spec 8.3 rule 3.7: the rival titles are largely different content.
     MultipleFeatures,

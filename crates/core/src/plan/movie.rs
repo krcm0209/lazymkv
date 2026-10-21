@@ -223,6 +223,18 @@ pub struct MoviePlan {
     pub evidence: Vec<String>,
 }
 
+impl MoviePlan {
+    /// Holds the plan for review (spec 8.3): its confidence at most 0.60, title_ambiguous among its reasons, and
+    /// `sentence` added to its evidence. Used by rule 4 (`runtime_sanity`) and by rule 3.5's hold of a lone feature that
+    /// is itself a play-all of other titles (`plan::plan`, ruling G1). Def: ruling J9. Use: T5, T7.
+    pub fn hold_ambiguous(&mut self, sentence: String) {
+        self.confidence = self.confidence.min(AMBIGUOUS_TITLE_CONFIDENCE);
+        self.reviews.push(ReviewReason::TitleAmbiguous);
+        self.reviews = sorted_unique(std::mem::take(&mut self.reviews));
+        self.evidence.push(sentence);
+    }
+}
+
 /// Rule 1: applies only when TheDiscDB marks at least one MainMovie and every MainMovie title matches a scan title in
 /// `matches`; one Feature per MainMovie, in database index order (0.98). Each Feature's edition is its item title with the
 /// media title and surrounding brackets or dashes removed; when that leaves nothing, `disc.java_in_use` holds and the scan
@@ -597,7 +609,9 @@ pub fn by_structure(disc: &Disc, groups: &[Group], settings: &Settings) -> Struc
 /// else the longest; 3.3 rivals within RIVAL_BAND of the longest kept; 3.4 in each rival the title with chapters, then the
 /// one whose audio and subtitle streams cover every other's, counted per signature (kind, language, codec family,
 /// channels: it holds at least as many streams of each signature as every other title), else 0.60 title_ambiguous; 3.5
-/// one rival 0.85; 3.6 every pair's segment_difference <= 0.25 gives 0.60 title_ambiguous; 3.7 else 0.60
+/// one rival 0.85 (when TheDiscDB does not state the kind and that one feature is itself a play-all of other titles,
+/// `plan::plan` holds it at 0.60 with title_ambiguous through `MoviePlan::hold_ambiguous`, ruling G1); 3.6 every pair's
+/// segment_difference <= 0.25 gives 0.60 title_ambiguous; 3.7 else 0.60
 /// multiple_features. Reads `settings.feature_min_minutes` only. No group at all (no candidate) gives a plan with no
 /// feature, 0.60 and title_ambiguous. Def: T5. Use: T5, T7.
 pub fn by_structure_as_movie(disc: &Disc, groups: &[Group], settings: &Settings) -> MoviePlan {
@@ -754,10 +768,7 @@ pub fn runtime_sanity(mut plan: MoviePlan, runtime_min: Option<u32>) -> MoviePla
     if !every_feature_off {
         return plan;
     }
-    plan.confidence = plan.confidence.min(AMBIGUOUS_TITLE_CONFIDENCE);
-    plan.reviews.push(ReviewReason::TitleAmbiguous);
-    plan.reviews = sorted_unique(plan.reviews);
-    plan.evidence.push(format!("no feature is within 10% of the TMDb runtime of {runtime} minutes"));
+    plan.hold_ambiguous(format!("no feature is within 10% of the TMDb runtime of {runtime} minutes"));
     plan
 }
 
