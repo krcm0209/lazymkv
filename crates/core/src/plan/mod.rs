@@ -217,9 +217,10 @@ pub struct PlanInputs<'a> {
 /// title_ambiguous and an evidence sentence, so the disc is copied whole, 8.3 rule 3.5 under ruling G1); identify (8.1)
 /// over `inputs.lookups` with `remembered` set to `inputs.remembered.map(|r| r.tmdb)` and `reviewed` to
 /// `inputs.overrides.and_then(|o| o.identity)`; when `identity.original_language` is Some and not English, by_labels
-/// runs again with `wanted_languages(identity.original_language)` for a rule 2 plan only (a rule 1 plan's unlisted cut
-/// keeps the variant chosen with English only, SR3) and its features replace the first pass's (cuts, editions and
-/// confidence never change between the passes, only the variant chosen within a cut); `Plan.wanted` is
+/// runs again, over the same candidates (J5), with `wanted_languages(identity.original_language)` for a rule 2 plan
+/// only (a rule 1 plan's unlisted cut keeps the variant chosen with English only, SR3) and its features replace the
+/// first pass's (cuts, editions and confidence never change between the passes, only the variant chosen within a cut);
+/// `Plan.wanted` is
 /// `wanted_languages(identity.original_language)` for every title rule (English only when the original language is
 /// unknown or English); rule 4; a remembered decision (`remembered::apply_titles`) or the owner's Assign titles
 /// (`overrides.titles`, which win) replace the planned titles and set title confidence to 1.00, and Set identity or a
@@ -353,7 +354,7 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     let wanted = wanted_languages(identity.original_language.as_deref());
     if let Some(found) = found_movie.as_mut() {
         if found.rule == TitleRule::Labels && !wanted.original_is_english {
-            if let Some(again) = movie::by_labels(disc, &wanted) {
+            if let Some(again) = movie::by_labels(disc, &wanted, &candidates.iter().copied().collect()) {
                 sentences.push(format!(
                     "8.3 rule 2 chose each cut's variant again with the original language ({})",
                     wanted.original.join(", ")
