@@ -769,8 +769,7 @@ mod tests {
 
     #[test]
     fn combined_style_puts_the_edition_and_its_tag_after_the_resolution() {
-        let settings = Settings::default();
-        assert_eq!(settings.edition_style, EditionStyle::Combined);
+        let settings = styled(EditionStyle::Combined, false);
         let (path, notes) = movie_path(MOVIES, &film(), "2160p", Some("Extended Cut"), None, &settings);
         assert_eq!(
             parts(&path),
@@ -834,7 +833,7 @@ mod tests {
         let (cut, _) = movie_path(MOVIES, &undated, "1080p", Some("Extended Cut"), None, &Settings::default());
         assert_eq!(
             parts(&cut),
-            ["Film {tmdb-12345}", "Film {tmdb-12345} - 1080p Extended Cut {edition-Extended Cut}.mkv"]
+            ["Film {tmdb-12345}", "Film {tmdb-12345} - 1080p Extended Cut.mkv"]
         );
     }
 
@@ -846,7 +845,7 @@ mod tests {
             ["Example Film (2006) {tmdb-4242}", "Example Film (2006) {tmdb-4242} - 2160p 2.mkv"]
         );
         let edition = Some("Extended Cut");
-        let (combined, _) = movie_path(MOVIES, &film(), "2160p", edition, Some(2), &Settings::default());
+        let (combined, _) = movie_path(MOVIES, &film(), "2160p", edition, Some(2), &styled(EditionStyle::Combined, false));
         assert_eq!(
             parts(&combined),
             ["Film (2010) {tmdb-12345}", "Film (2010) {tmdb-12345} - 2160p 2 Extended Cut {edition-Extended Cut}.mkv"]
@@ -954,7 +953,7 @@ mod tests {
             parts(&path),
             [
                 "Film (2010) {tmdb-12345}",
-                "Film (2010) {tmdb-12345} - 2160p Director's Cut - Remastered {edition-Director's Cut - Remastered}.mkv",
+                "Film (2010) {tmdb-12345} - 2160p Director's Cut - Remastered.mkv",
             ]
         );
     }
