@@ -1124,8 +1124,7 @@ mod tests {
         );
         let record = film_record(12345, "Film", 2010, Some("tt0012345"));
         let library = LibraryFacts::default();
-        let settings = settings();
-        assert_eq!(settings.edition_style, EditionStyle::Combined);
+        let settings = Settings { edition_style: EditionStyle::Combined, ..settings() };
         let theatrical = decide(&inputs(&plan, &disc, 0, Some(&record), &library, &settings)).unwrap();
         let unrated = decide(&inputs(&plan, &disc, 1, Some(&record), &library, &settings)).unwrap();
         assert_eq!(theatrical.edition.as_deref(), Some("Theatrical Cut"));
@@ -1171,7 +1170,7 @@ mod tests {
         assert_eq!(decision.edition.as_deref(), Some("Theatrical Cut"));
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Theatrical Cut {edition-Theatrical Cut}.mkv"
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Theatrical Cut.mkv"
         );
     }
 
@@ -1260,7 +1259,7 @@ mod tests {
         assert_eq!(decision.edition.as_deref(), Some("Director's Cut"));
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Director's Cut {edition-Director's Cut}.mkv"
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Director's Cut.mkv"
         );
         assert_eq!(decision.confidences, Confidences { identity: 0.95, title: 1.00, track: 0.90 });
     }
@@ -2136,7 +2135,7 @@ mod tests {
         assert_eq!(decision.edition.as_deref(), Some("Director's Cut"));
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Director's Cut {edition-Director's Cut}.mkv"
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Director's Cut.mkv"
         );
         assert!(decision.reviews.is_empty(), "{:?}", decision.reviews);
         assert_eq!(decision.disposition, Disposition::AutoFile);
@@ -2243,7 +2242,7 @@ mod tests {
         assert_eq!(decision.edition.as_deref(), Some("Original"));
         assert_eq!(
             path_of(&decision),
-            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Original {edition-Original}.mkv"
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p Original.mkv"
         );
     }
 

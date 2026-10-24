@@ -11,12 +11,13 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EditionStyle {
-    /// The default: one folder, files named `- <Res> <Ed> {edition-<Ed>}` (a Plex edition and a Jellyfin version
-    /// label; not yet verified, EXP-09 not run).
+    /// One folder, files named `- <Res> <Ed> {edition-<Ed>}`; on Jellyfin 12.1 the cuts group as versions but the
+    /// version name shows the raw suffix with its tag (EXP-09-naming.md).
     Combined,
     /// One folder per edition, named with `{edition-<Ed>}` (the layout Plex documents).
     Plex,
-    /// One folder, files named `- <Res> <Ed>` (Jellyfin's version picker).
+    /// The default (EXP-09-naming.md, 2026-10-21): one folder, files named `- <Res> <Ed>`, which Jellyfin 12.1 shows
+    /// as cleanly named versions.
     Jellyfin,
 }
 
@@ -100,7 +101,7 @@ pub struct Settings {
     pub subs_diff_max: f64,
     /// 64: image-subtitle packets this small clear the screen and are not events (8.7 "Events").
     pub sub_clear_max_bytes: i64,
-    /// Combined: the edition layout (8.9; not yet verified, EXP-09 not run).
+    /// Jellyfin: the edition layout (8.9; EXP-09-naming.md).
     pub edition_style: EditionStyle,
     /// false: add the square-bracket ID tag for Jellyfin 10.x (8.9).
     pub jellyfin10_compat: bool,
@@ -149,7 +150,7 @@ impl Default for Settings {
             subs_same_min: 0.70,
             subs_diff_max: 0.30,
             sub_clear_max_bytes: 64,
-            edition_style: EditionStyle::Combined,
+            edition_style: EditionStyle::Jellyfin,
             jellyfin10_compat: false,
             retention_days: 7,
             keep_tuning_evidence: true,
@@ -433,7 +434,7 @@ mod tests {
         assert_eq!(settings.subs_same_min, 0.70);
         assert_eq!(settings.subs_diff_max, 0.30);
         assert_eq!(settings.sub_clear_max_bytes, 64);
-        assert_eq!(settings.edition_style, EditionStyle::Combined);
+        assert_eq!(settings.edition_style, EditionStyle::Jellyfin);
         assert!(!settings.jellyfin10_compat);
         assert_eq!(settings.retention_days, 7);
         assert!(settings.keep_tuning_evidence);
@@ -461,7 +462,7 @@ mod tests {
                 r#"{"staging_root":null,"movies_root":null,"tv_root":null,"minlength_s":120,"cache_mb":1024,"#,
                 r#""auto_threshold":0.85,"feature_min_minutes":45,"tmdb_only_autofile":true,"#,
                 r#""prefer_most_channels":true,"original_language_first":true,"subs_tolerance_ms":300,"#,
-                r#""subs_same_min":0.7,"subs_diff_max":0.3,"sub_clear_max_bytes":64,"edition_style":"combined","#,
+                r#""subs_same_min":0.7,"subs_diff_max":0.3,"sub_clear_max_bytes":64,"edition_style":"jellyfin","#,
                 r#""jellyfin10_compat":false,"retention_days":7,"keep_tuning_evidence":true,"tuning_root":null,"#,
                 r#""file_phase_concurrency":1,"drive_settle_s":10,"drive_ready_timeout_s":120,"scan_timeout_min":30,"#,
                 r#""stall_timeout_s":300,"read_error_rate":20,"exit_wait_min":30,"makemkv_min_version":"2.0.0","#,

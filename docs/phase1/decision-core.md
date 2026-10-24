@@ -670,6 +670,8 @@ changing that test and its rule.
 
 ## Left for phase 2
 
+Phase 2's design (`docs/superpowers/specs/2026-10-21-phase-2-engine-design.md`, 2026-10-21) takes up every item below; its part 14 says which are built in phase 2 and which wait longer (the DVD disc ID, for one, stays deferred under LIB-6).
+
 - The `platform`, `tools`, `clients` and `engine` crates and `lazymkvctl` (design spec 4.2 and 16, row 2), which
   perform the job reducer's actions and fold `plan`, `decide` and `retune` into `lazymkvctl`.
 - Keeping remembered decisions, season sessions and jobs; reading the library for `LibraryFacts` and path collisions.
