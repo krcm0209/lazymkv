@@ -1,63 +1,10 @@
 //! Runs a command, tees its standard output to a file, and records when each line arrived.
 
+use lazymkv_tools::{tee_lines, with_suffix, Clock, RealClock};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, BufReader};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
-
-pub trait Clock {
-    fn elapsed_ms(&self) -> u64;
-}
-
-pub struct RealClock(Instant);
-
-impl RealClock {
-    pub fn start() -> Self {
-        RealClock(Instant::now())
-    }
-}
-
-impl Clock for RealClock {
-    fn elapsed_ms(&self) -> u64 {
-        self.0.elapsed().as_millis() as u64
-    }
-}
-
-/// Copies `reader` line by line to `out` and `echo`, and writes one timing
-/// record per line to `timing`. Returns the number of lines.
-pub fn tee_lines(
-    reader: &mut dyn BufRead,
-    out: &mut dyn Write,
-    timing: &mut dyn Write,
-    echo: &mut dyn Write,
-    clock: &dyn Clock,
-) -> io::Result<u64> {
-    let mut line = Vec::new();
-    let mut count = 0u64;
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
-        let arrived_ms = clock.elapsed_ms();
-        out.write_all(&line)?;
-        // The echo is a convenience: a reader that closes the pipe must not stop the recording.
-        let _ = echo.write_all(&line);
-        let _ = echo.flush();
-        writeln!(timing, "{{\"n\":{},\"t_ms\":{}}}", count, arrived_ms)?;
-        count += 1;
-    }
-    out.flush()?;
-    timing.flush()?;
-    Ok(count)
-}
-
-pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
-}
 
 /// Runs `command`. Standard output goes to `out_path`, line timing to
 /// `<out_path>.timing.jsonl`, standard error to `<out_path>.stderr`, and the
