@@ -9413,6 +9413,7 @@ fn the_remux_creates_the_partial_folder_when_the_library_root_has_none() {
 
 The file phase's own failure branches (design part 5.7 steps 9, 13 and 14, and spec 10.2's ToolMissing row):
 
+```rust
 #[test]
 fn a_probe_error_fails_probe_failed_unknown() {
     let h = harness(&["movie-direct-probe-error"], json!({}));
