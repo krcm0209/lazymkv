@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use lazymkv_core::job::Tool;
 
+/// The in-memory fakes of every platform trait, for the tests of the crates above this one (design part 4.2).
+/// Def: T8. Use: T22 to T29.
 #[cfg(feature = "fakes")]
 pub mod fakes;
 
@@ -16,7 +18,8 @@ pub mod fakes;
 pub enum DriveEvent {
     /// A disc is readable in `drive`, under `root`.
     Arrived {
-        /// The drive's identifier, the one MakeMKV's `disc:` argument and `Ejector::eject` take.
+        /// The drive's identifier in MakeMKV's `D:` form, the seventh field of its `DRV` line (design part 5.4);
+        /// `Ejector::eject` takes it too.
         drive: String,
         /// The folder or drive root the disc's files are read from.
         root: PathBuf,
@@ -28,13 +31,13 @@ pub enum DriveEvent {
     },
 }
 
-/// Delivers disc arrivals and removals to the engine's drive thread (spec 4.3, design part 4.2). Def: T8. Use: T22,
-/// T25.
+/// Delivers disc arrivals and removals to the engine's drive thread (spec 4.3, design part 4.2).
+/// Def: T8. Use: T22, T25.
 pub trait DriveWatcher: Send {
     /// Waits up to `timeout` for the next event and returns it, or None when none came in that time.
     fn next(&mut self, timeout: Duration) -> Option<DriveEvent>;
-    /// The drives holding a disc right now, as (drive, root), sorted by drive. The engine reads this at start (design
-    /// part 4.2, L1), before it drains any event.
+    /// The drives holding a disc right now, as (drive, root). The engine reads this at start (design part 4.2, L1),
+    /// before it drains any event, and does not rely on the order.
     fn present(&self) -> Vec<(String, PathBuf)>;
 }
 
@@ -57,8 +60,8 @@ pub struct Spawn {
     pub below_normal: bool,
 }
 
-/// Starts child programs so that closing the engine cannot leave them running (spec 4.3, design part 4.2). Def: T8.
-/// Use: T11.
+/// Starts child programs so that closing the engine cannot leave them running (spec 4.3, design part 4.2).
+/// Def: T8. Use: T11.
 pub trait ProcessGuard: Send + Sync {
     /// Starts `spawn` with piped standard output and error. Err is the operating system's refusal, such as a program
     /// that is not there.
@@ -83,7 +86,7 @@ pub trait GuardedChild: Send {
 pub struct KillHandle(pub(crate) Arc<dyn Fn() -> io::Result<()> + Send + Sync>);
 
 impl KillHandle {
-    /// Kills the child it was made for.
+    /// Kills the child it was made for (spec 4.3, design part 4.2). Def: T8. Use: T11.
     pub fn kill(&self) -> io::Result<()> {
         (self.0)()
     }
@@ -126,8 +129,8 @@ pub trait SecretStore: Send + Sync {
     fn set(&self, name: &str, value: &str) -> Result<(), String>;
 }
 
-/// One accepted connection of the engine's pipe: a line reader and a writer (spec 4.3, design part 4.2). Def: T8.
-/// Use: T26, T28.
+/// One accepted connection of the engine's pipe: a line reader and a writer (spec 4.3, design part 4.2).
+/// Def: T8. Use: T26, T28.
 pub struct IpcStream {
     /// Reads the peer's lines.
     pub reader: Box<dyn BufRead + Send>,
@@ -135,8 +138,8 @@ pub struct IpcStream {
     pub writer: Box<dyn Write + Send>,
 }
 
-/// The engine's end of the pipe: hands out one stream per client that connects (spec 4.3, design part 4.2). Def: T8.
-/// Use: T26.
+/// The engine's end of the pipe: hands out one stream per client that connects (spec 4.3, design part 4.2).
+/// Def: T8. Use: T26.
 pub trait IpcTransport: Send + Sync {
     /// Waits for the next client. Err when the transport is closed.
     fn accept(&self) -> io::Result<IpcStream>;

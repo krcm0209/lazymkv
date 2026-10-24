@@ -29,7 +29,8 @@ struct DriveState {
 type SharedDrives = Arc<(Mutex<DriveState>, Condvar)>;
 
 /// A drive watcher that plays back what a test scripts (spec 4.3, design part 4.2, Rulings T8-b, T8-f). It is the
-/// engine's end; the test keeps the `DriveScript`. Def: T8. Use: T22 to T29.
+/// engine's end; the test keeps the `DriveScript`. Its `present` lists the drives sorted by drive id (Ruling T8-b).
+/// Def: T8. Use: T22 to T29.
 pub struct ScriptedDrives {
     shared: SharedDrives,
 }
@@ -42,7 +43,7 @@ pub struct DriveScript {
 }
 
 impl ScriptedDrives {
-    /// A watcher with nothing present, and the script that feeds it.
+    /// A watcher with nothing present, and the script that feeds it (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn new() -> (ScriptedDrives, DriveScript) {
         let shared: SharedDrives = Arc::default();
         (ScriptedDrives { shared: Arc::clone(&shared) }, DriveScript { shared })
@@ -69,7 +70,7 @@ fn present_of(shared: &SharedDrives) -> Vec<(String, PathBuf)> {
 
 impl DriveScript {
     /// Puts a disc in `drive`: `present` shows it at once and an `Arrived` event is queued. A drive that already holds
-    /// a disc gets the new root (Ruling T8-f).
+    /// a disc gets the new root (Ruling T8-f). Def: T8. Use: T22 to T29.
     pub fn arrive(&self, drive: &str, root: &Path) {
         let (state, wake) = &*self.shared;
         let mut state = lock(state);
@@ -79,7 +80,7 @@ impl DriveScript {
     }
 
     /// Takes the disc out of `drive`: `present` drops it at once and a `Removed` event is queued, even for a drive that
-    /// holds no disc (Ruling T8-f).
+    /// holds no disc (Ruling T8-f). Def: T8. Use: T22 to T29.
     pub fn remove(&self, drive: &str) {
         let (state, wake) = &*self.shared;
         let mut state = lock(state);
@@ -88,7 +89,7 @@ impl DriveScript {
         wake.notify_all();
     }
 
-    /// The drives holding a disc now, as (drive, root), sorted by drive (Ruling T8-b).
+    /// The drives holding a disc now, as (drive, root), sorted by drive id (Ruling T8-b). Def: T8. Use: T22 to T29.
     pub fn present(&self) -> Vec<(String, PathBuf)> {
         present_of(&self.shared)
     }
@@ -101,31 +102,33 @@ struct EjectorState {
     fail: Option<String>,
 }
 
-/// An ejector that records every call and fails when told to (spec 4.3, design part 4.2, Ruling T8-c). Def: T8.
-/// Use: T23.
+/// An ejector that records every call and fails when told to (spec 4.3, design part 4.2, Ruling T8-c).
+/// Def: T8. Use: T22 to T29.
 pub struct RecordingEjector {
     state: Mutex<EjectorState>,
     removals: Option<DriveScript>,
 }
 
 impl RecordingEjector {
-    /// An ejector that succeeds and pushes no removal.
+    /// An ejector that succeeds and pushes no removal (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn new() -> RecordingEjector {
         RecordingEjector { state: Mutex::default(), removals: None }
     }
 
-    /// Every drive passed to `eject` so far, in order, failed calls included.
+    /// Every drive passed to `eject` so far, in order, failed calls included (design part 4.2).
+    /// Def: T8. Use: T22 to T29.
     pub fn calls(&self) -> Vec<String> {
         lock(&self.state).calls.clone()
     }
 
-    /// Makes the next `eject` fail with `message`. Later ones succeed again.
+    /// Makes the next `eject` fail with `message`. Later ones succeed again (design part 4.2).
+    /// Def: T8. Use: T22 to T29.
     pub fn fail_next(&self, message: &str) {
         lock(&self.state).fail = Some(message.to_string());
     }
 
     /// Makes each successful eject push `Removed` for its drive onto `script` (Ruling T8-c). A failed eject leaves the
-    /// disc in.
+    /// disc in. Def: T8. Use: T22 to T29.
     pub fn with_removals(mut self, script: DriveScript) -> RecordingEjector {
         self.removals = Some(script);
         self
@@ -154,18 +157,18 @@ impl Ejector for RecordingEjector {
     }
 }
 
-/// A keep-awake that counts its holders (spec 4.3, design part 4.2, Ruling T8-g). Def: T8. Use: T22.
+/// A keep-awake that counts its holders (spec 4.3, design part 4.2, Ruling T8-g). Def: T8. Use: T22 to T29.
 pub struct CountingKeepAwake {
     holders: Mutex<usize>,
 }
 
 impl CountingKeepAwake {
-    /// A keep-awake with no holder.
+    /// A keep-awake with no holder (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn new() -> CountingKeepAwake {
         CountingKeepAwake { holders: Mutex::new(0) }
     }
 
-    /// How many `acquire` calls have no `release` yet.
+    /// How many `acquire` calls have no `release` yet (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn holders(&self) -> usize {
         *lock(&self.holders)
     }
@@ -198,29 +201,34 @@ struct SharesState {
 }
 
 /// Fake shares (spec 4.3, design part 4.2, Ruling T8-a): every root is reachable, has `u64::MAX` free bytes and is its
-/// own volume until a test says otherwise. Roots are matched by their exact string, so no path rule runs. Def: T8.
-/// Use: T23, T24.
+/// own volume until a test says otherwise. Roots are matched by their exact string, so no path rule runs.
+/// Def: T8. Use: T22 to T29.
 pub struct FakeShares {
     state: Mutex<SharesState>,
 }
 
 impl FakeShares {
-    /// Shares where everything is reachable, empty of data and on separate volumes.
+    /// Shares where everything is reachable, empty of data and on separate volumes (Ruling T8-a).
+    /// Def: T8. Use: T22 to T29.
     pub fn new() -> FakeShares {
         FakeShares { state: Mutex::default() }
     }
 
-    /// Sets the free bytes `free_bytes(root)` reports.
+    /// Sets the free bytes `free_bytes(root)` reports (Ruling T8-a). Def: T8. Use: T22 to T29.
     pub fn set_free(&self, root: &str, bytes: u64) {
         lock(&self.state).free.insert(root.to_string(), bytes);
     }
 
-    /// Sets what `reach(root)` reports. While it is `Unreachable`, `free_bytes(root)` fails with the same text.
+    /// Sets what `reach(root)` reports. While it is `Unreachable`, `free_bytes(root)` fails with the same text (Ruling
+    /// T8-a).
+    /// Def: T8. Use: T22 to T29.
     pub fn set_reach(&self, root: &str, reach: Reach) {
         lock(&self.state).reach.insert(root.to_string(), reach);
     }
 
-    /// Puts `b` on the volume of `a`: `volume(b)` returns what `volume(a)` returns (S11, Ruling T8-a).
+    /// Gives `b` the volume `a` has at the time of the call, so `volume(b)` then returns what `volume(a)` returned
+    /// (S11, Ruling T8-a). It is not a live link: a later call that moves `a` leaves `b` where it was.
+    /// Def: T8. Use: T22 to T29.
     pub fn same_volume(&self, a: &str, b: &str) {
         let mut state = lock(&self.state);
         let volume = state.volumes.get(a).cloned().unwrap_or_else(|| a.to_string());
@@ -252,18 +260,18 @@ impl ShareConnector for FakeShares {
     }
 }
 
-/// A secret store that keeps its secrets in memory (spec 4.3, design part 4.2). Def: T8. Use: T26.
+/// A secret store that keeps its secrets in memory (spec 4.3, design part 4.2). Def: T8. Use: T22 to T29.
 pub struct MemorySecrets {
     secrets: Mutex<BTreeMap<String, String>>,
 }
 
 impl MemorySecrets {
-    /// An empty store.
+    /// An empty store (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn new() -> MemorySecrets {
         MemorySecrets { secrets: Mutex::default() }
     }
 
-    /// The store with `name` already set to `value`.
+    /// The store with `name` already set to `value` (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn with(self, name: &str, value: &str) -> MemorySecrets {
         lock(&self.secrets).insert(name.to_string(), value.to_string());
         self
@@ -342,13 +350,13 @@ fn stream_end(incoming: Receiver<Vec<u8>>, outgoing: Sender<Vec<u8>>) -> IpcStre
 }
 
 /// The engine's end of an in-memory pipe (spec 4.3, design part 4.2, Ruling T8-e). `accept` hands out the server end of
-/// each connection a `MemoryConnector` makes. Def: T8. Use: T26.
+/// each connection a `MemoryConnector` makes. Def: T8. Use: T22 to T29.
 pub struct MemoryIpc {
     incoming: Mutex<Receiver<IpcStream>>,
 }
 
 /// The client's end of an in-memory pipe, or a connector that always fails (spec 4.3, design part 4.2, Ruling T8-e).
-/// Clones connect to the same `MemoryIpc`. Def: T8. Use: T26, T28.
+/// Clones connect to the same `MemoryIpc`. Def: T8. Use: T22 to T29.
 #[derive(Clone)]
 pub struct MemoryConnector {
     /// The way to the `MemoryIpc`; None for a connector built by `failing`.
@@ -358,7 +366,7 @@ pub struct MemoryConnector {
 }
 
 impl MemoryIpc {
-    /// A pipe nobody has connected to, and the connector that connects to it.
+    /// A pipe nobody has connected to, and the connector that connects to it (Ruling T8-e). Def: T8. Use: T22 to T29.
     pub fn new() -> (MemoryIpc, MemoryConnector) {
         let (to_server, incoming) = channel();
         let connector = MemoryConnector { to_server: Some(to_server), error: ConnectError::NotRunning };
@@ -376,7 +384,7 @@ impl IpcTransport for MemoryIpc {
 }
 
 impl MemoryConnector {
-    /// A connector whose `connect` always returns `error`.
+    /// A connector whose `connect` always returns `error` (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn failing(error: ConnectError) -> MemoryConnector {
         MemoryConnector { to_server: None, error }
     }
@@ -403,7 +411,8 @@ struct HostState {
 }
 
 /// A host with a fixed date and time, no registration key, no debug log, no running programs and no volume label until
-/// a test sets one (spec 4.3, design part 4.2). It knows no default install path. Def: T8. Use: T11, T22 to T29.
+/// a test sets one (spec 4.3, design part 4.2). It knows no default install path.
+/// Def: T8. Use: T11, T13, T14, T22 to T29.
 pub struct FakeHost {
     local_date: String,
     now_unix: u64,
@@ -411,27 +420,28 @@ pub struct FakeHost {
 }
 
 impl FakeHost {
-    /// A host whose clock reads `now_unix` and whose calendar date is `local_date` (`yyyy-MM-dd`).
+    /// A host whose clock reads `now_unix` and whose calendar date is `local_date` (`yyyy-MM-dd`) (design part 4.2).
+    /// Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn new(local_date: &str, now_unix: u64) -> FakeHost {
         FakeHost { local_date: local_date.to_string(), now_unix, state: Mutex::default() }
     }
 
-    /// Gives the disc at `root` the volume label `label`.
+    /// Gives the disc at `root` the volume label `label` (design part 4.2). Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn set_label(&self, root: &Path, label: &str) {
         lock(&self.state).labels.insert(root.to_path_buf(), label.to_string());
     }
 
-    /// Sets the image names `running_processes` reports.
+    /// Sets the image names `running_processes` reports (design part 4.2). Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn set_running(&self, names: Vec<String>) {
         lock(&self.state).running = names;
     }
 
-    /// Sets the registration key `makemkv_app_key` reports.
+    /// Sets the registration key `makemkv_app_key` reports (design part 4.2). Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn set_app_key(&self, key: &str) {
         lock(&self.state).app_key = Some(key.to_string());
     }
 
-    /// Sets the path `makemkv_debug_log` reports.
+    /// Sets the path `makemkv_debug_log` reports (design part 4.2). Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn set_debug_log(&self, path: &Path) {
         lock(&self.state).debug_log = Some(path.to_path_buf());
     }
