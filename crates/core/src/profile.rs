@@ -4,6 +4,15 @@
 /// track order follows the scan order (spec 9.3).
 pub const ALL_TRACKS_SELECTION: &str = "+sel:all,-sel:mvcvideo,=100:all";
 
+/// The 1009 fallback profile's selection: every stream but 3D video (design part 5.4, K6, L4). Def: T4. Use: T23.
+pub const FALLBACK_SELECTION: &str = "+sel:all,-sel:mvcvideo";
+
+/// The job profile's file name in the job folder (design part 7.1). Def: T4. Use: T13, T23.
+pub const JOB_PROFILE_FILE: &str = "job.mmcp.xml";
+
+/// The fallback profile's file name in the job folder (design part 7.1, K6). Def: T4. Use: T13, T23.
+pub const FALLBACK_PROFILE_FILE: &str = "fallback.mmcp.xml";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProfileError {
     NoNameElement,
@@ -63,27 +72,11 @@ pub fn make_job_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Same shape as MakeMKV's default profile; the text is ours.
-    const DEFAULT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<profile>
-    <name lang="mogz">:5086</name>
-    <mkvSettings insertFirstChapter00IfMissing="true" />
-    <outputSettings name="copy" outputFormat="directCopy"></outputSettings>
-    <trackSettings input="default">
-        <output outputSettingsName="copy"
-                defaultSelection="$app_DefaultSelectionString">
-        </output>
-    </trackSettings>
-    <trackSettings input="LPCM-stereo">
-        <output outputSettingsName="lpcm" defaultSelection="$app_DefaultSelectionString"></output>
-    </trackSettings>
-</profile>
-"#;
+    use crate::testsupport::default_profile_xml;
 
     #[test]
     fn replaces_the_name_and_every_selection() {
-        let out = make_job_profile(DEFAULT, "lazymkv all tracks", ALL_TRACKS_SELECTION).unwrap();
+        let out = make_job_profile(&default_profile_xml(), "lazymkv all tracks", ALL_TRACKS_SELECTION).unwrap();
         assert!(out.contains(r#"<name lang="eng">lazymkv all tracks</name>"#));
         assert!(!out.contains(":5086"));
         assert!(!out.contains("$app_DefaultSelectionString"));
@@ -97,7 +90,7 @@ mod tests {
 
     #[test]
     fn escapes_xml_special_characters() {
-        let out = make_job_profile(DEFAULT, "a & b", "+sel:(eng|\"x\")&<y>").unwrap();
+        let out = make_job_profile(&default_profile_xml(), "a & b", "+sel:(eng|\"x\")&<y>").unwrap();
         assert!(out.contains("<name lang=\"eng\">a &amp; b</name>"));
         assert!(out.contains("defaultSelection=\"+sel:(eng|&quot;x&quot;)&amp;&lt;y&gt;\""));
     }
@@ -112,5 +105,13 @@ mod tests {
             make_job_profile("<profile><name>x</name></profile>", "n", "s"),
             Err(ProfileError::NoDefaultSelection)
         );
+    }
+
+    #[test]
+    fn the_fallback_profile_selects_every_stream_but_mvc_video() {
+        let out = make_job_profile(&default_profile_xml(), "j", FALLBACK_SELECTION).unwrap();
+        assert_eq!(out.matches("defaultSelection=\"+sel:all,-sel:mvcvideo\"").count(), 2);
+        assert_eq!(FALLBACK_SELECTION, "+sel:all,-sel:mvcvideo");
+        assert_eq!((JOB_PROFILE_FILE, FALLBACK_PROFILE_FILE), ("job.mmcp.xml", "fallback.mmcp.xml"));
     }
 }

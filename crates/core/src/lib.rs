@@ -18,6 +18,7 @@ pub mod settings;
 pub mod snapshot;
 pub mod subtitle;
 pub mod tracks;
+pub mod ustar;
 pub mod verify;
 #[cfg(any(test, feature = "testsupport"))]
 pub mod testsupport;
