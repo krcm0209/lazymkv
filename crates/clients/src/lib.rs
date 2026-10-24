@@ -1,0 +1,1 @@
+//! lazymkv-clients: TheDiscDB and TMDb (The Movie Database) behind an HTTP transport trait, with a transport that replays recorded answers (design parts 4.1, 8.1). The live transport arrives in pull request 4.
