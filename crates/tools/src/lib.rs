@@ -2,11 +2,13 @@
 
 mod lookup;
 mod record;
+mod snapshot;
 
 pub use lookup::{exe_name, find_tool, Found, ToolLocation};
 pub use record::{
     run_recorded, tee_lines, with_suffix, CancelToken, Clock, LineAction, Limits, RealClock, RunResult, ToolCtx,
 };
+pub use snapshot::{list_files, snapshot};
 
 #[cfg(test)]
 pub(crate) mod testutil {
