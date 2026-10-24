@@ -87,6 +87,13 @@ mod tests {
     }
 
     #[test]
+    fn a_longer_earlier_entry_is_skipped_to_the_next_header() {
+        // The first header at 0, its 600-byte body rounded up to 1024, so the profile's header sits at 1536.
+        let archive = ustar_build(&[("a/other.txt", &[b'x'; 600][..]), ("b/default.mmcp.xml", &b"<a/>"[..])]);
+        assert_eq!(ustar_entry(&archive, DEFAULT_PROFILE_NAME), Ok(Some(&b"<a/>"[..])));
+    }
+
+    #[test]
     fn a_truncated_archive_is_refused() {
         // An empty entry's header at 0, the profile's header at 512, its data at 1024.
         let archive = ustar_build(&[("x/empty.txt", &b""[..]), ("x/default.mmcp.xml", &b"<a/>"[..])]);
