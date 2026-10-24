@@ -15,6 +15,7 @@ pub mod reconcile;
 pub mod remembered;
 pub mod review;
 pub mod settings;
+pub mod snapshot;
 pub mod subtitle;
 pub mod tracks;
 pub mod verify;
