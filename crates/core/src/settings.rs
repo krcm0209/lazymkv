@@ -11,12 +11,13 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EditionStyle {
-    /// The default: one folder, files named `- <Res> <Ed> {edition-<Ed>}` (a Plex edition and a Jellyfin version
-    /// label; not yet verified, EXP-09 not run).
+    /// One folder, files named `- <Res> <Ed> {edition-<Ed>}`; on Jellyfin 12.1 the cuts group as versions but the
+    /// version name shows the raw suffix with its tag (EXP-09-naming.md).
     Combined,
     /// One folder per edition, named with `{edition-<Ed>}` (the layout Plex documents).
     Plex,
-    /// One folder, files named `- <Res> <Ed>` (Jellyfin's version picker).
+    /// The default (EXP-09-naming.md, 2026-10-21): one folder, files named `- <Res> <Ed>`, which Jellyfin 12.1 shows
+    /// as cleanly named versions.
     Jellyfin,
 }
 
@@ -100,7 +101,7 @@ pub struct Settings {
     pub subs_diff_max: f64,
     /// 64: image-subtitle packets this small clear the screen and are not events (8.7 "Events").
     pub sub_clear_max_bytes: i64,
-    /// Combined: the edition layout (8.9; not yet verified, EXP-09 not run).
+    /// Jellyfin: the edition layout (8.9; EXP-09-naming.md).
     pub edition_style: EditionStyle,
     /// false: add the square-bracket ID tag for Jellyfin 10.x (8.9).
     pub jellyfin10_compat: bool,
