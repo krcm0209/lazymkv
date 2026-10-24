@@ -5,12 +5,14 @@ use lazymkv_core::ipc::OutputStream;
 use lazymkv_core::settings::Settings;
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use lazymkv_platform::fakes::FakeHost;
-use lazymkv_platform::StdProcessGuard;
+use lazymkv_platform::{GuardedChild, KillHandle, ProcessGuard, Spawn, StdProcessGuard};
 use lazymkv_tools::{run_recorded, with_suffix, CancelToken, LineAction, Limits, RunResult, ToolCtx};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 const NOW: u64 = 1_790_000_000;
@@ -158,4 +160,74 @@ fn a_program_that_cannot_start_is_an_error_and_writes_no_files() {
     assert!(outcome.is_err());
     assert!(!out.exists());
     assert!(!with_suffix(&out, ".exit.json").exists());
+}
+
+/// A process runner that notes when the child it started has been waited for, so a test can tell that it is gone.
+struct Reaping(Arc<AtomicBool>);
+
+impl ProcessGuard for Reaping {
+    fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
+        Ok(Box::new(ReapingChild { inner: StdProcessGuard.spawn(spawn)?, reaped: Arc::clone(&self.0) }))
+    }
+}
+
+struct ReapingChild {
+    inner: Box<dyn GuardedChild>,
+    reaped: Arc<AtomicBool>,
+}
+
+impl GuardedChild for ReapingChild {
+    fn take_stdout(&mut self) -> Box<dyn Read + Send> {
+        self.inner.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Box<dyn Read + Send> {
+        self.inner.take_stderr()
+    }
+
+    fn killer(&self) -> KillHandle {
+        self.inner.killer()
+    }
+
+    fn wait(&mut self) -> io::Result<Option<i32>> {
+        let status = self.inner.wait();
+        if status.is_ok() {
+            self.reaped.store(true, Ordering::SeqCst);
+        }
+        status
+    }
+}
+
+#[test]
+fn a_panicking_line_callback_kills_the_child_and_run_recorded_panics() {
+    let dir = Scratch::new("rec-panic");
+    let tool = stand_in(&dir, r#"{"responses":[{"args_contain":["info"],"stdout":"out.txt","hang_after_line":1}]}"#);
+    dir.write("out.txt", "MSG:5015,0,0,\"Saving 1 titles\"\nTCOUNT:0\n");
+    let out = dir.0.join("rip.txt");
+    let reaped = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = mpsc::channel();
+    let guard = Reaping(Arc::clone(&reaped));
+
+    // The call runs on its own thread so that a run that never returns fails the test instead of hanging it.
+    std::thread::spawn(move || {
+        let host = FakeHost::new("2026-10-23", NOW);
+        let limits = Limits::from_settings(&Settings::default());
+        let ctx = ToolCtx {
+            guard: &guard,
+            host: &host,
+            limits: &limits,
+            cancel: CancelToken::default(),
+            on_output: &|_: OutputStream, _: &str| {},
+            on_progress: &|_: f64| {},
+        };
+        let args = ["info".to_string(), "disc:0".to_string()];
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            run_recorded(&ctx, &tool, &args, &out, None, false, &mut |_| panic!("the line callback failed"))
+        }));
+        let _ = sender.send(outcome.is_err());
+    });
+
+    let panicked = receiver.recv_timeout(Duration::from_secs(10)).expect("run_recorded did not return within 10 s");
+    assert!(panicked, "run_recorded swallowed the panic");
+    assert!(reaped.load(Ordering::SeqCst), "the child was not killed and waited for");
 }

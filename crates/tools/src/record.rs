@@ -3,14 +3,16 @@
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use lazymkv_core::ipc::OutputStream;
 use lazymkv_core::settings::Settings;
-use lazymkv_platform::{Host, ProcessGuard, Spawn};
+use lazymkv_platform::{GuardedChild, Host, KillHandle, ProcessGuard, Spawn};
 
 /// Tells how many milliseconds have passed since a run began (design part 7.2). It is a trait so that the tests of
 /// `tee_lines` can step a clock by hand. Moved from capture. Def: T11. Use: T13, T14, T23.
@@ -97,7 +99,8 @@ pub struct Limits {
     pub scan: Duration,
     /// The longest to wait for MakeMKV to exit after its last line (`exit_wait_min`).
     pub exit_wait: Duration,
-    /// The longest to wait for a killed tool to be gone.
+    /// The pause a driver takes after any kill before it returns, so that no `makemkvcon` call starts within this
+    /// time of a kill (design part 5.3, S56). Task 13's drivers sleep it; `run_recorded` does not.
     pub after_kill: Duration,
 }
 
@@ -176,6 +179,42 @@ pub enum LineAction {
     Kill,
 }
 
+/// Kills `child`, trying again every 20 ms until a kill takes or `within` has passed, and then waits for it to end.
+fn reap(child: &mut dyn GuardedChild, killer: &KillHandle, within: Duration) {
+    let deadline = Instant::now() + within;
+    loop {
+        if killer.kill().is_ok() {
+            let _ = child.wait();
+            return;
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Ends a run on every way out of `run_recorded`'s thread scope: when dropped it stops and reaps the tool if still
+/// armed, tells the watchdog to finish, and wakes it.
+struct RunGuard<'a> {
+    child: &'a mut dyn GuardedChild,
+    killer: &'a KillHandle,
+    done: &'a AtomicBool,
+    watchdog: &'a Thread,
+    within: Duration,
+    armed: bool,
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            reap(&mut *self.child, self.killer, self.within);
+        }
+        self.done.store(true, Ordering::SeqCst);
+        self.watchdog.unpark();
+    }
+}
+
 /// A line without its `\n` and the `\r` before it, with any byte that is not UTF-8 replaced (PIPE-14).
 fn line_text(line: &[u8]) -> String {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
@@ -188,9 +227,12 @@ fn line_text(line: &[u8]) -> String {
 /// files keep every byte the tool wrote. Each line also goes to `ctx.on_output` and, for standard output, to
 /// `on_line`; both get the line without its line ending, decoded lossily (PIPE-14). The run is killed when `limit`
 /// passes since the start (`timed_out`), when `ctx.cancel` is raised (`cancelled`), or when `on_line` returns
-/// `LineAction::Kill`; of the first two, only the one that came first is recorded. A program that cannot start gives `Err` before any run file is
-/// written. The exit file holds -1 when the tool had no exit code. Design parts 5.3, 7.2.
-/// Def: T11. Use: T13, T14, T23.
+/// `LineAction::Kill`; of the first two, only the one that came first is recorded.
+///
+/// A program that cannot start gives `Err` before any run file is written. The exit file holds -1 when the tool had
+/// no exit code. The tool never outlives the call: a run file that cannot be written, or a pipe that cannot be read,
+/// kills it and gives `Err`, and a panic of `on_line` or `on_output` kills it and then goes on panicking. Design
+/// parts 5.3, 7.2. Def: T11. Use: T13, T14, T23.
 pub fn run_recorded(
     ctx: &ToolCtx,
     program: &Path,
@@ -209,35 +251,72 @@ pub fn run_recorded(
     let clock = RealClock::start();
     let spawn = Spawn { program: program.to_path_buf(), args: args.to_vec(), env: Vec::new(), below_normal };
     let mut child = ctx.guard.spawn(&spawn)?;
-
-    let mut out_file = File::create(out)?;
-    let mut timing = File::create(with_suffix(out, ".timing.jsonl"))?;
-    let mut stderr_file = File::create(with_suffix(out, ".stderr"))?;
-    let mut stdout_reader = BufReader::new(child.take_stdout());
-    let stderr_reader = BufReader::new(child.take_stderr());
     let killer = child.killer();
 
+    let files = (|| -> io::Result<(File, File, File)> {
+        Ok((
+            File::create(out)?,
+            File::create(with_suffix(out, ".timing.jsonl"))?,
+            File::create(with_suffix(out, ".stderr"))?,
+        ))
+    })();
+    let (mut out_file, mut timing, mut stderr_file) = match files {
+        Ok(files) => files,
+        Err(error) => {
+            // The tool is already running: it must not be left so when its run cannot be recorded.
+            reap(&mut *child, &killer, ctx.limits.after_kill);
+            return Err(error);
+        }
+    };
+    let mut stdout_reader = BufReader::new(child.take_stdout());
+    let stderr_reader = BufReader::new(child.take_stderr());
+
     let done = AtomicBool::new(false);
+    // Raised by anything that wants the tool dead without being a time limit or a cancel: a `LineAction::Kill`, or a
+    // recording that cannot go on. The watchdog then keeps killing until a kill takes.
+    let stop = AtomicBool::new(false);
     let timed_out = AtomicBool::new(false);
     let cancelled = AtomicBool::new(false);
+    let stop_ref = &stop;
     let mut stdout = Vec::new();
     let (tee, waited, stderr_outcome) = std::thread::scope(|scope| {
         // The tool's standard error is drained on its own thread: a tool that writes a lot to it would otherwise fill
-        // the pipe and stop before it ever closes its standard output.
+        // the pipe and stop before it ever closes its standard output. The thread drains to the end of file whatever
+        // happens, and a panic of `on_output` is held back until it has.
         let stderr_thread = scope.spawn(move || -> io::Result<()> {
             let mut reader = stderr_reader;
-            let mut failure = None;
+            let mut failure: Option<io::Error> = None;
+            let mut panic = None;
             let mut line = Vec::new();
             loop {
                 line.clear();
-                if reader.read_until(b'\n', &mut line)? == 0 {
-                    break;
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                        stop_ref.store(true, Ordering::SeqCst);
+                        let _ = io::copy(&mut reader, &mut io::sink());
+                        break;
+                    }
                 }
-                // A file that cannot be written must not stop the draining.
-                if let Err(error) = stderr_file.write_all(&line) {
-                    failure.get_or_insert(error);
+                if failure.is_none() {
+                    if let Err(error) = stderr_file.write_all(&line) {
+                        failure = Some(error);
+                        stop_ref.store(true, Ordering::SeqCst);
+                    }
                 }
-                (ctx.on_output)(OutputStream::Stderr, &line_text(&line));
+                if panic.is_none() {
+                    let text = line_text(&line);
+                    let notify = AssertUnwindSafe(|| (ctx.on_output)(OutputStream::Stderr, &text));
+                    if let Err(payload) = catch_unwind(notify) {
+                        panic = Some(payload);
+                        stop_ref.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            if let Some(payload) = panic {
+                resume_unwind(payload);
             }
             match failure {
                 Some(error) => Err(error),
@@ -248,7 +327,7 @@ pub fn run_recorded(
             let mut reason: Option<&AtomicBool> = None;
             let mut killed = false;
             while !done.load(Ordering::SeqCst) {
-                if reason.is_none() {
+                if reason.is_none() && !stop.load(Ordering::SeqCst) {
                     if limit.is_some_and(|limit| clock.elapsed_ms() >= limit.as_millis() as u64) {
                         reason = Some(&timed_out);
                     } else if ctx.cancel.is_cancelled() {
@@ -258,34 +337,53 @@ pub fn run_recorded(
                         flag.store(true, Ordering::SeqCst);
                     }
                 }
-                if reason.is_some() && !killed {
+                if (reason.is_some() || stop.load(Ordering::SeqCst)) && !killed {
                     killed = killer.kill().is_ok();
                 }
                 std::thread::park_timeout(Duration::from_millis(20));
             }
         });
+        // However this closure ends, the tool is stopped and the watchdog told to finish. A panic of `on_line` or
+        // `on_output` below leaves the closure early, and without this the tool would run on and nothing would end.
+        let mut guard = RunGuard {
+            child: &mut *child,
+            killer: &killer,
+            done: &done,
+            watchdog: watchdog.thread(),
+            within: ctx.limits.after_kill,
+            armed: true,
+        };
 
         let tee = tee_each(&mut stdout_reader, &mut out_file, &mut timing, &clock, &mut |line| {
             stdout.extend_from_slice(line);
             let text = line_text(line);
             (ctx.on_output)(OutputStream::Stdout, &text);
             if on_line(&text) == LineAction::Kill {
+                stop.store(true, Ordering::SeqCst);
                 let _ = killer.kill();
             }
         });
         if tee.is_err() {
-            // The recording cannot go on, so the tool must not either; its own end closes the pipes.
-            let _ = killer.kill();
+            // The recording cannot go on, so the tool must not either. Draining what is left keeps it from blocking
+            // on a full pipe while the watchdog kills it.
+            stop.store(true, Ordering::SeqCst);
+            watchdog.thread().unpark();
+            let _ = io::copy(&mut stdout_reader, &mut io::sink());
         }
-        let waited = child.wait();
-        done.store(true, Ordering::SeqCst);
-        watchdog.thread().unpark();
-        let stderr_outcome = stderr_thread.join().expect("the stderr thread does not panic");
+        let waited = guard.child.wait();
+        // A wait that failed leaves the tool in an unknown state, so the guard stays armed and stops it.
+        guard.armed = waited.is_err();
+        drop(guard);
+        let stderr_outcome = stderr_thread.join();
         (tee, waited, stderr_outcome)
     });
+    let stderr_result = match stderr_outcome {
+        Ok(result) => result,
+        Err(payload) => resume_unwind(payload),
+    };
     let lines = tee?;
     let exit_code = waited?;
-    stderr_outcome?;
+    stderr_result?;
 
     let elapsed_ms = clock.elapsed_ms();
     std::fs::write(
