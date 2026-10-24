@@ -12,6 +12,9 @@ use lazymkv_core::job::Tool;
 #[cfg(feature = "fakes")]
 pub mod fakes;
 
+mod process;
+pub use process::StdProcessGuard;
+
 /// A change in the set of optical drives the machine holds (spec 4.3, design part 4.2): a disc arrived in `drive`,
 /// whose contents are readable under `root`, or the drive's disc went away. Def: T8. Use: T22, T25.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,4 +215,114 @@ pub struct Platform {
     pub ipc: Arc<dyn IpcTransport>,
     /// The machine itself.
     pub host: Arc<dyn Host>,
+}
+
+/// The suffix `write_atomic` adds to a file's name for the temporary file it writes beside it (design part 7.4, S13).
+/// Def: T9. Use: T9, T21.
+pub const TEMP_SUFFIX: &str = ".lazymkv-tmp";
+
+/// Writes `bytes` to `path` so that a reader sees the old file or the new one whole, never a part (design part 7.4,
+/// S13). It writes `<file name>.lazymkv-tmp` beside `path`, after removing one a crash left there, flushes it to disk
+/// with `sync_all`, and renames it over `path`. It creates no folders: a missing parent gives
+/// `ErrorKind::NotFound`, because each caller owns its folder layout (Ruling T9-c). A path with no file name gives
+/// `ErrorKind::InvalidInput`. Pull request 3 swaps in `FlushFileBuffers` with
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`. Def: T9. Use: T21 to T26.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the path has no file name"))?;
+    let mut temp_name = name.to_os_string();
+    temp_name.push(TEMP_SUFFIX);
+    let temp = path.parent().unwrap_or_else(|| Path::new("")).join(temp_name);
+    match std::fs::remove_file(&temp) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = std::fs::File::create(&temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&temp, path)
+}
+
+/// Moves `from` to `to` and fails with `ErrorKind::AlreadyExists` when `to` is there, so a finished file is never
+/// overwritten (design part 6.5, S13). It is `hard_link` then `remove_file`: `hard_link` refuses an existing `to` and
+/// that error comes back unchanged. Pull request 3 swaps in `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` or
+/// `MOVEFILE_COPY_ALLOWED`. Def: T9. Use: T24.
+pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
+}
+
+#[cfg(test)]
+pub(crate) mod testutil {
+    use std::path::PathBuf;
+
+    /// A fresh, empty directory under the system temporary folder.
+    pub fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("lazymkv-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io;
+
+    use super::*;
+    use crate::testutil::temp_dir;
+
+    #[test]
+    fn write_atomic_replaces_the_file_whole() {
+        let dir = temp_dir("atomic");
+        let path = dir.join("state.json");
+        write_atomic(&path, b"{\"format\":\"lazymkv job v1\",\"longer\":true}").unwrap();
+        write_atomic(&path, b"{}").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_temporary_file_a_crash_left_is_removed_at_the_next_write() {
+        let dir = temp_dir("atomic-left");
+        fs::write(dir.join("state.json.lazymkv-tmp"), "junk").unwrap();
+        write_atomic(&dir.join("state.json"), b"{}").unwrap();
+        assert!(!dir.join(format!("state.json{TEMP_SUFFIX}")).exists());
+        assert_eq!(fs::read_to_string(dir.join("state.json")).unwrap(), "{}");
+    }
+
+    #[test]
+    fn write_atomic_into_a_missing_folder_fails_with_not_found() {
+        let dir = temp_dir("atomic-missing");
+        let error = write_atomic(&dir.join("absent").join("state.json"), b"{}").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!dir.join("absent").exists());
+    }
+
+    #[test]
+    fn rename_no_replace_refuses_an_existing_target() {
+        let dir = temp_dir("rename-taken");
+        let (from, to) = (dir.join("a.mkv.partial"), dir.join("a.mkv"));
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "old").unwrap();
+        assert_eq!(rename_no_replace(&from, &to).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&from).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&to).unwrap(), "old");
+    }
+
+    #[test]
+    fn rename_no_replace_moves_when_the_target_is_free() {
+        let dir = temp_dir("rename-free");
+        let (from, to) = (dir.join("a.mkv.partial"), dir.join("a.mkv"));
+        fs::write(&from, "placeholder").unwrap();
+        rename_no_replace(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "placeholder");
+    }
 }
