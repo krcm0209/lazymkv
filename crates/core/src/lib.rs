@@ -9,6 +9,7 @@ pub mod lookup;
 pub mod naming;
 pub mod plan;
 pub mod profile;
+pub mod record;
 pub mod recording;
 pub mod robot;
 pub mod reconcile;
