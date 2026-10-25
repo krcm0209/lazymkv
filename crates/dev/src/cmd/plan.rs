@@ -459,7 +459,8 @@ fn file_text(tree: &dyn Tree, key: &PathKey) -> Result<Option<(String, String)>,
 /// An option file as (shown path, text): taken against ctx.cwd, read as utf-8-sig, strict. A missing file is refused
 /// with Python's OSError text, which names the path (`[Errno 2] No such file or directory: '<path>'`); a file that is
 /// there but cannot be read or decoded with `<shown>: <error>` (choice 9: the decode error alone names no file).
-fn option_text(ctx: &Ctx, path: &Path) -> Result<(String, String), Refused> {
+/// Def: T15. Use: T15, T20.
+pub(crate) fn option_text(ctx: &Ctx, path: &Path) -> Result<(String, String), Refused> {
     let shown = shown_path(path);
     let full = ctx.abs(&path.to_string_lossy());
     let text = read_file_text(&full, &shown, Encoding::Utf8Sig, Errors::Strict)
@@ -492,8 +493,8 @@ fn read_remembered(ctx: &Ctx, path: &Path, fingerprint: Option<&str>) -> Result<
 }
 
 /// A TMDb record answer (8.1): `/movie/{id}` when the object has a non-null `title`, else `/tv/{id}`. Err is the
-/// parser's sentence, prefixed by `shown`.
-fn parse_record(text: &str, shown: &str) -> Result<TmdbRecord, String> {
+/// parser's sentence, prefixed by `shown`. Def: T15. Use: T15, T20.
+pub(crate) fn parse_record(text: &str, shown: &str) -> Result<TmdbRecord, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|error| format!("{shown}: {error}"))?;
     if value.get("title").map_or(false, |title| !title.is_null()) {
         parse_movie(text, shown)

@@ -1,6 +1,7 @@
 //! `lazymkv-dev decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE]
-//! [--evidence DIR]` (port spec 3.4; `--settings FILE`, spec 14's settings for the plan and decision sections, is phase
-//! 1's): the first form of the design spec's phase 1 command that reads a recording and prints its decisions.
+//! [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--evidence DIR]` (port spec 3.4; `--settings FILE`,
+//! spec 14's settings for the plan and decision sections, is phase 1's; the three replay flags are phase 2's): the
+//! first form of the design spec's phase 1 command that reads a recording and prints its decisions.
 //! For one rip label it prints one JSON document, `DecideDoc`: `reconcile` (the scan's streams against
 //! mkvmerge.json, spec 3.3), `audio` (the content rule over every audio-levels-20ms-* folder of the label, or why a
 //! folder was skipped), `subtitles` (the text rule over the title's OCR text, or why it was skipped) and `reviews`
@@ -8,9 +9,9 @@
 //! this command: each section is a function an earlier task ported (reconcile; results and folder_json; subs_run
 //! and subs_json), run on the inputs spec 3.3's `recording` derives (the title and the selection from the rip's
 //! summary, the selection from the profile's file name split on '\'). Exit 0; 1 when a reconcile verdict is no; 2
-//! for an argument error, an unreadable scan.txt or mkvmerge.json, or a label that is not a rip label; 3 when a
-//! slug is given and the evidence clone is absent. A level folder or OCR text that is absent never changes the exit
-//! code: its section says why it was skipped.
+//! for an argument error, an unreadable scan.txt or mkvmerge.json, a label that is not a rip label, or a library root
+//! in the settings file that is not absolute; 3 when a slug is given and the evidence clone is absent. A level
+//! folder or OCR text that is absent never changes the exit code: its section says why it was skipped.
 //!
 //! Phase 1 (RP14, design spec 6.4 step 11) appends two sections after `reviews` and leaves the six above, and their
 //! goldens, byte-identical: `plan`, the document `lazymkv-dev plan` prints for the recording (`cmd::plan::plan_doc`
@@ -23,6 +24,12 @@
 //! the file phase, and the pure `decide_doc` renders the document from those inputs without a file, a `Ctx` or a
 //! `Tree`. Phase 2's engine builds `DecideInputs` from what it measured and renders each title's decide.json through
 //! the same function (R-B1).
+//!
+//! Phase 2 (design part 7.1) adds the replay flags `--tmdb-search FILE`, `--tmdb-record FILE` and `--remembered FILE`,
+//! read as `lazymkv-dev plan` reads them, so that `lazymkvctl decide` over a job folder prints what the engine wrote
+//! to decide.json (R-B1); `--tmdb-record` also replaces the recording's tmdb.json in the answers the decision reads
+//! (`replay_answers`, S49). A library root in the settings file that is not absolute exits 2 before the recording is
+//! read (design part 9.5, OR13).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -44,7 +51,7 @@ use lazymkv_core::recording::{py_repr_str, read_json, read_text, text_mode, Enco
 use lazymkv_core::reconcile::{reconcile, Report, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::remembered;
 use lazymkv_core::robot::Scan;
-use lazymkv_core::settings::Settings;
+use lazymkv_core::settings::{is_absolute_root, Settings};
 use lazymkv_core::subtitle::labels::{READING, TEXT_HINT};
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Decision as TextDecision, Rule as TextRule, SubsJson};
 use lazymkv_core::tracks::audio::AudioFacts;
@@ -54,7 +61,9 @@ use lazymkv_core::verify::{
     subs_streams, subtitle_events_of, verify_rip, PacketsFile, VerifyReport,
 };
 
-use crate::cmd::plan::{plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource, RecordedAnswers};
+use crate::cmd::plan::{
+    option_text, parse_record, plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource, RecordedAnswers,
+};
 use crate::evidence::{ocr_text_dir, pathlib_split, read_scan_in, resolve_recording, Ctx, DiskTree, Recording, Refused};
 use crate::pyjson::{dumps, Style};
 use crate::{usage_error, Args};
@@ -62,7 +71,8 @@ use crate::{usage_error, Args};
 /// The command's name as typed.
 const NAME: &str = "decide";
 /// The usage line, under the command's name: spec 3.4's synopsis with the --evidence flag every slug command takes.
-const USAGE: &str = "decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] [--evidence DIR]";
+const USAGE: &str = "decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] \
+                     [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--evidence DIR]";
 /// What -h prints after the usage line.
 const HELP: &str = "
 One JSON document for one rip label (port spec 3.4): reconcile (the scan's streams against mkvmerge.json, with
@@ -83,10 +93,15 @@ arguments:
   --settings FILE       spec 14's settings for the plan and decision sections: a JSON file naming the keys it
                         changes, such as movies_root and tv_root (default: spec 14's defaults, which set no library
                         root, so the decision has no final path); a file it refuses skips both sections
+  --tmdb-search FILE    a TMDb /search/multi answer for the disc's name, for the plan section (as plan's)
+  --tmdb-record FILE    a TMDb /movie/{id} or /tv/{id} answer: replaces the recording's tmdb.json for the plan
+                        section and names the decision's file
+  --remembered FILE     a remembered decision for the disc's fingerprint, for the plan section (spec 5)
   --evidence DIR        the evidence clone (default: LAZYMKV_EVIDENCE, else corpus/owner)
 
 exit status: 0; 1 when a reconcile verdict is no; 2 for an argument error, an unreadable scan.txt or
-mkvmerge.json, or a label that is not a rip label; 3 when the evidence clone is not there.
+mkvmerge.json, a label that is not a rip label, or a library root in the settings file that is not absolute;
+3 when the evidence clone is not there.
 ";
 /// The level folders of a label: the folders the tuning harness measures. Py: audio_dataset.find_folders' glob.
 const LEVEL_FOLDERS: &str = "audio-levels-20ms-*";
@@ -299,6 +314,8 @@ pub struct EngineDecideDoc {
 /// (rip_label, which also refuses a folder named golden) gives the title and the selection; `selection` overrides the
 /// profile's, and a negative title is one the scan lacks. scan.txt, mkvmerge.json and the rip log are read as
 /// compare_tracks.main reads them. `text` is taken against ctx.cwd when relative, and so are the files of `options`.
+/// The library roots of `options.settings` are checked first, before the rip label (`check_library_roots`, design part
+/// 9.5, OR13), and `answers` are `replay_answers`: the recording's, with `--tmdb-record`'s record in place of tmdb.json's.
 /// Def: T19. Use: T19, T20, T25, T27.
 pub fn read_decide_inputs(
     ctx: &Ctx,
@@ -309,6 +326,7 @@ pub fn read_decide_inputs(
     options: &PlanOptions,
 ) -> Result<DecideInputs, Refused> {
     let refused = |line: String| Refused { code: 2, line };
+    check_library_roots(ctx, options)?;
     let tree: &dyn Tree = &rec.tree;
     let rip = rip_label(tree, &rec.dir, label).map_err(refused)?;
     let label_dir = rec.dir.join(label);
@@ -328,7 +346,7 @@ pub fn read_decide_inputs(
         Ok(found) => PlanEntry::Results(found),
         Err(refused) => PlanEntry::Skipped { skipped: refused.line },
     };
-    let answers = recorded_answers(rec).map_err(|refused| refused.line);
+    let answers = replay_answers(ctx, rec, options);
     let (index, packets) = read_subs(tree, &label_dir);
     let file = FileFacts {
         level_md5: read_level_md5(tree, &label_dir),
@@ -353,6 +371,51 @@ pub fn read_decide_inputs(
         library: LibraryFacts::default(),
         overrides: None,
     })
+}
+
+/// The answers decide's decision reads (S49): `recorded_answers(rec)`, its Refused.line held back as the Err, with
+/// `recorded` replaced by `--tmdb-record`'s record when `options.tmdb_record` is Some and both `option_text` and
+/// `parse_record` succeed. read_decide_inputs and the engine (Task 24) both fill `DecideInputs.answers` with it, so
+/// the two documents of R-B1 read the answers one way. A record file that cannot be read or parsed leaves the answers
+/// as read: `plan_doc` refuses that file, so the plan and the decision are skipped. Design part 7.1, ruling S49.
+/// Def: T20. Use: T20, T24.
+pub fn replay_answers(ctx: &Ctx, rec: &Recording, options: &PlanOptions) -> Result<RecordedAnswers, String> {
+    let mut answers = recorded_answers(rec).map_err(|refused| refused.line)?;
+    if let Some(path) = &options.tmdb_record {
+        let record = option_text(ctx, path).ok().and_then(|(shown, text)| parse_record(&text, &shown).ok());
+        if record.is_some() {
+            answers.recorded = record;
+        }
+    }
+    Ok(answers)
+}
+
+/// Design part 9.5 (OR13): a library root of `options.settings` that is not absolute is an argument error, exit 2, so
+/// `lazymkvctl` and the engine's replay meet the rule `plan` prints as a problem. The file is read with `option_text`;
+/// when that read or `Settings::from_json` fails, nothing is refused here, and `plan_doc` refuses the file. The first of
+/// `movies_root` and `tv_root` (spec 14's key order, which `validate` keeps) that is set and not `is_absolute_root` is
+/// refused with `<file>: <key>: <problem>`, the problem being the first `SettingsProblem` of that key.
+fn check_library_roots(ctx: &Ctx, options: &PlanOptions) -> Result<(), Refused> {
+    let Some(path) = &options.settings else {
+        return Ok(());
+    };
+    let Ok((shown, text)) = option_text(ctx, path) else {
+        return Ok(());
+    };
+    let Ok((settings, problems)) = Settings::from_json(&text) else {
+        return Ok(());
+    };
+    for (key, root) in [("movies_root", &settings.movies_root), ("tv_root", &settings.tv_root)] {
+        let Some(root) = root.as_deref().filter(|root| !is_absolute_root(root)) else {
+            continue;
+        };
+        let problem = problems.iter().find(|problem| problem.key == key).map_or_else(
+            || format!("{key} {root} is not an absolute path"),
+            |problem| problem.problem.clone(),
+        );
+        return Err(Refused { code: 2, line: format!("{shown}: {key}: {problem}") });
+    }
+    Ok(())
 }
 
 /// decide's pure renderer (K5, R-B1). It reads no file and takes no Ctx or Tree. The reviews come from `inputs.audio`
@@ -504,7 +567,10 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         let _ = write!(out, "{}", HELP);
         return 0;
     }
-    let mut parsed = Args::new(args, &["--rec", "--text", "--selection", "--settings", "--evidence"]);
+    let mut parsed = Args::new(
+        args,
+        &["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"],
+    );
     let rec_dir = match parsed.flag("--rec") {
         Ok(value) => value,
         Err(message) => return usage_error(err, NAME, USAGE, &message),
@@ -518,6 +584,18 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         Err(message) => return usage_error(err, NAME, USAGE, &message),
     };
     let settings = match parsed.flag("--settings") {
+        Ok(value) => value,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
+    let tmdb_search = match parsed.flag("--tmdb-search") {
+        Ok(value) => value,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
+    let tmdb_record = match parsed.flag("--tmdb-record") {
+        Ok(value) => value,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
+    let remembered = match parsed.flag("--remembered") {
         Ok(value) => value,
         Err(message) => return usage_error(err, NAME, USAGE, &message),
     };
@@ -563,7 +641,12 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         }
     };
     let text = ocr_text_dir(ctx, text.as_deref());
-    let options = PlanOptions { settings: settings.map(PathBuf::from), ..PlanOptions::default() };
+    let options = PlanOptions {
+        settings: settings.map(PathBuf::from),
+        tmdb_search: tmdb_search.map(PathBuf::from),
+        tmdb_record: tmdb_record.map(PathBuf::from),
+        remembered: remembered.map(PathBuf::from),
+    };
     let inputs = match read_decide_inputs(ctx, &rec, &label, text.as_deref(), selection, &options) {
         Ok(inputs) => inputs,
         Err(refused) => {
@@ -922,11 +1005,14 @@ mod tests {
     use lazymkv_core::plan::{DiscDbMatch, Mode};
     use lazymkv_core::recording::Ordered;
     use lazymkv_core::reconcile::Verdicts;
+    use lazymkv_core::remembered::{Remembered, RememberedTitle, TitleRole};
     use lazymkv_core::review::{Note, ReviewReason};
     use lazymkv_core::robot::parse;
     use lazymkv_core::settings::Settings;
     use lazymkv_core::subtitle::text::{Class, Decision, Role, SubsStreamJson};
-    use lazymkv_core::testsupport::{commentary, level_file_text, programme, raw_file_text, scan_text};
+    use lazymkv_core::testsupport::{
+        commentary, level_file_text, programme, raw_file_text, scan_text, search_json, tmdb_movie_json,
+    };
     use lazymkv_core::tracks::audio::{Alignment, AudioDrop};
     use lazymkv_core::tracks::subtitle::SubtitleDrop;
     use lazymkv_core::tracks::SubtitleRole;
@@ -1532,8 +1618,9 @@ SINFO:0,4,6,0,"PGS"
         let tmp = Scratch::new("arguments");
         let root = tmp.0.clone();
         let usage = "usage: lazymkv-dev decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] \
-                     [--settings FILE] [--evidence DIR]\n";
-        let cases: [(&[&str], &str); 8] = [
+                     [--settings FILE] [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] \
+                     [--evidence DIR]\n";
+        let cases: [(&[&str], &str); 9] = [
             (&[], "the following arguments are required: slug, label"),
             (&["recs/disc-a"], "the following arguments are required: label"),
             (&["recs/disc-a", "eng-only", "extra"], "unrecognized arguments: extra"),
@@ -1545,6 +1632,7 @@ SINFO:0,4,6,0,"PGS"
             ),
             (&["recs/disc-a", "eng-only", "--text"], "argument --text: expected one argument"),
             (&["recs/disc-a", "eng-only", "--settings"], "argument --settings: expected one argument"),
+            (&["recs/disc-a", "eng-only", "--tmdb-record"], "argument --tmdb-record: expected one argument"),
         ];
         for (args, message) in cases {
             let (code, out, err) = run_in(&root, args);
@@ -1559,6 +1647,7 @@ SINFO:0,4,6,0,"PGS"
         assert_eq!((code, err.as_str()), (0, ""));
         assert!(out.starts_with(usage), "{}", out);
         assert!(out.contains("  --rec DIR "), "{}", out);
+        assert!(out.contains("  --remembered FILE "), "{}", out);
     }
 
     #[test]
@@ -2509,6 +2598,114 @@ SINFO:0,4,6,0,"PGS"
     }
 
     #[test]
+    fn decide_reads_tmdb_search_tmdb_record_and_remembered_like_plan() {
+        let tmp = Scratch::new("replay-flags");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        write(&root.join("recs/disc-b/thediscdb-hash.json"), discdb_answer());
+        write(&root.join("recs/disc-b/tmdb.json"), tmdb_answer(4242));
+        write(&root.join("settings.json"), json!({"movies_root": "/srv/media/Movies"}).to_string());
+        write(&root.join("search.json"), search_json(&[("movie", 4242, "Made Up Film", "Made Up Film", "2001-05-04")]));
+        // The plan's identity with another title and year than tmdb.json's: the decision must name the file from it (S49).
+        write(
+            &root.join("record.json"),
+            tmdb_movie_json(4242, "Another Made Up Film", "Another Made Up Film", "2003-02-01", "en", Some(50)),
+        );
+        let remembered = Remembered {
+            fingerprint: "0123456789ABCDEF0123456789ABCDEF".to_string(),
+            tmdb: TmdbIdentity { kind: TmdbKind::Movie, id: 4242 },
+            titles: vec![RememberedTitle {
+                source_file: Some("00800.mpls".to_string()),
+                dvd_title: None,
+                segment_map: "1".to_string(),
+                seconds: 3000,
+                role: TitleRole::Feature,
+                audio: Vec::new(),
+                subtitles: Vec::new(),
+            }],
+        };
+        write(&root.join("remembered.json"), serde_json::to_string(&remembered).unwrap());
+        let args = [
+            "recs/disc-b", "all-tracks", "--settings", "settings.json", "--tmdb-search", "search.json",
+            "--tmdb-record", "record.json", "--remembered", "remembered.json",
+        ];
+        let (code, out, err) = run_in(&root, &args);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let value: Value = serde_json::from_str(&out).unwrap();
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let options = PlanOptions {
+            settings: Some("settings.json".into()),
+            tmdb_search: Some("search.json".into()),
+            tmdb_record: Some("record.json".into()),
+            remembered: Some("remembered.json".into()),
+        };
+        let planned = plan_doc(&ctx, &PlanSource::Recording(&rec), &options).unwrap();
+        assert_eq!(value["plan"], serde_json::to_value(&planned).unwrap());
+        let answers = replay_answers(&ctx, &rec, &options).unwrap();
+        assert_eq!(answers.recorded.map(|record| record.title), Some("Another Made Up Film".to_string()));
+        let plain = replay_answers(&ctx, &rec, &PlanOptions::default()).unwrap();
+        assert_eq!(plain, recorded_answers(&rec).unwrap());
+        let given = (
+            planned.inputs.tmdb_search.as_deref(),
+            planned.inputs.tmdb_record.as_deref(),
+            planned.inputs.remembered.as_deref(),
+        );
+        assert_eq!(given, (Some("search.json"), Some("record.json"), Some("remembered.json")));
+        assert_eq!(planned.plan.identity.tmdb, Some(TmdbIdentity { kind: TmdbKind::Movie, id: 4242 }));
+        let path = "/srv/media/Movies/Another Made Up Film (2003) {tmdb-4242}/Another Made Up Film (2003) {tmdb-4242} - 1080p.mkv";
+        assert_eq!(value["decision"]["decision"]["path"]["path"], json!(path));
+    }
+
+    #[test]
+    fn decide_refuses_a_relative_library_root_with_exit_2_naming_the_key() {
+        let tmp = Scratch::new("relative-root");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        let not_absolute = |key: &str, value: &str| {
+            format!(
+                "settings.json: {key}: {key} {value} is not an absolute path: a library root must be a UNC path, a \
+                 drive-letter path or a path from / (spec 7, 14)"
+            )
+        };
+        let cases = [
+            (json!({"movies_root": "Movies"}), not_absolute("movies_root", "Movies")),
+            (json!({"tv_root": "D:Shows"}), not_absolute("tv_root", "D:Shows")),
+            (
+                json!({"movies_root": "  "}),
+                "settings.json: movies_root: movies_root is blank: a library root must be an absolute path (spec 7, 14)"
+                    .to_string(),
+            ),
+            (json!({"movies_root": "Movies", "tv_root": "Shows"}), not_absolute("movies_root", "Movies")),
+        ];
+        for (settings, line) in cases {
+            write(&root.join("settings.json"), settings.to_string());
+            let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--settings", "settings.json"]);
+            assert_eq!((code, out.as_str(), err), (2, "", format!("lazymkv-dev decide: error: {line}\n")), "{settings}");
+        }
+        // The reader refuses it the same way, so lazymkvctl and the engine's replay meet the same rule (OR13).
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let options = PlanOptions { settings: Some(PathBuf::from("settings.json")), ..PlanOptions::default() };
+        let refused = read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &options).unwrap_err();
+        assert_eq!(refused, Refused { code: 2, line: not_absolute("movies_root", "Movies") });
+    }
+
+    #[test]
+    fn an_absolute_posix_root_is_accepted() {
+        let tmp = Scratch::new("absolute-root");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        for library in ["/srv/media/Movies", r"\\nas\media\Movies", r"D:\Movies"] {
+            write(&root.join("settings.json"), json!({"movies_root": library}).to_string());
+            let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--settings", "settings.json"]);
+            assert_eq!((code, err.as_str()), (0, ""), "{library}");
+            let value: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(value["plan"]["settings"]["movies_root"], json!(library));
+        }
+    }
+
+    #[test]
     fn a_printed_document_reads_back_whole() {
         let tmp = Scratch::new("decision-read-back");
         let root = tmp.0.clone();
@@ -2535,7 +2732,10 @@ SINFO:0,4,6,0,"PGS"
         let row = crate::COMMANDS.iter().find(|(name, _, _)| *name == "decide");
         assert_eq!(
             row.map(|(_, _, synopsis)| *synopsis),
-            Some("(<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE]")
+            Some(
+                "(<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] [--tmdb-search FILE] \
+                 [--tmdb-record FILE] [--remembered FILE]"
+            )
         );
     }
 
