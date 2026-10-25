@@ -1,0 +1,521 @@
+{
+ "slug": "disc-a",
+ "label": "eng-only",
+ "reconcile": {
+  "title": 0,
+  "selection": "all",
+  "rip_log": "recs/disc-a/eng-only/rip.txt",
+  "want": [
+   {
+    "stream": 0,
+    "type": "video",
+    "lang": "und",
+    "lang_raw": "und",
+    "codec": "Mpeg4",
+    "out": "",
+    "ch": "",
+    "flags": 0
+   },
+   {
+    "stream": 1,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS-HD MA",
+    "out": "",
+    "ch": "6",
+    "flags": 0
+   },
+   {
+    "stream": 2,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DD",
+    "out": "",
+    "ch": "2",
+    "flags": 0
+   },
+   {
+    "stream": 3,
+    "type": "audio",
+    "lang": "spa",
+    "lang_raw": "spa",
+    "codec": "DD",
+    "out": "",
+    "ch": "2",
+    "flags": 0
+   },
+   {
+    "stream": 4,
+    "type": "subtitles",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "PGS",
+    "out": "",
+    "ch": "",
+    "flags": 0
+   }
+  ],
+  "dropped": [],
+  "unknown_removed": [],
+  "got": [
+   {
+    "id": 0,
+    "type": "video",
+    "lang": "und",
+    "lang_raw": "und",
+    "codec": "AVC",
+    "ch": "",
+    "tags": []
+   },
+   {
+    "id": 1,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS-HD MA",
+    "ch": 6,
+    "tags": []
+   },
+   {
+    "id": 2,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "AC-3",
+    "ch": 2,
+    "tags": []
+   },
+   {
+    "id": 3,
+    "type": "subtitles",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "HDMV PGS",
+    "ch": "",
+    "tags": []
+   }
+  ],
+  "verdicts": {
+   "count": false,
+   "order": false,
+   "video": true,
+   "chapters": true,
+   "duration": true
+  },
+  "numbers": {
+   "scan_chapters": 2,
+   "file_chapters": 2,
+   "scan_seconds": 600,
+   "file_seconds": 600.0
+  },
+  "video_tracks": 1,
+  "statistics_tags": false,
+  "exit_code": 1
+ },
+ "audio": [],
+ "subtitles": {
+  "skipped": "no OCR text (give --text DIR or LAZYMKV_OCR_TEXT)"
+ },
+ "reviews": [],
+ "plan": {
+  "slug": "disc-a",
+  "inputs": {
+   "scan": "recs/disc-a/scan.txt",
+   "fingerprint": null,
+   "disc_id": null,
+   "bdmt": null,
+   "meta": false,
+   "discdb_hash": {
+    "path": null,
+    "answer": "n/a"
+   },
+   "discdb_discid": {
+    "path": null,
+    "answer": "n/a"
+   },
+   "tmdb": {
+    "path": null,
+    "answer": "n/a"
+   },
+   "tmdb_search": null,
+   "tmdb_record": null,
+   "lookup_status": {},
+   "remembered": null
+  },
+  "settings": {
+   "staging_root": null,
+   "movies_root": null,
+   "tv_root": null,
+   "minlength_s": 120,
+   "cache_mb": 1024,
+   "auto_threshold": 0.85,
+   "feature_min_minutes": 45,
+   "tmdb_only_autofile": true,
+   "prefer_most_channels": true,
+   "original_language_first": true,
+   "subs_tolerance_ms": 300,
+   "subs_same_min": 0.7,
+   "subs_diff_max": 0.3,
+   "sub_clear_max_bytes": 64,
+   "edition_style": "jellyfin",
+   "jellyfin10_compat": false,
+   "retention_days": 7,
+   "keep_tuning_evidence": true,
+   "tuning_root": null,
+   "file_phase_concurrency": 1,
+   "drive_settle_s": 10,
+   "drive_ready_timeout_s": 120,
+   "scan_timeout_min": 30,
+   "stall_timeout_s": 300,
+   "read_error_rate": 20,
+   "exit_wait_min": 30,
+   "makemkv_min_version": "2.0.0",
+   "tool_paths": {
+    "makemkvcon": null,
+    "mkvmerge": null,
+    "ffprobe": null,
+    "ffmpeg": null,
+    "java": null
+   }
+  },
+  "settings_problems": [
+   {
+    "key": "tuning_root",
+    "problem": "tuning_root is not set: it is required while keep_tuning_evidence is on (spec 7, 14)"
+   }
+  ],
+  "plan": {
+   "identity": {
+    "step": "nothing",
+    "confidence": 0.0,
+    "tmdb": null,
+    "title": null,
+    "year": null,
+    "original_language": null,
+    "review": "identity_unknown",
+    "plausible": [],
+    "runtime_check": null,
+    "lookup_pending": false,
+    "evidence": [
+     "the disc has no name: TMDb is not searched"
+    ]
+   },
+   "kind": "movie",
+   "kind_source": "default",
+   "titles": [
+    {
+     "key": "t00-title00",
+     "title": 0,
+     "role": {
+      "role": "feature",
+      "edition": null,
+      "theatrical": true
+     },
+     "seconds": 600,
+     "size": null,
+     "source_file": null,
+     "suggested": false,
+     "remembered": false
+    }
+   ],
+   "mode": "direct",
+   "identity_confidence": 0.0,
+   "title_confidence": 0.85,
+   "reviews": [
+    "identity_unknown"
+   ],
+   "notes": [
+    {
+     "note": "label_rule_unavailable",
+     "stream": null,
+     "detail": "MakeMKV did not report a Java runtime in use (no MSG:3344), so label rule 8.3.2 does not apply"
+    }
+   ],
+   "wanted": {
+    "original_two_letter": null,
+    "original": [],
+    "english": [
+     "eng"
+    ],
+    "original_is_english": true
+   },
+   "session": null,
+   "evidence": {
+    "name": null,
+    "candidates": [
+     0
+    ],
+    "groups": [
+     {
+      "key": "#0",
+      "segment_map": "",
+      "segments": [],
+      "titles": [
+       0
+      ],
+      "seconds": 600,
+      "truncated": false
+     }
+    ],
+    "rivals": [
+     "#0"
+    ],
+    "title_rule": "structure",
+    "labels": [],
+    "discdb_matches": [],
+    "runtime": {
+     "feature_seconds": [
+      600
+     ],
+     "longest_rival_seconds": 600,
+     "episode_group_seconds": []
+    },
+    "sentences": [
+     "TheDiscDB gave no record: the titles are planned from the scan",
+     "1 of 1 titles pass the candidate filter, in 1 groups",
+     "the disc is a movie: no TV evidence",
+     "no group is at least 45 minutes long; the longest, #0, is kept",
+     "rival group #0: title 0 (its only title)",
+     "title confidence 0.85: Direct mode (6.2)"
+    ]
+   }
+  }
+ },
+ "decision": {
+  "title_key": "t00-title00",
+  "verify": {
+   "duration_ok": true,
+   "expected_seconds": 600.0,
+   "file_seconds": 600.0,
+   "chapters_ok": true,
+   "scan_chapters": 2,
+   "file_chapters": 2,
+   "tracks_ok": false,
+   "pairs": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     2
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     null
+    ]
+   ],
+   "extra_tracks": [],
+   "unknown_removed": [],
+   "mismatches": [
+    "track 3: type expected audio, file subtitles",
+    "stream 4 (subtitles): missing from the file"
+   ],
+   "unchecked": [
+    "track 0: codec not compared, the codec table does not know the scan's codec (file AVC)",
+    "track 1: codec not compared, the codec table does not know the scan's codec (file DTS-HD MA)",
+    "track 2: codec not compared, the codec table does not know the scan's codec (file AC-3)"
+   ],
+   "read_errors": [],
+   "ok": false
+  },
+  "facts": {
+   "md5_streams": [],
+   "profile_streams": [],
+   "event_streams": [],
+   "verdict_streams": [],
+   "verdict_reference": null,
+   "text_streams": [],
+   "removed": []
+  },
+  "decision": {
+   "title_key": "t00-title00",
+   "audio": {
+    "kept": [
+     {
+      "stream": 1,
+      "language": "eng",
+      "group": "english",
+      "codec": {
+       "family": "unknown",
+       "display": "DTS-HD MA",
+       "object": null,
+       "lossless": false
+      },
+      "file_codec": {
+       "family": "unknown",
+       "display": "DTS-HD MA",
+       "object": null,
+       "lossless": false
+      },
+      "channels": 6,
+      "tier": null,
+      "object": null,
+      "sample_size": null,
+      "sample_rate": null,
+      "bitrate_kbps": null,
+      "first_of_language": true,
+      "name": "DTS-HD MA 5.1",
+      "default": true,
+      "original": false
+     },
+     {
+      "stream": 2,
+      "language": "eng",
+      "group": "english",
+      "codec": {
+       "family": "unknown",
+       "display": "DD",
+       "object": null,
+       "lossless": false
+      },
+      "file_codec": {
+       "family": "unknown",
+       "display": "DD",
+       "object": null,
+       "lossless": false
+      },
+      "channels": 2,
+      "tier": null,
+      "object": null,
+      "sample_size": null,
+      "sample_rate": null,
+      "bitrate_kbps": null,
+      "first_of_language": false,
+      "name": "DD 2.0",
+      "default": false,
+      "original": false
+     }
+    ],
+    "dropped": [
+     [
+      3,
+      {
+       "why": "unwanted_language"
+      }
+     ]
+    ],
+    "reference": 1,
+    "verdict_reference": null,
+    "notes": [
+     {
+      "note": "possible_commentary",
+      "stream": 2,
+      "detail": "stream 2 (DD 2.0) is lossy with two channels or fewer and is not the first eng stream on the disc"
+     }
+    ],
+    "reviews": [],
+    "confidence": 0.95,
+    "description_alignment": null
+   },
+   "subtitles": {
+    "kept": [
+     {
+      "stream": 4,
+      "role": "regular",
+      "name": "English",
+      "forced": false,
+      "hearing_impaired": false,
+      "default": false,
+      "events": null,
+      "closed_captions": false,
+      "parent": null,
+      "decided_by": "single"
+     }
+    ],
+    "dropped": [],
+    "set_aside": [],
+    "full": [],
+    "groups": [],
+    "dialogue_group": null,
+    "dialogue_pick": null,
+    "pairs": [],
+    "case": "one_full",
+    "confidence": 0.9,
+    "notes": [],
+    "reviews": []
+   },
+   "layout": {
+    "tracks": [
+     {
+      "stream": 0,
+      "kind": "video",
+      "language": null,
+      "name": null,
+      "default": true,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     },
+     {
+      "stream": 1,
+      "kind": "audio",
+      "language": "eng",
+      "name": "DTS-HD MA 5.1",
+      "default": true,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     },
+     {
+      "stream": 2,
+      "kind": "audio",
+      "language": "eng",
+      "name": "DD 2.0",
+      "default": false,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     },
+     {
+      "stream": 4,
+      "kind": "subtitles",
+      "language": "eng",
+      "name": "English",
+      "default": false,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     }
+    ],
+    "chapters_kept": true
+   },
+   "resolution": null,
+   "edition": null,
+   "path": null,
+   "confidences": {
+    "identity": 0.0,
+    "title": 0.85,
+    "track": 0.9
+   },
+   "reviews": [
+    "identity_unknown",
+    "verify_failed"
+   ],
+   "notes": [
+    {
+     "note": "label_rule_unavailable",
+     "stream": null,
+     "detail": "MakeMKV did not report a Java runtime in use (no MSG:3344), so label rule 8.3.2 does not apply"
+    },
+    {
+     "note": "possible_commentary",
+     "stream": 2,
+     "detail": "stream 2 (DD 2.0) is lossy with two channels or fewer and is not the first eng stream on the disc"
+    }
+   ],
+   "read_errors": [],
+   "disposition": "needs_review"
+  }
+ }
+}

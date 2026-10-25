@@ -2402,4 +2402,91 @@ SINFO:0,4,6,0,"PGS"
             Some("(<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE]")
         );
     }
+
+    /// recs/disc-a with its eng-only rip label (`recording`).
+    fn disc_a(root: &Path) {
+        recording(root);
+    }
+
+    /// recs/disc-a with its level folders and both subtitle streams' OCR text under text/disc-a/eng-only/subs-ocr, as
+    /// `a_rip_label_gives_reconcile_audio_subtitles_and_reviews_in_one_document` lays it out.
+    fn disc_a_with_text(root: &Path) {
+        let label = recording(root);
+        level_folders(&label);
+        subtitles(&label, Some(&root.join("text/disc-a/eng-only/subs-ocr")), &[]);
+    }
+
+    /// recs/disc-b with its forced-kept rip label.
+    fn disc_b_forced_kept(root: &Path) {
+        disc_b(root);
+        forced_kept(root);
+    }
+
+    /// recs/disc-b with TheDiscDB's and TMDb's answers and settings.json naming /srv/media/Movies, as
+    /// `a_settings_file_gives_decides_own_decision_its_final_path` lays it out.
+    fn disc_b_with_settings(root: &Path) {
+        disc_b(root);
+        write(&root.join("recs/disc-b/thediscdb-hash.json"), discdb_answer());
+        write(&root.join("recs/disc-b/tmdb.json"), tmdb_answer(4242));
+        write(&root.join("settings.json"), json!({"movies_root": "/srv/media/Movies"}).to_string());
+    }
+
+    /// The folder of decide's characterised documents (Task 17, K5).
+    fn characterisation_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/decide/characterisation")
+    }
+
+    /// `out` with the scratch root written as `<root>`, in its JSON-escaped and its plain spelling, and then each
+    /// JSON-escaped Windows separator (`\\` in the printed text) written as `/`, so the files compare equal on every OS.
+    fn masked(out: &str, root: &Path) -> String {
+        let plain = root.display().to_string();
+        let escaped = plain.replace('\\', "\\\\");
+        out.replace(&escaped, "<root>").replace(&plain, "<root>").replace("\\\\", "/")
+    }
+
+    #[test]
+    fn decide_prints_the_characterised_document_for_each_made_up_fixture() {
+        let cases: [(&str, fn(&Path), &[&str]); 8] = [
+            ("disc-a-eng-only.json", disc_a, &["recs/disc-a", "eng-only"]),
+            ("disc-a-eng-only-all.json", disc_a, &["recs/disc-a", "eng-only", "--selection", "all"]),
+            ("disc-a-eng-only-text.json", disc_a_with_text, &["recs/disc-a", "eng-only", "--text", "text"]),
+            ("disc-b-all-tracks.json", disc_b, &["recs/disc-b", "all-tracks"]),
+            ("disc-b-eng-only.json", disc_b, &["recs/disc-b", "eng-only"]),
+            ("disc-b-extra.json", disc_b, &["recs/disc-b", "extra"]),
+            ("disc-b-forced-kept.json", disc_b_forced_kept, &["recs/disc-b", "forced-kept"]),
+            (
+                "disc-b-all-tracks-settings.json",
+                disc_b_with_settings,
+                &["recs/disc-b", "all-tracks", "--settings", "settings.json"],
+            ),
+        ];
+        let folder = characterisation_dir();
+        let writing = std::env::var_os("LAZYMKV_WRITE_CHARACTERISATION").is_some_and(|value| value == "1");
+        let mut differing = Vec::new();
+        for (name, setup, args) in cases {
+            let tmp = Scratch::new("characterised");
+            let root = tmp.0.clone();
+            setup(&root);
+            let (code, out, err) = run_in(&root, args);
+            assert_eq!(err, "", "{name}");
+            let printed = masked(&out, &root);
+            let path = folder.join(name);
+            if writing {
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(&path, &printed).unwrap();
+                continue;
+            }
+            let stored = fs::read_to_string(&path)
+                .unwrap_or_else(|error| {
+                    panic!("{}: {error}: run once with LAZYMKV_WRITE_CHARACTERISATION=1 on the pre-split code (Task 17)", path.display())
+                })
+                .replace("\r\n", "\n");
+            let value: Value = serde_json::from_str(&stored).unwrap();
+            let want = if value["reconcile"]["exit_code"] == json!(0) { 0 } else { 1 };
+            if code != want || printed != stored {
+                differing.push(name);
+            }
+        }
+        assert!(differing.is_empty(), "characterisation files that differ from decide's output: {differing:?}");
+    }
 }
