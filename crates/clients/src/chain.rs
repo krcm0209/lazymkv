@@ -154,8 +154,8 @@ fn status_word(state: &LookupState) -> Option<String> {
 }
 
 /// `lookup-status.txt` for the book as it stands: one line per lookup asked. The record's key is `tmdb <kind>/<id>`,
-/// named by the record in hand while `Record` is answered with one, else by `record_to_fetch` over the book, else by
-/// the record in hand (PF-18); with no identity there is no record line. Design part 8.4.
+/// named by the record in hand while `Record` is answered with one, else by `record_to_fetch` over the book (PF-18);
+/// when that names nothing there is no record line, as step 3 of the round then drops `Record`. Design part 8.4.
 fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
     let mut lines = BTreeMap::new();
     for (lookup, state) in &book.states {
@@ -165,10 +165,9 @@ fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
             Lookup::Discid => "discid".to_string(),
             Lookup::Search => "search".to_string(),
             Lookup::Record => {
-                let in_hand = book.answers.record.as_ref().map(|record| record.identity);
-                let identity = match (state, in_hand) {
-                    (LookupState::Answered { .. }, Some(identity)) => Some(identity),
-                    _ => record_to_fetch(&book.lookup_inputs(name)).or(in_hand),
+                let identity = match (state, &book.answers.record) {
+                    (LookupState::Answered { .. }, Some(record)) => Some(record.identity),
+                    _ => record_to_fetch(&book.lookup_inputs(name)),
                 };
                 let Some(identity) = identity else { continue };
                 format!("tmdb {}/{}", identity.kind.as_str(), identity.id)
@@ -282,7 +281,7 @@ mod tests {
 
     use lazymkv_core::lookup::discdb::{parse_discid, DiscDbRecord};
     use lazymkv_core::lookup::name::disc_name;
-    use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
+    use lazymkv_core::lookup::tmdb::{parse_movie, TmdbIdentity, TmdbKind};
     use serde_json::{json, Value};
 
     use crate::{
@@ -529,6 +528,34 @@ mod tests {
         assert_eq!(book.answers.record.as_ref().map(|record| record.identity), Some(JOHN_WICK));
         assert_eq!(book.pending(), (false, false));
         assert_eq!(last_status(&saved), ["dischash 200", "discid 404", "search 200", "tmdb movie/245891 200"]);
+    }
+
+    #[test]
+    fn a_pending_record_with_no_identity_left_to_fetch_has_no_status_line_and_leaves_the_book() {
+        // The record of an earlier identity is in hand, and the last fetch of a record timed out.
+        let earlier = String::from_utf8(movie_body(900004, "John Wick", "2099-01-01")).unwrap();
+        let mut book = LookupBook {
+            states: BTreeMap::from([
+                (Lookup::Dischash, LookupState::Pending { reason: PendingReason::Timeout }),
+                (Lookup::Record, LookupState::Pending { reason: PendingReason::Timeout }),
+            ]),
+            answers: Answers { record: Some(parse_movie(&earlier, "movie.json").unwrap()), ..Answers::default() },
+        };
+        // TheDiscDB misses and the name search leaves two plausible results: no record is to be fetched.
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("JOHN_WICK"));
+        misses(&t);
+        t.answer(&search_of(&inputs), 200, &search_body(&[(245891, "John Wick", "2014-10-22"), (900003, "John Wick", "1990-01-01")]));
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(record_to_fetch(&book.lookup_inputs(inputs.name.as_ref())), None);
+        assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url("JOHN WICK")]);
+        for file in saved.iter().filter(|file| file.name == "lookup-status.txt") {
+            let text = String::from_utf8(file.bytes.clone()).unwrap();
+            assert!(!text.lines().any(|line| line.starts_with("tmdb ")), "{text}");
+        }
+        assert_eq!(last_status(&saved), ["dischash 404", "discid 404", "search 200"]);
+        assert!(!book.states.contains_key(&Lookup::Record));
+        assert_eq!(book.pending(), (false, false));
     }
 
     #[test]
