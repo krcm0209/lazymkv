@@ -413,3 +413,45 @@ fn the_engine_logs_its_start_and_stop() {
     h.wait("started again", |h| h.engine_log().matches(&started).count() == 2);
     assert_eq!(h.engine_log().matches("engine stopped").count(), 1);
 }
+
+/// A step that panics is reported as a result with no event and its panic, and gives the disc-phase token back, so
+/// the engine still stops and a later disc still starts.
+#[test]
+fn a_panicking_step_reports_no_event_and_gives_the_token_back() {
+    let script = vec![("RunScan", StepScript::Panic("scripted panic")), ("RunScan", StepScript::Hang)];
+    let h = Harness::new_scripted(script, json!({}));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("RunScan called", |h| h.steps().calls() == ["RunScan"]);
+    h.settle();
+    assert_eq!(h.state_of(&a), "Fingerprinted");
+    let job_log = std::fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap_or_default();
+    assert!(job_log.contains("RunScan returned no event: the step panicked: scripted panic"), "{job_log}");
+    assert!(h.engine_log().contains(&format!("{a}: the step panicked: scripted panic")), "{}", h.engine_log());
+    assert_eq!(h.awake().holders(), 0);
+    h.insert("tok1", "disc-b");
+    h.wait("disc-b scanning", |h| h.steps().calls() == ["RunScan", "RunScan"]);
+    h.restart();
+    h.settle();
+    assert_eq!(h.job_ids().len(), 2);
+}
+
+/// R22.7: only a job that waits for its disc gets MediaArrived (design part 5.4 step 3), so a second arrival of a disc
+/// that is already in a drive feeds nothing and starts no second rip.
+#[test]
+fn a_second_arrival_of_a_present_disc_feeds_nothing() {
+    let mut script = disc_phase();
+    script[3] = ("RipTitle", StepScript::Hang);
+    let h = Harness::new_scripted(script, json!({}));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("ripping", |h| h.steps().calls().last().map(String::as_str) == Some("RipTitle"));
+    h.insert("tok1", "disc-a");
+    h.wait("tok1 handled", |h| h.drives_json()["drives"]["tok1"]["handled"] == json!(true));
+    h.settle();
+    assert_eq!(h.steps().calls().iter().filter(|call| *call == "RipTitle").count(), 1, "{:?}", h.steps().calls());
+    assert!(h.transitions(&a).iter().all(|line| line.event != Some(Event::MediaArrived)));
+    assert_eq!(h.drives_json()["drives"]["tok1"], json!({"fingerprint": h.fingerprint("disc-a"), "handled": true}));
+    assert!(h.engine_log().contains(&format!("tok1: the disc of job {a} is already in tok0")), "{}", h.engine_log());
+    assert_eq!(h.record(&a).drive, "tok0");
+}

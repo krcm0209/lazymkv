@@ -112,6 +112,8 @@ pub enum StepScript {
     Result(StepResult),
     /// Returns `StepResult { event: None, message: Some("cancelled") }` once its cancel token is raised.
     Hang,
+    /// Panics with this text, as a step with a bug would.
+    Panic(&'static str),
 }
 
 /// One call of a scripted step (R22.2): the action's tag, state.json's state at the call and the number of
@@ -182,6 +184,7 @@ impl StepRunner for ScriptedSteps {
                 }
                 StepResult { event: None, message: Some("cancelled".to_string()) }
             }
+            Some(StepScript::Panic(text)) => panic!("{text}"),
             None if NO_EVENT_ACTIONS.contains(&tag.as_str()) => StepResult { event: None, message: None },
             None => StepResult { event: None, message: Some(format!("no scripted result for {tag}")) },
         }
@@ -219,7 +222,8 @@ enum Queued {
 /// A real engine over a scratch folder `<root>/{data, staging, library/Movies, tuning, volumes}`, with the platform
 /// fakes, scripted steps, a memory sink and manual timers (design part 12.1, the interface sheet's helper list). Every
 /// method takes `&self`. `insert`, `insert_root` and `remove` only queue their drive event; every other method first
-/// hands the queued events to the `DriveScript`, in order (R22.1). The data-folder readers work while the engine is
+/// hands the queued events to the `DriveScript`, in order (R22.1), except `restart`, which hands them over once the
+/// old engine has stopped, so the new engine reads them (R22.9). The data-folder readers work while the engine is
 /// stopped. Dropping the harness stops a running engine and removes the scratch folder. Def: T22. Use: T22 to T29.
 pub struct Harness {
     root: PathBuf,
@@ -453,7 +457,7 @@ impl Harness {
     /// its sleeping threads, and starts a new engine (`start_until`) over the same data folder with the same drive
     /// script, ejector, keep-awake, shares, secrets, MemoryIpc, host, RecordedTransport, ScriptedSteps (used entries
     /// stay used) and MemorySink list. The queued drive events are handed over once the old engine has stopped, so
-    /// the new engine reads them. Def: T22. Use: T22 to T29.
+    /// the new engine reads them (R22.9). Def: T22. Use: T22 to T29.
     pub fn restart(&self) {
         self.stop();
         self.timers.drop_pending();

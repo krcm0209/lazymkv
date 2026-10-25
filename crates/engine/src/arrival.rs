@@ -3,6 +3,7 @@
 //! arrival waits for another disc's phase (R-A4).
 
 use std::fs;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use lazymkv_core::snapshot::{disc_meta, unit_key_file, DiscMeta};
 use lazymkv_platform::Host;
 use lazymkv_tools::{list_files, snapshot};
 
-use crate::owner::{Msg, StepResult};
+use crate::owner::{panic_text, Msg, StepResult, PANICKED};
 
 /// How often the wait for a volume looks for its root (design part 5.4).
 const READY_POLL: Duration = Duration::from_millis(100);
@@ -97,8 +98,13 @@ pub(crate) fn spawn_recording(
     done: Sender<Msg>,
 ) {
     thread::spawn(move || {
-        let written = snapshot(&arrival.root, &arrival.label, &job_dir, captured_unix)
-            .map_err(|error| error.to_string())
+        let walked = panic::catch_unwind(AssertUnwindSafe(|| {
+            snapshot(&arrival.root, &arrival.label, &job_dir, captured_unix)
+        }));
+        // R22.11: a panic is reported as the recording's failure, so the owner never waits for it.
+        let written = walked
+            .map_err(|payload| format!("{PANICKED}{}", panic_text(&*payload)))
+            .and_then(|meta| meta.map_err(|error| error.to_string()))
             .and_then(|meta| match (&meta.fingerprint, &arrival.meta.fingerprint) {
                 (now, then) if now == then => Ok(()),
                 (now, then) => Err(format!(

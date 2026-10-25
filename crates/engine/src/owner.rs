@@ -3,9 +3,11 @@
 //! the notifier itself and hands every other action to a `StepRunner` worker. It also routes arrivals, keeps the one
 //! disc-phase token with its queue, and holds KeepAwake while a job is active.
 
+use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -40,6 +42,19 @@ const WAIT_POLL: Duration = Duration::from_millis(20);
 /// The actions whose step returns no event, so their result writes no `returned no event` line (design part 5.2, PF-6:
 /// `ExtractSubtitleEvidence` runs with `Decide` as one unit). Def: T22. Use: T22, T24.
 pub(crate) const NO_EVENT_ACTIONS: [&str; 3] = ["EmptyTitleDirectory", "DeletePartialFile", "ExtractSubtitleEvidence"];
+
+/// The start of the message of a step, recording or eject that panicked (R22.11): the owner writes an engine.log line
+/// naming the job for every result whose message holds it. Def: T22. Use: T22.
+pub(crate) const PANICKED: &str = "the step panicked: ";
+
+/// The text a caught panic carries: its `&str` or `String` payload, else a fixed sentence (R22.11). Def: T22. Use: T22.
+pub(crate) fn panic_text(payload: &(dyn Any + Send)) -> String {
+    match (payload.downcast_ref::<&str>(), payload.downcast_ref::<String>()) {
+        (Some(text), _) => text.to_string(),
+        (None, Some(text)) => text.clone(),
+        (None, None) => "a panic with no message".to_string(),
+    }
+}
 
 /// A step's outcome (design part 5.2): the event to feed, if any, and the sentence for the job record and notification.
 /// Def: T22. Use: T23, T24, T26.
@@ -199,10 +214,12 @@ impl EngineHandle {
     }
 
     /// Cancels every running step's CancelToken (CheckSpace and Eject included), drops their results, writes the
-    /// engine.log line `engine stopped` and joins every thread (design part 3.5). The drive thread ends first, so every
-    /// drive event it handed over is handled before the owner stops; the owner then waits for every step, recording
-    /// and eject it started, and the notifier delivers what was raised. An arrival still waiting for its volume is not
-    /// waited for: it only reads. Err when a thread panicked. Def: T22. Use: T22 to T29.
+    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk (design part 3.5,
+    /// R22.10). The drive thread ends first, so every drive event it handed over is handled before the owner stops;
+    /// the owner then waits for every step, recording and eject it started, and the notifier delivers what was raised.
+    /// An arrival still waiting for its volume is not waited for: it only reads, and its late result goes nowhere. A
+    /// step, recording or eject that panics still reports (R22.11), so stop never waits on one. Err when the drive or
+    /// owner thread panicked. Def: T22. Use: T22 to T29.
     pub fn stop(self) -> io::Result<()> {
         self.drive_stop.store(true, Ordering::SeqCst);
         let drive = self.drive.join();
@@ -581,7 +598,8 @@ impl Owner {
         }
         while !self.workers.is_empty() || self.ejects > 0 {
             match inbox.recv() {
-                Ok(Msg::StepDone { job, generation, .. }) => {
+                Ok(Msg::StepDone { job, generation, result }) => {
+                    self.log_panic(&job, &result);
                     self.finish_worker(&job, generation);
                     drop(self.outbox.take(&job));
                 }
@@ -691,6 +709,13 @@ impl Owner {
                 }
                 self.record_drive(&drive, Some(fingerprint), true);
             }
+            JobLookup::Resume(id) if self.present_drive(&id).is_some() => {
+                // R22.7: only a job that waits for its disc gets MediaArrived (design part 5.4 step 3), so a repeat
+                // arrival, or a second copy of the disc, starts nothing beside the steps that run.
+                let old = self.present_drive(&id).unwrap_or_default();
+                self.store.log(&format!("{drive}: the disc of job {id} is already in {old}"));
+                self.record_drive(&drive, Some(fingerprint), true);
+            }
             JobLookup::Resume(id) => {
                 if !self.token.take(&id) {
                     self.token.wait(Waiting::Arrival(arrival));
@@ -712,6 +737,12 @@ impl Owner {
                 }
             }
         }
+    }
+
+    /// The drive holding the disc of `id` when it is a disc-phase job with its disc in a drive: such a job is not
+    /// waiting for its disc (R22.7). A job that failed with MediaReadError is routed its disc whatever this says.
+    fn present_drive(&self, id: &str) -> Option<String> {
+        self.jobs.get(id).filter(|job| job.record.state.is_disc_phase()).and_then(|job| job.disc.clone())
     }
 
     /// Every job ID in use: the owner's jobs and every job folder, since a folder the store refused keeps its ID
@@ -744,10 +775,17 @@ impl Owner {
         self.drive(drive).ejecting = true;
         self.ejects += 1;
         let (ejector, store, sender) = (Arc::clone(&self.parts.ejector), Arc::clone(&self.store), self.sender.clone());
-        let drive_id = drive.to_string();
+        let (drive_id, job) = (drive.to_string(), id.to_string());
         self.threads.push(thread::spawn(move || {
-            if let Err(error) = ejector.eject(&drive_id) {
-                store.log(&format!("{drive_id}: the eject of an already ripped disc failed: {error}"));
+            match panic::catch_unwind(AssertUnwindSafe(|| ejector.eject(&drive_id))) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    store.log(&format!("{drive_id}: the eject of an already ripped disc failed: {error}"));
+                }
+                Err(payload) => store.log(&format!(
+                    "{drive_id}: the eject of the disc of job {job} panicked: {}",
+                    panic_text(&*payload)
+                )),
             }
             let _ = sender.send(Msg::Ejected { drive: drive_id });
         }));
@@ -816,7 +854,7 @@ impl Owner {
             }
         }
         if new.is_waiting() || matches!(new, State::Failed { .. }) {
-            // An event that leaves the state as it was and brings no sentence keeps the state's message.
+            // R22.8: an event that leaves the state as it was and brings no sentence keeps the state's message.
             if message.is_some() || record.state != new {
                 record.message = message;
             }
@@ -831,6 +869,12 @@ impl Owner {
                 "{id}: the transition into {} could not be persisted, so none of its actions ran: {error}",
                 transition.new.as_str()
             ));
+            if transition.old.is_none() {
+                // A new job whose first line could not be written does not exist (S29): the arrival is unhandled.
+                self.jobs.remove(id);
+                lock(&self.shown).remove(id);
+                self.record_drive(&record.drive, Some(record.fingerprint.clone()), false);
+            }
             self.give_back(id);
             return;
         }
@@ -984,17 +1028,24 @@ impl Owner {
                 let title = title.map(str::to_string);
                 let _ = progress_to.send(Msg::Progress { job: progress_job.clone(), title, fraction });
             };
-            let mut kept: Option<StepResult> = None;
-            for action in &actions {
-                if cancel.is_cancelled() {
-                    break;
+            let run = panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut kept: Option<StepResult> = None;
+                for action in &actions {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let result = steps.run(&context, action, cancel.clone(), &progress);
+                    if result.event.is_some() || kept.as_ref().is_none_or(|kept| kept.event.is_none()) {
+                        kept = Some(result);
+                    }
                 }
-                let result = steps.run(&context, action, cancel.clone(), &progress);
-                if result.event.is_some() || kept.as_ref().is_none_or(|kept| kept.event.is_none()) {
-                    kept = Some(result);
-                }
-            }
-            let result = kept.unwrap_or(StepResult { event: None, message: None });
+                kept.unwrap_or(StepResult { event: None, message: None })
+            }));
+            // R22.11: a panic is reported as a result with no event, so the owner never waits for it.
+            let result = run.unwrap_or_else(|payload| StepResult {
+                event: None,
+                message: Some(format!("{PANICKED}{}", panic_text(&*payload))),
+            });
             let _ = sender.send(Msg::StepDone { job, generation, result });
         }));
     }
@@ -1011,9 +1062,11 @@ impl Owner {
 
     /// A worker's result (design part 5.2). A stale one is dropped with what its step posted (R-A7), unless a newer
     /// step of the job runs, whose posts it must not take. Otherwise the posted edits are applied, each posted event
-    /// is fed, then the result's event; a result with no event writes `<tag> returned no event` to job.log, except for
-    /// the actions that report none.
+    /// is fed, then the result's event. A result with no event, from an action other than those that report none,
+    /// writes `<tag> returned no event` to job.log, followed by `: <message>` when it has one, and gives the token
+    /// back, since no step of the job runs any more (L2).
     fn on_step_done(&mut self, id: &str, generation: u64, result: StepResult) {
+        self.log_panic(id, &result);
         let worker = self.finish_worker(id, generation);
         if self.jobs.get(id).map(|job| job.generation) != Some(generation) {
             if !self.workers.iter().any(|worker| worker.job == id) {
@@ -1038,9 +1091,21 @@ impl Owner {
             None => {
                 let tag = worker.and_then(|worker| worker.tags.last().cloned()).unwrap_or_default();
                 if !NO_EVENT_ACTIONS.contains(&tag.as_str()) {
-                    self.store.job_log(id, &format!("{tag} returned no event"));
+                    let line = match &result.message {
+                        Some(message) => format!("{tag} returned no event: {message}"),
+                        None => format!("{tag} returned no event"),
+                    };
+                    self.store.job_log(id, &line);
+                    self.give_back(id);
                 }
             }
+        }
+    }
+
+    /// The engine.log line `<id>: <message>` of a step or recording that panicked (R22.11).
+    fn log_panic(&self, id: &str, result: &StepResult) {
+        if let Some(message) = result.message.as_deref().filter(|message| message.contains(PANICKED)) {
+            self.store.log(&format!("{id}: {message}"));
         }
     }
 
