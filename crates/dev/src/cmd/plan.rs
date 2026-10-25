@@ -265,9 +265,10 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
 
 /// A recording's parsed lookup answers exactly as `plan_doc` reads them (`recording_inputs`: an answer file whose
 /// lookup-status.txt line is not 200 is left unparsed, since the recorder keeps the error body of a 404 or a failed
-/// lookup), for decide's decision section (RP14), so the plan and the decision never read the answers differently.
+/// lookup), for decide's decision section (RP14, through `DecideInputs.answers`, K5), so the plan and the decision
+/// never read the answers differently. Def: T15. Use: T15, T19, T24.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RecordedAnswers {
+pub struct RecordedAnswers {
     /// thediscdb-hash.json's record (`parse_dischash`).
     pub by_fingerprint: Option<DiscDbRecord>,
     /// thediscdb-discid.json's records, in order (`parse_discid`).
@@ -276,8 +277,8 @@ pub(crate) struct RecordedAnswers {
     pub recorded: Option<TmdbRecord>,
 }
 
-/// The three answers of `recording_inputs(rec)?`, its refusal unchanged (spec 8.1, RP14).
-pub(crate) fn recorded_answers(rec: &Recording) -> Result<RecordedAnswers, Refused> {
+/// The three answers of `recording_inputs(rec)?`, its refusal unchanged (spec 8.1, RP14). Def: T15. Use: T15, T19, T24.
+pub fn recorded_answers(rec: &Recording) -> Result<RecordedAnswers, Refused> {
     let found = recording_inputs(rec)?;
     Ok(RecordedAnswers { by_fingerprint: found.by_fingerprint, by_disc_id: found.by_disc_id, recorded: found.recorded })
 }

@@ -15,11 +15,14 @@
 //! Phase 1 (RP14, design spec 6.4 step 11) appends two sections after `reviews` and leaves the six above, and their
 //! goldens, byte-identical: `plan`, the document `lazymkv-dev plan` prints for the recording (`cmd::plan::plan_doc`
 //! with the settings of `--settings FILE`, spec 14's defaults without it), and `decision`, the file phase of the rip
-//! label's title (`decision_doc`): the rip
-//! verified against the scan (`verify::verify_rip`, spec 6.2 step 7), the facts read from the label's files and from
-//! the audio and subtitles sections above, and `decision::decide`'s FileDecision (tracks, layout, final path, the three
-//! confidences, review reasons, notes and disposition). Either is skipped with its reason, and neither changes the exit
-//! code or `reviews`.
+//! label's title: the rip verified against the scan (`verify::verify_rip`, spec 6.2 step 7), the facts read from the
+//! label's files and from the audio and subtitles sections above, and `decision::decide`'s FileDecision (tracks,
+//! layout, final path, the three confidences, review reasons, notes and disposition); either is skipped with its
+//! reason, and neither changes the exit code or `reviews`. The command reads, then renders (K5): the readers
+//! (`read_decide_inputs`) read every file of the rip label once into `DecideInputs`, holding back each read error of
+//! the file phase, and the pure `decide_doc` renders the document from those inputs without a file, a `Ctx` or a
+//! `Tree`. Phase 2's engine builds `DecideInputs` from what it measured and renders each title's decide.json through
+//! the same function (R-B1).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -36,20 +39,22 @@ use lazymkv_core::lookup::discdb::{match_titles, DiscDbRecord, DiscDbTitle};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbRecord};
 use lazymkv_core::plan::movie::LibraryFacts;
 use lazymkv_core::plan::{Plan, PlannedTitle};
-use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, Selection};
+use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, Selection, SubsIndexEntry};
 use lazymkv_core::recording::{py_repr_str, read_json, read_text, text_mode, Encoding, Errors, PathKey, Tree};
 use lazymkv_core::reconcile::{reconcile, Report, RipLog, RIP_LOG_NAMES};
+use lazymkv_core::remembered;
+use lazymkv_core::robot::Scan;
 use lazymkv_core::settings::Settings;
 use lazymkv_core::subtitle::labels::{READING, TEXT_HINT};
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Decision as TextDecision, Rule as TextRule, SubsJson};
 use lazymkv_core::tracks::audio::AudioFacts;
 use lazymkv_core::tracks::subtitle::{step10_runs, SubtitleFacts};
 use lazymkv_core::verify::{
-    by_scan_stream, failure_reviews, rip_title, selected_streams, stream_of_track, subs_index, subs_streams,
-    subtitle_events, verify_rip, VerifyReport,
+    by_scan_stream, failure_reviews, read_packets_file, rip_title, selected_streams, stream_of_track, subs_index,
+    subs_streams, subtitle_events_of, verify_rip, PacketsFile, VerifyReport,
 };
 
-use crate::cmd::plan::{plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource};
+use crate::cmd::plan::{plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource, RecordedAnswers};
 use crate::evidence::{ocr_text_dir, pathlib_split, read_scan_in, resolve_recording, Ctx, DiskTree, Recording, Refused};
 use crate::pyjson::{dumps, Style};
 use crate::{usage_error, Args};
@@ -220,22 +225,89 @@ pub fn subtitle_reviews(subs: &SubsJson) -> Vec<&'static str> {
     }
 }
 
-/// Everything decide prints for one rip label. The rip label (rip_label: Err code 2 with its reason, which also
-/// refuses a folder named golden) gives the title and the selection (its title_of and selection_of); `selection`
-/// overrides the profile's. Then <slug>/scan.txt, <label>/mkvmerge.json and the first of RIP_LOG_NAMES beside it,
-/// read as compare_tracks.main reads them, go to reconcile (code 2 where it fails: a title the scan lacks); then
-/// the audio and subtitle sections, which never fail. `text` is taken against ctx.cwd when relative. Last the plan
-/// section (`plan_doc` with `settings`, decide's --settings FILE, which plan_doc takes against ctx.cwd; spec 14's
-/// defaults without it) and the decision section (`decision_doc` over the document built so far), which never fail
-/// either: each is skipped with its reason (RP14), a refused settings file included.
-pub fn decide_doc(
+/// The rip's MakeMKV log as decide reads it (the first of `RIP_LOG_NAMES` beside mkvmerge.json, UTF-8 with
+/// invalid bytes replaced, `text_mode` applied) and its path as printed. K5. Def: T19. Use: T19, T24.
+#[derive(Clone, Debug)]
+pub struct RipLogText {
+    pub shown: String,
+    pub text: String,
+}
+
+/// The file-phase reads of one rip label, each with its error held back, so the renderer surfaces only the
+/// errors phase 1's decision_doc surfaced and in its order (K5, design part 5.7 step 3). Def: T19. Use: T19, T24.
+#[derive(Clone, Debug)]
+pub struct FileFacts {
+    /// (file track, trimmed digest) in `read_level_md5`'s order: per audio-levels-20ms-* folder in PathKey order,
+    /// each manifest.txt `main=` then `cand=` line's (`main`/`cand` value parsed as i64, `md5`), then each
+    /// audio-proxy.json track's (`source_stream` as i64, `source.md5`). Err: the manifest read error, or
+    /// "<audio-proxy.json shown>: <parse error>".
+    pub level_md5: Result<Vec<(Option<i64>, Option<String>)>, String>,
+    /// <label>/ffprobe-streams.json; None when absent; Err "<shown>: <serde error>".
+    pub probes: Result<Option<FfprobeStreams>, String>,
+    /// <label>/subs/index.json through `verify::subs_index`; None when it is not a file.
+    pub subs_index: Result<Option<Vec<SubsIndexEntry>>, String>,
+    /// `verify::read_packets_file` for every index entry's `n`, mapped or not; empty without an index.
+    pub packets: BTreeMap<i64, PacketsFile>,
+}
+
+/// Everything `decide_doc` renders for one rip label (K5, R-B1, design part 5.7 step 3). `read_decide_inputs`
+/// builds it from a recording folder; the engine builds it from what it measured (Task 24). Def: T19.
+/// Use: T19, T20, T24, T25.
+#[derive(Clone, Debug)]
+pub struct DecideInputs {
+    /// `rec.slug`, or the job ID.
+    pub slug: String,
+    /// The rip label, or the title key.
+    pub label: String,
+    /// `RipLabel.title` as read.
+    pub title: i64,
+    /// `--selection`, else `RipLabel.selection`.
+    pub selection: Selection,
+    /// <slug>/scan.txt, read as UTF-8 with invalid bytes replaced.
+    pub scan: Scan,
+    /// <label>/mkvmerge.json.
+    pub ident: MkvmergeIdent,
+    pub rip_log: Option<RipLogText>,
+    pub reconcile: Report,
+    pub audio: Vec<AudioEntry>,
+    pub subtitles: SubtitleEntry,
+    pub plan: PlanEntry,
+    /// `recorded_answers(rec)`, its `Refused.line` held back.
+    pub answers: Result<RecordedAnswers, String>,
+    pub file: FileFacts,
+    /// The readers' are `LibraryFacts::default()`.
+    pub library: LibraryFacts,
+    /// The readers' are None.
+    pub overrides: Option<remembered::Overrides>,
+}
+
+/// `<title key>/decide.json` as the engine writes it (design part 7.1): decide's document, then the audio content
+/// rule's version and lazymkv's version as its last two keys. Def: T19. Use: T24, T29.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct EngineDecideDoc {
+    #[serde(flatten)]
+    pub doc: DecideDoc,
+    /// `audio::rule::RULE_VERSION`.
+    pub audio_rule_version: u32,
+    /// lazymkv's package version.
+    pub lazymkv_version: String,
+}
+
+/// decide's readers (spec 3.4, RP14, K5). They read the rip label, the scan, mkvmerge.json and the rip log, and run
+/// reconcile; each failure is Refused { code: 2 }. Then come the audio and subtitle sections, `plan_doc` with
+/// `options` (its refusal held as `PlanEntry::Skipped`), the recorded answers, and the file facts. The rip label
+/// (rip_label, which also refuses a folder named golden) gives the title and the selection; `selection` overrides the
+/// profile's, and a negative title is one the scan lacks. scan.txt, mkvmerge.json and the rip log are read as
+/// compare_tracks.main reads them. `text` is taken against ctx.cwd when relative, and so are the files of `options`.
+/// Def: T19. Use: T19, T20, T25, T27.
+pub fn read_decide_inputs(
     ctx: &Ctx,
     rec: &Recording,
     label: &str,
     text: Option<&Path>,
     selection: Option<Selection>,
-    settings: Option<&Path>,
-) -> Result<DecideDoc, Refused> {
+    options: &PlanOptions,
+) -> Result<DecideInputs, Refused> {
     let refused = |line: String| Refused { code: 2, line };
     let tree: &dyn Tree = &rec.tree;
     let rip = rip_label(tree, &rec.dir, label).map_err(refused)?;
@@ -244,45 +316,77 @@ pub fn decide_doc(
     let title = u32::try_from(rip.title).map_err(|_| refused(format!("{}{}", NO_SUCH_TITLE, rip.title)))?;
     let scan = read_scan_in(tree, &rec.dir.join("scan.txt"), Encoding::Utf8, Errors::Replace).map_err(refused)?;
     let ident = read_ident(tree, &label_dir.join("mkvmerge.json")).map_err(refused)?;
-    let rip = read_rip_log(tree, &label_dir).map_err(refused)?;
-    let rip_log = rip.as_ref().map(|(path, text)| RipLog { shown: tree.display(path), text: text.as_str() });
-    let report = reconcile(&scan, title, &ident, selection, rip_log).map_err(refused)?;
+    let rip_log = read_rip_log(tree, &label_dir)
+        .map_err(refused)?
+        .map(|(path, text)| RipLogText { shown: tree.display(&path), text });
+    let log = rip_log.as_ref().map(|log| RipLog { shown: log.shown.clone(), text: log.text.as_str() });
+    let report = reconcile(&scan, title, &ident, selection, log).map_err(refused)?;
     let audio = audio_section(rec, label);
     let text = text.map(|dir| ctx.cwd.join(dir));
     let subtitles = subtitle_section(rec, label, text.as_deref());
+    let plan = match plan_doc(ctx, &PlanSource::Recording(rec), options) {
+        Ok(found) => PlanEntry::Results(found),
+        Err(refused) => PlanEntry::Skipped { skipped: refused.line },
+    };
+    let answers = recorded_answers(rec).map_err(|refused| refused.line);
+    let (index, packets) = read_subs(tree, &label_dir);
+    let file = FileFacts {
+        level_md5: read_level_md5(tree, &label_dir),
+        probes: read_probes(tree, &label_dir),
+        subs_index: index,
+        packets,
+    };
+    Ok(DecideInputs {
+        slug: rec.slug.clone(),
+        label: label.to_string(),
+        title: rip.title,
+        selection,
+        scan,
+        ident,
+        rip_log,
+        reconcile: report,
+        audio,
+        subtitles,
+        plan,
+        answers,
+        file,
+        library: LibraryFacts::default(),
+        overrides: None,
+    })
+}
+
+/// decide's pure renderer (K5, R-B1). It reads no file and takes no Ctx or Tree. The reviews come from `inputs.audio`
+/// and `inputs.subtitles`. The decision is the private `decision_section` when the plan is in `Results`, else
+/// "no plan: <reason>". Def: T19. Use: T19, T24, T25, T29.
+pub fn decide_doc(inputs: &DecideInputs) -> DecideDoc {
     let mut reviews: BTreeSet<&'static str> = BTreeSet::new();
-    for entry in &audio {
+    for entry in &inputs.audio {
         if let AudioEntry::Results(folder) = entry {
             reviews.extend(audio_reviews(folder));
         }
     }
-    if let SubtitleEntry::Results(subs) = &subtitles {
+    if let SubtitleEntry::Results(subs) = &inputs.subtitles {
         reviews.extend(subtitle_reviews(subs));
     }
-    let options = PlanOptions { settings: settings.map(Path::to_path_buf), ..PlanOptions::default() };
-    let plan = match plan_doc(ctx, &PlanSource::Recording(rec), &options) {
-        Ok(found) => PlanEntry::Results(found),
-        Err(refused) => PlanEntry::Skipped { skipped: refused.line },
-    };
     let mut doc = DecideDoc {
-        slug: rec.slug.clone(),
-        label: label.to_string(),
-        reconcile: report,
-        audio,
-        subtitles,
+        slug: inputs.slug.clone(),
+        label: inputs.label.clone(),
+        reconcile: inputs.reconcile.clone(),
+        audio: inputs.audio.clone(),
+        subtitles: inputs.subtitles.clone(),
         reviews: reviews.into_iter().map(str::to_string).collect(),
-        plan,
+        plan: inputs.plan.clone(),
         decision: DecisionEntry::Skipped { skipped: UNDECIDED.to_string() },
     };
     let decision = match &doc.plan {
-        PlanEntry::Results(found) => match decision_doc(ctx, rec, label, found, &doc) {
+        PlanEntry::Results(found) => match decision_section(inputs, found, &doc) {
             Ok(decided) => DecisionEntry::Results(decided),
             Err(why) => DecisionEntry::Skipped { skipped: why },
         },
         PlanEntry::Skipped { skipped } => DecisionEntry::Skipped { skipped: format!("{}{}", NO_PLAN, skipped) },
     };
     doc.decision = decision;
-    Ok(doc)
+    doc
 }
 
 /// mkvmerge.json: Err is the read or decode text, or "<shown>: <serde_json's message>" when it is not the JSON
@@ -341,7 +445,7 @@ fn reading_folder(text: &Path, slug: &str, label: &str) -> Option<(PathBuf, Stri
 fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>) -> SubtitleEntry {
     let text = match text {
         Some(text) => text,
-        None => return SubtitleEntry::Skipped { skipped: format!("no OCR text {}", TEXT_HINT) },
+        None => return no_text_entry(),
     };
     let (dir, reading) = match reading_folder(text, &rec.slug, label) {
         Some(found) => found,
@@ -362,10 +466,17 @@ fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>) -> Subtit
     }
 }
 
+/// The subtitles section of a run with no OCR text: Skipped "no OCR text {TEXT_HINT}". The engine uses it in PR 2
+/// (design part 5.7, S33). Def: T19. Use: T19, T24.
+pub fn no_text_entry() -> SubtitleEntry {
+    SubtitleEntry::Skipped { skipped: format!("no OCR text {}", TEXT_HINT) }
+}
+
 /// `--rec DIR`: the rip label folder, as subtitle_text.py's --rec. Its parent is the recording, named as a path (so
 /// no evidence check, spec 3.4), and its last component the label, both as pathlib splits the path as given
 /// (`pathlib_split`); a DIR whose name is empty, "." or ".." is resolved first. Err (exit 2) when DIR is not a folder.
-fn rec_folder(ctx: &Ctx, dir: &str) -> Result<(Recording, String), Refused> {
+/// Now pub for the engine (design part 7.1). Def: T19. Use: T24, T25.
+pub fn rec_folder(ctx: &Ctx, dir: &str) -> Result<(Recording, String), Refused> {
     if !ctx.abs(dir).is_dir() {
         return Err(Refused { code: 2, line: format!("--rec {}: no such folder", dir) });
     }
@@ -452,13 +563,15 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         }
     };
     let text = ocr_text_dir(ctx, text.as_deref());
-    let doc = match decide_doc(ctx, &rec, &label, text.as_deref(), selection, settings.as_deref().map(Path::new)) {
-        Ok(doc) => doc,
+    let options = PlanOptions { settings: settings.map(PathBuf::from), ..PlanOptions::default() };
+    let inputs = match read_decide_inputs(ctx, &rec, &label, text.as_deref(), selection, &options) {
+        Ok(inputs) => inputs,
         Err(refused) => {
             let _ = writeln!(err, "lazymkv-dev {}: error: {}", NAME, refused.line);
             return refused.code;
         }
     };
+    let doc = decide_doc(&inputs);
     let value = match serde_json::to_value(&doc) {
         Ok(value) => value,
         Err(error) => {
@@ -483,54 +596,50 @@ struct ContentVerdicts {
     veto_holds: bool,
 }
 
-/// The file phase of one rip label (RP14, spec 6.4 step 11), as phase 2's engine will run it after a Direct rip. The
-/// label's title (`doc.reconcile.title`, with the selection decide used) must be one of `plan`'s titles (Err "the plan
-/// does not include title <n> (planned: <titles>)"). <slug>/scan.txt is typed (`disc::disc`) and the rip's
-/// mkvmerge.json is verified against the scan's title with the rip log (`verify::verify_rip`, spec 6.2 step 7), whose
-/// pairs map every file track onto its scan stream. The title is narrowed to the selected streams (`verify::rip_title`,
-/// the one copy `retune --subtitles` shares), so a rip with the eng selection is decided over the streams it holds. The facts: every level folder's manifest.txt and
-/// audio-proxy.json give the packet MD5s (6.4 step 10a, D13), ffprobe-streams.json the audio profiles (6.4 step 9),
-/// subs/ the event start times at `plan.settings.sub_clear_max_bytes` (`verify::subtitle_events`, 8.7), decide's
-/// reconcile section the streams MakeMKV removed (its `dropped` rows, `MSG:4047`), decide's audio section the content
-/// rule's verdicts against their `main=` stream (RP7), decide's subtitles section the text rule's decisions (8.7
-/// "Text", passed through unchanged: `decide_subtitles` uses them only where 6.4 step 10 runs), and the lookup answers as the plan section parsed them (`cmd::plan::recorded_answers`) TheDiscDB's matched
-/// title (`lookup::discdb::match_titles`) and the TMDb record that names the file when it is the plan's identity
-/// (8.9); the rip's read errors and `verify::failure_reviews(&report, !report.ok)` are carried in (the recorded rip is
-/// the last attempt there will be, so a rip that fails verification raises verify_failed, as 6.2 step 7's second
-/// failure does). The settings are the plan's; `LibraryFacts` are the defaults (phase 2 reads the library, RP18).
-/// `decision::decide` then gives the FileDecision, and `decision::same_path_reviews` runs over the job's decisions as
-/// phase 2's engine runs it (decide holds one title, so it adds nothing here). Err with the sentence of an input that
-/// cannot be read, or decide's.
-/// `_ctx` is not read: every input is under the recording's tree.
-pub fn decision_doc(
-    _ctx: &Ctx,
-    rec: &Recording,
-    label: &str,
-    plan: &PlanDoc,
-    doc: &DecideDoc,
-) -> Result<DecisionDoc, String> {
-    let tree: &dyn Tree = &rec.tree;
-    let label_dir = rec.dir.join(label);
+/// The file phase of one rip label (RP14, spec 6.4 step 11), as phase 2's engine runs it after a Direct rip, rendered
+/// from the read inputs (K5): it reads no file. The label's title (`doc.reconcile.title`, with the selection decide
+/// used) must be one of `plan`'s titles (Err "the plan does not include title <n> (planned: <titles>)"). The scan
+/// (`inputs.scan`) is typed (`disc::disc`) and the rip's mkvmerge.json (`inputs.ident`) is verified against the scan's
+/// title with the rip log (`verify::verify_rip`, spec 6.2 step 7), whose pairs map every file track onto its scan
+/// stream. The title is narrowed to the selected streams (`verify::rip_title`, the one copy `retune --subtitles`
+/// shares), so a rip with the eng selection is decided over the streams it holds. The facts of `inputs.file`, each
+/// read error surfaced here in this order: the level folders' packet MD5s (6.4 step 10a, D13, `md5_by_stream`), the
+/// audio profiles of ffprobe-streams.json (6.4 step 9, `profiles_by_stream`), and the event start times of subs/ at
+/// `plan.settings.sub_clear_max_bytes` (`verify::subtitle_events_of`, 8.7; none without subs/index.json). Then decide's
+/// reconcile section gives the streams MakeMKV removed (its `dropped` rows, `MSG:4047`), decide's audio section the
+/// content rule's verdicts against their `main=` stream (RP7), decide's subtitles section the text rule's decisions
+/// (8.7 "Text", passed through unchanged: `decide_subtitles` uses them only where 6.4 step 10 runs), and the lookup
+/// answers as the plan section parsed them (`inputs.answers`, `cmd::plan::recorded_answers`) TheDiscDB's matched title
+/// (`lookup::discdb::match_titles`) and the TMDb record that names the file when it is the plan's identity (8.9); the
+/// rip's read errors and `verify::failure_reviews(&report, !report.ok)` are carried in (the recorded rip is the last
+/// attempt there will be, so a rip that fails verification raises verify_failed, as 6.2 step 7's second failure does).
+/// The settings are the plan's, and the library facts and overrides the inputs' (the readers give `LibraryFacts`'
+/// defaults and none: phase 2 reads the library, RP18). `decision::decide` then gives the FileDecision, and
+/// `decision::same_path_reviews` runs over the job's decisions as phase 2's engine runs it (decide holds one title, so
+/// it adds nothing here). Err with the sentence of an input that could not be read, or decide's.
+fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> Result<DecisionDoc, String> {
     let number = doc.reconcile.title;
     let planned = planned_title(&plan.plan, number)?;
-    let scan = read_scan_in(tree, &rec.dir.join("scan.txt"), Encoding::Utf8, Errors::Replace)?;
-    let typed = disc::disc(&scan)?;
+    let typed = disc::disc(&inputs.scan)?;
     let scanned = typed.title(number)?;
-    let selection = selected_streams(&scan, number, doc.reconcile.selection)?;
-    let ident = read_ident(tree, &label_dir.join("mkvmerge.json"))?;
-    let rip_text = read_rip_log(tree, &label_dir)?.map(|(_, text)| text);
-    let report = verify_rip(scanned, &ident, &selection, rip_text.as_deref(), typed.is_dvd);
+    let selection = selected_streams(&inputs.scan, number, doc.reconcile.selection)?;
+    let rip_text = inputs.rip_log.as_ref().map(|log| log.text.as_str());
+    let report = verify_rip(scanned, &inputs.ident, &selection, rip_text, typed.is_dvd);
     let title = rip_title(scanned, &selection);
     let settings = &plan.settings;
     // MSG:4047's removals as decide's own reconcile section counted them (6.2 step 7): not computed a second time.
     let removed: BTreeSet<u32> = doc.reconcile.dropped.iter().map(|row| row.stream).collect();
-    let md5 = level_md5s(tree, &label_dir, &report)?;
-    let profiles = ffprobe_profiles(tree, &label_dir, &report)?;
-    let events = subtitle_starts(tree, &label_dir, &report, settings.sub_clear_max_bytes)?;
+    let md5 = md5_by_stream(inputs.file.level_md5.as_ref().map_err(Clone::clone)?, &report);
+    let profiles = profiles_by_stream(inputs.file.probes.as_ref().map_err(Clone::clone)?.as_ref(), &report);
+    let events = match &inputs.file.subs_index {
+        Err(error) => return Err(error.clone()),
+        Ok(None) => BTreeMap::new(),
+        Ok(Some(index)) => subtitle_events_of(index, &inputs.file.packets, &report, settings.sub_clear_max_bytes)?,
+    };
     let verdicts = content_verdicts(&doc.audio, &report);
-    let text = text_decisions(&doc.subtitles, tree, &label_dir, &report, settings)?;
+    let text = text_decisions(&doc.subtitles, &inputs.file.subs_index, &report, settings)?;
     // The lookup answers exactly as the plan section parsed them (a non-200 answer is left unparsed there).
-    let answers = recorded_answers(rec).map_err(|refused| refused.line)?;
+    let answers = inputs.answers.as_ref().map_err(Clone::clone)?;
     let record = record_for_naming(plan.plan.identity.tmdb, answers.recorded.clone());
     let (rip_reviews, read_errors) = (failure_reviews(&report, !report.ok), report.read_errors.clone());
     // TheDiscDB's record as plan_doc chose it: the fingerprint's, else the first disc-ID record with titles.
@@ -548,8 +657,7 @@ pub fn decision_doc(
         text_streams: if step10_runs(&title, &removed) { text.keys().copied().collect() } else { Vec::new() },
         removed: removed.iter().copied().collect(),
     };
-    let library = LibraryFacts::default();
-    let inputs = DecisionInputs {
+    let decision_inputs = DecisionInputs {
         plan: &plan.plan,
         disc: &typed,
         planned,
@@ -573,14 +681,14 @@ pub fn decision_doc(
             reviewed: None,
         },
         record: record.as_ref(),
-        library: &library,
+        library: &inputs.library,
         rip_reviews,
         read_errors,
-        overrides: None,
+        overrides: inputs.overrides.as_ref(),
         settings,
     };
     // The job-level step after every title is decided (spec 7, 8.9): decide holds one title, so it never raises here.
-    let mut decisions = [file_decision(&inputs)?];
+    let mut decisions = [file_decision(&decision_inputs)?];
     same_path_reviews(&mut decisions);
     let [decision] = decisions;
     Ok(DecisionDoc { title_key: planned.key.clone(), verify: report, facts, decision })
@@ -597,12 +705,13 @@ fn record_for_naming(identity: Option<TmdbIdentity>, record: Option<TmdbRecord>)
 /// by its subs/index.json `n`, mapped through the index's track ids and the verify report's pairs
 /// (`verify::subs_streams`, `verify::by_scan_stream`); a stream without a decision is left out. Empty when the section
 /// was skipped (no OCR text), and when `settings.text_rule()` is not `text::Rule::default()`, the rule the section ran
-/// with, since its decisions answer other thresholds (spec 14's subtitle settings, RP15). subs/index.json is read by
-/// `verify::subs_index`, the reading `verify::subtitle_events` shares. Err when it cannot be read or does not parse.
+/// with, since its decisions answer other thresholds (spec 14's subtitle settings, RP15). `index` is the readers'
+/// subs/index.json (`FileFacts.subs_index`), the one reading the subtitle events share, so an index that gave the
+/// events never turns the text into an Err that skips the decision. Empty when the label has no subs/index.json (S48);
+/// Err with the read error when it could not be read or did not parse.
 fn text_decisions(
     subtitles: &SubtitleEntry,
-    tree: &dyn Tree,
-    label_dir: &PathKey,
+    index: &Result<Option<Vec<SubsIndexEntry>>, String>,
     report: &VerifyReport,
     settings: &Settings,
 ) -> Result<BTreeMap<u32, TextDecision>, String> {
@@ -612,12 +721,14 @@ fn text_decisions(
     if settings.text_rule() != TextRule::default() {
         return Ok(BTreeMap::new());
     }
+    let index = match index {
+        Ok(Some(index)) => index,
+        Ok(None) => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.clone()),
+    };
     let by_n: BTreeMap<i64, TextDecision> =
         subs.streams.iter().filter_map(|stream| stream.decide.clone().map(|decided| (stream.n, decided))).collect();
-    // Read as verify::subtitle_events reads it (invalid bytes replaced), so an index that gave the events never turns
-    // the text into an Err that skips the decision.
-    let index = subs_index(tree, &label_dir.join("subs"))?;
-    Ok(by_scan_stream(&by_n, &subs_streams(&index, report)))
+    Ok(by_scan_stream(&by_n, &subs_streams(index, report)))
 }
 
 /// The content rule's verdicts of decide's audio section, as 8.6 "Content" takes them (RP7): each measured level
@@ -689,15 +800,15 @@ fn track_stream(text: &str, report: &VerifyReport) -> Option<u32> {
     text.trim().parse::<i64>().ok().and_then(|track| stream_of_track(report, track))
 }
 
-/// The packet MD5 of every audio stream the label's level folders hold (6.4 step 10a, D13), keyed by scan stream: over
-/// every audio-levels-20ms-* folder in PathKey order, first the `md5=` of each manifest.txt line with `main=` or
-/// `cand=`, then the `source.md5` of each audio-proxy.json track by its `source_stream` (both ffprobe stream numbers of
-/// the file, mapped through the verify pairs); the first MD5 of a stream wins; `-` or empty is no MD5. The manifests are
-/// git-ignored side files, like the level series, but audio-proxy.json is tracked and holds the same MD5s for every
-/// audio stream of the file, so a clone without the level files keeps them. Err when a manifest cannot be read or an
-/// audio-proxy.json does not parse.
-fn level_md5s(tree: &dyn Tree, label_dir: &PathKey, report: &VerifyReport) -> Result<BTreeMap<u32, String>, String> {
-    let mut md5 = BTreeMap::new();
+/// The (file track, trimmed digest) pairs of the label's level folders, the reading half of the packet MD5s (6.4 step
+/// 10a, D13): over every audio-levels-20ms-* folder in PathKey order, first the `main` or `cand` value and the `md5=`
+/// of each manifest.txt line with `main=` or `cand=`, then the `source_stream` and `source.md5` of each
+/// audio-proxy.json track (both ffprobe stream numbers of the file). The manifests are git-ignored side files, like the
+/// level series, but audio-proxy.json is tracked and holds the same MD5s for every audio stream of the file, so a clone
+/// without the level files keeps them. Err when a manifest cannot be read or an audio-proxy.json cannot be read or
+/// does not parse.
+fn read_level_md5(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(Option<i64>, Option<String>)>, String> {
+    let mut read = Vec::new();
     for folder in tree.glob(label_dir, LEVEL_FOLDERS) {
         if !tree.is_dir(&folder) {
             continue;
@@ -706,21 +817,34 @@ fn level_md5s(tree: &dyn Tree, label_dir: &PathKey, report: &VerifyReport) -> Re
         let main = manifest.main.iter().map(|fields| (fields, "main"));
         let lines = main.chain(manifest.cands.iter().map(|fields| (fields, "cand")));
         for (fields, key) in lines {
-            let stream = fields.get(key).and_then(|text| track_stream(text, report));
-            first_md5(&mut md5, stream, fields.get("md5").map(|text| text.trim()));
+            read.push((
+                fields.get(key).and_then(|text| text.trim().parse::<i64>().ok()),
+                fields.get("md5").map(|text| text.trim().to_string()),
+            ));
         }
         let proxy_path = folder.join("audio-proxy.json");
         if tree.is_file(&proxy_path) {
             let text = read_text(tree, &proxy_path, Encoding::Utf8Sig, Errors::Strict)?;
             let proxy = parse_proxy(&text).map_err(|error| format!("{}: {}", tree.display(&proxy_path), error))?;
             for track in &proxy.tracks {
-                let stream = track.source_stream.as_i64().and_then(|index| stream_of_track(report, index));
                 let digest = track.source.as_ref().and_then(|source| source.get("md5")).and_then(|value| value.as_str());
-                first_md5(&mut md5, stream, digest.map(str::trim));
+                read.push((track.source_stream.as_i64(), digest.map(|text| text.trim().to_string())));
             }
         }
     }
-    Ok(md5)
+    Ok(read)
+}
+
+/// The packet MD5 of every audio stream the label's level folders hold (6.4 step 10a, D13), keyed by scan stream, the
+/// rendering half of `read_level_md5`: each pair's file track mapped through the verify pairs (`stream_of_track`), in
+/// the pairs' order; the first MD5 of a stream wins; `-` or empty is no MD5.
+fn md5_by_stream(level_md5: &[(Option<i64>, Option<String>)], report: &VerifyReport) -> BTreeMap<u32, String> {
+    let mut md5 = BTreeMap::new();
+    for (track, digest) in level_md5 {
+        let stream = track.and_then(|track| stream_of_track(report, track));
+        first_md5(&mut md5, stream, digest.as_deref());
+    }
+    md5
 }
 
 /// Records `digest` as the MD5 of `stream` unless the stream already has one; a missing stream, a missing digest, an
@@ -732,44 +856,49 @@ fn first_md5(md5: &mut BTreeMap<u32, String>, stream: Option<u32>, digest: Optio
     }
 }
 
-/// ffprobe's profile of every audio stream of the file (6.4 step 9: "DTS-HD MA", "DTS"), from
-/// <label>/ffprobe-streams.json, keyed by scan stream; streams without a profile are left out. Empty when the file is
-/// absent; Err "<path>: <serde's message>" when it does not parse.
-fn ffprobe_profiles(
-    tree: &dyn Tree,
-    label_dir: &PathKey,
-    report: &VerifyReport,
-) -> Result<BTreeMap<u32, String>, String> {
+/// <label>/ffprobe-streams.json, the reading half of the audio profiles (6.4 step 9): None when the file is absent;
+/// Err "<path>: <serde's message>" when it does not parse.
+fn read_probes(tree: &dyn Tree, label_dir: &PathKey) -> Result<Option<FfprobeStreams>, String> {
     let path = label_dir.join("ffprobe-streams.json");
     if !tree.is_file(&path) {
-        return Ok(BTreeMap::new());
+        return Ok(None);
     }
-    let probe: FfprobeStreams = read_json(tree, &path).map_err(|error| format!("{}: {}", tree.display(&path), error))?;
-    Ok(probe
-        .streams
-        .iter()
+    read_json(tree, &path).map(Some).map_err(|error| format!("{}: {}", tree.display(&path), error))
+}
+
+/// ffprobe's profile of every audio stream of the file (6.4 step 9: "DTS-HD MA", "DTS"), keyed by scan stream, the
+/// rendering half of `read_probes`; streams without a profile are left out. Empty without ffprobe-streams.json.
+fn profiles_by_stream(probes: Option<&FfprobeStreams>, report: &VerifyReport) -> BTreeMap<u32, String> {
+    probes
+        .into_iter()
+        .flat_map(|probe| &probe.streams)
         .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
         .filter_map(|stream| {
             let profile = stream.profile.as_deref().filter(|profile| !profile.is_empty())?;
             Some((stream_of_track(report, stream.index)?, profile.to_string()))
         })
-        .collect())
+        .collect()
 }
 
-/// The event start times of every subtitle stream the label's subs/ folder holds (6.4 step 10, 8.7 "Events"), keyed by
-/// scan stream: `verify::subtitle_events` at `clear_max_bytes` (spec 14 `sub_clear_max_bytes`). Empty when the label
-/// has no subs/index.json (6.4 step 10 skipped, or a title without subtitles).
-fn subtitle_starts(
+/// The label's subs/ folder, the reading half of the event start times (6.4 step 10, 8.7 "Events"): subs/index.json
+/// through `verify::subs_index` (Ok(None) when it is not a file: 6.4 step 10 skipped, or a title without subtitles),
+/// and on Ok `verify::read_packets_file` for every index entry, mapped or not, each error held in its entry
+/// (`verify::subtitle_events_of` reads the mapped ones only).
+fn read_subs(
     tree: &dyn Tree,
     label_dir: &PathKey,
-    report: &VerifyReport,
-    clear_max_bytes: i64,
-) -> Result<BTreeMap<u32, Vec<f64>>, String> {
+) -> (Result<Option<Vec<SubsIndexEntry>>, String>, BTreeMap<i64, PacketsFile>) {
     let subs = label_dir.join("subs");
     if !tree.is_file(&subs.join("index.json")) {
-        return Ok(BTreeMap::new());
+        return (Ok(None), BTreeMap::new());
     }
-    subtitle_events(tree, &subs, report, clear_max_bytes)
+    match subs_index(tree, &subs) {
+        Ok(index) => {
+            let packets = index.iter().map(|entry| (entry.n, read_packets_file(tree, &subs, entry.n))).collect();
+            (Ok(Some(index)), packets)
+        }
+        Err(error) => (Err(error), BTreeMap::new()),
+    }
 }
 
 /// The database title matched to scan title `number` (spec 8.3 "Database titles are matched to scan titles",
@@ -785,7 +914,7 @@ mod tests {
     use std::fs;
 
     use lazymkv_core::audio::report::CandidateJson;
-    use lazymkv_core::audio::rule::{Dialogue, Veto};
+    use lazymkv_core::audio::rule::{Dialogue, Veto, RULE_VERSION};
     use lazymkv_core::decision::{Confidences, Disposition};
     use lazymkv_core::lookup::tmdb::{parse_recorded, TmdbIdentity, TmdbKind};
     use lazymkv_core::lookup::{DescriptionKind, IdentityStep, Kind};
@@ -937,12 +1066,13 @@ SINFO:0,4,6,0,"PGS"
         written
     }
 
-    /// decide_doc over recs/disc-a (named by its path, so printed as recs/disc-a/...) with cwd `root` and no settings
-    /// file.
+    /// decide_doc over the inputs read from recs/disc-a (named by its path, so printed as recs/disc-a/...) with cwd
+    /// `root` and no settings file.
     fn doc_of(root: &Path, label: &str, text: Option<&str>, selection: Option<Selection>) -> Result<DecideDoc, Refused> {
         let ctx = Ctx::for_test(root);
         let rec = resolve_recording(&ctx, None, "recs/disc-a").unwrap();
-        decide_doc(&ctx, &rec, label, text.map(Path::new), selection, None)
+        read_decide_inputs(&ctx, &rec, label, text.map(Path::new), selection, &PlanOptions::default())
+            .map(|inputs| decide_doc(&inputs))
     }
 
     /// The command with cwd `root` and no environment: (exit code, stdout, stderr).
@@ -1701,12 +1831,12 @@ SINFO:0,4,6,0,"PGS"
         subs_b(&label, &[5, 6]);
     }
 
-    /// decide_doc over recs/disc-b (named by its path) with cwd `root`, no OCR text, the profile's selection and no
-    /// settings file (spec 14's defaults).
+    /// decide_doc over the inputs read from recs/disc-b (named by its path) with cwd `root`, no OCR text, the
+    /// profile's selection and no settings file (spec 14's defaults).
     fn doc_b(root: &Path, label: &str) -> DecideDoc {
         let ctx = Ctx::for_test(root);
         let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
-        decide_doc(&ctx, &rec, label, None, None, None).unwrap()
+        decide_doc(&read_decide_inputs(&ctx, &rec, label, None, None, &PlanOptions::default()).unwrap())
     }
 
     /// The decision section's document; panics with the reason when it was skipped.
@@ -1734,7 +1864,8 @@ SINFO:0,4,6,0,"PGS"
         disc_b(&root);
         let ctx = Ctx::for_test(&root);
         let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
-        let doc = decide_doc(&ctx, &rec, "all-tracks", None, None, None).unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &PlanOptions::default()).unwrap();
+        let doc = decide_doc(&inputs);
         let expected = plan_doc(&ctx, &PlanSource::Recording(&rec), &PlanOptions::default()).unwrap();
         assert_eq!(doc.plan, PlanEntry::Results(expected.clone()));
         // decide plans with spec 14's defaults.
@@ -1871,7 +2002,8 @@ SINFO:0,4,6,0,"PGS"
         let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
         let refused = plan_doc(&ctx, &PlanSource::Recording(&rec), &PlanOptions::default()).unwrap_err();
         assert_eq!(refused.code, 2);
-        let doc = decide_doc(&ctx, &rec, "all-tracks", None, None, None).unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &PlanOptions::default()).unwrap();
+        let doc = decide_doc(&inputs);
         assert_eq!(doc.plan, PlanEntry::Skipped { skipped: refused.line.clone() });
         assert_eq!(doc.decision, DecisionEntry::Skipped { skipped: format!("no plan: {}", refused.line) });
         // decide still prints its document and exits with the reconciler's code.
@@ -1969,8 +2101,9 @@ SINFO:0,4,6,0,"PGS"
         assert_eq!(results_of(&doc.decision).facts.md5_streams, vec![1, 2, 3, 4]);
     }
 
-    /// decision_doc over recs/disc-b's `label` after `change` edited the plan decide made and decide's document (its
-    /// audio and subtitles sections), as the engine decides with other settings or other evidence.
+    /// decision_section over the inputs read from recs/disc-b's `label` after `change` edited the plan decide made and
+    /// decide's document (its audio and subtitles sections), as the engine decides with other settings or other
+    /// evidence.
     fn decided_with(
         root: &Path,
         label: &str,
@@ -1978,13 +2111,14 @@ SINFO:0,4,6,0,"PGS"
     ) -> Result<DecisionDoc, String> {
         let ctx = Ctx::for_test(root);
         let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
-        let mut doc = decide_doc(&ctx, &rec, label, None, None, None).unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, label, None, None, &PlanOptions::default()).unwrap();
+        let mut doc = decide_doc(&inputs);
         let mut plan = match &doc.plan {
             PlanEntry::Results(found) => found.clone(),
             PlanEntry::Skipped { skipped } => panic!("the plan was skipped: {skipped}"),
         };
         change(&mut plan, &mut doc);
-        decision_doc(&ctx, &rec, label, &plan, &doc)
+        decision_section(&inputs, &plan, &doc)
     }
 
     /// A level folder's results as decide's audio section holds them: measured against file track `main`, with these
@@ -2346,7 +2480,8 @@ SINFO:0,4,6,0,"PGS"
         // decide_doc with the settings file (spec 14): the plan carries the root, and decide's own decision files.
         let ctx = Ctx::for_test(&root);
         let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
-        let doc = decide_doc(&ctx, &rec, "all-tracks", None, None, Some(Path::new("settings.json"))).unwrap();
+        let options = PlanOptions { settings: Some(PathBuf::from("settings.json")), ..PlanOptions::default() };
+        let doc = decide_doc(&read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &options).unwrap());
         let PlanEntry::Results(plan) = &doc.plan else {
             panic!("the plan was skipped: {:?}", doc.plan);
         };
@@ -2362,7 +2497,8 @@ SINFO:0,4,6,0,"PGS"
         assert_eq!(value["decision"]["decision"]["disposition"], json!("auto_file"));
         // A settings file plan_doc refuses (an unknown key, Task 15) skips the plan with its line, and the decision.
         write(&root.join("bad-settings.json"), r#"{"bogus": 1}"#);
-        let doc = decide_doc(&ctx, &rec, "all-tracks", None, None, Some(Path::new("bad-settings.json"))).unwrap();
+        let options = PlanOptions { settings: Some(PathBuf::from("bad-settings.json")), ..PlanOptions::default() };
+        let doc = decide_doc(&read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &options).unwrap());
         let PlanEntry::Skipped { skipped } = &doc.plan else {
             panic!("the plan was not skipped: {:?}", doc.plan);
         };
@@ -2488,5 +2624,90 @@ SINFO:0,4,6,0,"PGS"
             }
         }
         assert!(differing.is_empty(), "characterisation files that differ from decide's output: {differing:?}");
+    }
+
+    #[test]
+    fn run_prints_the_rendering_of_the_read_inputs() {
+        let tmp = Scratch::new("read-then-render");
+        let root = tmp.0.clone();
+        let label = recording(&root);
+        level_folders(&label);
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-a").unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, "eng-only", None, None, &PlanOptions::default()).unwrap();
+        let printed = dumps(&serde_json::to_value(decide_doc(&inputs)).unwrap(), Style::INDENT1_ASCII);
+        let (code, out, err) = run_in(&root, &["recs/disc-a", "eng-only"]);
+        assert_eq!((code, out, err.as_str()), (0, format!("{printed}\n"), ""));
+    }
+
+    #[test]
+    fn the_renderer_reads_no_file() {
+        let tmp = Scratch::new("render-no-file");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        forced_kept(&root);
+        write(&root.join("recs/disc-b/thediscdb-hash.json"), discdb_answer());
+        write(&root.join("recs/disc-b/tmdb.json"), tmdb_answer(4242));
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, "forced-kept", None, None, &PlanOptions::default()).unwrap();
+        let before = decide_doc(&inputs);
+        // The file facts reached the inputs: MD5s, profiles and subtitle events.
+        let facts = &results_of(&before.decision).facts;
+        assert!(
+            !facts.md5_streams.is_empty() && !facts.profile_streams.is_empty() && !facts.event_streams.is_empty(),
+            "{facts:?}"
+        );
+        fs::remove_dir_all(root.join("recs")).unwrap();
+        assert_eq!(decide_doc(&inputs), before);
+    }
+
+    #[test]
+    fn a_title_the_scan_lacks_is_refused_by_the_reader_with_code_2() {
+        let tmp = Scratch::new("reader-refuses");
+        let root = tmp.0.clone();
+        let label = recording(&root);
+        write(&label.join("rip-summary.json"), "{\"ok\": true, \"title\": 7}");
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-a").unwrap();
+        let refused = read_decide_inputs(&ctx, &rec, "eng-only", None, None, &PlanOptions::default()).unwrap_err();
+        assert_eq!(refused, Refused { code: 2, line: "the scan lists no title 7".to_string() });
+    }
+
+    #[test]
+    fn the_engine_document_appends_the_rule_and_lazymkv_versions() {
+        let tmp = Scratch::new("engine-doc");
+        let root = tmp.0.clone();
+        recording(&root);
+        let doc = doc_of(&root, "eng-only", None, None).unwrap();
+        let engine = EngineDecideDoc {
+            doc: doc.clone(),
+            audio_rule_version: RULE_VERSION,
+            lazymkv_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let value = serde_json::to_value(&engine).unwrap();
+        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["slug", "label", "reconcile", "audio", "subtitles", "reviews", "plan", "decision", "audio_rule_version",
+             "lazymkv_version"]
+        );
+        assert_eq!((value["audio_rule_version"].clone(), value["lazymkv_version"].clone()), (json!(1), json!("0.0.0")));
+        let mut without = value.clone();
+        let map = without.as_object_mut().unwrap();
+        map.remove("audio_rule_version");
+        map.remove("lazymkv_version");
+        assert_eq!(without, serde_json::to_value(&doc).unwrap());
+    }
+
+    #[test]
+    fn the_engines_subtitles_entry_is_the_no_ocr_text_skip() {
+        let expected =
+            SubtitleEntry::Skipped { skipped: "no OCR text (give --text DIR or LAZYMKV_OCR_TEXT)".to_string() };
+        assert_eq!(no_text_entry(), expected);
+        let tmp = Scratch::new("no-text-entry");
+        let root = tmp.0.clone();
+        recording(&root);
+        assert_eq!(doc_of(&root, "eng-only", None, None).unwrap().subtitles, expected);
     }
 }
