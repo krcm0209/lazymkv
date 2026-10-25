@@ -400,10 +400,13 @@ mod tests {
     }
 
     /// Accepts one connection, writes `before`; with `answer` Some, reads one request line and writes the answer;
-    /// then closes the connection. Returns the request line, or "" when none was read.
-    fn peer(ipc: MemoryIpc, before: Vec<String>, answer: Option<Vec<String>>) -> JoinHandle<String> {
+    /// then closes the connection. Returns the request line, or "" when none was read; None when nothing connected
+    /// before the test dropped its connector (`finish`), which makes `accept` fail instead of waiting forever.
+    fn peer(ipc: MemoryIpc, before: Vec<String>, answer: Option<Vec<String>>) -> JoinHandle<Option<String>> {
         thread::spawn(move || {
-            let mut stream = ipc.accept().unwrap();
+            let Ok(mut stream) = ipc.accept() else {
+                return None;
+            };
             let send = |lines: &[String], stream: &mut lazymkv_platform::IpcStream| {
                 for line in lines {
                     write!(stream.writer, "{}\n", line.trim_end_matches('\n')).unwrap();
@@ -416,8 +419,16 @@ mod tests {
                 stream.reader.read_line(&mut request).unwrap();
                 send(&lines, &mut stream);
             }
-            request
+            Some(request)
         })
+    }
+
+    /// Drops the test's only connector, so a peer still waiting in `accept` fails at once, then returns the peer's
+    /// request line. The test fails here, rather than hanging, when lazymkvctl never connected.
+    fn finish(server: JoinHandle<Option<String>>, connector: MemoryConnector) -> String {
+        drop(connector);
+        let request = server.join().expect("the scripted peer's thread panicked; its message is printed above");
+        request.expect("lazymkvctl never connected to the scripted peer")
     }
 
     fn request_of(line: &str) -> Value {
@@ -498,7 +509,7 @@ mod tests {
         let (ipc, connector) = MemoryIpc::new();
         let server = peer(ipc, vec![SNAPSHOT.to_string()], None);
         let (code, out, err) = call(&["status"], Some(&connector), b"", &scratch.0);
-        server.join().unwrap();
+        finish(server, connector);
         assert_eq!((code, out.as_str(), err.as_str()), (0, "{\n \"jobs\": []\n}\n", ""));
     }
 
@@ -514,7 +525,7 @@ mod tests {
         ];
         let server = peer(ipc, lines.clone(), None);
         let (code, out, err) = call(&["watch"], Some(&connector), b"", &scratch.0);
-        assert_eq!(server.join().unwrap(), "");
+        assert_eq!(finish(server, connector), "");
         assert_eq!((code, err.as_str()), (0, ""));
         assert_eq!(out, lines.join("\n") + "\n");
     }
@@ -539,7 +550,7 @@ mod tests {
             let answer = vec![selftest_push.clone(), reply_ok(Some(1), json!([]))];
             let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(answer));
             let (code, out, err) = call(&argv, Some(&connector), b"", &scratch.0);
-            let request = request_of(&server.join().unwrap());
+            let request = request_of(&finish(server, connector));
             assert_eq!(request, json!({"v": 1, "type": kind, "id": 1, "payload": payload}), "{argv:?}");
             assert_eq!((code, out.as_str(), err.as_str()), (0, printed, ""), "{argv:?}");
         }
@@ -555,7 +566,7 @@ mod tests {
             let (ipc, connector) = MemoryIpc::new();
             let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![reply_ok(Some(1), Value::Null)]));
             let (code, out, err) = call(&["secret", "set", name], Some(&connector), stdin, &scratch.0);
-            let request = request_of(&server.join().unwrap());
+            let request = request_of(&finish(server, connector));
             assert_eq!(request["type"], "secret_set");
             assert_eq!(request["payload"], json!({"name": name, "value": value}));
             assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
@@ -574,7 +585,7 @@ mod tests {
             Some(vec![reply_error(Some(1), "the settings were refused", &[problem])]),
         );
         let (code, out, err) = call(&["settings", "set", file.to_str().unwrap()], Some(&connector), b"", &scratch.0);
-        let request = request_of(&server.join().unwrap());
+        let request = request_of(&finish(server, connector));
         assert_eq!(request, json!({"v": 1, "type": "settings_set", "id": 1, "payload": {"cache_mb": "big"}}));
         assert_eq!(
             (code, out.as_str(), err.as_str()),
@@ -588,7 +599,7 @@ mod tests {
         let (ipc, connector) = MemoryIpc::new();
         let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![]));
         let (code, out, err) = call(&["retry", "a-1"], Some(&connector), b"", &scratch.0);
-        server.join().unwrap();
+        finish(server, connector);
         assert_eq!(
             (code, out.as_str(), err.as_str()),
             (4, "", "lazymkvctl: the engine closed the connection before replying\n")
@@ -613,7 +624,7 @@ mod tests {
         );
         let argv = ["decide", "--job", "a-1", "--title", "t00-00800"];
         let (code, out, err) = call(&argv, Some(&connector), b"", &scratch.0);
-        let request = request_of(&server.join().unwrap());
+        let request = request_of(&finish(server, connector));
         assert_eq!(request, json!({"v": 1, "type": "command", "id": 1, "payload": {"words": argv}}));
         assert_eq!((code, out.as_str(), err.as_str()), (3, "{\n", "warning: x\n"));
     }
@@ -628,7 +639,7 @@ mod tests {
             Some(vec![reply_error(Some(1), "a command is already running", &[])]),
         );
         let (code, out, err) = call(&["plan", "--job", "a-1"], Some(&connector), b"", &scratch.0);
-        server.join().unwrap();
+        finish(server, connector);
         assert_eq!((code, out.as_str(), err.as_str()), (2, "", "lazymkvctl: a command is already running\n"));
     }
 
@@ -638,7 +649,7 @@ mod tests {
         let (ipc, connector) = MemoryIpc::new();
         let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![reply_ok(Some(1), json!({"exit_code": 0}))]));
         let (code, _, err) = call(&["retune", "--jobs", "--spec", "spec.md"], Some(&connector), b"", &scratch.0);
-        let request = request_of(&server.join().unwrap());
+        let request = request_of(&finish(server, connector));
         let absolute = scratch.0.join("spec.md").to_str().unwrap().to_string();
         assert_eq!(request["payload"]["words"], json!(["retune", "--jobs", "--spec", "spec.md", "--spec", absolute]));
         assert_eq!((code, err.as_str()), (0, ""));
