@@ -82,7 +82,8 @@ fn help(w: &mut dyn Write) {
 /// Hand-written argument parsing with argparse's spellings: `--name VALUE`, `--name=VALUE`, a unique prefix of a
 /// declared long flag (argparse's allow_abbrev), repeatable flags, switches, positionals, and `--` before words that
 /// would look like flags. A command declares its flags, takes each with `flag`, `flags` or `switch`, then the rest
-/// with `positionals`. A value may be a negative number ("-5", "-2.5") or "-", as argparse allows.
+/// with `positionals` (or with `rest`, to hand the words to another parser). A value may be a negative number ("-5",
+/// "-2.5") or "-", as argparse allows.
 pub struct Args {
     words: Vec<String>,
     declared: Vec<String>,
@@ -156,6 +157,18 @@ impl Args {
         } else {
             Err(format!("unrecognized arguments: {}", unknown.join(" ")))
         }
+    }
+
+    /// The words left, unchanged and in order ("--" and undeclared flag-like words kept), for a caller that hands
+    /// them on to another parser; Err("ambiguous option: ...") for an ambiguous prefix of a declared flag before "--".
+    /// Ruling S85, design part 9.5. Def: T27. Use: T27.
+    pub fn rest(self) -> Result<Vec<String>, String> {
+        for word in self.words.iter().take_while(|word| *word != "--") {
+            if let Resolved::Ambiguous(option, matches) = self.resolve(word) {
+                return Err(format!("ambiguous option: {} could match {}", option, matches.join(", ")));
+            }
+        }
+        Ok(self.words)
     }
 
     /// Removes every occurrence of flag `name` before a "--", with its value, and returns the values in order.
@@ -273,6 +286,21 @@ mod tests {
         assert_eq!(args.flag("--main"), Ok(Some("-5".to_string())));
         assert_eq!(args.flag("--title"), Ok(None));
         assert_eq!(args.positionals(), Ok(vec!["-".to_string(), "--title".to_string()]));
+    }
+
+    #[test]
+    fn rest_keeps_unknown_flags_and_the_double_dash() {
+        let mut args =
+            Args::new(&words(&["x", "--job", "a-1", "--settings", "s.json", "--", "--title"]), &["--job", "--jobs", "--title"]);
+        assert_eq!(args.flag("--job"), Ok(Some("a-1".to_string())));
+        assert_eq!(args.flag("--title"), Ok(None));
+        assert_eq!(args.rest(), Ok(words(&["x", "--settings", "s.json", "--", "--title"])));
+    }
+
+    #[test]
+    fn rest_refuses_an_ambiguous_prefix_of_a_declared_flag() {
+        let args = Args::new(&words(&["--jo", "a-1"]), &["--job", "--jobs"]);
+        assert_eq!(args.rest(), Err("ambiguous option: --jo could match --job, --jobs".to_string()));
     }
 
     #[test]
