@@ -32,8 +32,8 @@ use lazymkv_tools::CancelToken;
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue};
 use crate::notify::{self, spawn_notifier, NotifySink};
-use crate::restart::{held_promise, plan_restart, rebuild_book};
-use crate::space::{rebuild_promise, Promises, PromisedStep};
+use crate::restart::{plan_restart, rebuild_book};
+use crate::space::{rebuild_promises, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
 use crate::store::Store;
 use crate::timers::Timers;
@@ -638,7 +638,7 @@ impl Owner {
     /// 3. each fed job has its disc noted (the token job's drive becomes its record's drive) and its book rebuilt
     ///    (`rebuild_book`), and its EngineRestart transition is persisted through the stop hook, whose true answer
     ///    stops the engine before any resume action runs;
-    /// 4. the space promises of the resumed jobs (`held_promise`, `rebuild_promise`), the token and the slot are
+    /// 4. the space promises of the resumed jobs (`rebuild_promises`), the token and the slot are
     ///    rebuilt, and the noted drives are recorded handled;
     /// 5. the resume actions are performed, the slot is granted, then the arrivals are routed as fresh insertions.
     fn restart(&mut self, present: Vec<(String, PathBuf)>) {
@@ -713,10 +713,8 @@ impl Owner {
                 let Some(job) = self.jobs.get(id) else {
                     continue;
                 };
-                if let Some(step) = held_promise(&job.record.state) {
-                    let (shares, job_dir) = (self.parts.shares.as_ref(), self.store.job_dir(id));
-                    rebuild_promise(&mut promises, shares, step, &job.record, &job.settings, &job_dir);
-                }
+                let (shares, job_dir) = (self.parts.shares.as_ref(), self.store.job_dir(id));
+                rebuild_promises(&mut promises, shares, &job.record, &job.settings, &job_dir);
             }
         }
         self.slots.seed(&plan.slot_holders, &plan.slot_queue);
@@ -1261,17 +1259,17 @@ impl Owner {
         }
     }
 
-    /// A return from a wait, or a Retry, into Ripping or Remuxing runs no space check, so the promise the step holds
-    /// is rebuilt as at a restart (design parts 5.8, 5.10, S75): `held_promise` of the new state through
-    /// `rebuild_promise`, after `release_promises` released what the job held when it started to wait or failed.
+    /// A return from a wait, or a Retry, runs no space check, so the promises of the state it returns to are rebuilt
+    /// as at a restart (design parts 5.8, 5.10, Rulings S75, R25.c2: `rebuild_promises`), after `release_promises`
+    /// released what the job held when it started to wait or failed.
     fn promise_on_return(&self, id: &str, transition: &Transition) {
         let back = transition.old.as_ref().is_some_and(|old| old.is_waiting() || matches!(old, State::Failed { .. }));
-        let (true, Some(step), Some(job)) = (back, held_promise(&transition.new), self.jobs.get(id)) else {
+        let (true, Some(job)) = (back, self.jobs.get(id)) else {
             return;
         };
         let mut promises = lock(&self.parts.promises);
         let (shares, job_dir) = (self.parts.shares.as_ref(), self.store.job_dir(id));
-        rebuild_promise(&mut promises, shares, step, &job.record, &job.settings, &job_dir);
+        rebuild_promises(&mut promises, shares, &job.record, &job.settings, &job_dir);
     }
 
     /// Releases the token `id` holds although it cannot go on (its folder or a transition could not be written), so

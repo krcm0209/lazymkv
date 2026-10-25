@@ -6,12 +6,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use lazymkv_core::job::Event;
+use lazymkv_core::job::{Event, State};
 use lazymkv_core::plan::{staging_bytes_needed, write_bytes_needed, Kind, Plan};
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::Settings;
 use lazymkv_platform::{Reach, ShareConnector};
 
+use crate::restart::held_promise;
 use crate::steps::mkv_files;
 
 /// Design part 5.8's two steps that promise space. Def: T23. Use: T23, T24, T25.
@@ -107,7 +108,7 @@ pub(crate) fn rip_promise(plan: &Plan, disc_size: u64) -> u64 {
 }
 
 /// The rip check's Remux promise on the library: `write_bytes_needed` of the planned titles' sizes (S54, design part
-/// 5.8). Def: T23. Use: T23.
+/// 5.8). Def: T23. Use: T23, T25.
 pub(crate) fn planned_remux_promise(plan: &Plan) -> u64 {
     write_bytes_needed(plan.titles.iter().map(|title| title.size.unwrap_or(0)).fold(0, u64::saturating_add))
 }
@@ -118,13 +119,40 @@ pub(crate) fn remux_promise(staged_bytes: u64) -> u64 {
     write_bytes_needed(staged_bytes)
 }
 
-/// Ruling S75 (design parts 5.8, 5.10): `record`'s promise of `step` rebuilt from the job folder and staging, through
-/// Task 23's functions, for a job a restart, a return from a wait or a Retry left in Ripping or Remuxing, which no
-/// check promised in this engine run. Rip is `rip_promise(plan, meta.json's total_bytes)` on `volume_of` the job's
-/// `staging_root`; Remux is `remux_promise` of the staged `.mkv` files' sizes summed, the files under
-/// `<staging_root>/<job id>/rip/<title key>/` of each planned title, on `volume_of` the library root of the plan's kind
-/// (`movies_root` for a movie). Nothing is promised without a plan or those roots. Def: T25. Use: T25.
-pub(crate) fn rebuild_promise(
+/// The promises a job holds across a restart, a return from a wait or a Retry, which no check made in this engine run
+/// (design parts 5.8, 5.10, Rulings S75, R25.c2): `held_promise`'s step through Task 23's functions (`rebuild_promise`:
+/// Rip in Ripping, the staged Remux in Remuxing), and from Ripping to Decided (Ripping, RipVerified, Ejected,
+/// Inspecting, Decided) the Remux promise `rip_check` made, `planned_remux_promise(plan)` on the volume of the plan
+/// kind's library root, or of staging when none is set, as `rip_check` places it; the remux check replaces it in
+/// Decided. Every other state holds none, as `release_promises` leaves it. Nothing is promised without a plan or a
+/// `staging_root`. Def: T25. Use: T25.
+pub(crate) fn rebuild_promises(
+    promises: &mut Promises,
+    shares: &dyn ShareConnector,
+    record: &JobRecord,
+    settings: &Settings,
+    job_dir: &Path,
+) {
+    if let Some(step) = held_promise(&record.state) {
+        rebuild_promise(promises, shares, step, record, settings, job_dir);
+    }
+    let checked = matches!(
+        record.state,
+        State::Ripping | State::RipVerified { .. } | State::Ejected { .. } | State::Inspecting | State::Decided { .. }
+    );
+    let (true, Some(plan), Some(staging)) = (checked, &record.plan, settings.staging_root.as_deref()) else {
+        return;
+    };
+    let volume = volume_of(shares, library_root(plan, settings).unwrap_or(staging));
+    promises.promise(&record.id, PromisedStep::Remux, &volume, planned_remux_promise(plan));
+}
+
+/// Ruling S75: `record`'s promise of `step` rebuilt from the job folder and staging, through Task 23's functions. Rip
+/// is `rip_promise(plan, meta.json's total_bytes)` on `volume_of` the job's `staging_root`; Remux is `remux_promise`
+/// of the staged `.mkv` files' sizes summed, the files under `<staging_root>/<job id>/rip/<title key>/` of each planned
+/// title, on `volume_of` the plan kind's library root (`movies_root` for a movie). Nothing is promised without a plan
+/// or those roots.
+fn rebuild_promise(
     promises: &mut Promises,
     shares: &dyn ShareConnector,
     step: PromisedStep,
@@ -143,11 +171,7 @@ pub(crate) fn rebuild_promise(
             promises.promise(&record.id, step, &volume_of(shares, staging), rip_promise(plan, disc_size));
         }
         PromisedStep::Remux => {
-            let library = match plan.kind {
-                Kind::Movie => settings.movies_root.as_deref(),
-                Kind::Tv => settings.tv_root.as_deref(),
-            };
-            let Some(library) = library else {
+            let Some(library) = library_root(plan, settings) else {
                 return;
             };
             let rip = Path::new(staging).join(&record.id).join("rip");
@@ -156,6 +180,14 @@ pub(crate) fn rebuild_promise(
             let staged = staged.fold(0, u64::saturating_add);
             promises.promise(&record.id, step, &volume_of(shares, library), remux_promise(staged));
         }
+    }
+}
+
+/// The library root of the plan's kind: `movies_root` or `tv_root`.
+fn library_root<'a>(plan: &Plan, settings: &'a Settings) -> Option<&'a str> {
+    match plan.kind {
+        Kind::Movie => settings.movies_root.as_deref(),
+        Kind::Tv => settings.tv_root.as_deref(),
     }
 }
 

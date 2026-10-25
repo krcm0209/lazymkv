@@ -46,9 +46,11 @@ pub(crate) struct RestartPlan {
 /// first, by (`created_unix`, `id`), and Filed, Discarded, NeedsReview and Failed jobs are not fed. The token goes to
 /// the first disc-phase job whose fingerprint a present disc carries, which is fed `disc_present` true; every other
 /// disc-phase job is fed false and waits for its disc. Every other fed job is fed true exactly when a present disc
-/// carries its fingerprint. In drive-id order, the token job's drive (the first holding its fingerprint) and a drive
-/// whose drives.json record has the same fingerprint with `handled` true are noted (S71, L1a); every other drive is an
-/// arrival (L1). The slot follows Ruling S72: a job in Inspecting, Decided, Remuxing or Verified, or waiting to return
+/// carries its fingerprint. In drive-id order, the token job's drive (the first holding its fingerprint) is noted
+/// (S71), and so is a drive whose drives.json record has the same fingerprint with `handled` true (L1a), unless its disc
+/// is that of a disc-phase job fed false: that job waits for its disc, so the disc is an arrival whatever the record
+/// says, and is routed to it as MediaArrived once the token is free (Ruling R25.c1, design part 5.10). Every other
+/// drive is an arrival (L1). The slot follows Ruling S72: a job in Inspecting, Decided, Remuxing or Verified, or waiting to return
 /// to one of them, holds it; an `Ejected { after_copy: false }` job queues for it.
 ///
 /// `present`: each drive with a disc, and its fingerprint (None when the walk failed). Def: T25. Use: T25.
@@ -78,13 +80,19 @@ pub(crate) fn plan_restart(
             (job.id.clone(), disc_present)
         })
         .collect();
+    let waiting: Vec<&str> = fed
+        .iter()
+        .filter(|job| job.state.is_disc_phase() && token.as_deref() != Some(job.id.as_str()))
+        .map(|job| job.fingerprint.as_str())
+        .collect();
     let (mut arrivals, mut noted) = (Vec::new(), Vec::new());
     for (drive, fingerprint) in present {
+        let waited_for = fingerprint.as_deref().is_some_and(|found| waiting.contains(&found));
         let handled = drives
             .drives
             .get(drive)
             .is_some_and(|record| record.handled && record.fingerprint == *fingerprint);
-        if token_drive.as_deref() == Some(drive.as_str()) || handled {
+        if token_drive.as_deref() == Some(drive.as_str()) || (handled && !waited_for) {
             noted.push(drive.clone());
         } else {
             arrivals.push(drive.clone());
@@ -356,6 +364,68 @@ mod tests {
             State::Verified, State::AwaitingSpace { return_to: back(State::Planned { mode: Mode::Direct }) },
         ] {
             assert_eq!(held_promise(&state), None, "{}", state.as_str());
+        }
+    }
+
+    /// R25.c1: the younger disc-phase job is fed false, so its disc in another drive is routed as an arrival although
+    /// that drive's record says handled; otherwise nothing would ever feed it MediaArrived.
+    #[test]
+    fn a_disc_phase_job_fed_false_has_its_present_disc_routed_as_an_arrival() {
+        let jobs = [record("aaa-1", "AAA", 10, State::Ripping), record("bbb-1", "BBB", 20, State::Ripping)];
+        let discs = present(&[("tok0", Some("BBB")), ("tok1", Some("AAA"))]);
+        let plan = plan_restart(&jobs, &discs, &drives(&[("tok0", Some("BBB"), true), ("tok1", Some("AAA"), false)]));
+        assert_eq!(plan.token.as_deref(), Some("aaa-1"));
+        assert_eq!(plan.feeds, vec![("aaa-1".to_string(), true), ("bbb-1".to_string(), false)]);
+        assert_eq!(plan.arrivals, vec!["tok0".to_string()]);
+        assert_eq!(plan.noted, vec!["tok1".to_string()]);
+    }
+
+    /// R25.c2: between its rip check and its remux a job holds the Remux promise the rip check made, on the library's
+    /// volume; Ripping also holds Rip on staging; Filed, Failed and waiting jobs hold none.
+    #[test]
+    fn the_rip_checks_remux_promise_is_rebuilt_until_the_remux_check() {
+        use crate::space::{planned_remux_promise, rebuild_promises, rip_promise, volume_of, Promises};
+        use lazymkv_core::disc::disc;
+        use lazymkv_core::lookup::LookupInputs;
+        use lazymkv_core::plan::movie::LibraryFacts;
+        use lazymkv_core::plan::{plan as make_plan, PlanInputs};
+        use lazymkv_core::robot::parse;
+        use lazymkv_core::settings::Settings;
+        use lazymkv_platform::fakes::FakeShares;
+
+        let scan = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/scan.txt");
+        let typed = disc(&parse(&fs::read_to_string(scan).unwrap())).unwrap();
+        let settings = Settings { staging_root: Some("/s".into()), movies_root: Some("/m".into()), ..Settings::default() };
+        let planned = make_plan(&PlanInputs {
+            disc: &typed, fingerprint: Some("AAA"), disc_id: None, lookups: LookupInputs::default(), remembered: None,
+            overrides: None, sessions: &[], library: &LibraryFacts::default(), settings: &settings,
+        })
+        .unwrap();
+        let remux = planned_remux_promise(&planned);
+        assert!(remux > 0);
+        let shares = FakeShares::new();
+        let (staging, library) = (volume_of(&shares, "/s"), volume_of(&shares, "/m"));
+        let job_dir = Scratch::new("promises");
+        let failed = State::Failed { class: FailureClass::Unknown, from: back(State::Inspecting) };
+        let waiting = State::AwaitingSpace { return_to: back(State::Decided { approved: None }) };
+        for (state, on_staging, on_library) in [
+            (State::Ripping, rip_promise(&planned, 0), remux),
+            (State::RipVerified { after_copy: false }, 0, remux),
+            (State::Ejected { after_copy: false }, 0, remux),
+            (State::Inspecting, 0, remux),
+            (State::Decided { approved: None }, 0, remux),
+            (State::Verified, 0, 0),
+            (State::Filed, 0, 0),
+            (failed, 0, 0),
+            (waiting, 0, 0),
+        ] {
+            let mut job = record("aaa-1", "AAA", 10, state);
+            job.plan = Some(planned.clone());
+            let mut promises = Promises::default();
+            rebuild_promises(&mut promises, &shares, &job, &settings, &job_dir.0);
+            let name = job.state.as_str();
+            assert_eq!(promises.promised(&staging, "bbb-1"), on_staging, "{name} on staging");
+            assert_eq!(promises.promised(&library, "bbb-1"), on_library, "{name} on the library");
         }
     }
 
