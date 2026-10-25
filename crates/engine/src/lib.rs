@@ -1,6 +1,12 @@
 //! lazymkv-engine: the job-owner loop over core::job::reduce, the job store, the IPC (inter-process communication) server and the self-test (design parts 4.1, 4.4, 7.3).
 
+mod arrival;
+mod notify;
+mod owner;
 mod store;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
+mod timers;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -8,6 +14,10 @@ use std::path::PathBuf;
 
 use lazymkv_dev::Args;
 use lazymkv_tools::Limits;
+
+pub use notify::NotifySink;
+pub use owner::{start, EngineHandle, JobContext, Services, StepResult, StepRunner};
+pub use timers::{StdTimers, Timers};
 
 /// The engine's start-up configuration (design parts 3.5, 3.6; S44): the data folder, the resources folder the tool
 /// lookup reads second, limits that replace `Limits::from_settings` (tests only), and the `PATH` the tool lookup reads

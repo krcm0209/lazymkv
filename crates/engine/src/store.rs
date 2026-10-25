@@ -29,6 +29,8 @@ const SETTINGS_FILE: &str = "settings.json";
 const REMEMBERED_DIR: &str = "remembered";
 /// The engine's own log (design part 3.5).
 const ENGINE_LOG: &str = "engine.log";
+/// A job's own log (design part 7.1).
+const JOB_LOG: &str = "job.log";
 
 /// The data folder's persisted files (design parts 3.5, 7.3, 7.4): `<data>/jobs/<id>/state.json` and
 /// `transitions.jsonl`, `<data>/drives.json`, `<data>/remembered/<fingerprint>.json`, `<data>/settings.json` and
@@ -59,6 +61,27 @@ impl Store {
     /// `<data>/jobs/<id>` (design part 7.3). Def: T21. Use: T22, T23, T25, T26.
     pub(crate) fn job_dir(&self, id: &str) -> PathBuf {
         self.data.join(JOBS_DIR).join(id)
+    }
+
+    /// Makes `<data>/jobs/<id>/` and writes the settings the job starts with and keeps there as `settings.json`
+    /// (design part 7.1, ENG-19): `write_atomic` of `to_vec_pretty` plus "\n". Returns the folder. Def: T22. Use: T22.
+    pub(crate) fn create_job(&self, id: &str, settings: &Settings) -> io::Result<PathBuf> {
+        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = self.job_dir(id);
+        fs::create_dir_all(&dir)?;
+        write_atomic(&dir.join(SETTINGS_FILE), &pretty(settings)?)?;
+        Ok(dir)
+    }
+
+    /// Appends "<line>\n" to `<data>/jobs/<id>/job.log` (design part 7.1: the engine's own lines about the job).
+    /// Errors are ignored, as engine.log's are. Def: T22. Use: T22 to T26.
+    pub(crate) fn job_log(&self, id: &str, line: &str) {
+        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = self.job_dir(id);
+        let _ = fs::create_dir_all(&dir);
+        if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(dir.join(JOB_LOG)) {
+            let _ = file.write_all(format!("{line}\n").as_bytes());
+        }
     }
 
     /// Every `<data>/jobs/*/state.json` in folder-name order (design parts 7.3, 7.4). Each is read as a Value, passed
@@ -142,6 +165,7 @@ impl Store {
     /// `<data>/remembered/<fingerprint>.json` through `check_format(REMEMBERED_FORMAT)` (design part 7.4), with the
     /// file's bytes for remembered.json. An Err is "<path>: <reason>". Absent gives Ok(None).
     /// Def: T21. Use: T22, T23, T25, T26.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 23's Plan step reads the remembered decision"))]
     pub(crate) fn remembered(&self, fingerprint: &str) -> Result<Option<(Remembered, Vec<u8>)>, String> {
         let path = self.data.join(REMEMBERED_DIR).join(format!("{fingerprint}.json"));
         read_checked(&path, REMEMBERED_FORMAT)
@@ -169,6 +193,7 @@ impl Store {
 
     /// Replaces `<data>/settings.json` (design part 7.4): `write_atomic` of `to_vec_pretty(settings)` plus "\n", with
     /// no `format` key, because `Settings` refuses an unknown key. Def: T21. Use: T22, T23, T25, T26.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 26's settings_set writes the settings"))]
     pub(crate) fn write_settings(&self, settings: &Settings) -> io::Result<()> {
         let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         fs::create_dir_all(&self.data)?;
