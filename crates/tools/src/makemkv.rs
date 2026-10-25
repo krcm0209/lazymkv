@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::thread::Thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use lazymkv_core::disc::TitleSource;
 use lazymkv_core::ipc::CANCELLED;
@@ -17,7 +17,7 @@ use lazymkv_core::job::{classify_title_failure, Failure, FailureClass};
 use lazymkv_core::robot::{self, lines::{Call, LineEvent, LineReader, RunSummary}};
 use lazymkv_platform::Host;
 
-use crate::record::{run_recorded, CancelToken, LineAction, RunResult, ToolCtx};
+use crate::record::{run_recorded, with_suffix, CancelToken, LineAction, RunResult, ToolCtx};
 
 /// The flags a job fixes for every makemkvcon call (design parts 5.3, 5.4; spec 9.2). Def: T13. Use: T23.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,6 +276,52 @@ fn mkv_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
     files.sort();
     Ok(files)
+}
+
+/// What replaces MakeMKV's registration key in a saved debug log.
+const KEY_REMOVED: &[u8] = b"[app_Key removed]";
+
+/// Saves MakeMKV's debug log as `<out>.makemkv-debug.txt` with every occurrence of the registration key replaced by
+/// `[app_Key removed]` (design part 7.2, PIPE-9). The log is copied as bytes, because it need not be UTF-8 (S61), and
+/// it is copied unchanged when the host has no key. `started_unix` is the call's start: a log last modified before it
+/// belongs to an earlier call and is not saved. The `Err` text says why nothing was saved and never holds the key.
+/// Def: T14. Use: T23.
+pub fn save_debug_log(host: &dyn Host, started_unix: u64, out: &Path) -> Result<(), String> {
+    let log = host.makemkv_debug_log().ok_or_else(|| "MakeMKV's debug log path is not known".to_string())?;
+    let failed = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
+    let metadata = match fs::metadata(&log) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("{}: no debug log was written", log.display()));
+        }
+        Err(error) => return Err(failed(&log, error)),
+    };
+    let modified = metadata.modified().map_err(|error| failed(&log, error))?;
+    if modified.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()) < started_unix {
+        return Err(format!("{}: the debug log is older than the call", log.display()));
+    }
+    let mut bytes = fs::read(&log).map_err(|error| failed(&log, error))?;
+    if let Some(key) = host.makemkv_app_key().filter(|key| !key.is_empty()) {
+        bytes = replace_bytes(&bytes, key.as_bytes(), KEY_REMOVED);
+    }
+    let target = with_suffix(out, ".makemkv-debug.txt");
+    fs::write(&target, bytes).map_err(|error| failed(&target, error))
+}
+
+/// `data` with each non-overlapping occurrence of the non-empty `key`, found from the left, replaced by `with`.
+fn replace_bytes(data: &[u8], key: &[u8], with: &[u8]) -> Vec<u8> {
+    let mut replaced = Vec::with_capacity(data.len());
+    let mut at = 0;
+    while at < data.len() {
+        if data[at..].starts_with(key) {
+            replaced.extend_from_slice(with);
+            at += key.len();
+        } else {
+            replaced.push(data[at]);
+            at += 1;
+        }
+    }
+    replaced
 }
 
 /// The class every failure of the drivers has unless the summary says otherwise.
@@ -552,5 +598,62 @@ mod tests {
         assert_eq!(drive_index(&drives, "D:"), Some(0));
         assert_eq!(drive_index(&drives, "D:\\"), None);
         assert_eq!(drive_index(&drives, "d:"), None);
+    }
+
+    use lazymkv_core::job::Tool;
+    use lazymkv_platform::Host;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct KeyHost { log: Option<PathBuf>, key: Option<String> }
+
+    impl Host for KeyHost {
+        fn now_unix(&self) -> u64 { 0 }
+        fn local_date(&self) -> String { String::new() }
+        fn makemkv_app_key(&self) -> Option<String> { self.key.clone() }
+        fn makemkv_debug_log(&self) -> Option<PathBuf> { self.log.clone() }
+        fn running_processes(&self) -> Vec<String> { Vec::new() }
+        fn volume_label(&self, _: &Path) -> Option<String> { None }
+        fn default_install_path(&self, _: Tool) -> Option<PathBuf> { None }
+    }
+
+    fn now() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    #[test]
+    fn the_debug_log_is_saved_with_the_key_removed() {
+        let dir = crate::testutil::temp_dir("debug-key");
+        let log = dir.join("MakeMKV_log.txt");
+        std::fs::write(&log, b"key ABC and ABC again, caf\xe9\n").unwrap();
+        let host = KeyHost { log: Some(log), key: Some("ABC".to_string()) };
+        save_debug_log(&host, now() - 60, &dir.join("scan.txt")).unwrap();
+        assert_eq!(std::fs::read(dir.join("scan.txt.makemkv-debug.txt")).unwrap(),
+            b"key [app_Key removed] and [app_Key removed] again, caf\xe9\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_debug_log_older_than_the_call_is_not_saved() {
+        let dir = crate::testutil::temp_dir("debug-old");
+        let log = dir.join("MakeMKV_log.txt");
+        std::fs::write(&log, b"old").unwrap();
+        let host = KeyHost { log: Some(log.clone()), key: None };
+        assert_eq!(save_debug_log(&host, now() + 3600, &dir.join("scan.txt")),
+            Err(format!("{}: the debug log is older than the call", log.display())));
+        assert!(!dir.join("scan.txt.makemkv-debug.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_debug_log_is_reported_not_saved() {
+        let dir = crate::testutil::temp_dir("debug-missing");
+        let log = dir.join("MakeMKV_log.txt");
+        let host = KeyHost { log: Some(log.clone()), key: None };
+        assert_eq!(save_debug_log(&host, now(), &dir.join("scan.txt")),
+            Err(format!("{}: no debug log was written", log.display())));
+        let none = KeyHost { log: None, key: None };
+        assert_eq!(save_debug_log(&none, now(), &dir.join("scan.txt")),
+            Err("MakeMKV's debug log path is not known".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

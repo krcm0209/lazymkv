@@ -1,15 +1,19 @@
 //! lazymkv-tools: the makemkvcon, mkvmerge and ffprobe drivers, their capture-style recorded runs under ProcessGuard, the tool lookup of design part 3.6, and the disc snapshot's file I/O moved from capture (design part 4.1, R-B2).
 
+pub mod ffprobe;
 mod lookup;
 pub mod makemkv;
+pub mod mkvmerge;
 mod record;
 mod snapshot;
 
+pub use ffprobe::{probe, probe_args};
 pub use lookup::{exe_name, find_tool, Found, ToolLocation};
 pub use makemkv::{
-    drive_index, drive_list_args, list_drives, rip, rip_args, scan, scan_args, DriveListing, MakemkvFlags, RipOutcome,
-    RipRun, ScanOutcome, StagingHealth,
+    drive_index, drive_list_args, list_drives, rip, rip_args, save_debug_log, scan, scan_args, DriveListing,
+    MakemkvFlags, RipOutcome, RipRun, ScanOutcome, StagingHealth,
 };
+pub use mkvmerge::{gui_progress, ident, ident_args, remux, remux_args};
 pub use record::{
     run_recorded, tee_lines, with_suffix, CancelToken, Clock, LineAction, Limits, RealClock, RunResult, ToolCtx,
 };
