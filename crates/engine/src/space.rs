@@ -1,5 +1,6 @@
-//! Design part 5.8's space checks: the promises of unfinished steps, by volume, and the Direct rip's check. A check
-//! adds, on each volume it reads, this job's later steps there and what other jobs' unfinished steps were promised.
+//! Design part 5.8's space checks: the promises of unfinished steps, by volume, the Direct rip's check and the remux's
+//! check. A check adds, on each volume it reads, this job's later steps there and what other jobs' unfinished steps
+//! were promised.
 
 use std::collections::BTreeMap;
 
@@ -107,9 +108,34 @@ pub(crate) fn planned_remux_promise(plan: &Plan) -> u64 {
 
 /// The remux check's Remux promise: `write_bytes_needed(staged_bytes)`, the staged files' sizes (S54, design part
 /// 5.8). Def: T23. Use: T24, T25.
-#[expect(dead_code, reason = "Task 24's remux check promises the staged files' sizes")]
 pub(crate) fn remux_promise(staged_bytes: u64) -> u64 {
     write_bytes_needed(staged_bytes)
+}
+
+/// The remux's check (design part 5.8, S54): the staged files' sizes; SpaceOk replaces this job's Remux promise. An
+/// unreachable library root, or a `free_bytes` error, gives ShareLost; a library that does not hold `remux_bytes` plus
+/// what other jobs were promised on its volume gives SpaceShort. Otherwise `job`'s Remux promise becomes
+/// `remux_bytes` on the library's volume and the check gives SpaceOk. Def: T24. Use: T24.
+pub(crate) fn remux_check(
+    remux_bytes: u64,
+    library: &str,
+    shares: &dyn ShareConnector,
+    promises: &mut Promises,
+    job: &str,
+) -> Event {
+    if matches!(shares.reach(library), Reach::Unreachable(_)) {
+        return Event::ShareLost;
+    }
+    let volume = volume_of(shares, library);
+    let needs = remux_bytes.saturating_add(promises.promised(&volume, job));
+    match shares.free_bytes(library) {
+        Err(_) => Event::ShareLost,
+        Ok(free) if free < needs => Event::SpaceShort,
+        Ok(_) => {
+            promises.promise(job, PromisedStep::Remux, &volume, remux_bytes);
+            Event::SpaceOk
+        }
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +169,19 @@ mod tests {
         shares.set_free("/s", 12903);
         shares.set_free("/m", 12903);
         assert_eq!(rip_check(4301, 4301, "/s", Some("/m"), &shares, &mut promises, "b-1"), Event::SpaceOk);
+    }
+
+    #[test]
+    fn the_remux_check_replaces_the_rips_remux_promise_with_the_staged_size() {
+        let shares = FakeShares::new();
+        let mut promises = Promises::default();
+        let library = volume_of(&shares, "/m");
+        promises.promise("a-1", PromisedStep::Remux, &library, 4301);
+        shares.set_free("/m", 17);
+        assert_eq!(remux_check(17, "/m", &shares, &mut promises, "a-1"), Event::SpaceOk);
+        assert_eq!(promises.promised(&library, "b-1"), 17);
+        shares.set_free("/m", 16);
+        assert_eq!(remux_check(17, "/m", &shares, &mut promises, "a-1"), Event::SpaceShort);
     }
 
     #[test]

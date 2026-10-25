@@ -1,0 +1,4 @@
+{"responses":[
+ {"args_contain":["-J","title_t00.mkv"],"stdout":"ident-raw.json"},
+ {"args_contain":["--gui-mode","-o"],"stdout":"remux-mkvmerge.txt","exit_code":2},
+ {"args_contain":["-J",".partial"],"stdout":"partial-ident.json"}]}

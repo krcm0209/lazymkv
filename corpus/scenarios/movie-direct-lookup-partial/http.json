@@ -1,0 +1,7 @@
+{"answers":[
+ {"url":"https://thediscdb.com/api/dischash/{fingerprint}","error":"timeout"},
+ {"url":"https://thediscdb.com/api/dischash/{fingerprint}","error":"timeout"},
+ {"url":"https://thediscdb.com/api/dischash/{fingerprint}","status":404,"body":""},
+ {"url":"https://thediscdb.com/api/discid/{disc_id}","status":404,"body":""},
+ {"url":"{search}","status":200,"body_file":"tmdb-search-answer.json"},
+ {"url":"https://api.themoviedb.org/3/movie/900001?append_to_response=external_ids","error":"timeout"}]}

@@ -1,10 +1,12 @@
-//! The real step runner for the disc phase on the tools (design parts 5.2, 5.4 to 5.6, 5.8): the job profile and its
+//! The real step runner on the tools (design parts 5.2, 5.4 to 5.8, 6.4, 6.5): the disc phase (the job profile and its
 //! 1009 fallback, the drive listing before every `makemkvcon` call, the scan with its one retry past its limit, the
-//! plan, the rip check, the rip with the index guard, the rip's verification and the eject. Every run is recorded
+//! plan, the rip check, the rip with the index guard, the rip's verification and the eject) and the file phase (the
+//! probe, the decision rendered through `lazymkv-dev`'s `decide_doc`, the remux check, the remux into the library
+//! root's partial folder, the partial file's verification and the rename that never replaces). Every run is recorded
 //! capture-style in the job folder, with a `run` and an `ended` line in job.log (design part 7.2). A step never posts
 //! to the Outbox once its CancelToken is raised (R22.11).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -12,36 +14,51 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
+use std::time::UNIX_EPOCH;
 
-use lazymkv_clients::{run_round, HttpTransport, LookupBook};
+use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
+use lazymkv_core::audio::rule::RULE_VERSION;
+use lazymkv_core::decision::{same_path_reviews, FileDecision};
 use lazymkv_core::disc::{disc, same_scan_title, Disc, Title};
 use lazymkv_core::ipc::{OutputStream, CANCELLED};
-use lazymkv_core::job::{Action, Event, Failure, FailureClass, State, Tool};
+use lazymkv_core::job::{decision_done, Action, Event, Failure, FailureClass, State, Tool};
+use lazymkv_core::naming::NamedPath;
 use lazymkv_core::plan::movie::LibraryFacts;
-use lazymkv_core::plan::{plan, Kind, Mode, PlanInputs};
+use lazymkv_core::plan::{plan, Kind, Mode, Plan, PlanInputs, PlannedTitle};
 use lazymkv_core::profile::{
     make_job_profile, ProfileError, ALL_TRACKS_SELECTION, FALLBACK_PROFILE_FILE, FALLBACK_SELECTION, JOB_PROFILE_FILE,
 };
-use lazymkv_core::record::{JobRecord, TitleRecord};
-use lazymkv_core::recording::files::Selection;
+use lazymkv_core::record::{FiledFile, JobRecord, TitleRecord};
+use lazymkv_core::recording::files::{FfprobeStreams, MkvmergeIdent, Selection};
 use lazymkv_core::review::{Note, ReviewReason};
 use lazymkv_core::robot::lines::RunSummary;
 use lazymkv_core::robot::{parse, Scan};
 use lazymkv_core::settings::version_triple;
+use lazymkv_core::tracks::subtitle::step10_runs;
 use lazymkv_core::ustar::{ustar_entry, DEFAULT_PROFILE_NAME};
-use lazymkv_core::verify::{failure_reviews, selected_streams, verify_rip, VerifyReport};
-use lazymkv_platform::{write_atomic, Ejector, Host, Platform, ProcessGuard, Reach, SecretStore, ShareConnector};
+use lazymkv_core::verify::{
+    failure_reviews, removed_scan_streams, rip_title, selected_streams, verify_final, verify_rip, VerifyReport,
+};
+use lazymkv_dev::cmd::decide::{decide_doc, DecideDoc, DecisionEntry, EngineDecideDoc};
+use lazymkv_dev::evidence::Ctx;
+use lazymkv_dev::pyjson::{dumps, Style};
+use lazymkv_platform::{
+    rename_no_replace, write_atomic, Ejector, Host, Platform, ProcessGuard, Reach, SecretStore, ShareConnector,
+};
 use lazymkv_tools::makemkv::SCAN_PAST_LIMIT;
 use lazymkv_tools::{
-    drive_list_args, find_tool, ident, ident_args, list_drives, rip, rip_args, save_debug_log, scan, scan_args,
-    snapshot, with_suffix, CancelToken, Limits, MakemkvFlags, RipOutcome, RunResult, ScanOutcome, StagingHealth,
-    ToolCtx,
+    drive_list_args, find_tool, ident, ident_args, list_drives, probe, probe_args, remux, remux_args, rip, rip_args,
+    save_debug_log, scan, scan_args, snapshot, with_suffix, CancelToken, Limits, MakemkvFlags, RipOutcome, RunResult,
+    ScanOutcome, StagingHealth, ToolCtx,
 };
 use serde_json::{json, Value};
 
 use crate::arrival::chain_inputs;
+use crate::file_phase::{
+    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refreshed_plan,
+};
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
-use crate::space::{planned_remux_promise, rip_check, rip_promise, Promises};
+use crate::space::{planned_remux_promise, remux_check, remux_promise, rip_check, rip_promise, Promises};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -53,6 +70,12 @@ const COPY_PLAN: &str = "the plan needs whole-disc copy mode, which arrives in p
 
 /// The class of every failure the engine finds itself (design part 5.2).
 const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
+
+/// The sentence of a Decide whose title needs step 10's subtitle evidence, which this version does not build (S32).
+const STEP10_NOT_BUILT: &str = "subtitle evidence (step 10) is not built in this version";
+
+/// ExtractSubtitleEvidence's job.log line (S33): step 10a's packet MD5 pass is not built either.
+const STEP10A_NOT_RUN: &str = "step 10a did not run in this version";
 
 /// Locks `mutex`, ignoring a poison a panicked thread left.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -121,6 +144,19 @@ fn highest_numbered(dir: &Path, stem: &str) -> u32 {
 /// The JSON file at `path`, or None when it is absent or not JSON.
 fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+/// The text of the file at `path` with invalid UTF-8 replaced, or None when it cannot be read.
+fn read_lossy(path: &Path) -> Option<String> {
+    fs::read(path).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Adds `path` to the record's collisions unless it is there, keeping them sorted [ENG-22].
+fn add_collision(record: &mut JobRecord, path: String) {
+    if !record.collisions.contains(&path) {
+        record.collisions.push(path);
+        record.collisions.sort();
+    }
 }
 
 /// `dir` emptied, or made when absent.
@@ -211,8 +247,9 @@ pub(crate) fn next_attempt_dir(title_dir: &Path) -> PathBuf {
 
 /// One lookup round on its own thread (design part 8.2): run_round over the locked book, each SavedFile written with
 /// write_atomic into the job folder (a write that fails is logged in engine.log); `done` gets `book.pending()` or
-/// chain_inputs' Err. The round holds the book for the whole round (R23.1). A panic of the round is caught and given to
-/// `done` as an Err. Def: T23. Use: T23, T24.
+/// chain_inputs' Err. The round holds the book for the whole round (R23.1). Each lookup the round leaves
+/// `Pending { Unparsed(sentence) }` writes the job.log line `lookup <word>: <sentence>` (design part 8.3, R24.6). A
+/// panic of the round is caught and given to `done` as an Err. Def: T23. Use: T23, T24.
 pub(crate) fn spawn_round(
     job_dir: PathBuf,
     lookups: Arc<Mutex<LookupBook>>,
@@ -232,14 +269,33 @@ pub(crate) fn spawn_round(
                     store.log(&format!("{}: the lookup answer could not be written: {error}", path.display()));
                 }
             });
-            Ok(book.pending())
+            let unparsed: Vec<String> = book
+                .states
+                .iter()
+                .filter_map(|(lookup, state)| match state {
+                    LookupState::Pending { reason: PendingReason::Unparsed(sentence) } => {
+                        Some(format!("lookup {}: {sentence}", lookup_word(*lookup)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let pending = book.pending();
+            drop(book);
+            if let Some(id) = job_dir.file_name().and_then(|name| name.to_str()) {
+                for line in &unparsed {
+                    store.job_log(id, line);
+                }
+            }
+            Ok(pending)
         }));
         done(round.unwrap_or_else(|payload| Err(format!("the lookup round panicked: {}", panic_text(&*payload)))));
     });
 }
 
-/// The real StepRunner for Fingerprint, RunScan, Plan, CheckSpace in Planned, RipTitle, VerifyFile in Ripping, Eject
-/// and EmptyTitleDirectory (design part 5.2); Task 24 adds the file phase. Def: T23. Use: T23 to T29.
+/// The real StepRunner (design part 5.2): Fingerprint, RunScan, Plan, CheckSpace in Planned, RipTitle, VerifyFile in
+/// Ripping, Eject and EmptyTitleDirectory for the disc phase (Task 23); Probe, ExtractSubtitleEvidence, Decide,
+/// CheckSpace in Decided, Remux, VerifyFile in Remuxing, File and DeletePartialFile for the file phase (Task 24).
+/// Def: T23. Use: T23 to T29.
 pub(crate) struct RealSteps {
     /// The resources folder the tool lookup reads second (design part 3.6).
     resources: Option<PathBuf>,
@@ -260,6 +316,8 @@ pub(crate) struct RealSteps {
     java_in_use: Arc<Mutex<Option<bool>>>,
     /// The (job, title key) pairs whose verification failed in this engine run (design part 5.6 step 7).
     verify_failed: Mutex<BTreeSet<(String, String)>>,
+    /// The probe of each (job, title key) Probe ran in this engine run, which Decide reads (design part 5.7 step 11.3).
+    probes: Mutex<BTreeMap<(String, String), FfprobeStreams>>,
 }
 
 impl RealSteps {
@@ -290,6 +348,7 @@ impl RealSteps {
             promises,
             java_in_use,
             verify_failed: Mutex::default(),
+            probes: Mutex::default(),
         }
     }
 }
@@ -309,12 +368,20 @@ impl StepRunner for RealSteps {
             (Action::RunScan, _) => step.run_scan(),
             (Action::Plan, _) => step.plan(),
             (Action::CheckSpace, State::Planned { .. }) => step.check_space(),
+            (Action::CheckSpace, State::Decided { .. }) => step.remux_space(),
             (Action::RipTitle, _) => step.rip_title(),
             (Action::VerifyFile, State::Ripping) => step.verify_rip(),
+            (Action::VerifyFile, State::Remuxing) => step.verify_partial(),
             (Action::Eject, _) => step.eject(),
             (Action::EmptyTitleDirectory, _) => step.empty_title_directory(),
+            (Action::Probe, _) => step.probe(),
+            (Action::ExtractSubtitleEvidence, _) => step.extract_subtitle_evidence(),
+            (Action::Decide, _) => step.decide(),
+            (Action::Remux, _) => step.remux(),
+            (Action::File, _) => step.file(),
+            (Action::DeletePartialFile, _) => step.delete_partial_file(),
             (other, state) => {
-                Ok(none(format!("{} in {} arrives with the file phase (Task 24)", action_tag(other), state.as_str())))
+                Ok(none(format!("{} in {} is not built in this version", action_tag(other), state.as_str())))
             }
         };
         outcome.unwrap_or_else(|early| early)
@@ -1002,6 +1069,368 @@ impl Step<'_> {
         if let Some(dir) = key.and_then(|key| self.rip_dir(&key)) {
             if let Err(error) = empty_dir(&dir) {
                 self.log(&format!("{}: {error}", dir.display()));
+            }
+        }
+        Ok(StepResult { event: None, message: None })
+    }
+
+    /// The job's plan, or `failed(Unknown)` with `the job has no plan`.
+    fn job_plan(&self, failed: fn(Failure) -> Event) -> Result<&Plan, StepResult> {
+        self.job.record.plan.as_ref().ok_or_else(|| unknown(failed, "the job has no plan"))
+    }
+
+    /// The staged file of the title `key`: the one `.mkv` of its staging folder (design part 5.6 step 6).
+    fn staged_file(&self, key: &str) -> Result<PathBuf, String> {
+        let dir = self.rip_dir(key).ok_or_else(|| "staging_root is unset".to_string())?;
+        match mkv_files(&dir).as_slice() {
+            [file] => Ok(file.clone()),
+            files => Err(format!("{} holds {} .mkv files, not one", dir.display(), files.len())),
+        }
+    }
+
+    /// The title `key`'s decision and its final path (design part 5.7 step 11).
+    fn decided(&self, key: &str) -> Result<(&FileDecision, &NamedPath), String> {
+        let title = self.job.record.titles.iter().find(|title| title.key == key);
+        let decision = title.and_then(|title| title.decision.as_ref()).ok_or_else(|| format!("{key} has no decision"))?;
+        let path = decision.path.as_ref().ok_or_else(|| format!("{key}'s decision has no final path"))?;
+        Ok((decision, path))
+    }
+
+    /// The staged file's verification report, the call VerifyFile in Ripping made (design part 5.6 step 7):
+    /// `verify_rip` of the scan title against `<key>/mkvmerge.json` with `Selection::All` and the rip log, read from
+    /// the job folder so that it survives a restart. Its pairs map each scan stream to the staged file's track ID
+    /// (S60).
+    fn staged_report(&self, scan: &Scan, typed: &Disc, planned: &PlannedTitle) -> Result<VerifyReport, String> {
+        let key_dir = self.job.job_dir.join(&planned.key);
+        let path = key_dir.join("mkvmerge.json");
+        let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let header: MkvmergeIdent =
+            serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+        let title = typed.title(planned.title)?;
+        let selection = selected_streams(scan, planned.title, Selection::All)?;
+        let rip_log = read_lossy(&key_dir.join("rip.txt"));
+        Ok(verify_rip(title, &header, &selection, rip_log.as_deref(), typed.is_dvd))
+    }
+
+    /// Probe (design part 5.7 step 9): `ffprobe` of each planned title's staged file, in plan order, recorded as
+    /// `<key>/ffprobe-streams.json` and kept in memory for Decide. No ffprobe gives ToolMissing { Ffprobe }, so the
+    /// file phase waits; a probe that fails gives ProbeFailed { Unknown } with its sentence.
+    fn probe(&self) -> Outcome {
+        let failed = |failure| Event::ProbeFailed { failure };
+        let plan = self.job_plan(failed)?;
+        let Some(ffprobe) = self.tool(Tool::Ffprobe) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Ffprobe }));
+        };
+        let mut probed = Vec::new();
+        for planned in &plan.titles {
+            let key = planned.key.as_str();
+            let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
+            let out = self.job.job_dir.join(key).join("ffprobe-streams.json");
+            let name = format!("{key}/ffprobe-streams.json");
+            let _ = fs::remove_file(with_suffix(&out, ".exit.json"));
+            self.started(&name, &ffprobe, &probe_args(&raw));
+            let read = self.ctx(&no_progress, |ctx| probe(ctx, &ffprobe, &raw, &out));
+            match &read {
+                Ok(_) => self.ended_from_file(&name, &out),
+                Err(error) => self.not_run(&name, error),
+            }
+            self.check_cancel()?;
+            match read {
+                Ok(Ok(streams)) => probed.push((key.to_string(), streams)),
+                Ok(Err(message)) => return Ok(unknown(failed, message)),
+                Err(error) => return Ok(unknown(failed, format!("ffprobe could not run: {error}"))),
+            }
+        }
+        let mut probes = lock(&self.steps.probes);
+        for (key, streams) in probed {
+            probes.insert((self.id.to_string(), key), streams);
+        }
+        Ok(event(Event::ProbeDone))
+    }
+
+    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): neither is built in this version, so it writes
+    /// the job.log line `step 10a did not run in this version` (S33) and returns no event; Decide fails a title that
+    /// needs step 10 (S32).
+    fn extract_subtitle_evidence(&self) -> Outcome {
+        self.log(STEP10A_NOT_RUN);
+        Ok(StepResult { event: None, message: None })
+    }
+
+    /// Whether step 10 runs for the planned title (design part 5.7 step 10): `step10_runs` over the scan title narrowed
+    /// to `Selection::All`'s streams, less the streams the rip log's MSG:4047 lines removed.
+    fn needs_step10(&self, scan: &Scan, typed: &Disc, planned: &PlannedTitle) -> Result<bool, String> {
+        let title = typed.title(planned.title)?;
+        let selection = selected_streams(scan, planned.title, Selection::All)?;
+        let rip_log = read_lossy(&self.job.job_dir.join(&planned.key).join("rip.txt"));
+        Ok(step10_runs(&rip_title(title, &selection), &removed_scan_streams(rip_log.as_deref(), &selection)))
+    }
+
+    /// One title's decision document (design parts 5.7 step 11, 6.4): `decide_doc` over `engine_decide_inputs` with the
+    /// probe Probe kept, or over `read_back_inputs` when this engine run holds none (PF-27), with no library facts;
+    /// when the decision has a final path whose `library_facts` are not the defaults, rendered again with them
+    /// (Ruling R24.3: the decision fed is the document's). Err is the reason the inputs or the decision could not be
+    /// made.
+    fn title_doc(&self, ctx: &Ctx, plan: &Plan, key: &str) -> Result<DecideDoc, String> {
+        let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
+        let mut inputs = match &probes {
+            Some(probes) => engine_decide_inputs(ctx, self.job, plan, key, probes, LibraryFacts::default())?,
+            None => read_back_inputs(ctx, &self.job.job_dir, plan, key)?,
+        };
+        let doc = decide_doc(&inputs);
+        let path = match &doc.decision {
+            DecisionEntry::Results(found) => found.decision.path.clone(),
+            DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
+        };
+        let facts = path.map(|path| library_facts(&path, self.job.settings.edition_style)).unwrap_or_default();
+        if facts == LibraryFacts::default() {
+            return Ok(doc);
+        }
+        inputs.library = facts;
+        Ok(decide_doc(&inputs))
+    }
+
+    /// `<key>/decide.json` (design part 7.1): the document with the audio rule's and lazymkv's versions as its last two
+    /// keys, through `dumps` with `INDENT1_ASCII` and a newline, written with write_atomic.
+    fn write_decide_json(&self, doc: DecideDoc) -> Result<(), String> {
+        let path = self.job.job_dir.join(&doc.label).join("decide.json");
+        let shown = |error: &dyn std::fmt::Display| format!("{}: {error}", path.display());
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        let engine = EngineDecideDoc { doc, audio_rule_version: RULE_VERSION, lazymkv_version: version };
+        let value = serde_json::to_value(&engine).map_err(|error| shown(&error))?;
+        let text = format!("{}\n", dumps(&value, Style::INDENT1_ASCII));
+        write_atomic(&path, text.as_bytes()).map_err(|error| shown(&error))
+    }
+
+    /// Decide (design parts 5.7 step 11, 8.4): the record's plan, refreshed from the saved answers while it is
+    /// lookup-pending and persisted so (R24.2); each planned title failing with S32's sentence when it needs step 10,
+    /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
+    /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
+    /// gives DecisionFailed { Unknown } with its sentence.
+    fn decide(&self) -> Outcome {
+        let failed = |failure| Event::DecisionFailed { failure };
+        let mut plan = self.job_plan(failed)?.clone();
+        if plan.identity.lookup_pending {
+            let job = self.job;
+            let refreshed = refreshed_plan(&plan, &job.job_dir, &job.lookups, &job.settings);
+            plan = refreshed.map_err(|error| unknown(failed, error))?;
+            let refreshed = plan.clone();
+            if !self.post_edit(move |record| record.plan = Some(refreshed)) {
+                return Err(cancelled());
+            }
+        }
+        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
+        let ctx = Ctx::from_process();
+        let mut docs = Vec::new();
+        for planned in &plan.titles {
+            if self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))? {
+                return Ok(unknown(failed, STEP10_NOT_BUILT));
+            }
+            docs.push(self.title_doc(&ctx, &plan, &planned.key).map_err(|error| unknown(failed, error))?);
+        }
+        let mut decisions = Vec::new();
+        for doc in &docs {
+            match &doc.decision {
+                DecisionEntry::Results(found) => decisions.push(found.decision.clone()),
+                DecisionEntry::Skipped { skipped } => return Ok(unknown(failed, skipped.clone())),
+            }
+        }
+        same_path_reviews(&mut decisions);
+        for (doc, decision) in docs.iter_mut().zip(&decisions) {
+            if let DecisionEntry::Results(found) = &mut doc.decision {
+                found.decision = decision.clone();
+            }
+        }
+        self.check_cancel()?;
+        for doc in docs {
+            self.write_decide_json(doc).map_err(|error| unknown(failed, error))?;
+        }
+        let collisions: BTreeSet<String> = decisions
+            .iter()
+            .filter(|decision| decision.reviews.contains(&ReviewReason::PathCollision))
+            .filter_map(|decision| decision.path.as_ref().map(|path| path.path.clone()))
+            .collect();
+        let decided = decisions.clone();
+        if !self.post_edit(move |record| {
+            for decision in decided {
+                if let Some(title) = record.titles.iter_mut().find(|title| title.key == decision.title_key) {
+                    title.decision = Some(decision);
+                }
+            }
+            for path in collisions {
+                add_collision(record, path);
+            }
+        }) {
+            return Err(cancelled());
+        }
+        Ok(event(decision_done(&decisions)))
+    }
+
+    /// CheckSpace in Decided (design part 5.8, S54): `remux_check` of `remux_promise` of the staged files' sizes
+    /// against the library root of the plan's kind.
+    fn remux_space(&self) -> Outcome {
+        let Some(plan) = &self.job.record.plan else {
+            return Ok(none("the job has no plan"));
+        };
+        let settings = &self.job.settings;
+        let (name, library) = match plan.kind {
+            Kind::Movie => ("movies_root", settings.movies_root.as_deref()),
+            Kind::Tv => ("tv_root", settings.tv_root.as_deref()),
+        };
+        let Some(library) = library else {
+            return Ok(with(Event::ShareLost, format!("{name} is unset")));
+        };
+        let dirs = plan.titles.iter().filter_map(|planned| self.rip_dir(&planned.key));
+        let files: Vec<PathBuf> = dirs.flat_map(|dir| mkv_files(&dir)).collect();
+        let staged = files.iter().filter_map(|file| fs::metadata(file).ok()).map(|meta| meta.len());
+        let staged = staged.fold(0, u64::saturating_add);
+        self.check_cancel()?;
+        let shares = self.steps.shares.as_ref();
+        let mut promises = lock(&self.steps.promises);
+        Ok(event(remux_check(remux_promise(staged), library, shares, &mut promises, self.id)))
+    }
+
+    /// Remux (design part 5.7 step 13): for each planned title in plan order, the partial folder of its library root
+    /// made when missing (Review Focus 3), then `mkvmerge --gui-mode -o <partial>` of its staged file with the
+    /// decision's layout, recorded as `<key>/remux-mkvmerge.txt`, its progress forwarded with the title key. No
+    /// mkvmerge gives ToolMissing { Mkvmerge }; a remux that cannot be built or fails gives RemuxFailed { Unknown }
+    /// with its sentence, and the staged file stays.
+    fn remux(&self) -> Outcome {
+        let failed = |failure| Event::RemuxFailed { failure };
+        let plan = self.job_plan(failed)?;
+        let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+        };
+        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
+        for planned in &plan.titles {
+            let key = planned.key.as_str();
+            let (decision, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
+            let partial = partial_path(&path.root, self.id, key);
+            if let Some(folder) = partial.parent() {
+                let made = fs::create_dir_all(folder);
+                made.map_err(|error| unknown(failed, format!("{}: {error}", folder.display())))?;
+            }
+            let staged = self.staged_report(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
+            let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
+            let args = remux_args(&partial, &decision.layout, &staged, &raw).map_err(|error| unknown(failed, error))?;
+            let out = self.job.job_dir.join(key).join("remux-mkvmerge.txt");
+            let name = format!("{key}/remux-mkvmerge.txt");
+            let _ = fs::remove_file(with_suffix(&out, ".exit.json"));
+            self.started(&name, &mkvmerge, &args);
+            let on_progress = |fraction: f64| (self.progress)(Some(key), fraction);
+            let ran = self.ctx(&on_progress, |ctx| remux(ctx, &mkvmerge, &args, &out));
+            match &ran {
+                Ok(_) => self.ended_from_file(&name, &out),
+                Err(error) => self.not_run(&name, error),
+            }
+            self.check_cancel()?;
+            match ran {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => return Ok(unknown(failed, message)),
+                Err(error) => return Ok(unknown(failed, format!("the remux could not run: {error}"))),
+            }
+        }
+        Ok(event(Event::RemuxDone))
+    }
+
+    /// VerifyFile in Remuxing (design part 5.7 step 14): for each planned title, `mkvmerge -J` of its partial file,
+    /// recorded as `<key>/partial-mkvmerge.json`, then `verify_final` against the decision's layout, the scan title and
+    /// the staged file's report. The first title with a difference gives FileVerifyFailed { Unknown } with its
+    /// mismatches joined by "; ", also in job.log; an ident error gives the same with its sentence.
+    fn verify_partial(&self) -> Outcome {
+        let failed = |failure| Event::FileVerifyFailed { failure };
+        let plan = self.job_plan(failed)?;
+        let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+        };
+        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
+        for planned in &plan.titles {
+            let key = planned.key.as_str();
+            let (decision, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
+            let partial = partial_path(&path.root, self.id, key);
+            let out = self.job.job_dir.join(key).join("partial-mkvmerge.json");
+            let name = format!("{key}/partial-mkvmerge.json");
+            let _ = fs::remove_file(with_suffix(&out, ".exit.json"));
+            self.started(&name, &mkvmerge, &ident_args(&partial));
+            let read = self.ctx(&no_progress, |ctx| ident(ctx, &mkvmerge, &partial, &out));
+            match &read {
+                Ok(_) => self.ended_from_file(&name, &out),
+                Err(error) => self.not_run(&name, error),
+            }
+            self.check_cancel()?;
+            let header = match read {
+                Ok(Ok(header)) => header,
+                Ok(Err(message)) => return Ok(unknown(failed, message)),
+                Err(error) => return Ok(unknown(failed, format!("mkvmerge -J could not run: {error}"))),
+            };
+            let staged = self.staged_report(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
+            let title = typed.title(planned.title).map_err(|error| unknown(failed, error))?;
+            let report = verify_final(&decision.layout, title, &staged, &header);
+            if !report.ok {
+                let message = report.mismatches.join("; ");
+                self.log(&format!("{key}: the partial file's verification failed: {message}"));
+                return Ok(unknown(failed, message));
+            }
+        }
+        Ok(event(Event::FileVerified))
+    }
+
+    /// File (design parts 5.7 step 14, 6.5): for each planned title in plan order, the final path's missing folders
+    /// made, then the partial file renamed into it with `rename_no_replace`, and the filed file's path, size and
+    /// modification time recorded. A file already at the final path gives FileFailed { Unknown } with `<final> already
+    /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22].
+    fn file(&self) -> Outcome {
+        let failed = |failure| Event::FileFailed { failure };
+        let plan = self.job_plan(failed)?;
+        for planned in &plan.titles {
+            let key = planned.key.as_str();
+            let (_, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
+            let partial = partial_path(&path.root, self.id, key);
+            let target = Path::new(&path.path);
+            if let Some(folder) = target.parent() {
+                let made = fs::create_dir_all(folder);
+                made.map_err(|error| unknown(failed, format!("{}: {error}", folder.display())))?;
+            }
+            self.check_cancel()?;
+            match rename_no_replace(&partial, target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let collision = path.path.clone();
+                    if !self.post_edit(move |record| add_collision(record, collision)) {
+                        return Err(cancelled());
+                    }
+                    let (shown, stays) = (&path.path, partial.display());
+                    return Ok(unknown(failed, format!("{shown} already exists; the partial file stays at {stays}")));
+                }
+                Err(error) => {
+                    let message = format!("{} could not be renamed to {}: {error}", partial.display(), path.path);
+                    return Ok(unknown(failed, message));
+                }
+            }
+            let meta = fs::metadata(target).map_err(|error| unknown(failed, format!("{}: {error}", path.path)))?;
+            let modified = meta.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+            let mtime_unix = modified.map_or(0, |at| at.as_secs());
+            let filed = FiledFile { path: path.path.clone(), size: meta.len(), mtime_unix };
+            if !self.post_title(key, move |title| title.filed = Some(filed)) {
+                return Err(cancelled());
+            }
+        }
+        Ok(event(Event::FileDone))
+    }
+
+    /// DeletePartialFile (design part 5.2; 10.1 "Resuming after a restart"): each decided title's partial file removed
+    /// before the remux runs again, a missing one ignored and any other error logged; no event.
+    fn delete_partial_file(&self) -> Outcome {
+        let keys = self.job.record.plan.iter().flat_map(|plan| plan.titles.iter().map(|planned| planned.key.as_str()));
+        for key in keys {
+            let Ok((_, path)) = self.decided(key) else {
+                continue;
+            };
+            let partial = partial_path(&path.root, self.id, key);
+            match fs::remove_file(&partial) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    self.log(&format!("{}: {error}", partial.display()));
+                }
+                _ => {}
             }
         }
         Ok(StepResult { event: None, message: None })

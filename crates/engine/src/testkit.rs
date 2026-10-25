@@ -52,10 +52,15 @@ const WAIT_CAP: Duration = Duration::from_secs(10);
 const RUN_UNTIL_CAP: Duration = Duration::from_secs(60);
 /// How long `settle` needs everything unchanged.
 const QUIET: Duration = Duration::from_millis(300);
+/// How long `settle` needs everything unchanged while a step or lookup round is outstanding (Task 24).
+const BUSY_QUIET: Duration = Duration::from_secs(2);
 /// `settle`'s cap.
 const SETTLE_CAP: Duration = Duration::from_secs(10);
 /// How long a scan waits for the recorded lookups' files (R23.2).
 const LOOKUP_WAIT_CAP: Duration = Duration::from_secs(5);
+
+/// `Harness::on_spawn`'s actions, each with its needles; an action is taken out when it runs.
+type SpawnHooks = Arc<Mutex<Vec<(Vec<String>, Option<Box<dyn Fn() + Send + Sync>>)>>>;
 
 /// Locks `mutex`, ignoring a poison a panicked thread left, so one failed assertion does not cascade.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -250,6 +255,8 @@ pub struct Harness {
     disc: Option<(String, Value)>,
     /// Whether a scan waits for the recorded lookups' files (R23.2), shared with the `TestGuard`.
     lookups_wait: Arc<AtomicBool>,
+    /// `on_spawn`'s actions, shared with the `TestGuard`.
+    spawn_hooks: SpawnHooks,
     /// True for `new_scripted`: the engine runs `steps`; false for `new`: the real runner.
     scripted: bool,
     script: DriveScript,
@@ -299,7 +306,8 @@ impl Harness {
     ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
     /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
     ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
-    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files.
+    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files, and
+    ///   `on_spawn`'s actions run before the spawns they name.
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
@@ -332,7 +340,8 @@ impl Harness {
         let mut defaults = folders.defaults();
         defaults["tool_paths"] = Value::Object(tool_paths);
         let lookups_wait = Arc::new(AtomicBool::new(true));
-        let guard = TestGuard { wait: Arc::clone(&lookups_wait), urls };
+        let spawn_hooks = SpawnHooks::default();
+        let guard = TestGuard { wait: Arc::clone(&lookups_wait), urls, hooks: Arc::clone(&spawn_hooks) };
         let runner = Runner {
             steps: ScriptedSteps::new(Vec::new()),
             scripted: false,
@@ -341,6 +350,7 @@ impl Harness {
             tools,
             disc,
             lookups_wait,
+            spawn_hooks,
         };
         let harness = folders.harness(defaults, settings, runner);
         harness.start();
@@ -597,7 +607,9 @@ impl Harness {
     }
 
     /// Returns once the job files, notifications, engine.log, drives.json, ejects, step calls and keep-awake holders
-    /// are unchanged for 300 ms (10 s cap). Def: T22. Use: T22 to T29.
+    /// are unchanged for 300 ms, or for 2 s while the running engine has a step or lookup round outstanding (10 s
+    /// cap). A step can pass 300 ms with no file changing, as a stand-in's first launch does, and a step that hangs on
+    /// purpose ends the wait after 2 s (Task 24). Def: T22. Use: T22 to T29.
     pub fn settle(&self) {
         self.deliver();
         let cap = Instant::now() + SETTLE_CAP;
@@ -610,7 +622,10 @@ impl Harness {
                 last = marks;
                 since = Instant::now();
             } else if since.elapsed() >= QUIET {
-                return;
+                let busy = lock(&self.engine).as_ref().is_some_and(EngineHandle::busy);
+                if !busy || since.elapsed() >= BUSY_QUIET {
+                    return;
+                }
             }
         }
     }
@@ -723,6 +738,15 @@ impl Harness {
         self.deliver();
         self.lookups_wait.store(wait, Ordering::SeqCst);
     }
+
+    /// Registers `action` to run once, before the first spawn whose arguments hold every one of `needles`, each as a
+    /// substring of some argument (as the stand-ins match theirs), and then lets that spawn go ahead (design part
+    /// 12.2). Only `new`'s `TestGuard` runs the actions. Def: T24. Use: T24.
+    pub fn on_spawn(&self, needles: &[&str], action: impl Fn() + Send + Sync + 'static) {
+        self.deliver();
+        let needles = needles.iter().map(|needle| needle.to_string()).collect();
+        lock(&self.spawn_hooks).push((needles, Some(Box::new(action))));
+    }
 }
 
 impl Drop for Harness {
@@ -793,6 +817,7 @@ impl Folders {
             tools: runner.tools,
             disc: runner.disc,
             lookups_wait: runner.lookups_wait,
+            spawn_hooks: runner.spawn_hooks,
             scripted: runner.scripted,
             ejector: Arc::new(RecordingEjector::new().with_removals(script_end.clone())),
             script: script_end,
@@ -824,6 +849,7 @@ struct Runner {
     tools: PathBuf,
     disc: Option<(String, Value)>,
     lookups_wait: Arc<AtomicBool>,
+    spawn_hooks: SpawnHooks,
 }
 
 impl Runner {
@@ -837,6 +863,7 @@ impl Runner {
             tools,
             disc: None,
             lookups_wait: Arc::new(AtomicBool::new(true)),
+            spawn_hooks: SpawnHooks::default(),
         }
     }
 }
@@ -845,16 +872,29 @@ impl Runner {
 /// holding `info` and a `--profile=` argument), this guard waits, at most 5 s, until `<the profile's
 /// folder>/lookup-status.txt` has one line per distinct URL of the merged `http.json` and no line ends in `000`. The
 /// engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
-/// each outcome to the book before it saves the status file. Every spawn then goes to `StdProcessGuard`.
+/// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
+/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `StdProcessGuard`.
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,
     /// The distinct URLs of the merged `http.json`; 0 waits for nothing.
     urls: usize,
+    /// `Harness::on_spawn`'s actions.
+    hooks: SpawnHooks,
 }
 
 impl ProcessGuard for TestGuard {
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
+        let action = lock(&self.hooks)
+            .iter_mut()
+            .find(|(needles, action)| {
+                action.is_some()
+                    && needles.iter().all(|needle| spawn.args.iter().any(|arg| arg.contains(needle.as_str())))
+            })
+            .and_then(|(_, action)| action.take());
+        if let Some(action) = action {
+            action();
+        }
         let scan = spawn.args.iter().any(|arg| arg == "info");
         let profile = spawn.args.iter().find_map(|arg| arg.strip_prefix("--profile="));
         if let (true, Some(profile)) = (scan && self.urls > 0 && self.wait.load(Ordering::SeqCst), profile) {

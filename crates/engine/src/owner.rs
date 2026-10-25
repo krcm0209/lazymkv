@@ -1,10 +1,11 @@
-//! The job-owner thread (design parts 4.4, 5.2, 5.4, 7.3; K8, L2): it holds every job, runs `core::job::reduce` on each
-//! event, persists the transition before any of its actions run, performs the actions that only touch the record or
-//! the notifier itself and hands every other action to a `StepRunner` worker. It also routes arrivals, keeps the one
-//! disc-phase token with its queue, and holds KeepAwake while a job is active.
+//! The job-owner thread (design parts 4.4, 5.2, 5.4, 5.7, 7.3, 8.3; K8, L2): it holds every job, runs
+//! `core::job::reduce` on each event, persists the transition before any of its actions run, performs the actions that
+//! only touch the record or the notifier itself and hands every other action to a `StepRunner` worker. It also routes
+//! arrivals, keeps the one disc-phase token with its queue and the file-phase slot with its queue, runs the lookup
+//! rounds of design part 8.3, and holds KeepAwake while a job is active.
 
 use std::any::Any;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
@@ -25,13 +26,14 @@ use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, DRIVE
 use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::Settings;
 use lazymkv_core::snapshot::DiscMeta;
-use lazymkv_platform::{DriveEvent, DriveWatcher, Ejector, Host, KeepAwake, Platform};
+use lazymkv_platform::{DriveEvent, DriveWatcher, Ejector, Host, KeepAwake, Platform, SecretStore};
 use lazymkv_tools::CancelToken;
 
 use crate::arrival::{spawn_arrival, spawn_recording, Arrival};
+use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue};
 use crate::notify::{self, spawn_notifier, NotifySink};
 use crate::space::{Promises, PromisedStep};
-use crate::steps::RealSteps;
+use crate::steps::{spawn_round, RealSteps};
 use crate::store::Store;
 use crate::timers::Timers;
 use crate::EngineConfig;
@@ -129,6 +131,8 @@ pub(crate) enum Msg {
     Progress { job: String, title: Option<String>, fraction: f64 },
     /// A StartTimer timer of the job ran out.
     Timer { job: String },
+    /// A lookup round of the job ended (design part 8.3): `book.pending()`, or why the round could not run.
+    RoundDone { job: String, pending: Result<(bool, bool), String> },
     /// The eject of an already-ripped disc returned.
     Ejected { drive: String },
     /// `EngineHandle::stop`.
@@ -159,17 +163,32 @@ pub(crate) fn start_until(
     let java_in_use = Arc::new(Mutex::new(None));
     let steps = steps.unwrap_or_else(|| {
         let (store, outbox, promises) = (Arc::clone(&store), outbox.clone(), Arc::clone(&promises));
-        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, Arc::clone(&java_in_use)))
+        let (http, java_in_use) = (Arc::clone(&http), Arc::clone(&java_in_use));
+        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use))
     });
-    let Platform { drives, ejector, awake, host, .. } = platform;
+    let Platform { drives, ejector, awake, host, secrets, .. } = platform;
     let (delivered, notifier_done) = channel::<()>();
     let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }));
     let (sender, inbox) = channel::<Msg>();
     let shown = Arc::new(Mutex::new(BTreeMap::new()));
+    let busy = Arc::new(AtomicBool::new(false));
     let drive_stop = Arc::new(AtomicBool::new(false));
+    let parts = Parts {
+        host,
+        ejector,
+        awake,
+        timers,
+        steps,
+        outbox,
+        promises,
+        java_in_use,
+        http,
+        secrets,
+        busy: Arc::clone(&busy),
+    };
     let owner = Owner::load(
         Arc::clone(&store),
-        Parts { host, ejector, awake, timers, steps, outbox, promises, java_in_use },
+        parts,
         sender.clone(),
         notifications,
         stop_after,
@@ -178,7 +197,7 @@ pub(crate) fn start_until(
     );
     let owner = thread::spawn(move || owner.run(inbox));
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
-    Ok(EngineHandle { sender, owner, drive, drive_stop, notifier_done, store, jobs: shown })
+    Ok(EngineHandle { sender, owner, drive, drive_stop, notifier_done, busy, store, jobs: shown })
 }
 
 /// A running engine (design part 4.4). Def: T22. Use: T22 to T29.
@@ -193,6 +212,8 @@ pub struct EngineHandle {
     drive_stop: Arc<AtomicBool>,
     /// Closes when the notifier thread has delivered its last notification and ended.
     notifier_done: Receiver<()>,
+    /// The owner's `busy`, set after each message it handles.
+    busy: Arc<AtomicBool>,
     /// The data folder's store, for the `engine stopped` line.
     store: Arc<Store>,
     /// The owner's records, replaced after each persisted transition.
@@ -203,6 +224,12 @@ impl EngineHandle {
     /// `job_summary` of each job's record, by id (design part 9.3). Def: T22. Use: T22 to T29.
     pub fn jobs(&self) -> Vec<JobSummary> {
         lock(&self.jobs).values().map(job_summary).collect()
+    }
+
+    /// Whether the owner, after the last message it handled, had a step or a lookup round outstanding: the testkit's
+    /// `settle` waits until it has none (Task 24). Def: T24. Use: T24 to T29.
+    pub(crate) fn busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
     }
 
     /// Polls `jobs` every 20 ms until `done` holds, and gives true; false once `timeout` has passed. Def: T22. Use: T22
@@ -461,6 +488,12 @@ struct Parts {
     /// The last scan's MSG:3344 verdict (design part 5.4 step 4), which `RealSteps` writes.
     #[expect(dead_code, reason = "Task 26's self-test reads Java use from the last scan (design part 9.4)")]
     java_in_use: Arc<Mutex<Option<bool>>>,
+    /// The lookups' transport, for the owner's lookup rounds (design part 8.3).
+    http: Arc<dyn HttpTransport>,
+    /// The secrets, for the rounds' `tmdb_token` (design part 8.1).
+    secrets: Arc<dyn SecretStore>,
+    /// Whether a step or a lookup round is outstanding, set after each message (`EngineHandle::busy`).
+    busy: Arc<AtomicBool>,
 }
 
 /// One job as the owner holds it.
@@ -512,6 +545,12 @@ struct Owner {
     /// False when drives.json was refused: the records are then kept in memory only (design part 7.4).
     drives_writable: bool,
     token: DiscToken,
+    /// The file-phase slot and its queue (design part 5.7).
+    slots: SlotQueue,
+    /// The jobs whose lookup round for their current Ejected entry has run and left nothing pending (R24.1).
+    rounds_done: BTreeSet<String>,
+    /// The jobs with a lookup round running (design part 8.3).
+    rounds_running: BTreeSet<String>,
     workers: Vec<Worker>,
     /// Ejects of already-ripped discs not yet returned.
     ejects: usize,
@@ -544,6 +583,7 @@ impl Owner {
                 Err(error) => store.log(&format!("a job is refused and left alone: {error}")),
             }
         }
+        let slots = SlotQueue::new(store.settings().0.file_phase_concurrency as usize);
         let (drive_records, drives_writable) = match store.drives() {
             Ok(drives) => (drives, true),
             Err(error) => {
@@ -565,6 +605,9 @@ impl Owner {
             drive_records,
             drives_writable,
             token: DiscToken::default(),
+            slots,
+            rounds_done: BTreeSet::new(),
+            rounds_running: BTreeSet::new(),
             workers: Vec::new(),
             ejects: 0,
             threads: Vec::new(),
@@ -585,6 +628,7 @@ impl Owner {
                 // Task 26 pushes progress to clients; until then it is read and dropped.
                 Msg::Progress { job, title, fraction } => drop((job, title, fraction)),
                 Msg::Timer { job } => self.on_timer(&job),
+                Msg::RoundDone { job, pending } => self.on_round_done(&job, pending),
                 Msg::Ejected { drive } => {
                     self.ejects = self.ejects.saturating_sub(1);
                     self.drive(&drive).ejecting = false;
@@ -592,6 +636,8 @@ impl Owner {
             }
             self.threads.retain(|thread| !thread.is_finished());
             self.keep_awake();
+            let busy = !self.workers.is_empty() || !self.rounds_running.is_empty();
+            self.parts.busy.store(busy, Ordering::SeqCst);
             if self.stopping {
                 break;
             }
@@ -838,8 +884,9 @@ impl Owner {
         }
     }
 
-    /// One transition (design part 7.3, R22.3): the record actions applied, `updated_unix`, the message, then
-    /// `Store::persist`, all before any action runs; then the stop hook, the actions, and the token.
+    /// One transition (design part 7.3, R22.3, R24.2): the record actions applied (RefreshIdentity's refreshed plan
+    /// among them), `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`, all before any
+    /// action runs; then the stop hook, the actions, the token and the file-phase slot.
     fn commit(
         &mut self,
         id: &str,
@@ -859,9 +906,12 @@ impl Owner {
             match action {
                 Action::RecordNote { note } => add_note(&mut record.notes, *note),
                 Action::ArmRipAgain => record.rip_again = true,
-                Action::RefreshIdentity => self.store.job_log(id, "RefreshIdentity arrives in Task 24"),
+                Action::RefreshIdentity => self.refresh_identity(id, &mut record),
                 _ => {}
             }
+        }
+        if new == State::Filed && record.state != State::Filed {
+            record.filed_unix = Some(now);
         }
         if new.is_waiting() || matches!(new, State::Failed { .. }) {
             // R22.8: an event that leaves the state as it was and brings no sentence keeps the state's message.
@@ -904,14 +954,141 @@ impl Owner {
         }
         let next = self.token.after(id, &transition.new, &transition.actions);
         self.route_queue(next);
+        if self.stopping {
+            return;
+        }
+        self.file_slot(id, &transition);
     }
 
-    /// Design part 5.8's promises released as steps finish: leaving Ripping releases the job's Rip promise, and a new
-    /// Failed or waiting state releases both of its promises.
+    /// RefreshIdentity (design part 8.4, R24.2): the record's plan replaced by `refreshed_plan` over the job's book and
+    /// settings. A plan that cannot be refreshed stays, with a job.log line.
+    fn refresh_identity(&self, id: &str, record: &mut JobRecord) {
+        let (Some(job), Some(plan)) = (self.jobs.get(id), record.plan.as_ref()) else {
+            return;
+        };
+        match refreshed_plan(plan, &self.store.job_dir(id), &job.lookups, &job.settings) {
+            Ok(refreshed) => record.plan = Some(refreshed),
+            Err(error) => self.store.job_log(id, &format!("the identity was not refreshed: {error}")),
+        }
+    }
+
+    /// The file-phase slot after a transition (design part 5.7): a job entering `Ejected { after_copy: false }` joins
+    /// the queue with no lookup round run for this entry; a holder reaching Filed, NeedsReview, Failed or Discarded
+    /// frees its place. Either way the slot is granted again.
+    fn file_slot(&mut self, id: &str, transition: &Transition) {
+        let ejected = State::Ejected { after_copy: false };
+        if transition.new == ejected && transition.old.as_ref() != Some(&ejected) {
+            self.rounds_done.remove(id);
+            self.slots.join(id);
+            self.grant_next();
+        } else if self.slots.after(id, &transition.new) {
+            self.grant_next();
+        }
+    }
+
+    /// Grants the file-phase slot while a place is free (design part 5.7, R24.1): a head of the queue whose persisted
+    /// plan is lookup-pending gets one lookup round first (design part 8.3), and nothing is granted while that round
+    /// runs; any other head is granted its place and fed FilePhaseSlot. A head that is no longer an Ejected job leaves
+    /// the queue.
+    fn grant_next(&mut self) {
+        while let Some(head) = self.slots.next() {
+            let Some(job) = self.jobs.get(&head).filter(|job| job.record.state == State::Ejected { after_copy: false })
+            else {
+                self.slots.leave(&head);
+                continue;
+            };
+            let pending = job.record.plan.as_ref().is_some_and(|plan| plan.identity.lookup_pending);
+            if pending && !self.rounds_done.contains(&head) {
+                if !self.rounds_running.contains(&head) {
+                    self.start_round(&head);
+                }
+                return;
+            }
+            self.slots.grant(&head);
+            self.feed(&head, Event::FilePhaseSlot, None);
+            if self.stopping {
+                return;
+            }
+        }
+    }
+
+    /// A lookup round for `id` on its own thread (design part 8.3), with the `tmdb_token` secret and the host's date;
+    /// its end comes back as `Msg::RoundDone`.
+    fn start_round(&mut self, id: &str) {
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        self.rounds_running.insert(id.to_string());
+        let (sender, job_id) = (self.sender.clone(), id.to_string());
+        spawn_round(
+            self.store.job_dir(id),
+            Arc::clone(&job.lookups),
+            Arc::clone(&self.parts.http),
+            self.parts.secrets.get("tmdb_token"),
+            self.parts.host.local_date(),
+            Arc::clone(&self.store),
+            Box::new(move |pending| {
+                let _ = sender.send(Msg::RoundDone { job: job_id, pending });
+            }),
+        );
+    }
+
+    /// The waiting message of `id`'s pending lookups, the book locked only to read it (design part 8.3, R24.6).
+    fn lookup_message(&self, id: &str) -> Option<String> {
+        self.jobs.get(id).map(|job| waiting_message(&lock(&job.lookups)))
+    }
+
+    /// A lookup round ended (design part 8.3). In `Ejected`, a lookup still pending takes the job out of the slot's
+    /// queue and feeds LookupPending with the waiting message; otherwise the round is marked done, and a round that
+    /// could not run is logged in job.log and marked done too, so the job goes on to the file phase, where its decision
+    /// says what is missing. In AwaitingLookup, a lookup still pending feeds LookupPending, which restarts the timer,
+    /// and none feeds LookupAnswered; a round that could not run feeds LookupPending with its sentence. The slot is
+    /// granted again afterwards.
+    fn on_round_done(&mut self, id: &str, pending: Result<(bool, bool), String>) {
+        self.rounds_running.remove(id);
+        let Some(state) = self.jobs.get(id).map(|job| job.record.state.clone()) else {
+            return;
+        };
+        let waiting = matches!(pending, Ok((discdb, tmdb)) if discdb || tmdb);
+        if let Err(error) = &pending {
+            self.store.job_log(id, &format!("the lookup round could not run: {error}"));
+        }
+        match state {
+            State::Ejected { after_copy: false } if waiting => {
+                self.slots.leave(id);
+                let message = self.lookup_message(id);
+                self.feed(id, Event::LookupPending, message);
+            }
+            State::Ejected { after_copy: false } => {
+                self.rounds_done.insert(id.to_string());
+            }
+            State::AwaitingLookup { .. } => match pending {
+                Ok(_) if waiting => {
+                    let message = self.lookup_message(id);
+                    self.feed(id, Event::LookupPending, message);
+                }
+                Ok(_) => self.feed(id, Event::LookupAnswered, None),
+                Err(error) => {
+                    let message = format!("the lookup round could not run: {error}");
+                    self.feed(id, Event::LookupPending, Some(message));
+                }
+            },
+            _ => {}
+        }
+        if !self.stopping {
+            self.grant_next();
+        }
+    }
+
+    /// Design part 5.8's promises released as steps finish: leaving Ripping releases the job's Rip promise, leaving
+    /// Remuxing its Remux promise, and a new Failed or waiting state releases both of its promises.
     fn release_promises(&self, id: &str, transition: &Transition) {
         let mut promises = lock(&self.parts.promises);
         if transition.old == Some(State::Ripping) && transition.new != State::Ripping {
             promises.release(id, PromisedStep::Rip);
+        }
+        if transition.old == Some(State::Remuxing) && transition.new != State::Remuxing {
+            promises.release(id, PromisedStep::Remux);
         }
         if transition.new.is_waiting() || matches!(transition.new, State::Failed { .. }) {
             promises.release(id, PromisedStep::Rip);
@@ -1169,12 +1346,19 @@ impl Owner {
         }
     }
 
-    /// A StartTimer timer ran out (design part 5.2). AwaitingNetwork gets NetworkRetry once its disc is in and the
-    /// disc-phase token is free (L2); until then the timer runs again. AwaitingLookup's round is Task 24's.
+    /// A StartTimer timer ran out (design part 5.2). AwaitingLookup gets a lookup round, unless one runs (design part
+    /// 8.3). AwaitingNetwork gets NetworkRetry once its disc is in and the disc-phase token is free (L2); until then
+    /// the timer runs again.
     fn on_timer(&mut self, id: &str) {
         let Some(job) = self.jobs.get(id) else {
             return;
         };
+        if matches!(job.record.state, State::AwaitingLookup { .. }) {
+            if !self.rounds_running.contains(id) {
+                self.start_round(id);
+            }
+            return;
+        }
         let State::AwaitingNetwork { return_to } = &job.record.state else {
             return;
         };
@@ -1186,9 +1370,10 @@ impl Owner {
         }
     }
 
-    /// KeepAwake is held while a step runs or the token is held (design part 4.2, R22.4).
+    /// KeepAwake is held while a step runs, the token is held or a file-phase slot is held (design parts 4.2, 5.7,
+    /// R22.4).
     fn keep_awake(&mut self) {
-        let active = !self.workers.is_empty() || self.token.holder().is_some();
+        let active = !self.workers.is_empty() || self.token.holder().is_some() || self.slots.held();
         if active != self.awake_held {
             if active {
                 self.parts.awake.acquire();
