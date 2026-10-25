@@ -4,6 +4,7 @@ mod arrival;
 mod file_phase;
 mod notify;
 mod owner;
+mod restart;
 mod space;
 mod steps;
 mod store;

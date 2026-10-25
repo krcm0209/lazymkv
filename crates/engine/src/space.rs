@@ -3,10 +3,16 @@
 //! were promised.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 use lazymkv_core::job::Event;
-use lazymkv_core::plan::{staging_bytes_needed, write_bytes_needed, Plan};
+use lazymkv_core::plan::{staging_bytes_needed, write_bytes_needed, Kind, Plan};
+use lazymkv_core::record::JobRecord;
+use lazymkv_core::settings::Settings;
 use lazymkv_platform::{Reach, ShareConnector};
+
+use crate::steps::mkv_files;
 
 /// Design part 5.8's two steps that promise space. Def: T23. Use: T23, T24, T25.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,7 +54,7 @@ impl Promises {
     }
 }
 
-/// `shares.volume(root)`, else the root itself (S11, design part 6.1). Def: T23. Use: T23, T24.
+/// `shares.volume(root)`, else the root itself (S11, design part 6.1). Def: T23. Use: T23, T24, T25.
 pub(crate) fn volume_of(shares: &dyn ShareConnector, root: &str) -> String {
     shares.volume(root).unwrap_or_else(|| root.to_string())
 }
@@ -110,6 +116,47 @@ pub(crate) fn planned_remux_promise(plan: &Plan) -> u64 {
 /// 5.8). Def: T23. Use: T24, T25.
 pub(crate) fn remux_promise(staged_bytes: u64) -> u64 {
     write_bytes_needed(staged_bytes)
+}
+
+/// Ruling S75 (design parts 5.8, 5.10): `record`'s promise of `step` rebuilt from the job folder and staging, through
+/// Task 23's functions, for a job a restart, a return from a wait or a Retry left in Ripping or Remuxing, which no
+/// check promised in this engine run. Rip is `rip_promise(plan, meta.json's total_bytes)` on `volume_of` the job's
+/// `staging_root`; Remux is `remux_promise` of the staged `.mkv` files' sizes summed, the files under
+/// `<staging_root>/<job id>/rip/<title key>/` of each planned title, on `volume_of` the library root of the plan's kind
+/// (`movies_root` for a movie). Nothing is promised without a plan or those roots. Def: T25. Use: T25.
+pub(crate) fn rebuild_promise(
+    promises: &mut Promises,
+    shares: &dyn ShareConnector,
+    step: PromisedStep,
+    record: &JobRecord,
+    settings: &Settings,
+    job_dir: &Path,
+) {
+    let (Some(plan), Some(staging)) = (&record.plan, settings.staging_root.as_deref()) else {
+        return;
+    };
+    match step {
+        PromisedStep::Rip => {
+            let meta = fs::read(job_dir.join("meta.json")).ok();
+            let meta = meta.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            let disc_size = meta.and_then(|meta| meta["total_bytes"].as_u64()).unwrap_or(0);
+            promises.promise(&record.id, step, &volume_of(shares, staging), rip_promise(plan, disc_size));
+        }
+        PromisedStep::Remux => {
+            let library = match plan.kind {
+                Kind::Movie => settings.movies_root.as_deref(),
+                Kind::Tv => settings.tv_root.as_deref(),
+            };
+            let Some(library) = library else {
+                return;
+            };
+            let rip = Path::new(staging).join(&record.id).join("rip");
+            let files = plan.titles.iter().flat_map(|planned| mkv_files(&rip.join(&planned.key)));
+            let staged = files.filter_map(|file| fs::metadata(file).ok()).map(|meta| meta.len());
+            let staged = staged.fold(0, u64::saturating_add);
+            promises.promise(&record.id, step, &volume_of(shares, library), remux_promise(staged));
+        }
+    }
 }
 
 /// The remux's check (design part 5.8, S54): the staged files' sizes; SpaceOk replaces this job's Remux promise. An

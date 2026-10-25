@@ -58,6 +58,7 @@ use crate::file_phase::{
     engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refreshed_plan,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
+use crate::restart::READ_BACK_LINE;
 use crate::space::{planned_remux_promise, remux_check, remux_promise, rip_check, rip_promise, Promises};
 use crate::store::Store;
 use crate::EngineConfig;
@@ -159,6 +160,23 @@ fn add_collision(record: &mut JobRecord, path: String) {
     }
 }
 
+/// Whether `a` and `b` name one file, as both names of a rename stopped between its hard link and its remove do: both
+/// are files of equal size and modification time (design part 6.5).
+fn one_file(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => {
+            let same_time = a.modified().ok().is_some_and(|at| b.modified().ok() == Some(at));
+            a.is_file() && b.is_file() && a.len() == b.len() && same_time
+        }
+        _ => false,
+    }
+}
+
+/// The message of a rename whose hard link was made and whose remove of the partial name failed (design part 6.5).
+fn half_done(partial: &Path, target: &str, error: &io::Error) -> String {
+    format!("{target} holds the filed file, but the partial file {} could not be removed: {error}", partial.display())
+}
+
 /// `dir` emptied, or made when absent.
 fn empty_dir(dir: &Path) -> io::Result<()> {
     match fs::remove_dir_all(dir) {
@@ -168,8 +186,9 @@ fn empty_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-/// The regular `.mkv` files directly in `dir`, sorted; none when `dir` is missing.
-fn mkv_files(dir: &Path) -> Vec<PathBuf> {
+/// The regular `.mkv` files directly in `dir`, sorted; none when `dir` is missing (design part 5.6 step 6: a title's
+/// staging folder holds one). Def: T23. Use: T23, T24, T25.
+pub(crate) fn mkv_files(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -1166,7 +1185,8 @@ impl Step<'_> {
     }
 
     /// One title's decision document (design parts 5.7 step 11, 6.4): `decide_doc` over `engine_decide_inputs` with the
-    /// probe Probe kept, or over `read_back_inputs` when this engine run holds none (PF-27), first with no library
+    /// probe Probe kept, or over `read_back_inputs` when this engine run holds none (PF-27, Ruling S74), which writes
+    /// the job.log line `<key>: ` and `READ_BACK_LINE` (design part 5.10), first with no library
     /// facts, then rendered again with the `library_facts` of the path the last render chose while they differ from
     /// the facts it was rendered with (Ruling R24.c2: the facts can lead to an edition-named path, whose own facts may
     /// hold a collision). The film folder does not change with the edition, so this settles at once; facts seen before
@@ -1176,7 +1196,11 @@ impl Step<'_> {
         let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
         let mut inputs = match &probes {
             Some(probes) => engine_decide_inputs(ctx, self.job, plan, key, probes, LibraryFacts::default())?,
-            None => read_back_inputs(ctx, &self.job.job_dir, plan, key)?,
+            None => {
+                let inputs = read_back_inputs(ctx, &self.job.job_dir, plan, key)?;
+                self.log(&format!("{key}: {READ_BACK_LINE}"));
+                inputs
+            }
         };
         let mut seen = vec![inputs.library.clone()];
         loop {
@@ -1340,7 +1364,9 @@ impl Step<'_> {
     /// VerifyFile in Remuxing (design part 5.7 step 14): for each planned title, `mkvmerge -J` of its partial file,
     /// recorded as `<key>/partial-mkvmerge.json`, then `verify_final` against the decision's layout, the scan title and
     /// the staged file's report. The first title with a difference gives FileVerifyFailed { Unknown } with its
-    /// mismatches joined by "; ", also in job.log; an ident error gives the same with its sentence.
+    /// mismatches joined by "; ", also in job.log; an ident error gives the same with its sentence. When every title
+    /// passes, each title's `filed` records its final path and its partial file's size with `mtime_unix` 0, the
+    /// verified size that File reads after a restart (RP-7, design part 6.5); File then records the filed file's own.
     fn verify_partial(&self) -> Outcome {
         let failed = |failure| Event::FileVerifyFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1348,6 +1374,7 @@ impl Step<'_> {
             return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
         };
         let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
+        let mut verified = Vec::new();
         for planned in &plan.titles {
             let key = planned.key.as_str();
             let (decision, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
@@ -1375,6 +1402,18 @@ impl Step<'_> {
                 self.log(&format!("{key}: the partial file's verification failed: {message}"));
                 return Ok(unknown(failed, message));
             }
+            let size = fs::metadata(&partial).map(|meta| meta.len());
+            let size = size.map_err(|error| unknown(failed, format!("{}: {error}", partial.display())))?;
+            verified.push((key.to_string(), FiledFile { path: path.path.clone(), size, mtime_unix: 0 }));
+        }
+        if !self.post_edit(move |record| {
+            for (key, filed) in verified {
+                if let Some(title) = record.titles.iter_mut().find(|title| title.key == key) {
+                    title.filed = Some(filed);
+                }
+            }
+        }) {
+            return Err(cancelled());
         }
         Ok(event(Event::FileVerified))
     }
@@ -1382,7 +1421,12 @@ impl Step<'_> {
     /// File (design parts 5.7 step 14, 6.5): for each planned title in plan order, the final path's missing folders
     /// made, then the partial file renamed into it with `rename_no_replace`, and the filed file's path, size and
     /// modification time recorded. A file already at the final path gives FileFailed { Unknown } with `<final> already
-    /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22].
+    /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22]. An earlier
+    /// rename is taken as done, as design part 6.5 says after a restart in Verified, when the partial file is gone and
+    /// the final path holds a file of the verified size (the title's `filed` size, RP-7), and when a rename stopped
+    /// between its hard link and its remove left both names on one file (`one_file`), whose partial name is then
+    /// removed. A partial file that is gone otherwise gives FileFailed { Unknown }, as does a remove that fails after
+    /// the link, with a message saying the final path holds the file.
     fn file(&self) -> Outcome {
         let failed = |failure| Event::FileFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1391,6 +1435,36 @@ impl Step<'_> {
             let (_, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
             let partial = partial_path(&path.root, self.id, key);
             let target = Path::new(&path.path);
+            if !partial.exists() {
+                let title = self.job.record.titles.iter().find(|title| title.key == key);
+                let verified = title.and_then(|title| title.filed.as_ref()).map(|filed| filed.size);
+                let found = fs::metadata(target).ok().filter(|meta| meta.is_file());
+                match (found, verified) {
+                    (Some(meta), Some(size)) if meta.len() == size => {
+                        let shown = &path.path;
+                        self.log(&format!("{key}: the partial file is gone and {shown} holds the verified file"));
+                        self.record_filed(key, &path.path)?;
+                        continue;
+                    }
+                    (Some(_), _) => {
+                        let collision = path.path.clone();
+                        if !self.post_edit(move |record| add_collision(record, collision)) {
+                            return Err(cancelled());
+                        }
+                        let message = format!(
+                            "{} already exists and is not the verified file; the partial file {} is gone",
+                            path.path,
+                            partial.display()
+                        );
+                        return Ok(unknown(failed, message));
+                    }
+                    (None, _) => {
+                        let (gone, shown) = (partial.display(), &path.path);
+                        let message = format!("the partial file {gone} is gone and {shown} holds no file");
+                        return Ok(unknown(failed, message));
+                    }
+                }
+            }
             if let Some(folder) = target.parent() {
                 let made = fs::create_dir_all(folder);
                 made.map_err(|error| unknown(failed, format!("{}: {error}", folder.display())))?;
@@ -1398,6 +1472,14 @@ impl Step<'_> {
             self.check_cancel()?;
             match rename_no_replace(&partial, target) {
                 Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists && one_file(&partial, target) => {
+                    // Design part 6.5: an earlier rename stopped between its hard link and its remove.
+                    if let Err(error) = fs::remove_file(&partial) {
+                        return Ok(unknown(failed, half_done(&partial, &path.path, &error)));
+                    }
+                    let shown = &path.path;
+                    self.log(&format!("{key}: {shown} already held the partial file, so the rename was finished"));
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     let collision = path.path.clone();
                     if !self.post_edit(move |record| add_collision(record, collision)) {
@@ -1406,20 +1488,32 @@ impl Step<'_> {
                     let (shown, stays) = (&path.path, partial.display());
                     return Ok(unknown(failed, format!("{shown} already exists; the partial file stays at {stays}")));
                 }
+                Err(error) if one_file(&partial, target) => {
+                    // The hard link was made and only the remove of the partial name failed.
+                    return Ok(unknown(failed, half_done(&partial, &path.path, &error)));
+                }
                 Err(error) => {
                     let message = format!("{} could not be renamed to {}: {error}", partial.display(), path.path);
                     return Ok(unknown(failed, message));
                 }
             }
-            let meta = fs::metadata(target).map_err(|error| unknown(failed, format!("{}: {error}", path.path)))?;
-            let modified = meta.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok());
-            let mtime_unix = modified.map_or(0, |at| at.as_secs());
-            let filed = FiledFile { path: path.path.clone(), size: meta.len(), mtime_unix };
-            if !self.post_title(key, move |title| title.filed = Some(filed)) {
-                return Err(cancelled());
-            }
+            self.record_filed(key, &path.path)?;
         }
         Ok(event(Event::FileDone))
+    }
+
+    /// Records the file at `path` as the title `key`'s filed file: its path, size and modification time (design part
+    /// 6.5). Err is FileFailed { Unknown } when it cannot be read, or the cancelled result.
+    fn record_filed(&self, key: &str, path: &str) -> Result<(), StepResult> {
+        let failed = |failure| Event::FileFailed { failure };
+        let meta = fs::metadata(path).map_err(|error| unknown(failed, format!("{path}: {error}")))?;
+        let modified = meta.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+        let mtime_unix = modified.map_or(0, |at| at.as_secs());
+        let filed = FiledFile { path: path.to_string(), size: meta.len(), mtime_unix };
+        if !self.post_title(key, move |title| title.filed = Some(filed)) {
+            return Err(cancelled());
+        }
+        Ok(())
     }
 
     /// DeletePartialFile (design part 5.2; 10.1 "Resuming after a restart"): each decided title's partial file removed

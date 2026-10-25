@@ -54,6 +54,18 @@ impl SlotQueue {
         SlotQueue { capacity, holders: Vec::new(), queue: VecDeque::new() }
     }
 
+    /// The slot as a restart finds it (design parts 5.7, 5.10, Ruling S72): `holders` hold their places whatever the
+    /// capacity, as a wait entered after the grant keeps it, and `queue` waits in its order, oldest first. Def: T25.
+    /// Use: T25.
+    pub(crate) fn seed(&mut self, holders: &[String], queue: &[String]) {
+        for holder in holders {
+            self.grant(holder);
+        }
+        for queued in queue {
+            self.join(queued);
+        }
+    }
+
     /// Appends `job` to the queue; a job already queued or holding a place keeps its place (design part 5.7).
     /// Def: T24. Use: T24, T25, T26.
     pub(crate) fn join(&mut self, job: &str) {

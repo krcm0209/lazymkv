@@ -26,13 +26,14 @@ use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, DRIVE
 use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::Settings;
 use lazymkv_core::snapshot::DiscMeta;
-use lazymkv_platform::{DriveEvent, DriveWatcher, Ejector, Host, KeepAwake, Platform, SecretStore};
+use lazymkv_platform::{DriveEvent, DriveWatcher, Ejector, Host, KeepAwake, Platform, SecretStore, ShareConnector};
 use lazymkv_tools::CancelToken;
 
-use crate::arrival::{spawn_arrival, spawn_recording, Arrival};
+use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue};
 use crate::notify::{self, spawn_notifier, NotifySink};
-use crate::space::{Promises, PromisedStep};
+use crate::restart::{held_promise, plan_restart, rebuild_book};
+use crate::space::{rebuild_promise, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
 use crate::store::Store;
 use crate::timers::Timers;
@@ -145,10 +146,11 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
     start_until(config, services, None)
 }
 
-/// `start` with the testkit's stop hook. It writes the engine.log line `engine started (lazymkv <version>)` before it
-/// returns (design part 3.5). With `services.steps` None it runs the real runner, `RealSteps` (Task 23), over the
-/// owner's Outbox, the space promises and the last scan's Java use, which the owner keeps for Task 26's self-test.
-/// Def: T22. Use: T22.
+/// `start` with the testkit's stop hook. It writes the engine.log line `engine started (lazymkv <version>)` and runs
+/// the restart sequence (design part 5.10, Ruling S70; `Owner::load`) before it returns, so a restart's EngineRestart
+/// lines are persisted by then (design part 3.5). With `services.steps` None it runs the real runner, `RealSteps`
+/// (Task 23), over the owner's Outbox, the space promises and the last scan's Java use, which the owner keeps for Task
+/// 26's self-test. Def: T22. Use: T22.
 pub(crate) fn start_until(
     config: EngineConfig,
     services: Services,
@@ -166,7 +168,7 @@ pub(crate) fn start_until(
         let (http, java_in_use) = (Arc::clone(&http), Arc::clone(&java_in_use));
         Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use))
     });
-    let Platform { drives, ejector, awake, host, secrets, .. } = platform;
+    let Platform { drives, ejector, awake, host, secrets, shares, .. } = platform;
     let (delivered, notifier_done) = channel::<()>();
     let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }));
     let (sender, inbox) = channel::<Msg>();
@@ -184,8 +186,11 @@ pub(crate) fn start_until(
         java_in_use,
         http,
         secrets,
+        shares,
         busy: Arc::clone(&busy),
     };
+    // L1: the discs already in a drive, read before the drive thread drains any event (design part 4.2).
+    let present = drives.present();
     let owner = Owner::load(
         Arc::clone(&store),
         parts,
@@ -194,6 +199,7 @@ pub(crate) fn start_until(
         stop_after,
         Arc::clone(&shown),
         Arc::clone(&drive_stop),
+        present,
     );
     let owner = thread::spawn(move || owner.run(inbox));
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
@@ -493,6 +499,8 @@ struct Parts {
     http: Arc<dyn HttpTransport>,
     /// The secrets, for the rounds' `tmdb_token` (design part 8.1).
     secrets: Arc<dyn SecretStore>,
+    /// The shares, for the space promises rebuilt at a restart or a return (design part 5.8, S75).
+    shares: Arc<dyn ShareConnector>,
     /// Whether a step or a lookup round is outstanding, set after each message and cleared at shutdown
     /// (`EngineHandle::busy`, Ruling R24.c1).
     busy: Arc<AtomicBool>,
@@ -562,8 +570,10 @@ struct Owner {
 }
 
 impl Owner {
-    /// The owner over the store's jobs and drives.json (design parts 5.10, 7.4). A refused job is logged and left
-    /// alone; a refused drives.json is logged and the drives are kept in memory only. Restarts are Task 25's.
+    /// The owner over the store's jobs and drives.json (design parts 5.10, 7.4), after the restart sequence over the
+    /// discs `present` in the drives (`Owner::restart`). A refused job is logged and left alone; a refused drives.json
+    /// is logged and the drives are kept in memory only.
+    #[allow(clippy::too_many_arguments)]
     fn load(
         store: Arc<Store>,
         parts: Parts,
@@ -572,6 +582,7 @@ impl Owner {
         stop_after: Option<StopAfter>,
         shown: Arc<Mutex<BTreeMap<String, JobRecord>>>,
         drive_stop: Arc<AtomicBool>,
+        present: Vec<(String, PathBuf)>,
     ) -> Owner {
         let mut jobs = BTreeMap::new();
         for loaded in store.load_jobs() {
@@ -594,7 +605,7 @@ impl Owner {
                 (DrivesFile { format, drives: BTreeMap::new(), drive_incapable: Vec::new() }, false)
             }
         };
-        Owner {
+        let mut owner = Owner {
             store,
             parts,
             sender,
@@ -615,12 +626,134 @@ impl Owner {
             threads: Vec::new(),
             awake_held: false,
             stopping: false,
+        };
+        owner.restart(present);
+        owner
+    }
+
+    /// The restart sequence (design part 5.10, L1, L1a, Rulings S70 to S75), run before `start` returns:
+    /// 1. each disc in a drive is fingerprinted as an arrival's walk would be (`read_arrival`), and a drive record
+    ///    whose drive holds no disc now is emptied, as a removal would;
+    /// 2. `plan_restart` over the loaded jobs, those discs and drives.json;
+    /// 3. each fed job has its disc noted (the token job's drive becomes its record's drive) and its book rebuilt
+    ///    (`rebuild_book`), and its EngineRestart transition is persisted through the stop hook, whose true answer
+    ///    stops the engine before any resume action runs;
+    /// 4. the space promises of the resumed jobs (`held_promise`, `rebuild_promise`), the token and the slot are
+    ///    rebuilt, and the noted drives are recorded handled;
+    /// 5. the resume actions are performed, the slot is granted, then the arrivals are routed as fresh insertions.
+    fn restart(&mut self, present: Vec<(String, PathBuf)>) {
+        let host = Arc::clone(&self.parts.host);
+        let mut present = present;
+        present.sort();
+        let mut walked = Vec::new();
+        for (drive, root) in present {
+            let slot = self.drive(&drive);
+            slot.number += 1;
+            slot.root = Some(root.clone());
+            let number = slot.number;
+            walked.push(read_arrival(&drive, &root, number, host.as_ref()).map_err(|sentence| (drive, sentence)));
+        }
+        let discs: Vec<(String, Option<String>)> = walked
+            .iter()
+            .map(|walk| match walk {
+                Ok(arrival) => (arrival.drive.clone(), arrival.meta.fingerprint.clone()),
+                Err((drive, _)) => (drive.clone(), None),
+            })
+            .collect();
+        let emptied: Vec<String> = self
+            .drive_records
+            .drives
+            .iter()
+            .filter(|(drive, record)| record.fingerprint.is_some() && !discs.iter().any(|(id, _)| id == *drive))
+            .map(|(drive, _)| drive.clone())
+            .collect();
+        for drive in emptied {
+            self.record_drive(&drive, None, false);
+        }
+        let records: Vec<JobRecord> = self.jobs.values().map(|job| job.record.clone()).collect();
+        let plan = plan_restart(&records, &discs, &self.drive_records);
+        let mut resumed = Vec::new();
+        for (id, disc_present) in &plan.feeds {
+            let job_dir = self.store.job_dir(id);
+            let Some(job) = self.jobs.get_mut(id) else {
+                continue;
+            };
+            let fingerprint = Some(job.record.fingerprint.as_str());
+            let carrier = discs.iter().find(|(_, found)| found.as_deref() == fingerprint);
+            let drive = carrier.map(|(drive, _)| drive.clone()).filter(|_| *disc_present);
+            let token = plan.token.as_deref() == Some(id.as_str());
+            if let (true, Some(drive)) = (token, &drive) {
+                job.record.drive = drive.clone();
+            }
+            job.disc = drive;
+            job.lookups = Arc::new(Mutex::new(rebuild_book(&job_dir)));
+            let event = Event::EngineRestart { disc_present: *disc_present };
+            let (new, actions) = match reduce(&job.record.state, &event) {
+                Ok(next) => next,
+                Err(rejected) => {
+                    let line = format!("rejected {} in {}", event_tag(&event), rejected.state.as_str());
+                    self.store.job_log(id, &line);
+                    continue;
+                }
+            };
+            let Some(transition) = self.persist_transition(id, Some(event), new, actions, None) else {
+                if self.stopping {
+                    return;
+                }
+                continue;
+            };
+            if token {
+                self.token.take(id);
+            }
+            resumed.push((id.clone(), transition.actions));
+        }
+        {
+            let mut promises = lock(&self.parts.promises);
+            for (id, _) in &resumed {
+                let Some(job) = self.jobs.get(id) else {
+                    continue;
+                };
+                if let Some(step) = held_promise(&job.record.state) {
+                    let (shares, job_dir) = (self.parts.shares.as_ref(), self.store.job_dir(id));
+                    rebuild_promise(&mut promises, shares, step, &job.record, &job.settings, &job_dir);
+                }
+            }
+        }
+        self.slots.seed(&plan.slot_holders, &plan.slot_queue);
+        for drive in &plan.noted {
+            let fingerprint = discs.iter().find(|(id, _)| id == drive).and_then(|(_, found)| found.clone());
+            let record = DriveRecord { fingerprint: fingerprint.clone(), handled: true };
+            if self.drive_records.drives.get(drive) != Some(&record) {
+                self.record_drive(drive, fingerprint, true);
+            }
+        }
+        for (id, actions) in resumed {
+            self.perform(&id, &actions, None);
+        }
+        self.grant_next();
+        let arrivals = walked.into_iter().filter(|walk| {
+            let drive = match walk {
+                Ok(arrival) => &arrival.drive,
+                Err((drive, _)) => drive,
+            };
+            plan.arrivals.contains(drive)
+        });
+        for outcome in arrivals.collect::<Vec<_>>() {
+            if self.stopping {
+                return;
+            }
+            self.on_arrival(outcome);
         }
     }
 
-    /// The loop: one message at a time, until `Msg::Stop` or the stop hook.
+    /// The loop: one message at a time, until `Msg::Stop` or the stop hook, which may already have stopped the
+    /// restart sequence (`Owner::restart`).
     fn run(mut self, inbox: Receiver<Msg>) {
-        while let Ok(message) = inbox.recv() {
+        self.after_message();
+        while !self.stopping {
+            let Ok(message) = inbox.recv() else {
+                break;
+            };
             match message {
                 Msg::Stop => break,
                 Msg::Drive(DriveEvent::Arrived { drive, root }) => self.on_arrived(drive, root),
@@ -636,15 +769,18 @@ impl Owner {
                     self.drive(&drive).ejecting = false;
                 }
             }
-            self.threads.retain(|thread| !thread.is_finished());
-            self.keep_awake();
-            let busy = !self.workers.is_empty() || !self.rounds_running.is_empty();
-            self.parts.busy.store(busy, Ordering::SeqCst);
-            if self.stopping {
-                break;
-            }
+            self.after_message();
         }
         self.shut_down(&inbox);
+    }
+
+    /// After the restart sequence and after each message: finished threads dropped, KeepAwake held or released, and
+    /// the busy flag set (Ruling R24.c1).
+    fn after_message(&mut self) {
+        self.threads.retain(|thread| !thread.is_finished());
+        self.keep_awake();
+        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty();
+        self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
     /// Cancels every running step, drops their results and waits for every step, recording and eject the owner
@@ -888,9 +1024,8 @@ impl Owner {
         }
     }
 
-    /// One transition (design part 7.3, R22.3, R24.2): the record actions applied (RefreshIdentity's refreshed plan
-    /// among them), `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`, all before any
-    /// action runs; then the stop hook, the actions, the token and the file-phase slot.
+    /// One transition (design part 7.3, R22.3, R24.2): `persist_transition`, then the actions, the token and the
+    /// file-phase slot.
     fn commit(
         &mut self,
         id: &str,
@@ -900,9 +1035,34 @@ impl Owner {
         message: Option<String>,
         recording: Option<(Arrival, PathBuf)>,
     ) {
-        let Some(job) = self.jobs.get(id) else {
+        let Some(transition) = self.persist_transition(id, event, new, actions, message) else {
             return;
         };
+        self.perform(id, &transition.actions, recording);
+        if self.stopping {
+            return;
+        }
+        let next = self.token.after(id, &transition.new, &transition.actions);
+        self.route_queue(next);
+        if self.stopping {
+            return;
+        }
+        self.file_slot(id, &transition);
+    }
+
+    /// A transition persisted before any of its actions runs (design part 7.3, R22.3, R24.2): the record actions
+    /// applied (RefreshIdentity's refreshed plan among them), `filed_unix` on entering Filed, `updated_unix`, the
+    /// message, then `Store::persist`; then the promises released or rebuilt and the stop hook. None when it could not
+    /// be persisted, or when the stop hook stopped the engine.
+    fn persist_transition(
+        &mut self,
+        id: &str,
+        event: Option<Event>,
+        new: State,
+        actions: Vec<Action>,
+        message: Option<String>,
+    ) -> Option<Transition> {
+        let job = self.jobs.get(id)?;
         let now = self.parts.host.now_unix();
         let mut record = job.record.clone();
         let old = event.as_ref().map(|_| record.state.clone());
@@ -940,28 +1100,20 @@ impl Owner {
                 self.record_drive(&record.drive, Some(record.fingerprint.clone()), false);
             }
             self.give_back(id);
-            return;
+            return None;
         }
         lock(&self.shown).insert(id.to_string(), record.clone());
         if let Some(job) = self.jobs.get_mut(id) {
             job.record = record;
         }
         self.release_promises(id, &transition);
+        self.promise_on_return(id, &transition);
         if self.stop_after.as_ref().is_some_and(|stop| stop(&transition)) {
             self.stopping = true;
             self.drive_stop.store(true, Ordering::SeqCst);
-            return;
+            return None;
         }
-        self.perform(id, &transition.actions, recording);
-        if self.stopping {
-            return;
-        }
-        let next = self.token.after(id, &transition.new, &transition.actions);
-        self.route_queue(next);
-        if self.stopping {
-            return;
-        }
-        self.file_slot(id, &transition);
+        Some(transition)
     }
 
     /// RefreshIdentity (design part 8.4, R24.2): the record's plan replaced by `refreshed_plan` over the job's book and
@@ -1107,6 +1259,19 @@ impl Owner {
             promises.release(id, PromisedStep::Rip);
             promises.release(id, PromisedStep::Remux);
         }
+    }
+
+    /// A return from a wait, or a Retry, into Ripping or Remuxing runs no space check, so the promise the step holds
+    /// is rebuilt as at a restart (design parts 5.8, 5.10, S75): `held_promise` of the new state through
+    /// `rebuild_promise`, after `release_promises` released what the job held when it started to wait or failed.
+    fn promise_on_return(&self, id: &str, transition: &Transition) {
+        let back = transition.old.as_ref().is_some_and(|old| old.is_waiting() || matches!(old, State::Failed { .. }));
+        let (true, Some(step), Some(job)) = (back, held_promise(&transition.new), self.jobs.get(id)) else {
+            return;
+        };
+        let mut promises = lock(&self.parts.promises);
+        let (shares, job_dir) = (self.parts.shares.as_ref(), self.store.job_dir(id));
+        rebuild_promise(&mut promises, shares, step, &job.record, &job.settings, &job_dir);
     }
 
     /// Releases the token `id` holds although it cannot go on (its folder or a transition could not be written), so
