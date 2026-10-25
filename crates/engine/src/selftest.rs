@@ -298,6 +298,9 @@ pub(crate) struct CheckEnv {
     pub(crate) java_in_use: Arc<Mutex<Option<bool>>>,
     /// The shared MakeMKV state (S79).
     pub(crate) makemkv: Arc<MakeMkv>,
+    /// Stops the check's tool runs: the owner gives each check a token of its own and raises it at a stop or a forced
+    /// shutdown, because a drive listing has no time limit (design parts 3.8, 5.3; S57).
+    pub(crate) cancel: CancelToken,
 }
 
 impl CheckEnv {
@@ -308,7 +311,7 @@ impl CheckEnv {
         find_tool(tool, settings, resources, self.host.as_ref(), path_var).filter(|found| found.path.is_file())
     }
 
-    /// Runs `call` with a ToolCtx over the guard and host, the limits, a cancel token nobody raises and no callbacks.
+    /// Runs `call` with a ToolCtx over the guard and host, the limits, the check's cancel token and no callbacks.
     fn with_ctx<R>(&self, settings: &Settings, call: impl FnOnce(&ToolCtx) -> R) -> R {
         let limits = self.limits_override.unwrap_or_else(|| Limits::from_settings(settings));
         let on_output = |_: OutputStream, _: &str| {};
@@ -317,7 +320,7 @@ impl CheckEnv {
             guard: self.processes.as_ref(),
             host: self.host.as_ref(),
             limits: &limits,
-            cancel: CancelToken::default(),
+            cancel: self.cancel.clone(),
             on_output: &on_output,
             on_progress: &on_progress,
         };
@@ -334,8 +337,8 @@ impl CheckEnv {
     /// The MakeMKV check (design part 3.7, S79, S80): while a `makemkvcon` runs (`busy`, or another MakeMKV the
     /// listing finds running) the last check marked busy, with no run; otherwise the drive listing recorded at
     /// `<data>/selftest/drive-list.txt`, its (version, licence code) observed. It is ok when `makemkvcon` is found,
-    /// prints a version of at least `makemkv_min_version` and no licence message. The check becomes the last one.
-    /// Def: T26. Use: T26.
+    /// prints a version of at least `makemkv_min_version` and no licence message. The check becomes the last one. A
+    /// listing the check's cancel token ended is not observed and does not become the last check. Def: T26. Use: T26.
     pub(crate) fn makemkv_check(&self, settings: &Settings, busy: bool) -> SelfTestCheck {
         let name = Tool::Makemkvcon.as_str();
         if busy {
@@ -357,6 +360,10 @@ impl CheckEnv {
         let (ok, detail, version) = match listed {
             Err(error) if error.kind() == io::ErrorKind::ResourceBusy => return self.makemkv.busy(&error.to_string()),
             Err(error) => (false, format!("the drive listing could not run: {error}"), None),
+            Ok(listing) if listing.run.cancelled => {
+                let cancelled = check(name, false, "the drive listing was cancelled".to_string());
+                return SelfTestCheck { path: Some(location.path.display().to_string()), ..cancelled };
+            }
             Ok(listing) => {
                 let summary = listing.summary;
                 self.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
@@ -386,9 +393,12 @@ impl CheckEnv {
 
     /// One of the other four tools' checks (S80): its path, the version `tool_version` reads, recorded at
     /// `<data>/selftest/<tool>-version.txt`, and where it was found; ok when found. The java check's detail also says
-    /// Java use at the last scan, or that no scan ran yet.
+    /// Java use at the last scan, or that no scan ran yet. Once the check's cancel token is raised, no tool runs.
     fn tool_check(&self, settings: &Settings, tool: Tool) -> SelfTestCheck {
         let name = tool.as_str();
+        if self.cancel.is_cancelled() {
+            return check(name, false, "the self-test was cancelled before this check ran".to_string());
+        }
         let mut found = match self.locate(tool, settings) {
             None => check(name, false, format!("{name} was not found")),
             Some(location) => {
@@ -419,9 +429,11 @@ impl CheckEnv {
 
     /// Every check of spec 13's self-test that needs no disc, in S80's order: the MakeMKV check (`busy` while a
     /// `makemkvcon` runs), mkvmerge, ffprobe, ffmpeg, java, the three roots and the TMDb token (design part 9.4, S53).
-    /// Def: T26. Use: T26.
-    pub(crate) fn selftest(&self, settings: &Settings, busy: bool) -> SelfTest {
+    /// `listed` runs once the MakeMKV check has ended, so the owner can free the disc-phase token the check holds
+    /// (Ruling R26.c1). Def: T26. Use: T26.
+    pub(crate) fn selftest(&self, settings: &Settings, busy: bool, listed: &dyn Fn()) -> SelfTest {
         let mut checks = vec![self.makemkv_check(settings, busy)];
+        listed();
         let tools = [Tool::Mkvmerge, Tool::Ffprobe, Tool::Ffmpeg, Tool::Java];
         checks.extend(tools.map(|tool| self.tool_check(settings, tool)));
         checks.push(root_check("staging_root", settings.staging_root.as_deref(), false));
@@ -492,11 +504,13 @@ fn library_root<'a>(record: &JobRecord, settings: &'a Settings) -> Option<&'a st
     }
 }
 
-/// AwaitingShare's re-check (Ruling S81): staging and the plan kind's library root all reachable give ShareBack.
+/// AwaitingShare's re-check (Ruling S81): the roots the return state uses all reachable give ShareBack; a disc-phase
+/// return uses staging, any other return staging and the plan kind's library root.
 fn share_back(record: &JobRecord, settings: &Settings, shares: &dyn ShareConnector) -> Option<Event> {
     let staging = settings.staging_root.as_deref()?;
-    let roots = std::iter::once(staging).chain(library_root(record, settings));
-    let mut roots = roots;
+    let disc = matches!(&record.state, State::AwaitingShare { return_to } if return_to.is_disc_phase());
+    let library = if disc { None } else { library_root(record, settings) };
+    let mut roots = std::iter::once(staging).chain(library);
     roots.all(|root| shares.reach(root) == Reach::Reachable).then_some(Event::ShareBack)
 }
 
@@ -586,6 +600,30 @@ mod tests {
         let reopened = MakeMkvState::open(&s.0);
         assert_eq!(reopened.recorded, Some((Some("2.0.0".to_string()), None)));
         assert!(s.0.join("selftest/makemkv-check.json").is_file());
+    }
+
+    #[test]
+    fn a_share_recheck_reaches_the_roots_its_return_uses() {
+        use lazymkv_core::job::State;
+        use lazymkv_platform::fakes::FakeShares;
+        let settings = Settings {
+            staging_root: Some("/staging".to_string()),
+            movies_root: Some("/movies".to_string()),
+            ..Settings::default()
+        };
+        let shares = FakeShares::new();
+        shares.set_reach("/movies", Reach::Unreachable("cable out".to_string()));
+        let waiting = |return_to: State| JobRecord {
+            format: lazymkv_core::record::JOB_FORMAT.to_string(), id: "abc-1".to_string(),
+            fingerprint: "ABC".to_string(), disc_id: None, drive: "tok0".to_string(), created_unix: 1, updated_unix: 1,
+            state: State::AwaitingShare { return_to: Box::new(return_to) }, message: None, rip_again: false,
+            profile: "job.mmcp.xml".to_string(), plan: None, titles: vec![], filed_unix: None, collisions: vec![],
+            notes: vec![],
+        };
+        assert_eq!(share_back(&waiting(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), None);
+        shares.set_reach("/movies", Reach::Reachable);
+        assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), Some(Event::ShareBack));
     }
 
     #[test]

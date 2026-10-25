@@ -63,6 +63,10 @@ const WAIT_POLL: Duration = Duration::from_millis(20);
 /// `ExtractSubtitleEvidence` runs with `Decide` as one unit). Def: T22. Use: T22, T24.
 pub(crate) const NO_EVENT_ACTIONS: [&str; 3] = ["EmptyTitleDirectory", "DeletePartialFile", "ExtractSubtitleEvidence"];
 
+/// The disc-phase token's holder while a MakeMKV check's listing runs (Ruling R26.c1, design part 3.7): it is never a
+/// job ID, which is a lower-case fingerprint, a dash and a number (K3). Def: T26. Use: T26.
+pub(crate) const CHECK_HOLDER: &str = "the MakeMKV check";
+
 /// The start of the message of a step, recording or eject that panicked (R22.11): the owner writes an engine.log line
 /// naming the job for every result whose message holds it. Def: T22. Use: T22.
 pub(crate) const PANICKED: &str = "the step panicked: ";
@@ -157,6 +161,8 @@ pub(crate) enum Msg {
     Request { client: u64, id: Option<u64>, request: Request },
     /// A self-test or a retry's re-check ended, for the request `id` of `client` (design part 9.4, S81).
     Checked { client: u64, id: Option<u64>, outcome: CheckOutcome },
+    /// The running self-test's MakeMKV check ended, so the disc-phase token it holds is free again (Ruling R26.c1).
+    CheckListed,
     /// `EngineHandle::stop`.
     Stop,
 }
@@ -207,6 +213,7 @@ pub(crate) fn start_until(
         secrets: Arc::clone(&platform.secrets),
         java_in_use: Arc::clone(&java_in_use),
         makemkv: Arc::clone(&makemkv),
+        cancel: CancelToken::default(),
     };
     // PF-28: the MakeMKV check at start runs to its end before any step runs or any client is accepted (S79).
     let selftest = first_selftest(env.makemkv_check(&store.settings().0, false));
@@ -718,6 +725,8 @@ struct Owner {
     checks: VecDeque<PendingCheck>,
     /// Whether a self-test or re-check runs.
     checking: bool,
+    /// The running check's CancelToken, raised at a stop or a forced shutdown (design parts 3.8, 5.3).
+    check_cancel: Option<CancelToken>,
     /// The Retry or ReviewApproved a job waiting in the slot's queue is fed with its place (design part 5.7).
     slot_events: BTreeMap<String, Event>,
     /// The jobs whose running lookup round a `retry` started (Ruling S81).
@@ -791,6 +800,7 @@ impl Owner {
             share_secrets: BTreeSet::new(),
             checks: VecDeque::new(),
             checking: false,
+            check_cancel: None,
             slot_events: BTreeMap::new(),
             retry_rounds: BTreeSet::new(),
             rescans: BTreeSet::new(),
@@ -957,6 +967,7 @@ impl Owner {
             Msg::Connect(stream) => self.on_connect(stream),
             Msg::Request { client, id, request } => self.on_request(client, id, request),
             Msg::Checked { client, id, outcome } => self.on_checked(client, id, outcome),
+            Msg::CheckListed => self.release_check_token(),
         }
     }
 
@@ -975,8 +986,11 @@ impl Owner {
             Msg::Request { client, id, .. } => self.parts.clients.send(client, reply_error(id, STOPPING, &[])),
             Msg::Checked { client, id, .. } => {
                 self.checking = false;
+                self.check_cancel = None;
+                self.release_check_token();
                 self.parts.clients.send(client, reply_error(id, STOPPING, &[]));
             }
+            Msg::CheckListed => self.release_check_token(),
             Msg::Connect(stream) => drop(stream),
             Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Stop => {}
         }
@@ -997,12 +1011,15 @@ impl Owner {
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
-    /// Cancels every running step, drops their results and waits for every step, recording, eject and check the owner
-    /// started (design part 3.5), then releases KeepAwake and closes every client.
+    /// Cancels every running step and the running check, drops their results and waits for every step, recording,
+    /// eject and check the owner started (design part 3.5), then releases KeepAwake and closes every client.
     fn shut_down(&mut self, inbox: &Receiver<Msg>) {
         self.drive_stop.store(true, Ordering::SeqCst);
         for worker in &self.workers {
             worker.cancel.cancel();
+        }
+        if let Some(cancel) = &self.check_cancel {
+            cancel.cancel();
         }
         while !self.workers.is_empty() || self.ejects > 0 {
             match inbox.recv() {
@@ -2153,8 +2170,27 @@ impl Owner {
         self.workers.iter().any(|worker| worker.tags.iter().any(|tag| tag == "RunScan" || tag == "RipTitle"))
     }
 
+    /// Whether `work` runs the MakeMKV check's drive listing: a self-test, or the re-check of a job in AwaitingMakeMkv
+    /// or in AwaitingTool returning to the disc phase or an extraction (Ruling S81).
+    fn lists_drives(&self, work: &CheckWork) -> bool {
+        let CheckWork::Recheck(job) = work else {
+            return true;
+        };
+        match self.jobs.get(job).map(|job| &job.record.state) {
+            Some(State::AwaitingMakeMkv { .. }) => true,
+            Some(State::AwaitingTool { return_to }) => {
+                return_to.is_disc_phase() || matches!(**return_to, State::Extracting)
+            }
+            _ => false,
+        }
+    }
+
     /// Starts the next queued check on its own thread, unless one runs: a self-test over the engine's settings, or a
-    /// re-check of the job with its own settings; its end comes back as `Msg::Checked`.
+    /// re-check of the job with its own settings; its end comes back as `Msg::Checked`. A check that lists the drives
+    /// takes the disc-phase token for its MakeMKV check, so no step runs a `makemkvcon` beside it; while a job holds
+    /// the token, or a `makemkvcon` runs for a job, it takes nothing and its MakeMKV check reports the last one marked
+    /// busy (Ruling R26.c1, design part 3.7, S79). A self-test frees the token once its MakeMKV check has ended
+    /// (`Msg::CheckListed`); a re-check, when it ends. The check gets a CancelToken of its own (design part 5.3).
     fn start_check(&mut self) {
         if self.checking || self.quiet.is_some() {
             return;
@@ -2162,14 +2198,23 @@ impl Owner {
         let Some(PendingCheck { client, id, work }) = self.checks.pop_front() else {
             return;
         };
-        let (env, busy) = (self.parts.env.clone(), self.makemkv_busy());
+        let busy = self.lists_drives(&work) && (self.makemkv_busy() || !self.token.take(CHECK_HOLDER));
+        let cancel = CancelToken::default();
+        let env = CheckEnv { cancel: cancel.clone(), ..self.parts.env.clone() };
         let run: Box<dyn FnOnce() -> CheckOutcome + Send> = match work {
             CheckWork::Selftest => {
                 let settings = self.store.settings().0;
-                Box::new(move || CheckOutcome::Selftest(env.selftest(&settings, busy)))
+                let sender = self.sender.clone();
+                Box::new(move || {
+                    let listed = move || {
+                        let _ = sender.send(Msg::CheckListed);
+                    };
+                    CheckOutcome::Selftest(env.selftest(&settings, busy, &listed))
+                })
             }
             CheckWork::Recheck(job) => {
                 let Some(held) = self.jobs.get(&job) else {
+                    self.release_check_token();
                     self.reply(client, id, Err(no_job(&job)));
                     return self.start_check();
                 };
@@ -2186,6 +2231,7 @@ impl Owner {
             }
         };
         self.checking = true;
+        self.check_cancel = Some(cancel);
         let sender = self.sender.clone();
         self.threads.push(thread::spawn(move || {
             let outcome = panic::catch_unwind(AssertUnwindSafe(run))
@@ -2194,11 +2240,14 @@ impl Owner {
         }));
     }
 
-    /// A check ended (design part 9.4, S78, S81). A self-test becomes the last one, is pushed to every client as
-    /// `selftest_result`, then answers its request with itself, and every AwaitingTool job whose re-check passes gets
-    /// ToolFound. A re-check's event is delivered, then its `retry` gets `ok`. The next check starts.
+    /// A check ended (design part 9.4, S78, S81). The disc-phase token it may still hold is freed first. A self-test
+    /// becomes the last one, is pushed to every client as `selftest_result`, then answers its request with itself, and
+    /// every AwaitingTool job whose re-check passes gets ToolFound. A re-check's event is delivered, then its `retry`
+    /// gets `ok`. The next check starts.
     fn on_checked(&mut self, client: u64, id: Option<u64>, outcome: CheckOutcome) {
         self.checking = false;
+        self.check_cancel = None;
+        self.release_check_token();
         match outcome {
             CheckOutcome::Selftest(selftest) => {
                 self.selftest = selftest.clone();
@@ -2219,6 +2268,14 @@ impl Owner {
         }
         if !self.stopping {
             self.start_check();
+        }
+    }
+
+    /// Frees the disc-phase token when a check holds it, through the token's normal path, so what waits in its queue
+    /// is routed (Ruling R26.c1).
+    fn release_check_token(&mut self) {
+        if self.token.holder() == Some(CHECK_HOLDER) {
+            self.give_back(CHECK_HOLDER);
         }
     }
 
@@ -2269,8 +2326,8 @@ impl Owner {
 
     /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, closes every client and stops. With a
     /// step running and no `force`, it is refused naming the jobs. With `force`, each running step is cancelled as
-    /// `cancel` does, but a CheckSpace or Eject is let finish; the owner then waits for every step (`quiet_message`)
-    /// and ends in `finish_shutdown`.
+    /// `cancel` does, but a CheckSpace or Eject is let finish, and a running check is cancelled; the owner then waits
+    /// for every step (`quiet_message`) and ends in `finish_shutdown`.
     fn shutdown(&mut self, client: u64, id: Option<u64>, force: bool) {
         let mut running: Vec<String> = self.workers.iter().map(|worker| worker.job.clone()).collect();
         running.sort();
@@ -2281,6 +2338,9 @@ impl Owner {
         }
         if !force {
             return self.reply(client, id, Err(steps_running(&running)));
+        }
+        if let Some(cancel) = &self.check_cancel {
+            cancel.cancel();
         }
         let mut cancelled = Vec::new();
         for worker in &mut self.workers {

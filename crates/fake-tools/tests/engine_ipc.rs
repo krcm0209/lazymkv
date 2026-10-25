@@ -918,9 +918,68 @@ fn the_selftest_java_check_reports_the_last_scans_java_use() {
     assert!(check(&before, "java")["detail"].as_str().unwrap().contains("no scan yet"));
     h.insert("tok0", DISC_A);
     h.deliver();
-    c.until_state(None, "Ejected");
+    // Filed: no stand-in of the job runs beside the self-test's version calls (the stand-ins' counter files).
+    c.until_state(None, "Filed");
     let after = c.ok("run_selftest", Value::Null);
     assert!(check(&after, "java")["detail"].as_str().unwrap().contains("java in use at the last scan: true"));
+}
+
+/// Ruling R26.c1 (design part 3.7): the MakeMKV check holds the disc-phase token while its listing runs, so a disc
+/// that arrives then waits in the token's queue, and its job's RunScan lists the drives only after the check's
+/// listing ended. The other tools are unset, so the self-test runs no stand-in beside the job's.
+#[test]
+fn a_makemkv_check_holds_the_disc_phase_token_until_its_listing_ends() {
+    let unset = json!({"mkvmerge": null, "ffprobe": null, "ffmpeg": null, "java": null});
+    let h = stand_in(&["movie-direct"], json!({"keep_tuning_evidence": false, "drive_settle_s": 0,
+                                              "drive_ready_timeout_s": 1, "tool_paths": unset}));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let (entered, in_listing) = channel::<()>();
+    let (release, gate) = channel::<()>();
+    let gate = std::sync::Mutex::new(gate);
+    h.on_spawn(&["info", "disc:9999"], move || {
+        let _ = entered.send(());
+        let _ = gate.lock().unwrap().recv_timeout(WAIT);
+    });
+    c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
+    in_listing.recv_timeout(WAIT).expect("the self-test's listing starts");
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    h.wait("the arrival to be walked", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_string());
+    h.settle();
+    assert!(h.job_ids().is_empty(), "a job started while the check's listing ran: {:?}", h.job_ids());
+    assert_eq!(h.drives_json()["drives"]["tok0"]["handled"], json!(false));
+    release.send(()).unwrap();
+    let selftest = loop {
+        match read_reply(c.line().expect("a line").trim_end()).unwrap() {
+            Reply::Ok { id: Some(99), result } => break result,
+            Reply::Push(envelope) => c.pushes.push_back(envelope),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!((&check(&selftest, "makemkvcon")["ok"], &check(&selftest, "makemkvcon")["busy"]), (&json!(true), &json!(false)));
+    let id = c.until_state(None, "Scanned")["id"].as_str().unwrap().to_string();
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
+}
+
+/// The running check's CancelToken is raised at stop (design part 5.3): a listing that hangs ends with it.
+#[test]
+fn stop_cancels_a_makemkv_check_whose_listing_hangs() {
+    let h = stand_in(&["movie-direct", "movie-direct-listing-hang"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let out = h.data().join("selftest").join("drive-list.txt");
+    let at_start = fs::read(&out).unwrap();
+    c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
+    h.wait("the self-test's listing to hang", |_| fs::read(&out).is_ok_and(|now| !now.is_empty() && now != at_start));
+    let (stopped, done) = channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        drop(h);
+        let _ = stopped.send(());
+    });
+    assert!(done.recv_timeout(WAIT).is_ok(), "stop waited for the hanging listing");
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 #[test]

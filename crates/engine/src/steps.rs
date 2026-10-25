@@ -549,9 +549,9 @@ impl Step<'_> {
 
     /// The drive listing before a makemkvcon call (design part 5.4 step 1): recorded as `drive-list.txt` at the job's
     /// first listing and as `drive-list-<n>.txt` after it (RP-1), with the job.log line `drive listing <n>: <drive> is
-    /// index <index>`. Its (version, licence code) is observed into the engine's MakeMKV state (S79). A listing with
-    /// no DRV line for the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>`
-    /// (RP-2).
+    /// index <index>`. Its (version, licence code) is observed into the engine's MakeMKV state (S79), unless the step
+    /// was cancelled. A listing with no DRV line for the job's drive gives `failed(Unknown)` with `MakeMKV's drive
+    /// listing has no drive <drive>` (RP-2).
     fn listing(&self, program: &Path, failed: fn(Failure) -> Event) -> Result<(u32, RunSummary), StepResult> {
         let drive = self.job.record.drive.as_str();
         if drive.is_empty() {
@@ -573,9 +573,9 @@ impl Step<'_> {
         };
         self.ended(&name, &listing.run);
         self.keep_debug_log(&name, listing.run.started_unix, &out);
+        self.check_cancel()?;
         let summary = &listing.summary;
         self.steps.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
-        self.check_cancel()?;
         match listing.index {
             Some(index) => {
                 self.log(&format!("drive listing {n}: {drive} is index {index}"));
