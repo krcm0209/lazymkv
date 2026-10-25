@@ -1,0 +1,556 @@
+//! The makemkvcon drivers (design parts 5.3, 5.4, 5.6): the drive listing, the scan and the rip. Each one checks that
+//! no other MakeMKV process runs, records its run with `run_recorded`, reads each line with `LineReader`, kills the
+//! run past its limits, and pauses `limits.after_kill` after any kill before it returns (S55 to S59).
+
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::thread::Thread;
+use std::time::{Duration, Instant};
+
+use lazymkv_core::disc::TitleSource;
+use lazymkv_core::ipc::CANCELLED;
+use lazymkv_core::job::{classify_title_failure, Failure, FailureClass};
+use lazymkv_core::robot::{self, lines::{Call, LineEvent, LineReader, RunSummary}};
+use lazymkv_platform::Host;
+
+use crate::record::{run_recorded, CancelToken, LineAction, RunResult, ToolCtx};
+
+/// The flags a job fixes for every makemkvcon call (design parts 5.3, 5.4; spec 9.2). Def: T13. Use: T23.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MakemkvFlags {
+    /// `--minlength`: the shortest title, in seconds, MakeMKV lists.
+    pub minlength_s: u32,
+    /// `--cache`: the read cache, in megabytes.
+    pub cache_mb: u32,
+    /// `--profile`: the job's profile file.
+    pub profile: PathBuf,
+    /// Whether `--debug` is passed (S45).
+    pub debug: bool,
+}
+
+/// `["-r","--cache=1","info","disc:9999"]`, with `"--debug"` after `"-r"` when `debug` (design part 5.4 step 1, S45).
+/// Def: T13. Use: T13, T23.
+pub fn drive_list_args(debug: bool) -> Vec<String> {
+    let mut args = vec!["-r".to_string()];
+    if debug {
+        args.push("--debug".to_string());
+    }
+    args.extend(["--cache=1", "info", "disc:9999"].map(String::from));
+    args
+}
+
+/// The flags every scan and rip starts with: `-r`, the messages and progress to standard output, `--debug` when on,
+/// then the length, cache and profile flags (design part 5.4 step 4).
+fn job_flag_args(flags: &MakemkvFlags) -> Vec<String> {
+    let mut args = ["-r", "--messages=-stdout", "--progress=-same"].map(String::from).to_vec();
+    if flags.debug {
+        args.push("--debug".to_string());
+    }
+    args.push(format!("--minlength={}", flags.minlength_s));
+    args.push(format!("--cache={}", flags.cache_mb));
+    args.push(format!("--profile={}", flags.profile.display()));
+    args
+}
+
+/// `["-r","--messages=-stdout","--progress=-same",("--debug",)"--minlength=<m>","--cache=<c>","--profile=<p>","info",
+/// "disc:<drive>"]` (design part 5.4 step 4). Def: T13. Use: T13, T23.
+pub fn scan_args(flags: &MakemkvFlags, drive: u32) -> Vec<String> {
+    let mut args = job_flag_args(flags);
+    args.push("info".to_string());
+    args.push(format!("disc:{drive}"));
+    args
+}
+
+/// The scan's flags, then `"mkv","disc:<drive>","<title>","<dir>"` (design part 5.6 step 6). Def: T13. Use: T13, T23.
+pub fn rip_args(flags: &MakemkvFlags, drive: u32, title: u32, dir: &Path) -> Vec<String> {
+    let mut args = job_flag_args(flags);
+    args.push("mkv".to_string());
+    args.push(format!("disc:{drive}"));
+    args.push(title.to_string());
+    args.push(dir.display().to_string());
+    args
+}
+
+/// Field 0, read as a number, of the first DRV line whose field 6 equals `drive` exactly (design part 5.4 step 1). A
+/// line with fewer than 7 fields, or whose field 0 is not a number, is skipped. Def: T13. Use: T13, T23.
+pub fn drive_index(drives: &[robot::Drive], drive: &str) -> Option<u32> {
+    drives.iter().find_map(|fields| match fields.get(6) {
+        Some(id) if id == drive => fields[0].parse().ok(),
+        _ => None,
+    })
+}
+
+/// One drive listing: the index for the drive id, the reducer's summary and the run (design parts 3.7, 5.4).
+/// Def: T13. Use: T23, T26.
+#[derive(Clone, Debug)]
+pub struct DriveListing {
+    /// The `disc:` index of the drive id, or None when no DRV line names it.
+    pub index: Option<u32>,
+    /// What the listing said.
+    pub summary: RunSummary,
+    /// How the run ended.
+    pub run: RunResult,
+}
+
+/// Runs and records the drive listing into `out` (design part 5.4 step 1). Another MakeMKV process running gives `Err`
+/// of kind `ResourceBusy` naming it (S55). The run has no time limit; it is killed only by the exit wait after its
+/// `MSG:5010` (`run.timed_out`) or by the cancel (`run.cancelled`) (S57). Def: T13. Use: T23, T26.
+pub fn list_drives(ctx: &ToolCtx, program: &Path, debug: bool, drive: &str, out: &Path) -> io::Result<DriveListing> {
+    let (run, summary, _) = run_makemkv(ctx, program, &drive_list_args(debug), out, None, Call::DriveList)?;
+    Ok(DriveListing { index: drive_index(&summary.drives, drive), summary, run })
+}
+
+/// How a scan ended (design part 5.4 step 4, L5). Def: T13. Use: T23.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScanOutcome {
+    /// The scan finished: its standard output read with replacement, and what it said.
+    Done { text: String, summary: RunSummary },
+    /// MakeMKV rejected the profile (`MSG:1009`), with the message text.
+    ProfileRejected { text: String },
+    /// The scan failed, with its class and a message for the job's log.
+    Failed { failure: Failure, message: String },
+}
+
+/// Runs and records the scan into `out`, killing it past `limits.scan`; the engine lists the drives and retries once
+/// (RP-5; design parts 5.3, 5.4 step 4). Every call writes `out` from the start (S58). A licence message gives
+/// `Failed { Licence }`, `MSG:1009` gives `ProfileRejected`, and a scan without `MSG:5011` and a `TCOUNT` line fails
+/// whatever its exit code. Def: T13. Use: T23.
+pub fn scan(ctx: &ToolCtx, program: &Path, flags: &MakemkvFlags, drive: u32, out: &Path) -> io::Result<ScanOutcome> {
+    let failed = |failure, message: &str| ScanOutcome::Failed { failure, message: message.to_string() };
+    let ran = run_makemkv(ctx, program, &scan_args(flags, drive), out, Some(ctx.limits.scan), Call::Scan);
+    let (run, summary, kill) = match ran {
+        Ok(ran) => ran,
+        Err(error) => return busy_message(error).map(|message| failed(UNKNOWN, &message)),
+    };
+    Ok(match kill {
+        Kill::Limit => failed(UNKNOWN, SCAN_PAST_LIMIT),
+        Kill::ExitWait => failed(UNKNOWN, EXIT_WAIT_PASSED),
+        Kill::Cancel => failed(UNKNOWN, CANCELLED),
+        Kill::None | Kill::LineKill => {
+            if let Some(licence) = &summary.licence {
+                failed(Failure { class: FailureClass::Licence, output: None }, &licence.text)
+            } else if let Some(text) = &summary.profile_rejected {
+                ScanOutcome::ProfileRejected { text: text.clone() }
+            } else if !summary.scan_complete {
+                let code = exit_text(&run, kill);
+                failed(UNKNOWN, &format!("the scan ended without MSG:5011 and a TCOUNT line (exit code {code})"))
+            } else {
+                ScanOutcome::Done { text: String::from_utf8_lossy(&run.stdout).into_owned(), summary }
+            }
+        }
+    })
+}
+
+/// `classify_title_failure`'s first two arguments, read when a rip has failed (design part 5.6 step 6). Def: T13.
+/// Use: T23.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StagingHealth {
+    /// Whether the staging share can be reached.
+    pub share_healthy: bool,
+    /// Whether the staging share is out of space.
+    pub out_of_space: bool,
+}
+
+/// How a rip ended (design part 5.6 step 6). Def: T13. Use: T23.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RipOutcome {
+    /// MakeMKV saved the title, and the title folder holds this one `.mkv` file.
+    Ripped { file: PathBuf },
+    /// The index guard found the planned title under another index, and the rip was killed (spec 6.2 step 6).
+    IndexMismatch,
+    /// A licence or key message, with its text.
+    Licence { message: String },
+    /// The rip failed, with its class and a message for the job's log.
+    Failed { failure: Failure, message: String },
+}
+
+/// A rip's outcome, run and summary (design part 5.6 step 6). When another MakeMKV process stopped the rip before it
+/// started (S55), `run` has no exit code, no lines and no output, and `summary` is empty. Def: T13. Use: T23.
+#[derive(Clone, Debug)]
+pub struct RipRun {
+    /// How the rip ended.
+    pub outcome: RipOutcome,
+    /// How the run ended.
+    pub run: RunResult,
+    /// What the rip said.
+    pub summary: RunSummary,
+}
+
+/// Runs and records one title's rip into `out`, with the index guard (design part 5.6 step 6). `title` is the title's
+/// index in the scan and `source` how the guard recognises it; `dir` is the title's empty rip folder. A mismatch kills
+/// the rip; a licence message does not (S59). `staging` is read only when the rip has failed. Def: T13. Use: T23.
+#[allow(clippy::too_many_arguments)]
+pub fn rip(
+    ctx: &ToolCtx,
+    program: &Path,
+    flags: &MakemkvFlags,
+    drive: u32,
+    title: u32,
+    source: TitleSource,
+    dir: &Path,
+    out: &Path,
+    staging: &dyn Fn() -> StagingHealth,
+) -> io::Result<RipRun> {
+    let call = Call::Rip { index: title, source };
+    let (run, summary, kill) = match run_makemkv(ctx, program, &rip_args(flags, drive, title, dir), out, None, call) {
+        Ok(ran) => ran,
+        Err(error) => {
+            let message = busy_message(error)?;
+            let run = RunResult {
+                exit_code: None,
+                lines: 0,
+                elapsed_ms: 0,
+                started_unix: ctx.host.now_unix(),
+                timed_out: false,
+                cancelled: ctx.cancel.is_cancelled(),
+                stdout: Vec::new(),
+            };
+            let outcome = RipOutcome::Failed { failure: UNKNOWN, message };
+            return Ok(RipRun { outcome, run, summary: RunSummary::default() });
+        }
+    };
+    let outcome = rip_outcome(&run, &summary, kill, dir, staging)?;
+    Ok(RipRun { outcome, run, summary })
+}
+
+/// The verdict of a rip that ran, in design part 5.6 step 6's order: the kills, the index guard, a licence message, a
+/// rejected profile, then the summary and the title folder.
+fn rip_outcome(
+    run: &RunResult,
+    summary: &RunSummary,
+    kill: Kill,
+    dir: &Path,
+    staging: &dyn Fn() -> StagingHealth,
+) -> io::Result<RipOutcome> {
+    let failed = |message: String| RipOutcome::Failed { failure: UNKNOWN, message };
+    match kill {
+        Kill::Cancel => return Ok(failed(CANCELLED.to_string())),
+        Kill::ExitWait => return Ok(failed(EXIT_WAIT_PASSED.to_string())),
+        Kill::None | Kill::Limit | Kill::LineKill => {}
+    }
+    if summary.index_guard == Some(false) {
+        return Ok(RipOutcome::IndexMismatch);
+    }
+    if let Some(licence) = &summary.licence {
+        return Ok(RipOutcome::Licence { message: licence.text.clone() });
+    }
+    if let Some(text) = &summary.profile_rejected {
+        return Ok(failed(format!("MakeMKV rejected the profile on the rip: {text}")));
+    }
+    let mut files = mkv_files(dir)?;
+    if summary.title_saved && !summary.title_failed && files.len() == 1 {
+        return Ok(RipOutcome::Ripped { file: files.remove(0) });
+    }
+    let code = exit_text(run, kill);
+    let message = if summary.title_failed {
+        format!("MakeMKV reported the title failed (exit code {code})")
+    } else if !summary.title_saved {
+        format!("the rip ended without a success summary (exit code {code})")
+    } else {
+        format!("the title folder holds {} .mkv files, not one", files.len())
+    };
+    let health = staging();
+    let failure =
+        classify_title_failure(health.share_healthy, health.out_of_space, summary.write_error, summary.read_errors);
+    Ok(RipOutcome::Failed { failure, message })
+}
+
+/// The regular files directly in `dir` whose extension is `mkv` in any ASCII case, sorted. A missing `dir` holds none.
+fn mkv_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")) && entry.file_type()?.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The class every failure of the drivers has unless the summary says otherwise.
+const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
+
+/// The message of a scan killed past `limits.scan`, which the engine retries once (RP-5).
+const SCAN_PAST_LIMIT: &str = "the scan did not finish within scan_timeout_min and was killed";
+
+/// The message of a run killed by the exit wait (S57).
+const EXIT_WAIT_PASSED: &str = "makemkvcon did not exit within exit_wait_min of its final message and was killed";
+
+/// The process names, lower-cased and without `.exe`, that stop a call when running: the two command-line programs
+/// and the graphical one (S55).
+const MAKEMKV_PROCESSES: [&str; 3] = ["makemkvcon64", "makemkvcon", "makemkv"];
+
+/// The prefixes of a rip's final messages (S57).
+const RIP_ENDINGS: [&str; 4] = ["MSG:5004,", "MSG:5005,", "MSG:5036,", "MSG:5037,"];
+
+/// How often the watcher of `run_makemkv` copies the cancel and checks the exit wait.
+const WATCH_EVERY: Duration = Duration::from_millis(20);
+
+/// Which kill ended a run (S56, S57).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kill {
+    /// No kill: the tool ended by itself.
+    None,
+    /// The run passed its whole-run limit.
+    Limit,
+    /// The tool did not exit within `limits.exit_wait` of its final message.
+    ExitWait,
+    /// The line callback asked for the kill (the index guard).
+    LineKill,
+    /// The owner's cancel.
+    Cancel,
+}
+
+/// S55's refusal, carried inside the `io::Error` so that `scan` and `rip` can tell it from any other error.
+#[derive(Debug)]
+struct Busy(String);
+
+impl fmt::Display for Busy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "another MakeMKV process is running: {}", self.0)
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// S55's message when `error` is the busy refusal, else `error` itself.
+fn busy_message(error: io::Error) -> io::Result<String> {
+    match error.get_ref().and_then(|inner| inner.downcast_ref::<Busy>()) {
+        Some(busy) => Ok(busy.to_string()),
+        None => Err(error),
+    }
+}
+
+/// The first running process that is MakeMKV, named as the host reported it (S55).
+fn makemkv_running(host: &dyn Host) -> Option<String> {
+    host.running_processes().into_iter().find(|name| {
+        let lower = name.to_lowercase();
+        let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+        MAKEMKV_PROCESSES.contains(&stem)
+    })
+}
+
+/// The exit code for a message, or `none` when the process was killed or ended without one.
+fn exit_text(run: &RunResult, kill: Kill) -> String {
+    match (kill, run.exit_code) {
+        (Kill::None, Some(code)) => code.to_string(),
+        _ => "none".to_string(),
+    }
+}
+
+/// Recognises a call's final message by its line prefix, only to start the exit wait (S57).
+enum Ending {
+    /// The first `MSG:5010`.
+    DriveList,
+    /// The first `TCOUNT` after a `MSG:5011`.
+    Scan { seen_5011: bool },
+    /// The first of `RIP_ENDINGS`.
+    Rip,
+}
+
+impl Ending {
+    fn of(call: &Call) -> Ending {
+        match call {
+            Call::DriveList => Ending::DriveList,
+            Call::Scan => Ending::Scan { seen_5011: false },
+            Call::Rip { .. } => Ending::Rip,
+        }
+    }
+
+    /// Whether `line` is a final message of the call.
+    fn is_final(&mut self, line: &str) -> bool {
+        match self {
+            Ending::DriveList => line.starts_with("MSG:5010,"),
+            Ending::Scan { seen_5011 } => {
+                if line.starts_with("MSG:5011,") {
+                    *seen_5011 = true;
+                }
+                *seen_5011 && line.starts_with("TCOUNT:")
+            }
+            Ending::Rip => RIP_ENDINGS.iter().any(|prefix| line.starts_with(prefix)),
+        }
+    }
+}
+
+/// Tells the watcher of `run_makemkv` to finish, however the run ends, a panic included.
+struct StopWatcher<'a> {
+    done: &'a AtomicBool,
+    watcher: Thread,
+}
+
+impl Drop for StopWatcher<'_> {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        self.watcher.unpark();
+    }
+}
+
+/// The run all three drivers share (design part 5.3): S55's check, then `run_recorded` with a `LineReader` fed each
+/// line, `Progress` forwarded to `ctx.on_progress`, an `IndexMismatch` answered with a kill, and a watcher that copies
+/// `ctx.cancel` and kills once `limits.exit_wait` has passed since the call's final message (S57). The result's
+/// `cancelled` reflects only `ctx.cancel`, and its `timed_out` is also true after the exit wait's kill. After any kill
+/// it sleeps `limits.after_kill` (S56). It sleeps too when the recorder gives `Err`, because the recorder kills the
+/// tool on its error paths without saying so.
+fn run_makemkv(
+    ctx: &ToolCtx,
+    program: &Path,
+    args: &[String],
+    out: &Path,
+    limit: Option<Duration>,
+    call: Call,
+) -> io::Result<(RunResult, RunSummary, Kill)> {
+    if let Some(name) = makemkv_running(ctx.host) {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, Busy(name)));
+    }
+    let mut ending = Ending::of(&call);
+    let mut reader = LineReader::new(call);
+    let inner = CancelToken::default();
+    let final_at: OnceLock<Instant> = OnceLock::new();
+    // The watcher's reason for raising `inner`, the first one only.
+    let reason: OnceLock<Kill> = OnceLock::new();
+    let done = AtomicBool::new(false);
+    let mut line_kill = false;
+    let ran = std::thread::scope(|scope| {
+        let (cancel, exit_wait) = (ctx.cancel.clone(), ctx.limits.exit_wait);
+        let (inner_ref, final_ref, reason_ref, done_ref) = (&inner, &final_at, &reason, &done);
+        let watcher = scope.spawn(move || {
+            while !done_ref.load(Ordering::SeqCst) {
+                if cancel.is_cancelled() {
+                    let _ = reason_ref.set(Kill::Cancel);
+                    inner_ref.cancel();
+                } else if final_ref.get().is_some_and(|at| at.elapsed() >= exit_wait) {
+                    let _ = reason_ref.set(Kill::ExitWait);
+                    inner_ref.cancel();
+                }
+                std::thread::park_timeout(WATCH_EVERY);
+            }
+        });
+        let _stop = StopWatcher { done: &done, watcher: watcher.thread().clone() };
+        let inner_ctx = ToolCtx {
+            guard: ctx.guard,
+            host: ctx.host,
+            limits: ctx.limits,
+            cancel: inner.clone(),
+            on_output: ctx.on_output,
+            on_progress: ctx.on_progress,
+        };
+        run_recorded(&inner_ctx, program, args, out, limit, false, &mut |line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if ending.is_final(line) {
+                let _ = final_at.set(Instant::now());
+            }
+            let mut action = LineAction::Continue;
+            for event in reader.feed(line) {
+                match event {
+                    LineEvent::Progress { fraction } => (ctx.on_progress)(fraction),
+                    LineEvent::IndexMismatch => {
+                        line_kill = true;
+                        action = LineAction::Kill;
+                    }
+                    // A licence message does not kill the run: MakeMKV ends it itself (S59).
+                    LineEvent::Licence { .. } | LineEvent::ProfileRejected { .. } => {}
+                }
+            }
+            action
+        })
+    });
+    let mut run = match ran {
+        Ok(run) => run,
+        Err(error) => {
+            std::thread::sleep(ctx.limits.after_kill);
+            return Err(error);
+        }
+    };
+    // `run_recorded` records a time limit or a raised `inner`, whichever came first, and neither after a line kill.
+    let kill = if run.timed_out {
+        Kill::Limit
+    } else if run.cancelled {
+        reason.get().copied().unwrap_or(Kill::Cancel)
+    } else if line_kill {
+        Kill::LineKill
+    } else {
+        Kill::None
+    };
+    run.cancelled = ctx.cancel.is_cancelled();
+    if kill == Kill::ExitWait {
+        run.timed_out = true;
+    }
+    if kill != Kill::None {
+        std::thread::sleep(ctx.limits.after_kill);
+    }
+    Ok((run, reader.finish(), kill))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn flags(debug: bool) -> MakemkvFlags {
+        MakemkvFlags { minlength_s: 120, cache_mb: 1024, profile: PathBuf::from("p"), debug }
+    }
+
+    fn drv(fields: &[&str]) -> Vec<String> {
+        fields.iter().map(|field| field.to_string()).collect()
+    }
+
+    #[test]
+    fn scan_args_match_the_design() {
+        assert_eq!(
+            scan_args(&flags(false), 0),
+            ["-r", "--messages=-stdout", "--progress=-same", "--minlength=120", "--cache=1024", "--profile=p", "info", "disc:0"]
+        );
+        assert_eq!(
+            scan_args(&flags(true), 2),
+            ["-r", "--messages=-stdout", "--progress=-same", "--debug", "--minlength=120", "--cache=1024", "--profile=p", "info", "disc:2"]
+        );
+    }
+
+    #[test]
+    fn rip_args_end_with_the_title_index_and_folder() {
+        assert_eq!(
+            rip_args(&flags(false), 1, 3, Path::new("dir")),
+            ["-r", "--messages=-stdout", "--progress=-same", "--minlength=120", "--cache=1024", "--profile=p", "mkv", "disc:1", "3", "dir"]
+        );
+    }
+
+    #[test]
+    fn the_drive_listing_gets_debug_after_r_when_debug_is_on() {
+        assert_eq!(drive_list_args(false), ["-r", "--cache=1", "info", "disc:9999"]);
+        assert_eq!(drive_list_args(true), ["-r", "--debug", "--cache=1", "info", "disc:9999"]);
+    }
+
+    #[test]
+    fn the_drive_index_is_the_drv_line_whose_seventh_field_is_the_drive_id() {
+        let drives = vec![
+            drv(&["0", "2", "999", "12", "BD-RE DRIVE A 1.00 SERIAL", "DISC", "D:"]),
+            drv(&["1", "2", "999", "12", "BD-RE DRIVE B 1.00 SERIAL", "OTHER", "E:"]),
+            drv(&["2", "256", "999", "0", "", "", ""]),
+            drv(&["x", "2", "999", "12", "BROKEN", "", "F:"]),
+            drv(&["3", "2", "999"]),
+        ];
+        assert_eq!(drive_index(&drives, "D:"), Some(0));
+        assert_eq!(drive_index(&drives, "E:"), Some(1));
+        assert_eq!(drive_index(&drives, "F:"), None);
+        assert_eq!(drive_index(&drives, "G:"), None);
+    }
+
+    #[test]
+    fn the_drive_index_requires_an_exact_match_of_the_seventh_field() {
+        let drives = vec![drv(&["0", "2", "999", "12", "BD-RE DRIVE A 1.00 SERIAL", "DISC", "D:"])];
+        assert_eq!(drive_index(&drives, "D:"), Some(0));
+        assert_eq!(drive_index(&drives, "D:\\"), None);
+        assert_eq!(drive_index(&drives, "d:"), None);
+    }
+}
