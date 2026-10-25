@@ -59,6 +59,7 @@ use crate::file_phase::{
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
+use crate::selftest::MakeMkv;
 use crate::space::{planned_remux_promise, remux_check, remux_promise, rip_check, rip_promise, Promises};
 use crate::store::Store;
 use crate::EngineConfig;
@@ -333,6 +334,8 @@ pub(crate) struct RealSteps {
     promises: Arc<Mutex<Promises>>,
     /// The last scan's MSG:3344 verdict (design part 5.4 step 4).
     java_in_use: Arc<Mutex<Option<bool>>>,
+    /// The MakeMKV state each drive listing is observed into (design part 3.7, S79).
+    makemkv: Arc<MakeMkv>,
     /// The (job, title key) pairs whose verification failed in this engine run (design part 5.6 step 7).
     verify_failed: Mutex<BTreeSet<(String, String)>>,
     /// The probe of each (job, title key) Probe ran in this engine run, which Decide reads (design part 5.7 step 11.3).
@@ -342,7 +345,9 @@ pub(crate) struct RealSteps {
 impl RealSteps {
     /// The runner over the engine's configuration and platform parts (design part 5.2). `java_in_use` holds the last
     /// scan's MSG:3344 verdict (design part 5.4 step 4); the owner keeps the same Arc for Task 26's self-test, which
-    /// reads Java use from the last scan (design part 9.4). Def: T23. Use: T23.
+    /// reads Java use from the last scan (design part 9.4). `makemkv` is the engine's MakeMKV state, which every drive
+    /// listing feeds (S79). Def: T23. Use: T23, T26.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: &EngineConfig,
         platform: &Platform,
@@ -351,6 +356,7 @@ impl RealSteps {
         outbox: Outbox,
         promises: Arc<Mutex<Promises>>,
         java_in_use: Arc<Mutex<Option<bool>>>,
+        makemkv: Arc<MakeMkv>,
     ) -> RealSteps {
         RealSteps {
             resources: config.resources.clone(),
@@ -366,6 +372,7 @@ impl RealSteps {
             outbox,
             promises,
             java_in_use,
+            makemkv,
             verify_failed: Mutex::default(),
             probes: Mutex::default(),
         }
@@ -423,11 +430,13 @@ impl Step<'_> {
         self.steps.store.job_log(self.id, line);
     }
 
-    /// `find_tool`'s path of `tool` (design part 3.6).
+    /// `find_tool`'s path of `tool` (design part 3.6), when it is a file: a tool the settings name but that is not
+    /// there is missing, so its job waits in AwaitingTool (design part 3.7).
     fn tool(&self, tool: Tool) -> Option<PathBuf> {
         let (steps, settings) = (self.steps, &self.job.settings);
         let resources = steps.resources.as_deref();
-        find_tool(tool, settings, resources, steps.host.as_ref(), steps.path_var.as_deref()).map(|found| found.path)
+        let found = find_tool(tool, settings, resources, steps.host.as_ref(), steps.path_var.as_deref());
+        found.map(|found| found.path).filter(|path| path.is_file())
     }
 
     /// Whether every makemkvcon call gets `--debug` (S45).
@@ -540,8 +549,9 @@ impl Step<'_> {
 
     /// The drive listing before a makemkvcon call (design part 5.4 step 1): recorded as `drive-list.txt` at the job's
     /// first listing and as `drive-list-<n>.txt` after it (RP-1), with the job.log line `drive listing <n>: <drive> is
-    /// index <index>`. A listing with no DRV line for the job's drive gives `failed(Unknown)` with `MakeMKV's drive
-    /// listing has no drive <drive>` (RP-2).
+    /// index <index>`. Its (version, licence code) is observed into the engine's MakeMKV state (S79). A listing with
+    /// no DRV line for the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>`
+    /// (RP-2).
     fn listing(&self, program: &Path, failed: fn(Failure) -> Event) -> Result<(u32, RunSummary), StepResult> {
         let drive = self.job.record.drive.as_str();
         if drive.is_empty() {
@@ -563,6 +573,8 @@ impl Step<'_> {
         };
         self.ended(&name, &listing.run);
         self.keep_debug_log(&name, listing.run.started_unix, &out);
+        let summary = &listing.summary;
+        self.steps.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
         self.check_cancel()?;
         match listing.index {
             Some(index) => {

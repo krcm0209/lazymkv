@@ -1,8 +1,9 @@
-//! The job-owner thread (design parts 4.4, 5.2, 5.4, 5.7, 7.3, 8.3; K8, L2): it holds every job, runs
+//! The job-owner thread (design parts 4.4, 5.2, 5.4, 5.7, 7.3, 8.3, 9.1 to 9.4; K8, L2): it holds every job, runs
 //! `core::job::reduce` on each event, persists the transition before any of its actions run, performs the actions that
 //! only touch the record or the notifier itself and hands every other action to a `StepRunner` worker. It also routes
 //! arrivals, keeps the one disc-phase token with its queue and the file-phase slot with its queue, runs the lookup
-//! rounds of design part 8.3, and holds KeepAwake while a job is active.
+//! rounds of design part 8.3, holds KeepAwake while a job is active, broadcasts `job_update` and `progress` to the IPC
+//! clients and answers their requests (Task 26).
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -17,22 +18,36 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use lazymkv_clients::{HttpTransport, LookupBook};
-use lazymkv_core::ipc::{job_summary, JobSummary, Notification};
+use lazymkv_core::ipc::{
+    is_secret_name, job_summary, push_line, reply_error, reply_ok, JobSummary, JobUpdate, Notification, Progress, Push,
+    Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+};
 use lazymkv_core::job::{
-    job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, JobLookup, NotifyEvent, State, NETWORK_RETRY_MIN,
+    job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
 };
 use lazymkv_core::profile::JOB_PROFILE_FILE;
 use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, DRIVES_FORMAT, JOB_FORMAT};
+use lazymkv_core::remembered::Overrides;
 use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::Settings;
 use lazymkv_core::snapshot::DiscMeta;
-use lazymkv_platform::{DriveEvent, DriveWatcher, Ejector, Host, KeepAwake, Platform, SecretStore, ShareConnector};
+use lazymkv_platform::{
+    DriveEvent, DriveWatcher, Ejector, Host, IpcStream, KeepAwake, Platform, SecretStore, ShareConnector,
+};
 use lazymkv_tools::CancelToken;
+use serde_json::{Map, Value};
 
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
-use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue};
+use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
+use crate::ipc_server::{
+    cancel_event, history_page, main_tag, no_job, no_retry, no_rip_again, no_running_step, not_a_secret,
+    not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs, spawn_reader, spawn_serve,
+    staging_unset, steps_running, waits_for_review, Clients, ProgressGate, COMMAND_REFUSED, DISCARD_REFUSED, STOPPING,
+    UI_QUIT_REFUSED,
+};
 use crate::notify::{self, spawn_notifier, NotifySink};
 use crate::restart::{plan_restart, rebuild_book};
+use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
 use crate::space::{rebuild_promises, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
 use crate::store::Store;
@@ -120,7 +135,7 @@ pub struct Services {
 /// them and stop as `EngineHandle::stop` does. Only the testkit passes one (`Harness::run_until`). Def: T22. Use: T22.
 pub(crate) type StopAfter = Arc<dyn Fn(&Transition) -> bool + Send + Sync>;
 
-/// Everything that reaches the owner thread, on its one channel (design part 4.4). Def: T22. Use: T22, T24.
+/// Everything that reaches the owner thread, on its one channel (design part 4.4). Def: T22. Use: T22, T24, T26.
 pub(crate) enum Msg {
     /// A drive event from the drive thread.
     Drive(DriveEvent),
@@ -128,16 +143,32 @@ pub(crate) enum Msg {
     Arrival(Result<Arrival, (String, String)>),
     /// A worker's result, for the job's `generation` when it was handed.
     StepDone { job: String, generation: u64, result: StepResult },
-    /// A running step's progress (title key, fraction).
-    Progress { job: String, title: Option<String>, fraction: f64 },
+    /// A running step's progress: the running action's serde tag, the title key and the fraction (S7).
+    Progress { job: String, step: String, title: Option<String>, fraction: f64 },
     /// A StartTimer timer of the job ran out.
     Timer { job: String },
     /// A lookup round of the job ended (design part 8.3): `book.pending()`, or why the round could not run.
     RoundDone { job: String, pending: Result<(bool, bool), String> },
     /// The eject of an already-ripped disc returned.
     Ejected { drive: String },
+    /// A client the serve thread accepted (design part 9.2).
+    Connect(IpcStream),
+    /// A client's request, with the request's id (design part 9.3).
+    Request { client: u64, id: Option<u64>, request: Request },
+    /// A self-test or a retry's re-check ended, for the request `id` of `client` (design part 9.4, S81).
+    Checked { client: u64, id: Option<u64>, outcome: CheckOutcome },
     /// `EngineHandle::stop`.
     Stop,
+}
+
+/// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
+pub(crate) enum CheckOutcome {
+    /// The self-test's results.
+    Selftest(SelfTest),
+    /// A waiting job's re-check, with the event its cleared condition gives.
+    Recheck { job: String, event: Option<Event> },
+    /// The check's thread panicked, with the panic's text.
+    Panicked(String),
 }
 
 /// Starts the drive, owner and notifier threads over `config.data` (design part 4.4); `start_until(config, services,
@@ -146,11 +177,12 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
     start_until(config, services, None)
 }
 
-/// `start` with the testkit's stop hook. It writes the engine.log line `engine started (lazymkv <version>)` and runs
-/// the restart sequence (design part 5.10, Ruling S70; `Owner::load`) before it returns, so a restart's EngineRestart
-/// lines are persisted by then (design part 3.5). With `services.steps` None it runs the real runner, `RealSteps`
-/// (Task 23), over the owner's Outbox, the space promises and the last scan's Java use, which the owner keeps for Task
-/// 26's self-test. Def: T22. Use: T22.
+/// `start` with the testkit's stop hook. It writes the engine.log line `engine started (lazymkv <version>)`, runs the
+/// MakeMKV check to its end (design part 3.7, S79, PF-28) and then the restart sequence (design part 5.10, Ruling S70;
+/// `Owner::load`) before it returns, so a restart's EngineRestart lines are persisted by then (design part 3.5); the
+/// IPC server's serve thread starts last (Task 26). With `services.steps` None it runs the real runner, `RealSteps`
+/// (Task 23), over the owner's Outbox, the space promises, the last scan's Java use and the MakeMKV state, which the
+/// owner keeps for the self-test. Def: T22. Use: T22.
 pub(crate) fn start_until(
     config: EngineConfig,
     services: Services,
@@ -163,12 +195,27 @@ pub(crate) fn start_until(
     let outbox = Outbox::default();
     let promises = Arc::new(Mutex::new(Promises::default()));
     let java_in_use = Arc::new(Mutex::new(None));
+    let makemkv = Arc::new(MakeMkv::new(MakeMkvState::open(&config.data)));
+    let env = CheckEnv {
+        data: config.data.clone(),
+        resources: config.resources.clone(),
+        path_var: config.path_var.clone(),
+        limits_override: config.limits_override,
+        processes: Arc::clone(&platform.processes),
+        host: Arc::clone(&platform.host),
+        http: Arc::clone(&http),
+        secrets: Arc::clone(&platform.secrets),
+        java_in_use: Arc::clone(&java_in_use),
+        makemkv: Arc::clone(&makemkv),
+    };
+    // PF-28: the MakeMKV check at start runs to its end before any step runs or any client is accepted (S79).
+    let selftest = first_selftest(env.makemkv_check(&store.settings().0, false));
     let steps = steps.unwrap_or_else(|| {
         let (store, outbox, promises) = (Arc::clone(&store), outbox.clone(), Arc::clone(&promises));
-        let (http, java_in_use) = (Arc::clone(&http), Arc::clone(&java_in_use));
-        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use))
+        let (http, java_in_use, makemkv) = (Arc::clone(&http), Arc::clone(&java_in_use), Arc::clone(&makemkv));
+        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv))
     });
-    let Platform { drives, ejector, awake, host, secrets, shares, .. } = platform;
+    let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
     let (delivered, notifier_done) = channel::<()>();
     let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }));
     let (sender, inbox) = channel::<Msg>();
@@ -183,11 +230,12 @@ pub(crate) fn start_until(
         steps,
         outbox,
         promises,
-        java_in_use,
         http,
         secrets,
         shares,
         busy: Arc::clone(&busy),
+        env,
+        clients: Arc::new(Clients::new()),
     };
     // L1: the discs already in a drive, read before the drive thread drains any event (design part 4.2).
     let present = drives.present();
@@ -200,10 +248,25 @@ pub(crate) fn start_until(
         Arc::clone(&shown),
         Arc::clone(&drive_stop),
         present,
+        selftest,
     );
     let owner = thread::spawn(move || owner.run(inbox));
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
-    Ok(EngineHandle { sender, owner, drive, drive_stop, notifier_done, busy, store, jobs: shown })
+    let serve_stop = Arc::new(AtomicBool::new(false));
+    let serve = spawn_serve(ipc, Arc::clone(&serve_stop), sender.clone());
+    Ok(EngineHandle {
+        sender,
+        owner,
+        drive,
+        drive_stop,
+        notifier_done,
+        busy,
+        store,
+        jobs: shown,
+        serve,
+        serve_stop,
+        waker: Mutex::new(None),
+    })
 }
 
 /// A running engine (design part 4.4). Def: T22. Use: T22 to T29.
@@ -224,6 +287,13 @@ pub struct EngineHandle {
     store: Arc<Store>,
     /// The owner's records, replaced after each persisted transition.
     jobs: Arc<Mutex<BTreeMap<String, JobRecord>>>,
+    /// The IPC server's serve thread (design part 4.4).
+    serve: JoinHandle<()>,
+    /// Raised to end the serve thread.
+    serve_stop: Arc<AtomicBool>,
+    /// How `stop` wakes the serve thread from the transport's waiting `accept`; None leaves the thread to end with
+    /// its transport.
+    waker: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl EngineHandle {
@@ -254,22 +324,41 @@ impl EngineHandle {
         }
     }
 
+    /// Sets how `stop` wakes the IPC serve thread, which waits in the transport's `accept` (design part 4.4): the
+    /// testkit connects once through its `MemoryConnector`, because `MemoryIpc::accept` holds its lock while it waits.
+    /// Without a waker, `stop` leaves the serve thread to end with its transport. Def: T26. Use: T26.
+    pub(crate) fn set_ipc_waker(&self, wake: Box<dyn FnOnce() + Send>) {
+        *lock(&self.waker) = Some(wake);
+    }
+
     /// Cancels every running step's CancelToken (CheckSpace and Eject included), drops their results, writes the
-    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk (design part 3.5,
-    /// R22.10). The drive thread ends first, so every drive event it handed over is handled before the owner stops;
-    /// the owner then waits for every step, recording and eject it started, and the notifier delivers what was raised.
-    /// An arrival still waiting for its volume is not waited for: it only reads, and its late result goes nowhere. A
-    /// step, recording or eject that panics still reports (R22.11), so stop never waits on one. Err when the drive or
-    /// owner thread panicked. Def: T22. Use: T22 to T29.
+    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk and a client's reader
+    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first, woken by the IPC
+    /// waker, so no client connects while the engine stops; then the drive thread, so every drive event it handed over
+    /// is handled before the owner stops; the owner then waits for every step, recording, eject and check it started,
+    /// closes every client, and the notifier delivers what was raised. An arrival still waiting for its volume is not
+    /// waited for: it only reads, and its late result goes nowhere. A step, recording or eject that panics still
+    /// reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked. Def: T22.
+    /// Use: T22 to T29.
     pub fn stop(self) -> io::Result<()> {
-        self.drive_stop.store(true, Ordering::SeqCst);
-        let drive = self.drive.join();
-        let _ = self.sender.send(Msg::Stop);
-        drop(self.sender);
-        let owner = self.owner.join();
-        let _ = self.notifier_done.recv();
-        self.store.log("engine stopped");
-        if drive.is_err() || owner.is_err() {
+        let EngineHandle { sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, waker, .. } =
+            self;
+        serve_stop.store(true, Ordering::SeqCst);
+        let served = match waker.into_inner().unwrap_or_else(PoisonError::into_inner) {
+            Some(wake) => {
+                wake();
+                serve.join().is_ok()
+            }
+            None => true,
+        };
+        drive_stop.store(true, Ordering::SeqCst);
+        let drive = drive.join();
+        let _ = sender.send(Msg::Stop);
+        drop(sender);
+        let owner = owner.join();
+        let _ = notifier_done.recv();
+        store.log("engine stopped");
+        if drive.is_err() || owner.is_err() || !served {
             return Err(io::Error::other("lazymkv-engine: an engine thread panicked"));
         }
         Ok(())
@@ -316,10 +405,14 @@ pub(crate) struct DiscToken {
     queue: VecDeque<Waiting>,
 }
 
-/// What waits for the disc-phase token (design part 5.4). Def: T22. Use: T22, T25, T26.
+/// What waits for the disc-phase token, in one queue (design part 5.4, way (d)). Def: T22. Use: T22, T25, T26.
 pub(crate) enum Waiting {
     /// A fingerprinted arrival whose routing needs the token: a new job, or a disc routed with MediaArrived.
     Arrival(Arrival),
+    /// A Retry of the failed job, whose failed step is a disc-phase step (design part 9.4, L3).
+    Retry(String),
+    /// The return of the waiting job to a disc-phase state, with the event that returns it (design parts 3.7, 5.10).
+    Return(String, Event),
 }
 
 impl DiscToken {
@@ -351,8 +444,22 @@ impl DiscToken {
         let before = self.queue.len();
         self.queue.retain(|waiting| match waiting {
             Waiting::Arrival(arrival) => arrival.drive != drive,
+            Waiting::Retry(_) | Waiting::Return(..) => true,
         });
         self.queue.len() != before
+    }
+
+    /// Whether a Retry or return of `job` waits in the queue (design part 5.4). Def: T26. Use: T26.
+    pub(crate) fn queued_job(&self, job: &str) -> bool {
+        self.queue.iter().any(|waiting| match waiting {
+            Waiting::Retry(id) | Waiting::Return(id, _) => id == job,
+            Waiting::Arrival(_) => false,
+        })
+    }
+
+    /// Whether an arrival of `drive` waits in the queue (design part 5.4). Def: T26. Use: T26.
+    pub(crate) fn queued_arrival(&self, drive: &str) -> bool {
+        self.queue.iter().any(|waiting| matches!(waiting, Waiting::Arrival(arrival) if arrival.drive == drive))
     }
 
     /// After a transition of `job`: releases the token when `job` holds it and `keeps_token` is false, then, while the
@@ -492,18 +599,20 @@ struct Parts {
     outbox: Outbox,
     /// The space promised to unfinished steps (design part 5.8), released here as steps finish.
     promises: Arc<Mutex<Promises>>,
-    /// The last scan's MSG:3344 verdict (design part 5.4 step 4), which `RealSteps` writes.
-    #[expect(dead_code, reason = "Task 26's self-test reads Java use from the last scan (design part 9.4)")]
-    java_in_use: Arc<Mutex<Option<bool>>>,
     /// The lookups' transport, for the owner's lookup rounds (design part 8.3).
     http: Arc<dyn HttpTransport>,
     /// The secrets, for the rounds' `tmdb_token` (design part 8.1).
     secrets: Arc<dyn SecretStore>,
     /// The shares, for the space promises rebuilt at a restart or a return (design part 5.8, S75).
     shares: Arc<dyn ShareConnector>,
-    /// Whether a step or a lookup round is outstanding, set after each message and cleared at shutdown
+    /// Whether a step, a lookup round or a check is outstanding, set after each message and cleared at shutdown
     /// (`EngineHandle::busy`, Ruling R24.c1).
     busy: Arc<AtomicBool>,
+    /// What the self-test and the re-checks run with, the last scan's Java use and the MakeMKV state among it (design
+    /// part 9.4).
+    env: CheckEnv,
+    /// The IPC clients (design part 9.2).
+    clients: Arc<Clients>,
 }
 
 /// One job as the owner holds it.
@@ -538,6 +647,38 @@ struct Worker {
     /// The drive it ejects, when its actions include Eject.
     eject_drive: Option<String>,
     cancel: CancelToken,
+    /// Set when the owner cancelled it (`cancel`, or a forced shutdown).
+    cancelled: Option<Cancelled>,
+}
+
+/// A running step the owner cancelled (design part 9.4, R-A7): the failure fed once the step has ended, in place of
+/// its own result, and the `cancel` requests answered then (S78).
+struct Cancelled {
+    event: Event,
+    replies: Vec<(u64, Option<u64>)>,
+}
+
+/// A self-test or a retry's re-check waiting for its turn: they run one at a time.
+struct PendingCheck {
+    client: u64,
+    id: Option<u64>,
+    work: CheckWork,
+}
+
+/// What a check runs (design part 9.4, S81).
+enum CheckWork {
+    /// `run_selftest`.
+    Selftest,
+    /// A `retry` of the waiting job.
+    Recheck(String),
+}
+
+/// A forced shutdown waiting for its steps to end (design part 3.8, S83): the `shutdown` request to answer and the
+/// jobs whose step it cancelled.
+struct Quiet {
+    client: u64,
+    id: Option<u64>,
+    cancelled: Vec<String>,
 }
 
 /// The job-owner thread's state (design part 4.4).
@@ -567,12 +708,30 @@ struct Owner {
     threads: Vec<JoinHandle<()>>,
     awake_held: bool,
     stopping: bool,
+    /// At most one progress push a second per job (design part 9.2).
+    gate: ProgressGate,
+    /// The last self-test, which every snapshot shows (design part 9.2, S80).
+    selftest: SelfTest,
+    /// The share names a `secret_set` of this run stored, which the snapshot lists (Ruling S77).
+    share_secrets: BTreeSet<String>,
+    /// The self-tests and re-checks waiting for their turn.
+    checks: VecDeque<PendingCheck>,
+    /// Whether a self-test or re-check runs.
+    checking: bool,
+    /// The Retry or ReviewApproved a job waiting in the slot's queue is fed with its place (design part 5.7).
+    slot_events: BTreeMap<String, Event>,
+    /// The jobs whose running lookup round a `retry` started (Ruling S81).
+    retry_rounds: BTreeSet<String>,
+    /// The (drive, arrival number) of each walk a `settings_set` started (design part 9.4, L1a).
+    rescans: BTreeSet<(String, u64)>,
+    /// A forced shutdown waiting for its steps (design part 3.8).
+    quiet: Option<Quiet>,
 }
 
 impl Owner {
     /// The owner over the store's jobs and drives.json (design parts 5.10, 7.4), after the restart sequence over the
-    /// discs `present` in the drives (`Owner::restart`). A refused job is logged and left alone; a refused drives.json
-    /// is logged and the drives are kept in memory only.
+    /// discs `present` in the drives (`Owner::restart`), showing `selftest` until the first `run_selftest`. A refused
+    /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only.
     #[allow(clippy::too_many_arguments)]
     fn load(
         store: Arc<Store>,
@@ -583,6 +742,7 @@ impl Owner {
         shown: Arc<Mutex<BTreeMap<String, JobRecord>>>,
         drive_stop: Arc<AtomicBool>,
         present: Vec<(String, PathBuf)>,
+        selftest: SelfTest,
     ) -> Owner {
         let mut jobs = BTreeMap::new();
         for loaded in store.load_jobs() {
@@ -626,6 +786,15 @@ impl Owner {
             threads: Vec::new(),
             awake_held: false,
             stopping: false,
+            gate: ProgressGate::new(),
+            selftest,
+            share_secrets: BTreeSet::new(),
+            checks: VecDeque::new(),
+            checking: false,
+            slot_events: BTreeMap::new(),
+            retry_rounds: BTreeSet::new(),
+            rescans: BTreeSet::new(),
+            quiet: None,
         };
         owner.restart(present);
         owner
@@ -705,6 +874,7 @@ impl Owner {
             if token {
                 self.token.take(id);
             }
+            self.publish(id);
             resumed.push((id.clone(), transition.actions));
         }
         {
@@ -744,32 +914,78 @@ impl Owner {
         }
     }
 
-    /// The loop: one message at a time, until `Msg::Stop` or the stop hook, which may already have stopped the
-    /// restart sequence (`Owner::restart`).
+    /// The loop: one message at a time, until `Msg::Stop`, the stop hook, which may already have stopped the restart
+    /// sequence (`Owner::restart`), or a `shutdown` request. After the restart sequence and after each message, a
+    /// changed MakeMKV version or key state is delivered (design part 3.7). While a forced shutdown waits for its
+    /// steps, only `quiet_message` runs, and the shutdown ends once no step runs (design part 3.8).
     fn run(mut self, inbox: Receiver<Msg>) {
+        self.makemkv_changed();
         self.after_message();
         while !self.stopping {
             let Ok(message) = inbox.recv() else {
                 break;
             };
-            match message {
-                Msg::Stop => break,
-                Msg::Drive(DriveEvent::Arrived { drive, root }) => self.on_arrived(drive, root),
-                Msg::Drive(DriveEvent::Removed { drive }) => self.on_removed(&drive),
-                Msg::Arrival(outcome) => self.on_arrival(outcome),
-                Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
-                // Task 26 pushes progress to clients; until then it is read and dropped.
-                Msg::Progress { job, title, fraction } => drop((job, title, fraction)),
-                Msg::Timer { job } => self.on_timer(&job),
-                Msg::RoundDone { job, pending } => self.on_round_done(&job, pending),
-                Msg::Ejected { drive } => {
-                    self.ejects = self.ejects.saturating_sub(1);
-                    self.drive(&drive).ejecting = false;
-                }
+            if matches!(message, Msg::Stop) {
+                break;
             }
+            if self.quiet.is_some() {
+                self.quiet_message(message);
+            } else {
+                self.on_message(message);
+            }
+            if self.quiet.is_some() && self.workers.is_empty() {
+                self.finish_shutdown();
+            }
+            self.makemkv_changed();
             self.after_message();
         }
         self.shut_down(&inbox);
+    }
+
+    /// One message, outside a forced shutdown.
+    fn on_message(&mut self, message: Msg) {
+        match message {
+            Msg::Stop => {}
+            Msg::Drive(DriveEvent::Arrived { drive, root }) => self.on_arrived(drive, root),
+            Msg::Drive(DriveEvent::Removed { drive }) => self.on_removed(&drive),
+            Msg::Arrival(outcome) => self.on_arrival(outcome),
+            Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
+            Msg::Progress { job, step, title, fraction } => self.on_progress(job, step, title, fraction),
+            Msg::Timer { job } => self.on_timer(&job),
+            Msg::RoundDone { job, pending } => self.on_round_done(&job, pending),
+            Msg::Ejected { drive } => self.on_ejected(&drive),
+            Msg::Connect(stream) => self.on_connect(stream),
+            Msg::Request { client, id, request } => self.on_request(client, id, request),
+            Msg::Checked { client, id, outcome } => self.on_checked(client, id, outcome),
+        }
+    }
+
+    /// One message while a forced shutdown waits for its steps (design part 3.8, PF-29): a step's end is fed, with
+    /// only its notifications performed, progress still goes out, and nothing new starts: drive events, arrivals,
+    /// timers and lookup rounds are dropped, a new client is turned away and every request is refused.
+    fn quiet_message(&mut self, message: Msg) {
+        match message {
+            Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
+            Msg::Progress { job, step, title, fraction } => self.on_progress(job, step, title, fraction),
+            Msg::Ejected { drive } => self.on_ejected(&drive),
+            Msg::RoundDone { job, .. } => {
+                self.rounds_running.remove(&job);
+                self.retry_rounds.remove(&job);
+            }
+            Msg::Request { client, id, .. } => self.parts.clients.send(client, reply_error(id, STOPPING, &[])),
+            Msg::Checked { client, id, .. } => {
+                self.checking = false;
+                self.parts.clients.send(client, reply_error(id, STOPPING, &[]));
+            }
+            Msg::Connect(stream) => drop(stream),
+            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Stop => {}
+        }
+    }
+
+    /// The eject of an already-ripped disc returned.
+    fn on_ejected(&mut self, drive: &str) {
+        self.ejects = self.ejects.saturating_sub(1);
+        self.drive(drive).ejecting = false;
     }
 
     /// After the restart sequence and after each message: finished threads dropped, KeepAwake held or released, and
@@ -777,12 +993,12 @@ impl Owner {
     fn after_message(&mut self) {
         self.threads.retain(|thread| !thread.is_finished());
         self.keep_awake();
-        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty();
+        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty() || self.checking;
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
-    /// Cancels every running step, drops their results and waits for every step, recording and eject the owner
-    /// started (design part 3.5), then releases KeepAwake.
+    /// Cancels every running step, drops their results and waits for every step, recording, eject and check the owner
+    /// started (design part 3.5), then releases KeepAwake and closes every client.
     fn shut_down(&mut self, inbox: &Receiver<Msg>) {
         self.drive_stop.store(true, Ordering::SeqCst);
         for worker in &self.workers {
@@ -807,6 +1023,7 @@ impl Owner {
             self.parts.awake.release();
             self.awake_held = false;
         }
+        self.parts.clients.close_all();
         // No step runs any more, and a lookup round's late end goes nowhere: a stopped engine is not busy (R24.c1).
         self.parts.busy.store(false, Ordering::SeqCst);
     }
@@ -829,6 +1046,7 @@ impl Owner {
     /// Design part 5.4's arrival: a new arrival number, a stale queued arrival of the drive dropped, and the
     /// fingerprint walk on its own thread after `drive_settle_s`, waiting up to `drive_ready_timeout_s`.
     fn on_arrived(&mut self, drive: String, root: PathBuf) {
+        self.rescans.retain(|(rescanned, _)| *rescanned != drive);
         let slot = self.drive(&drive);
         slot.number += 1;
         slot.root = Some(root.clone());
@@ -846,7 +1064,9 @@ impl Owner {
     }
 
     /// A walked arrival (design part 5.4 steps 2 and 3). A failure is never dropped: it is logged and sends `failed`
-    /// with no job. A stale success is dropped with a log line; a current one is recorded in drives.json and routed.
+    /// with no job. A stale success is dropped with a log line; a current one is recorded in drives.json and routed,
+    /// except that the walk a `settings_set` started only notes a disc whose drive record holds its fingerprint with
+    /// `handled` true (design part 9.4, L1a).
     fn on_arrival(&mut self, outcome: Result<Arrival, (String, String)>) {
         match outcome {
             Err((drive, sentence)) => {
@@ -866,6 +1086,11 @@ impl Owner {
                 self.store.log(&format!("{}: the disc was removed before its arrival was handled", arrival.drive));
             }
             Ok(arrival) => {
+                let rescan = self.rescans.remove(&(arrival.drive.clone(), arrival.number));
+                let handled = DriveRecord { fingerprint: arrival.meta.fingerprint.clone(), handled: true };
+                if rescan && self.drive_records.drives.get(&arrival.drive) == Some(&handled) {
+                    return;
+                }
                 self.record_drive(&arrival.drive, arrival.meta.fingerprint.clone(), false);
                 self.route(arrival);
             }
@@ -1022,8 +1247,9 @@ impl Owner {
         }
     }
 
-    /// One transition (design part 7.3, R22.3, R24.2): `persist_transition`, then the actions, the token and the
-    /// file-phase slot.
+    /// One transition (design part 7.3, R22.3, R24.2): `persist_transition`, then the actions, the `job_update`
+    /// push (S84), the token and the file-phase slot. During a forced shutdown only the transition's notifications
+    /// are performed and nothing new starts (PF-29).
     fn commit(
         &mut self,
         id: &str,
@@ -1036,7 +1262,13 @@ impl Owner {
         let Some(transition) = self.persist_transition(id, event, new, actions, message) else {
             return;
         };
+        if self.quiet.is_some() {
+            self.notify_only(id, &transition.actions);
+            self.publish(id);
+            return;
+        }
         self.perform(id, &transition.actions, recording);
+        self.publish(id);
         if self.stopping {
             return;
         }
@@ -1128,24 +1360,43 @@ impl Owner {
 
     /// The file-phase slot after a transition (design part 5.7): a job entering `Ejected { after_copy: false }` joins
     /// the queue with no lookup round run for this entry; a holder reaching Filed, NeedsReview, Failed or Discarded
-    /// frees its place. Either way the slot is granted again.
+    /// frees its place, unless it waits in the queue for a Retry or an approval. Either way the slot is granted again.
     fn file_slot(&mut self, id: &str, transition: &Transition) {
         let ejected = State::Ejected { after_copy: false };
         if transition.new == ejected && transition.old.as_ref() != Some(&ejected) {
             self.rounds_done.remove(id);
             self.slots.join(id);
             self.grant_next();
-        } else if self.slots.after(id, &transition.new) {
+        } else if !self.slot_events.contains_key(id) && self.slots.after(id, &transition.new) {
             self.grant_next();
         }
     }
 
-    /// Grants the file-phase slot while a place is free (design part 5.7, R24.1): a head of the queue whose persisted
-    /// plan is lookup-pending gets one lookup round first (design part 8.3), and nothing is granted while that round
-    /// runs; any other head is granted its place and fed FilePhaseSlot. A head that is no longer an Ejected job leaves
-    /// the queue.
+    /// Grants the file-phase slot while a place is free (design part 5.7, R24.1): a head that waits with a Retry or an
+    /// approval is granted its place and fed it (Task 26); a head whose persisted plan is lookup-pending gets one
+    /// lookup round first (design part 8.3), and nothing is granted while that round runs; any other head is granted
+    /// its place and fed FilePhaseSlot. A head that is no longer an Ejected job, or whose waiting event its state no
+    /// longer takes, leaves the queue. Nothing is granted during a forced shutdown (PF-29).
     fn grant_next(&mut self) {
+        if self.quiet.is_some() {
+            return;
+        }
         while let Some(head) = self.slots.next() {
+            if let Some(event) = self.slot_events.remove(&head) {
+                let state = self.jobs.get(&head).map(|job| job.record.state.clone());
+                if state.as_ref().is_some_and(|state| reduce(state, &event).is_ok()) {
+                    self.slots.grant(&head);
+                    self.feed(&head, event, None);
+                    if self.stopping {
+                        return;
+                    }
+                } else {
+                    self.slots.leave(&head);
+                    let state = state.as_ref().map_or("no state", State::as_str);
+                    self.store.job_log(&head, &format!("{} left the slot's queue: it is {state}", event_tag(&event)));
+                }
+                continue;
+            }
             let Some(job) = self.jobs.get(&head).filter(|job| job.record.state == State::Ejected { after_copy: false })
             else {
                 self.slots.leave(&head);
@@ -1197,10 +1448,12 @@ impl Owner {
     /// LookupPending with the waiting message, or with that sentence when the round could not run; otherwise the round
     /// is marked done. A round that could not run is judged by the book's own `pending()` (Ruling R24.c3). In
     /// AwaitingLookup, a lookup still pending feeds LookupPending, which restarts the timer, and none feeds
-    /// LookupAnswered; a round that could not run feeds LookupPending with its sentence. The slot is granted again
-    /// afterwards.
+    /// LookupAnswered; a round that could not run feeds LookupPending with its sentence. A round a `retry` started
+    /// feeds only LookupAnswered: its lookup still pending, or the round not run, feeds nothing (Ruling S81). The slot
+    /// is granted again afterwards.
     fn on_round_done(&mut self, id: &str, pending: Result<(bool, bool), String>) {
         self.rounds_running.remove(id);
+        let by_retry = self.retry_rounds.remove(id);
         let Some(job) = self.jobs.get(id) else {
             return;
         };
@@ -1226,11 +1479,13 @@ impl Owner {
                 self.rounds_done.insert(id.to_string());
             }
             State::AwaitingLookup { .. } => match pending {
+                Ok(_) if waiting && by_retry => {}
                 Ok(_) if waiting => {
                     let message = self.lookup_message(id);
                     self.feed(id, Event::LookupPending, message);
                 }
                 Ok(_) => self.feed(id, Event::LookupAnswered, None),
+                Err(_) if by_retry => {}
                 Err(error) => {
                     let message = format!("the lookup round could not run: {error}");
                     self.feed(id, Event::LookupPending, Some(message));
@@ -1279,8 +1534,12 @@ impl Owner {
         self.route_queue(next);
     }
 
-    /// Routes what the token's queue gives while the token is free (design part 5.4).
+    /// Routes what the token's queue gives while the token is free (design part 5.4): an arrival is routed, a Retry or
+    /// return delivered. Nothing is routed during a forced shutdown (PF-29).
     fn route_queue(&mut self, next: Option<Waiting>) {
+        if self.quiet.is_some() {
+            return;
+        }
         let mut next = next;
         while let Some(waiting) = next {
             match waiting {
@@ -1288,6 +1547,8 @@ impl Owner {
                     self.store.log(&format!("{}: the disc was removed before its arrival was handled", arrival.drive));
                 }
                 Waiting::Arrival(arrival) => self.route(arrival),
+                Waiting::Retry(id) => self.deliver(&id, Event::Retry),
+                Waiting::Return(id, event) => self.deliver(&id, event),
             }
             if self.stopping {
                 return;
@@ -1365,13 +1626,15 @@ impl Owner {
             tags: vec![action_tag(&Action::Fingerprint)],
             eject_drive: None,
             cancel: CancelToken::default(),
+            cancelled: None,
         });
         let now = self.parts.host.now_unix();
         spawn_recording(id.to_string(), generation, arrival, job_dir, now, self.sender.clone());
     }
 
     /// One worker runs `actions` one after another and returns the last result whose event is Some, else the last
-    /// result (design part 5.2). Handing Eject marks the job's drive as ejecting.
+    /// result (design part 5.2). Each action's progress goes to the owner with its tag (S7). Handing Eject marks the
+    /// job's drive as ejecting.
     fn hand(&mut self, id: &str, actions: Vec<Action>) {
         let Some(job) = self.jobs.get(id) else {
             return;
@@ -1397,20 +1660,21 @@ impl Owner {
             tags: actions.iter().map(action_tag).collect(),
             eject_drive,
             cancel: cancel.clone(),
+            cancelled: None,
         });
         let (steps, sender, job) = (Arc::clone(&self.parts.steps), self.sender.clone(), id.to_string());
         self.threads.push(thread::spawn(move || {
-            let (progress_to, progress_job) = (sender.clone(), job.clone());
-            let progress = move |title: Option<&str>, fraction: f64| {
-                let title = title.map(str::to_string);
-                let _ = progress_to.send(Msg::Progress { job: progress_job.clone(), title, fraction });
-            };
             let run = panic::catch_unwind(AssertUnwindSafe(|| {
                 let mut kept: Option<StepResult> = None;
                 for action in &actions {
                     if cancel.is_cancelled() {
                         break;
                     }
+                    let (progress_to, progress_job, step) = (sender.clone(), job.clone(), action_tag(action));
+                    let progress = move |title: Option<&str>, fraction: f64| {
+                        let (job, step, title) = (progress_job.clone(), step.clone(), title.map(str::to_string));
+                        let _ = progress_to.send(Msg::Progress { job, step, title, fraction });
+                    };
                     let result = steps.run(&context, action, cancel.clone(), &progress);
                     if result.event.is_some() || kept.as_ref().is_none_or(|kept| kept.event.is_none()) {
                         kept = Some(result);
@@ -1437,14 +1701,26 @@ impl Owner {
         Some(worker)
     }
 
-    /// A worker's result (design part 5.2). A stale one is dropped with what its step posted (R-A7), unless a newer
+    /// A worker's result (design part 5.2). The result of a step the owner cancelled is dropped with what it posted,
+    /// and the cancel's failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its
+    /// `ok` (design part 9.4, R-A7, S78). A stale one is dropped with what its step posted (R-A7), unless a newer
     /// step of the job runs, whose posts it must not take. Otherwise the posted edits are applied, each posted event
     /// is fed, then the result's event. A result with no event, from an action other than those that report none,
     /// writes `<tag> returned no event` to job.log, followed by `: <message>` when it has one, and gives the token
     /// back, since no step of the job runs any more (L2).
     fn on_step_done(&mut self, id: &str, generation: u64, result: StepResult) {
         self.log_panic(id, &result);
-        let worker = self.finish_worker(id, generation);
+        let mut worker = self.finish_worker(id, generation);
+        if let Some(cancelled) = worker.as_mut().and_then(|worker| worker.cancelled.take()) {
+            if !self.workers.iter().any(|worker| worker.job == id) {
+                drop(self.parts.outbox.take(id));
+            }
+            self.feed(id, cancelled.event, Some(CANCELLED.to_string()));
+            for (client, request) in cancelled.replies {
+                self.parts.clients.send(client, reply_ok(request, Value::Null));
+            }
+            return;
+        }
         if self.jobs.get(id).map(|job| job.generation) != Some(generation) {
             if !self.workers.iter().any(|worker| worker.job == id) {
                 drop(self.parts.outbox.take(id));
@@ -1473,7 +1749,9 @@ impl Owner {
                         None => format!("{tag} returned no event"),
                     };
                     self.store.job_log(id, &line);
-                    self.give_back(id);
+                    if self.quiet.is_none() {
+                        self.give_back(id);
+                    }
                 }
             }
         }
@@ -1490,6 +1768,7 @@ impl Owner {
     /// The token holder whose disc it held, in a disc-phase state, has its running step cancelled and dropped and is
     /// fed MediaRemoved; any other job whose disc was in the drive only has it marked absent.
     fn on_removed(&mut self, drive: &str) {
+        self.rescans.retain(|(rescanned, _)| rescanned != drive);
         let slot = self.drive(drive);
         slot.number += 1;
         slot.root = None;
@@ -1523,26 +1802,20 @@ impl Owner {
     }
 
     /// A StartTimer timer ran out (design part 5.2). AwaitingLookup gets a lookup round, unless one runs (design part
-    /// 8.3). AwaitingNetwork gets NetworkRetry once its disc is in and the disc-phase token is free (L2); until then
-    /// the timer runs again.
+    /// 8.3); a running round a `retry` started becomes the timer's, so its end starts the timer again. AwaitingNetwork
+    /// gets NetworkRetry through `deliver`: a return to a disc-phase state waits for the token in its queue (design
+    /// part 5.4, way (d), L2).
     fn on_timer(&mut self, id: &str) {
         let Some(job) = self.jobs.get(id) else {
             return;
         };
-        if matches!(job.record.state, State::AwaitingLookup { .. }) {
-            if !self.rounds_running.contains(id) {
-                self.start_round(id);
+        match job.record.state {
+            State::AwaitingLookup { .. } if self.rounds_running.contains(id) => {
+                self.retry_rounds.remove(id);
             }
-            return;
-        }
-        let State::AwaitingNetwork { return_to } = &job.record.state else {
-            return;
-        };
-        let ready = !return_to.is_disc_phase() || (job.disc.is_some() && self.token.take(id));
-        if ready {
-            self.feed(id, Event::NetworkRetry, None);
-        } else {
-            self.start_timer(id, NETWORK_RETRY_MIN);
+            State::AwaitingLookup { .. } => self.start_round(id),
+            State::AwaitingNetwork { .. } => self.deliver(id, Event::NetworkRetry),
+            _ => {}
         }
     }
 
@@ -1557,6 +1830,523 @@ impl Owner {
                 self.parts.awake.release();
             }
             self.awake_held = active;
+        }
+    }
+}
+
+/// The IPC clients' side of the owner (design parts 3.7, 3.8, 9.1 to 9.4; Rulings S76 to S84; Task 26): the
+/// pushes, the snapshot, each request's answer, the deliveries a Retry, a return or an approval waits for, the checks
+/// and the shutdown.
+impl Owner {
+    /// Broadcasts `job_update` of `id`'s record after its persisted transition (design part 9.2, S84): the summary, the
+    /// plan, and `collisions` only in NeedsReview with a list that is not empty.
+    fn publish(&self, id: &str) {
+        let clients = &self.parts.clients;
+        let Some(job) = self.jobs.get(id).filter(|_| clients.count() > 0) else {
+            return;
+        };
+        let record = &job.record;
+        let held = matches!(record.state, State::NeedsReview { .. }) && !record.collisions.is_empty();
+        let collisions = held.then(|| record.collisions.clone());
+        let update = JobUpdate { summary: job_summary(record), plan: record.plan.clone(), collisions };
+        clients.broadcast(&push_line(&Push::JobUpdate(update), None));
+    }
+
+    /// Performs only the Notify actions of `actions`: a transition during a forced shutdown (PF-29), or a delivery
+    /// that runs no disc-phase action without its disc (design part 5.4).
+    fn notify_only(&self, id: &str, actions: &[Action]) {
+        for action in actions {
+            if let Action::Notify { event } = action {
+                self.notify_job(id, event);
+            }
+        }
+    }
+
+    /// A running step's progress, pushed as `progress` when the job pushed none in the last second (design part 9.2,
+    /// S7).
+    fn on_progress(&mut self, job: String, step: String, title: Option<String>, fraction: f64) {
+        if !fraction.is_finite() || self.parts.clients.count() == 0 || !self.gate.admit(&job, Instant::now()) {
+            return;
+        }
+        let progress = Progress { job, step, title, fraction: fraction.clamp(0.0, 1.0) };
+        self.parts.clients.broadcast(&push_line(&Push::Progress(progress), None));
+    }
+
+    /// A client the serve thread accepted (design part 9.2): added to the clients and sent the snapshot before
+    /// anything else, then read by its own reader thread.
+    fn on_connect(&mut self, stream: IpcStream) {
+        let IpcStream { reader, writer } = stream;
+        let clients = Arc::clone(&self.parts.clients);
+        let client = clients.add(writer);
+        clients.send(client, push_line(&Push::Snapshot(self.snapshot()), None));
+        spawn_reader(client, reader, clients, self.sender.clone());
+    }
+
+    /// Every job's record, as the owner holds it.
+    fn records(&self) -> Vec<JobRecord> {
+        self.jobs.values().map(|job| job.record.clone()).collect()
+    }
+
+    /// The snapshot (design part 9.2, S77): `snapshot_jobs`, the settings in force, `Settings::validate`'s problems and
+    /// the unset `staging_root`'s, the secrets' states and the last self-test.
+    fn snapshot(&self) -> Snapshot {
+        let (settings, mut problems) = self.store.settings();
+        if settings.staging_root.is_none() {
+            problems.push(staging_unset());
+        }
+        let secrets = secret_states(self.parts.secrets.as_ref(), &self.share_secrets);
+        Snapshot { jobs: snapshot_jobs(&self.records()), settings, problems, secrets, selftest: self.selftest.clone() }
+    }
+
+    /// Sends `client` the `ok` of `answer`'s result, or its `error` with no problems.
+    fn reply(&self, client: u64, id: Option<u64>, answer: Result<Value, String>) {
+        let line = match answer {
+            Ok(result) => reply_ok(id, result),
+            Err(message) => reply_error(id, &message, &[]),
+        };
+        self.parts.clients.send(client, line);
+    }
+
+    /// One request (design part 9.4): answered here, or later by the step, check or shutdown it waits for (S78).
+    fn on_request(&mut self, client: u64, id: Option<u64>, request: Request) {
+        let answer = match request {
+            Request::SettingsSet { changes } => return self.settings_set(client, id, changes),
+            Request::SecretSet { name, value } => self.secret_set(&name, &value),
+            Request::Retry { job } => return self.retry(client, id, &job),
+            Request::Cancel { job } => return self.cancel(client, id, &job),
+            Request::Discard { .. } => Err(DISCARD_REFUSED.to_string()),
+            Request::RipAgain { job } => self.rip_again(&job),
+            Request::RunSelftest => return self.queue_check(client, id, CheckWork::Selftest),
+            Request::History { before } => history_page(&self.records(), before.as_deref())
+                .map(|page| serde_json::to_value(page).unwrap_or(Value::Null)),
+            Request::Shutdown { force } => return self.shutdown(client, id, force),
+            Request::Command { .. } => Err(COMMAND_REFUSED.to_string()),
+            Request::ReviewAction { job, action, overrides } => self.review_action(&job, &action, overrides.as_ref()),
+            Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
+        };
+        self.reply(client, id, answer);
+    }
+
+    /// `settings_set` (design part 9.4, ENG-19): `changes` over the settings in force, read through
+    /// `Settings::from_json`. An unreadable result is refused with its error, one with problems with `settings_set
+    /// refused: <n> problems` and the problems; then nothing changes. Otherwise settings.json is written, the slot
+    /// takes the new `file_phase_concurrency`, the reply carries the new settings, and every disc already in a drive is
+    /// an arrival, but one whose drive record says it was handled (L1, L1a). Each job keeps its own settings.
+    fn settings_set(&mut self, client: u64, id: Option<u64>, changes: Map<String, Value>) {
+        let (current, _) = self.store.settings();
+        let mut merged = serde_json::to_value(&current).unwrap_or_else(|_| Value::Object(Map::new()));
+        if let Value::Object(object) = &mut merged {
+            object.extend(changes);
+        }
+        let line = match Settings::from_json(&merged.to_string()) {
+            Err(error) => reply_error(id, &error, &[]),
+            Ok((_, problems)) if !problems.is_empty() => reply_error(id, &settings_refused(problems.len()), &problems),
+            Ok((settings, _)) => match self.store.write_settings(&settings) {
+                Err(error) => reply_error(id, &format!("settings.json could not be written: {error}"), &[]),
+                Ok(()) => {
+                    self.slots.set_capacity(settings.file_phase_concurrency as usize);
+                    let result = serde_json::to_value(&settings).unwrap_or(Value::Null);
+                    self.parts.clients.send(client, reply_ok(id, result));
+                    self.grant_next();
+                    self.present_discs_arrive(&settings);
+                    return;
+                }
+            },
+        };
+        self.parts.clients.send(client, line);
+    }
+
+    /// Design part 9.4's arrival rule after a `settings_set`: each drive with a disc in, not ejecting and not queued
+    /// already, gets a new arrival number and a fingerprint walk at once; its result is routed as a fresh insertion
+    /// unless the drive record holds its fingerprint with `handled` true (`on_arrival`, L1a).
+    fn present_discs_arrive(&mut self, settings: &Settings) {
+        let ready = Duration::from_secs(u64::from(settings.drive_ready_timeout_s));
+        let present: Vec<(String, PathBuf)> = self
+            .drives
+            .iter()
+            .filter(|(drive, slot)| !slot.ejecting && !self.token.queued_arrival(drive))
+            .filter_map(|(drive, slot)| slot.root.clone().map(|root| (drive.clone(), root)))
+            .collect();
+        for (drive, root) in present {
+            let slot = self.drive(&drive);
+            slot.number += 1;
+            let number = slot.number;
+            self.rescans.insert((drive.clone(), number));
+            let (host, sender) = (Arc::clone(&self.parts.host), self.sender.clone());
+            spawn_arrival(drive, root, number, Duration::ZERO, ready, host, sender);
+        }
+    }
+
+    /// `secret_set` (design part 9.4, S77): a name `is_secret_name` takes is stored through `SecretStore`, and a share
+    /// name joins the names the snapshot lists; the value is never echoed or logged.
+    fn secret_set(&mut self, name: &str, value: &str) -> Result<Value, String> {
+        if !is_secret_name(name) {
+            return Err(not_a_secret(name));
+        }
+        self.parts.secrets.set(name, value).map_err(|error| format!("{name} could not be stored: {error}"))?;
+        if !SECRET_NAMES.contains(&name) {
+            self.share_secrets.insert(name.to_string());
+        }
+        Ok(Value::Null)
+    }
+
+    /// `retry` (design part 9.4, L3, S81). A failed job gets Retry: through the token's queue when its failed step is a
+    /// disc-phase step, through the slot's queue otherwise. A waiting job's condition is checked again: a lookup round
+    /// in AwaitingLookup, NetworkRetry in AwaitingNetwork, and a re-check (`CheckEnv::recheck`) for the others, whose
+    /// reply waits for it. Every other state is refused.
+    fn retry(&mut self, client: u64, id: Option<u64>, job_id: &str) {
+        let Some(job) = self.jobs.get(job_id) else {
+            return self.reply(client, id, Err(no_job(job_id)));
+        };
+        let state = job.record.state.clone();
+        match &state {
+            State::Failed { from, .. } if reduce(&state, &Event::Retry).is_ok() => {
+                if from.is_disc_phase() {
+                    self.deliver(job_id, Event::Retry);
+                } else {
+                    self.wait_for_slot(job_id, Event::Retry);
+                }
+                self.reply(client, id, Ok(Value::Null));
+            }
+            State::AwaitingLookup { .. } => {
+                if !self.rounds_running.contains(job_id) {
+                    self.start_round(job_id);
+                    self.retry_rounds.insert(job_id.to_string());
+                }
+                self.reply(client, id, Ok(Value::Null));
+            }
+            State::AwaitingNetwork { .. } => {
+                self.deliver(job_id, Event::NetworkRetry);
+                self.reply(client, id, Ok(Value::Null));
+            }
+            waiting if waiting.is_waiting() => self.queue_check(client, id, CheckWork::Recheck(job_id.to_string())),
+            other => self.reply(client, id, Err(no_retry(job_id, other))),
+        }
+    }
+
+    /// Delivers `event`, a Retry or a waiting state's return, to `id` (design part 5.4, way (d), L3). An event that
+    /// re-enters a disc-phase state needs the disc-phase token: while another job holds it, it waits in the token's
+    /// queue (once per job); with the token, a job whose disc is in no drive runs no disc-phase action
+    /// (`without_disc`). Any other event is fed at once.
+    fn deliver(&mut self, id: &str, event: Event) {
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        let new = match reduce(&job.record.state, &event) {
+            Ok((new, _)) => new,
+            Err(rejected) => {
+                let line = format!("rejected {} in {}", event_tag(&event), rejected.state.as_str());
+                return self.store.job_log(id, &line);
+            }
+        };
+        if !new.is_disc_phase() {
+            return self.feed(id, event, None);
+        }
+        if !self.token.take(id) {
+            if !self.token.queued_job(id) {
+                let waiting = match event {
+                    Event::Retry => Waiting::Retry(id.to_string()),
+                    other => Waiting::Return(id.to_string(), other),
+                };
+                self.token.wait(waiting);
+            }
+            return;
+        }
+        if job.disc.is_none() {
+            return self.without_disc(id, event);
+        }
+        self.feed(id, event, None);
+    }
+
+    /// A Retry or return delivered while the job's disc is in no drive (design part 5.4): its transition is persisted
+    /// with only its notifications performed, then MediaRemoved is fed, whose WaitForDisc frees the token.
+    fn without_disc(&mut self, id: &str, event: Event) {
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        let Ok((new, actions)) = reduce(&job.record.state, &event) else {
+            return;
+        };
+        let Some(transition) = self.persist_transition(id, Some(event), new, actions, None) else {
+            return;
+        };
+        self.notify_only(id, &transition.actions);
+        self.publish(id);
+        self.feed(id, Event::MediaRemoved, None);
+    }
+
+    /// Queues `id` for the file-phase slot with `event`, a Retry of a file-phase failure or an approval, fed when the
+    /// slot is free for it (design part 5.7); the job then holds the slot.
+    fn wait_for_slot(&mut self, id: &str, event: Event) {
+        self.slot_events.insert(id.to_string(), event);
+        self.slots.join(id);
+        self.grant_next();
+    }
+
+    /// `cancel` (design part 9.4, R-A7, S78): refused for a job with no running step, naming its state, and for a
+    /// CheckSpace or Eject. Otherwise the step's CancelToken is raised, the job's generation bumped so the step's own
+    /// result is stale, and the `ok` waits until the step has ended and its failure is persisted (`on_step_done`).
+    fn cancel(&mut self, client: u64, id: Option<u64>, job_id: &str) {
+        let Some(job) = self.jobs.get_mut(job_id) else {
+            return self.reply(client, id, Err(no_job(job_id)));
+        };
+        let Some(worker) = self.workers.iter_mut().find(|worker| worker.job == job_id) else {
+            let refusal = no_running_step(job_id, &job.record.state);
+            return self.reply(client, id, Err(refusal));
+        };
+        let tag = main_tag(&worker.tags);
+        if tag == "CheckSpace" || tag == "Eject" {
+            return self.reply(client, id, Err(not_cancellable(job_id, &tag)));
+        }
+        match &mut worker.cancelled {
+            Some(cancelled) => cancelled.replies.push((client, id)),
+            None => {
+                let event = cancel_event(&tag, &job.record.state);
+                worker.cancelled = Some(Cancelled { event, replies: vec![(client, id)] });
+                worker.cancel.cancel();
+                job.generation += 1;
+            }
+        }
+    }
+
+    /// `rip_again` (design part 9.4): RipAgain for a job past its disc phase, which arms it; refused otherwise.
+    fn rip_again(&mut self, job_id: &str) -> Result<Value, String> {
+        let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
+        if reduce(&job.record.state, &Event::RipAgain).is_err() {
+            return Err(no_rip_again(job_id, &job.record.state));
+        }
+        self.feed(job_id, Event::RipAgain, None);
+        Ok(Value::Null)
+    }
+
+    /// `review_action` (design part 9.4, P25, R-A8, S82): only `approve` with no overrides (absent, null or empty) of
+    /// a job held at the disposition gate, which waits for the slot with `ReviewApproved` of default overrides and the
+    /// job's summary's review reasons. Every other action, and `approve` with overrides, waits for phase 3.
+    fn review_action(&mut self, job_id: &str, action: &str, overrides: Option<&Value>) -> Result<Value, String> {
+        let empty = match overrides {
+            None | Some(Value::Null) => true,
+            Some(Value::Object(fields)) => fields.is_empty(),
+            Some(Value::Array(items)) => items.is_empty(),
+            Some(_) => false,
+        };
+        if action != "approve" || !empty {
+            return Err(waits_for_review(action));
+        }
+        let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
+        if job.record.state != (State::NeedsReview { held: Held::DispositionGate }) {
+            return Err(not_held(job_id, &job.record.state));
+        }
+        let approved_reasons = job_summary(&job.record).review_reasons;
+        self.wait_for_slot(job_id, Event::ReviewApproved { overrides: Overrides::default(), approved_reasons });
+        Ok(Value::Null)
+    }
+
+    /// Queues a self-test or a re-check; they run one at a time, each on its own thread (design part 4.4).
+    fn queue_check(&mut self, client: u64, id: Option<u64>, work: CheckWork) {
+        self.checks.push_back(PendingCheck { client, id, work });
+        self.start_check();
+    }
+
+    /// Whether a `makemkvcon` runs for a job: a RunScan or RipTitle worker, whose listing is part of it (design part
+    /// 3.7, S80).
+    fn makemkv_busy(&self) -> bool {
+        self.workers.iter().any(|worker| worker.tags.iter().any(|tag| tag == "RunScan" || tag == "RipTitle"))
+    }
+
+    /// Starts the next queued check on its own thread, unless one runs: a self-test over the engine's settings, or a
+    /// re-check of the job with its own settings; its end comes back as `Msg::Checked`.
+    fn start_check(&mut self) {
+        if self.checking || self.quiet.is_some() {
+            return;
+        }
+        let Some(PendingCheck { client, id, work }) = self.checks.pop_front() else {
+            return;
+        };
+        let (env, busy) = (self.parts.env.clone(), self.makemkv_busy());
+        let run: Box<dyn FnOnce() -> CheckOutcome + Send> = match work {
+            CheckWork::Selftest => {
+                let settings = self.store.settings().0;
+                Box::new(move || CheckOutcome::Selftest(env.selftest(&settings, busy)))
+            }
+            CheckWork::Recheck(job) => {
+                let Some(held) = self.jobs.get(&job) else {
+                    self.reply(client, id, Err(no_job(&job)));
+                    return self.start_check();
+                };
+                let input = RecheckJob {
+                    record: held.record.clone(),
+                    settings: held.settings.clone(),
+                    job_dir: self.store.job_dir(&job),
+                };
+                let (shares, promises) = (Arc::clone(&self.parts.shares), Arc::clone(&self.parts.promises));
+                Box::new(move || {
+                    let event = env.recheck(&input, busy, shares.as_ref(), &promises);
+                    CheckOutcome::Recheck { job, event }
+                })
+            }
+        };
+        self.checking = true;
+        let sender = self.sender.clone();
+        self.threads.push(thread::spawn(move || {
+            let outcome = panic::catch_unwind(AssertUnwindSafe(run))
+                .unwrap_or_else(|payload| CheckOutcome::Panicked(panic_text(&*payload)));
+            let _ = sender.send(Msg::Checked { client, id, outcome });
+        }));
+    }
+
+    /// A check ended (design part 9.4, S78, S81). A self-test becomes the last one, is pushed to every client as
+    /// `selftest_result`, then answers its request with itself, and every AwaitingTool job whose re-check passes gets
+    /// ToolFound. A re-check's event is delivered, then its `retry` gets `ok`. The next check starts.
+    fn on_checked(&mut self, client: u64, id: Option<u64>, outcome: CheckOutcome) {
+        self.checking = false;
+        match outcome {
+            CheckOutcome::Selftest(selftest) => {
+                self.selftest = selftest.clone();
+                self.parts.clients.broadcast(&push_line(&Push::SelftestResult(selftest.clone()), None));
+                self.reply(client, id, Ok(serde_json::to_value(&selftest).unwrap_or(Value::Null)));
+                self.deliver_tool_found(&selftest);
+            }
+            CheckOutcome::Recheck { job, event } => {
+                if let Some(event) = event {
+                    self.deliver(&job, event);
+                }
+                self.reply(client, id, Ok(Value::Null));
+            }
+            CheckOutcome::Panicked(text) => {
+                self.store.log(&format!("a check panicked: {text}"));
+                self.reply(client, id, Err(format!("the check panicked: {text}")));
+            }
+        }
+        if !self.stopping {
+            self.start_check();
+        }
+    }
+
+    /// After a self-test, each AwaitingTool job whose re-check passes gets ToolFound (Ruling S81, design part 9.4): its
+    /// tools found with its own settings, and the self-test's MakeMKV check for a disc-phase return.
+    fn deliver_tool_found(&mut self, selftest: &SelfTest) {
+        let makemkv = selftest.checks.iter().find(|check| check.name == Tool::Makemkvcon.as_str()).cloned();
+        let waiting: Vec<(String, State, Settings)> = self
+            .jobs
+            .values()
+            .filter_map(|job| match &job.record.state {
+                State::AwaitingTool { return_to } => {
+                    Some((job.record.id.clone(), (**return_to).clone(), job.settings.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, return_to, settings) in waiting {
+            let check = makemkv.clone().unwrap_or_else(|| not_checked(Tool::Makemkvcon.as_str()));
+            if let Some(event) = self.parts.env.tool_found(&settings, &return_to, || check) {
+                self.deliver(&id, event);
+                if self.stopping {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// When a MakeMKV check or listing found the version or licence state changed, every AwaitingMakeMkv job gets
+    /// MakeMkvChanged, delivered once the token is free (design part 3.7, S79).
+    fn makemkv_changed(&mut self) {
+        if self.stopping || self.quiet.is_some() || !self.parts.env.makemkv.take_changed() {
+            return;
+        }
+        let waiting: Vec<String> = self
+            .jobs
+            .values()
+            .filter(|job| matches!(job.record.state, State::AwaitingMakeMkv { .. }))
+            .map(|job| job.record.id.clone())
+            .collect();
+        for id in waiting {
+            self.deliver(&id, Event::MakeMkvChanged);
+            if self.stopping {
+                return;
+            }
+        }
+    }
+
+    /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, closes every client and stops. With a
+    /// step running and no `force`, it is refused naming the jobs. With `force`, each running step is cancelled as
+    /// `cancel` does, but a CheckSpace or Eject is let finish; the owner then waits for every step (`quiet_message`)
+    /// and ends in `finish_shutdown`.
+    fn shutdown(&mut self, client: u64, id: Option<u64>, force: bool) {
+        let mut running: Vec<String> = self.workers.iter().map(|worker| worker.job.clone()).collect();
+        running.sort();
+        running.dedup();
+        if running.is_empty() {
+            self.reply(client, id, Ok(Value::Null));
+            return self.close_and_stop();
+        }
+        if !force {
+            return self.reply(client, id, Err(steps_running(&running)));
+        }
+        let mut cancelled = Vec::new();
+        for worker in &mut self.workers {
+            let tag = main_tag(&worker.tags);
+            if tag == "CheckSpace" || tag == "Eject" {
+                continue;
+            }
+            cancelled.push(worker.job.clone());
+            if worker.cancelled.is_none() {
+                let state = self.jobs.get(&worker.job).map_or(State::Discarded, |job| job.record.state.clone());
+                worker.cancelled = Some(Cancelled { event: cancel_event(&tag, &state), replies: Vec::new() });
+                worker.cancel.cancel();
+                if let Some(job) = self.jobs.get_mut(&worker.job) {
+                    job.generation += 1;
+                }
+            }
+        }
+        self.quiet = Some(Quiet { client, id, cancelled });
+    }
+
+    /// The end of a forced shutdown, once no step runs (S83): each cancelled job's partial files are deleted, the
+    /// `shutdown` gets its `ok`, every client is closed and the owner stops.
+    fn finish_shutdown(&mut self) {
+        let Some(quiet) = self.quiet.take() else {
+            return;
+        };
+        for job in &quiet.cancelled {
+            self.delete_partials(job);
+        }
+        self.reply(quiet.client, quiet.id, Ok(Value::Null));
+        self.close_and_stop();
+    }
+
+    /// Refuses every queued check, closes every client after what is queued for it, and stops the owner (design part
+    /// 3.8).
+    fn close_and_stop(&mut self) {
+        for PendingCheck { client, id, .. } in std::mem::take(&mut self.checks) {
+            self.reply(client, id, Err(STOPPING.to_string()));
+        }
+        self.parts.clients.close_all();
+        self.stopping = true;
+        self.drive_stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Deletes `<root>/.lazymkv-partial/<id>-*.mkv.partial` in every library root of the engine's and the job's
+    /// settings (S83); a file that cannot be deleted is logged.
+    fn delete_partials(&self, id: &str) {
+        let (engine, _) = self.store.settings();
+        let mut roots: BTreeSet<String> = [engine.movies_root, engine.tv_root].into_iter().flatten().collect();
+        if let Some(job) = self.jobs.get(id) {
+            roots.extend([job.settings.movies_root.clone(), job.settings.tv_root.clone()].into_iter().flatten());
+        }
+        let prefix = format!("{id}-");
+        for root in roots {
+            let Ok(entries) = fs::read_dir(Path::new(&root).join(PARTIAL_FOLDER)) else {
+                continue;
+            };
+            for entry in entries.filter_map(|entry| entry.ok()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && name.ends_with(".mkv.partial") {
+                    if let Err(error) = fs::remove_file(entry.path()) {
+                        let shown = entry.path().display().to_string();
+                        self.store.log(&format!("{shown}: the partial file was not deleted: {error}"));
+                    }
+                }
+            }
         }
     }
 }

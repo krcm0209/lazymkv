@@ -35,7 +35,9 @@ use lazymkv_platform::fakes::{
     CountingKeepAwake, DriveScript, FakeHost, FakeShares, MemoryConnector, MemoryIpc, MemorySecrets, RecordingEjector,
     ScriptedDrives,
 };
-use lazymkv_platform::{DriveEvent, DriveWatcher, GuardedChild, Platform, ProcessGuard, Spawn, StdProcessGuard};
+use lazymkv_platform::{
+    DriveEvent, DriveWatcher, GuardedChild, IpcConnector, Platform, ProcessGuard, Spawn, StdProcessGuard,
+};
 use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
 
@@ -131,6 +133,9 @@ pub enum StepScript {
     Hang,
     /// Panics with this text, as a step with a bug would.
     Panic(&'static str),
+    /// Sleeps for the duration, then returns the result whether or not the step was cancelled: a CheckSpace or Eject
+    /// that `cancel` does not stop (design parts 3.8, 9.4; Task 26).
+    After(Duration, StepResult),
 }
 
 /// One call of a scripted step (R22.2): the action's tag, state.json's state at the call and the number of
@@ -202,6 +207,10 @@ impl StepRunner for ScriptedSteps {
                 StepResult { event: None, message: Some("cancelled".to_string()) }
             }
             Some(StepScript::Panic(text)) => panic!("{text}"),
+            Some(StepScript::After(pause, result)) => {
+                thread::sleep(pause);
+                result
+            }
             None if NO_EVENT_ACTIONS.contains(&tag.as_str()) => StepResult { event: None, message: None },
             None => StepResult { event: None, message: Some(format!("no scripted result for {tag}")) },
         }
@@ -268,8 +277,9 @@ pub struct Harness {
     shares: Arc<FakeShares>,
     secrets: Arc<MemorySecrets>,
     ipc: Arc<MemoryIpc>,
-    /// The client end of `ipc`, kept so the engine's end never sees every connector gone (Task 26 hands out clones).
-    _connector: MemoryConnector,
+    /// The client end of `ipc`, kept so the engine's end never sees every connector gone; `client` hands out clones,
+    /// and the engine's stop connects through one to wake its serve thread (Task 26).
+    connector: MemoryConnector,
     host: Arc<FakeHost>,
     http: Arc<RecordedTransport>,
     timers: Arc<ManualTimers>,
@@ -399,6 +409,12 @@ impl Harness {
             stop
         });
         let engine = start_until(config, services, Some(stop_after)).expect("the harness's engine starts");
+        // MemoryIpc::accept holds its lock while it waits, so the engine's stop wakes its serve thread with a
+        // connection of its own before it joins it, and the next engine's accept is not queued behind the old one.
+        let connector = self.connector.clone();
+        engine.set_ipc_waker(Box::new(move || {
+            let _ = connector.connect();
+        }));
         *lock(&self.engine) = Some(engine);
     }
 
@@ -410,8 +426,10 @@ impl Harness {
         }
     }
 
-    /// Hands the queued drive events to the `DriveScript`, in order (R22.1).
-    fn deliver(&self) {
+    /// Hands the queued drive events to the `DriveScript`, in order (R22.1). Every other method does this first; a test
+    /// that inserts or removes a disc and then waits only through an IPC client calls it itself (PF-1). Def: T22.
+    /// Use: T22 to T29.
+    pub fn deliver(&self) {
         let queued = std::mem::take(&mut *lock(&self.queued));
         for event in queued {
             match event {
@@ -739,6 +757,13 @@ impl Harness {
         self.lookups_wait.store(wait, Ordering::SeqCst);
     }
 
+    /// A clone of the harness's `MemoryConnector`, which connects an IPC client to the running engine (design part
+    /// 9.1). Def: T26. Use: T26, T28.
+    pub fn client(&self) -> MemoryConnector {
+        self.deliver();
+        self.connector.clone()
+    }
+
     /// Registers `action` to run once, before the first spawn whose arguments hold every one of `needles`, each as a
     /// substring of some argument (as the stand-ins match theirs), and then lets that spawn go ahead (design part
     /// 12.2). Only `new`'s `TestGuard` runs the actions. Def: T24. Use: T24.
@@ -828,7 +853,7 @@ impl Folders {
             shares: Arc::new(FakeShares::new()),
             secrets: Arc::new(MemorySecrets::new().with("tmdb_token", "test-token")),
             ipc: Arc::new(ipc),
-            _connector: connector,
+            connector,
             host: Arc::new(FakeHost::new("2026-10-23", 1_792_800_000)),
             http: Arc::new(runner.http),
             timers: Arc::new(ManualTimers::new()),

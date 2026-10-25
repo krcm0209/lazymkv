@@ -192,7 +192,6 @@ impl Store {
 
     /// Replaces `<data>/settings.json` (design part 7.4): `write_atomic` of `to_vec_pretty(settings)` plus "\n", with
     /// no `format` key, because `Settings` refuses an unknown key. Def: T21. Use: T22, T23, T25, T26.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 26's settings_set writes the settings"))]
     pub(crate) fn write_settings(&self, settings: &Settings) -> io::Result<()> {
         let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         fs::create_dir_all(&self.data)?;

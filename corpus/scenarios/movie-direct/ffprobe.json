@@ -1,1 +1,2 @@
-{"responses":[{"args_contain":["-show_streams"],"stdout":"ffprobe-streams.json"}]}
+{"responses":[{"args_contain":["-show_streams"],"stdout":"ffprobe-streams.json"},
+ {"args_contain":["-version"],"stdout":"ffprobe-version.txt"}]}

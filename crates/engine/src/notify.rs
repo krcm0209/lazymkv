@@ -5,8 +5,12 @@ use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
 use lazymkv_core::ipc::Notification;
-use lazymkv_core::job::NotifyEvent;
+use lazymkv_core::job::{FailureClass, NotifyEvent};
 use lazymkv_core::record::JobRecord;
+
+/// What a `failed` notification of class `MediaReadError` adds to its message (spec 12): the disc may read in the other
+/// drive.
+const TRY_THE_OTHER_DRIVE: &str = "; try the other drive";
 
 /// Where notifications go (design part 8.6, S36): PR 2's sink; PR 4 adds webhook delivery. Def: T22. Use: T22, T26,
 /// T29.
@@ -22,7 +26,8 @@ pub trait NotifySink: Send {
 /// - `needs_review`: "held for review: <reasons, snake_case, joined by ", ">";
 /// - `waiting`: "waiting: <reason>", plus ": <record.message>" when the record has one;
 /// - `resumed`: "resumed";
-/// - `failed`: the record's message, else "failed with class <class>";
+/// - `failed`: the record's message, else "failed with class <class>", followed by "; try the other drive" for class
+///   `MediaReadError` (spec 12);
 /// - `eject_failed`: "the eject failed; remove the disc by hand".
 ///
 /// Def: T22. Use: T22, T24, T26.
@@ -50,7 +55,11 @@ pub(crate) fn message(event: &NotifyEvent, record: Option<&JobRecord>) -> String
         },
         NotifyEvent::Resumed => "resumed".to_string(),
         NotifyEvent::Failed { class } => {
-            state_message.unwrap_or_else(|| format!("failed with class {}", class.as_str()))
+            let message = state_message.unwrap_or_else(|| format!("failed with class {}", class.as_str()));
+            match class {
+                FailureClass::MediaReadError => format!("{message}{TRY_THE_OTHER_DRIVE}"),
+                _ => message,
+            }
         }
         NotifyEvent::EjectFailed => "the eject failed; remove the disc by hand".to_string(),
     }

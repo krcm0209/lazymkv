@@ -1,0 +1,4 @@
+MSG:1005,0,1,"MakeMKV v2.0.0 win(x64-release) started","%1 started","MakeMKV v2.0.0 win(x64-release)"
+DRV:0,2,999,12,"BD-RE SYNTHETIC DRIVE 1.00 SERIAL","SYNTHETIC_MOVIE","tok0"
+DRV:1,2,999,12,"BD-RE SYNTHETIC DRIVE 1.00 SERIAL2","SYNTHETIC_MOVIE","tok1"
+MSG:5010,0,0,"Failed to open disc","Failed to open disc"

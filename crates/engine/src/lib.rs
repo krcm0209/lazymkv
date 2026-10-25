@@ -2,9 +2,11 @@
 
 mod arrival;
 mod file_phase;
+mod ipc_server;
 mod notify;
 mod owner;
 mod restart;
+mod selftest;
 mod space;
 mod steps;
 mod store;

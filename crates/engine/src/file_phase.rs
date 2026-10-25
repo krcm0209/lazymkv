@@ -27,8 +27,10 @@ use lazymkv_dev::evidence::Ctx;
 use crate::arrival::chain_inputs;
 use crate::owner::JobContext;
 
-/// The folder under a library root that holds the partial files (design part 5.7 step 13).
-const PARTIAL_FOLDER: &str = ".lazymkv-partial";
+/// The folder under a library root that holds the partial files (design part 5.7 step 13), where the self-test probes
+/// a library root and a forced shutdown deletes a cancelled job's partial files (design part 3.8). Def: T24. Use: T24,
+/// T26.
+pub(crate) const PARTIAL_FOLDER: &str = ".lazymkv-partial";
 
 /// `naming::resolution_label`'s values, the `<R>` of a file name the namer builds (Ruling R24.5).
 const RESOLUTIONS: [&str; 5] = ["2160p", "1080p", "720p", "576p", "480p"];
@@ -64,6 +66,12 @@ impl SlotQueue {
         for queued in queue {
             self.join(queued);
         }
+    }
+
+    /// Sets the number of places to `capacity`, after a `settings_set` of `file_phase_concurrency` (design part 9.4);
+    /// a holder keeps its place whatever the capacity. Def: T26. Use: T26.
+    pub(crate) fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity;
     }
 
     /// Appends `job` to the queue; a job already queued or holding a place keeps its place (design part 5.7).
