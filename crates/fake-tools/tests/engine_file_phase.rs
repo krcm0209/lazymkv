@@ -222,6 +222,25 @@ fn a_collision_holds_the_job_with_path_collision_and_keeps_the_path() {
     assert_eq!(fs::read_dir(h.library().join(".lazymkv-partial")).map(|d| d.count()).unwrap_or(0), 0);
 }
 
+/// R24.c2: the library facts lead the decision to an edition-named path, and the collision there holds the job.
+#[test]
+fn a_collision_at_the_path_the_library_facts_lead_to_holds_the_job() {
+    let h = harness(&[], json!({"edition_style": "jellyfin"}));
+    let folder = "Synthetic Movie (2001) {tmdb-900001}";
+    let target = h.library().join(folder).join(format!("{folder} - 1080p Theatrical Cut.mkv"));
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"already here").unwrap();
+    let id = run_to(&h, "NeedsReview");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::NeedsReview { held: Held::DispositionGate });
+    let decision = record.titles[0].decision.as_ref().unwrap();
+    assert!(decision.reviews.contains(&ReviewReason::PathCollision), "{:?}", decision.reviews);
+    assert_eq!(decision.path.as_ref().map(|path| PathBuf::from(&path.path)), Some(target.clone()));
+    assert_eq!(record.collisions.iter().map(PathBuf::from).collect::<Vec<_>>(), vec![target.clone()]);
+    assert_eq!(fs::read(&target).unwrap(), b"already here");
+    assert_eq!(fs::read_dir(h.library().join(".lazymkv-partial")).map(|d| d.count()).unwrap_or(0), 0);
+}
+
 #[test]
 fn an_existing_final_file_fails_file_failed_unknown_and_keeps_the_partial() {
     let h = harness(&[], json!({}));

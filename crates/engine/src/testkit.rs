@@ -52,7 +52,7 @@ const WAIT_CAP: Duration = Duration::from_secs(10);
 const RUN_UNTIL_CAP: Duration = Duration::from_secs(60);
 /// How long `settle` needs everything unchanged.
 const QUIET: Duration = Duration::from_millis(300);
-/// How long `settle` needs everything unchanged while a step or lookup round is outstanding (Task 24).
+/// How long `settle` needs everything unchanged while a step or lookup round is outstanding (Ruling R24.c1).
 const BUSY_QUIET: Duration = Duration::from_secs(2);
 /// `settle`'s cap.
 const SETTLE_CAP: Duration = Duration::from_secs(10);
@@ -609,7 +609,7 @@ impl Harness {
     /// Returns once the job files, notifications, engine.log, drives.json, ejects, step calls and keep-awake holders
     /// are unchanged for 300 ms, or for 2 s while the running engine has a step or lookup round outstanding (10 s
     /// cap). A step can pass 300 ms with no file changing, as a stand-in's first launch does, and a step that hangs on
-    /// purpose ends the wait after 2 s (Task 24). Def: T22. Use: T22 to T29.
+    /// purpose ends the wait after 2 s (Ruling R24.c1). Def: T22. Use: T22 to T29.
     pub fn settle(&self) {
         self.deliver();
         let cap = Instant::now() + SETTLE_CAP;

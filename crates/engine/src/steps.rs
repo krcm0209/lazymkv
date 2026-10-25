@@ -1166,27 +1166,32 @@ impl Step<'_> {
     }
 
     /// One title's decision document (design parts 5.7 step 11, 6.4): `decide_doc` over `engine_decide_inputs` with the
-    /// probe Probe kept, or over `read_back_inputs` when this engine run holds none (PF-27), with no library facts;
-    /// when the decision has a final path whose `library_facts` are not the defaults, rendered again with them
-    /// (Ruling R24.3: the decision fed is the document's). Err is the reason the inputs or the decision could not be
-    /// made.
+    /// probe Probe kept, or over `read_back_inputs` when this engine run holds none (PF-27), first with no library
+    /// facts, then rendered again with the `library_facts` of the path the last render chose while they differ from
+    /// the facts it was rendered with (Ruling R24.c2: the facts can lead to an edition-named path, whose own facts may
+    /// hold a collision). The film folder does not change with the edition, so this settles at once; facts seen before
+    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs or the decision
+    /// could not be made.
     fn title_doc(&self, ctx: &Ctx, plan: &Plan, key: &str) -> Result<DecideDoc, String> {
         let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
         let mut inputs = match &probes {
             Some(probes) => engine_decide_inputs(ctx, self.job, plan, key, probes, LibraryFacts::default())?,
             None => read_back_inputs(ctx, &self.job.job_dir, plan, key)?,
         };
-        let doc = decide_doc(&inputs);
-        let path = match &doc.decision {
-            DecisionEntry::Results(found) => found.decision.path.clone(),
-            DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
-        };
-        let facts = path.map(|path| library_facts(&path, self.job.settings.edition_style)).unwrap_or_default();
-        if facts == LibraryFacts::default() {
-            return Ok(doc);
+        let mut seen = vec![inputs.library.clone()];
+        loop {
+            let doc = decide_doc(&inputs);
+            let path = match &doc.decision {
+                DecisionEntry::Results(found) => found.decision.path.clone(),
+                DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
+            };
+            let facts = path.map(|path| library_facts(&path, self.job.settings.edition_style)).unwrap_or_default();
+            if seen.contains(&facts) {
+                return Ok(doc);
+            }
+            seen.push(facts.clone());
+            inputs.library = facts;
         }
-        inputs.library = facts;
-        Ok(decide_doc(&inputs))
     }
 
     /// `<key>/decide.json` (design part 7.1): the document with the audio rule's and lazymkv's versions as its last two

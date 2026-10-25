@@ -226,8 +226,9 @@ impl EngineHandle {
         lock(&self.jobs).values().map(job_summary).collect()
     }
 
-    /// Whether the owner, after the last message it handled, had a step or a lookup round outstanding: the testkit's
-    /// `settle` waits until it has none (Task 24). Def: T24. Use: T24 to T29.
+    /// Whether the owner, after the last message it handled, had a step or a lookup round outstanding; false once it
+    /// has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet instead of 300 ms, and waits no
+    /// longer than that for it to clear (Ruling R24.c1). Def: T24. Use: T24 to T29.
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
@@ -492,7 +493,8 @@ struct Parts {
     http: Arc<dyn HttpTransport>,
     /// The secrets, for the rounds' `tmdb_token` (design part 8.1).
     secrets: Arc<dyn SecretStore>,
-    /// Whether a step or a lookup round is outstanding, set after each message (`EngineHandle::busy`).
+    /// Whether a step or a lookup round is outstanding, set after each message and cleared at shutdown
+    /// (`EngineHandle::busy`, Ruling R24.c1).
     busy: Arc<AtomicBool>,
 }
 
@@ -671,6 +673,8 @@ impl Owner {
             self.parts.awake.release();
             self.awake_held = false;
         }
+        // No step runs any more, and a lookup round's late end goes nowhere: a stopped engine is not busy (R24.c1).
+        self.parts.busy.store(false, Ordering::SeqCst);
     }
 
     /// The owner's record of `drive`.
@@ -1038,25 +1042,34 @@ impl Owner {
         self.jobs.get(id).map(|job| waiting_message(&lock(&job.lookups)))
     }
 
-    /// A lookup round ended (design part 8.3). In `Ejected`, a lookup still pending takes the job out of the slot's
-    /// queue and feeds LookupPending with the waiting message; otherwise the round is marked done, and a round that
-    /// could not run is logged in job.log and marked done too, so the job goes on to the file phase, where its decision
-    /// says what is missing. In AwaitingLookup, a lookup still pending feeds LookupPending, which restarts the timer,
-    /// and none feeds LookupAnswered; a round that could not run feeds LookupPending with its sentence. The slot is
-    /// granted again afterwards.
+    /// A lookup round ended (design part 8.3). A round that could not run writes `the lookup round could not run:
+    /// <error>` to job.log. In `Ejected`, a lookup still pending takes the job out of the slot's queue and feeds
+    /// LookupPending with the waiting message, or with that sentence when the round could not run; otherwise the round
+    /// is marked done. A round that could not run is judged by the book's own `pending()` (Ruling R24.c3). In
+    /// AwaitingLookup, a lookup still pending feeds LookupPending, which restarts the timer, and none feeds
+    /// LookupAnswered; a round that could not run feeds LookupPending with its sentence. The slot is granted again
+    /// afterwards.
     fn on_round_done(&mut self, id: &str, pending: Result<(bool, bool), String>) {
         self.rounds_running.remove(id);
-        let Some(state) = self.jobs.get(id).map(|job| job.record.state.clone()) else {
+        let Some(job) = self.jobs.get(id) else {
             return;
         };
-        let waiting = matches!(pending, Ok((discdb, tmdb)) if discdb || tmdb);
+        let state = job.record.state.clone();
+        let (discdb, tmdb) = match &pending {
+            Ok(found) => *found,
+            Err(_) => lock(&job.lookups).pending(),
+        };
+        let waiting = discdb || tmdb;
         if let Err(error) = &pending {
             self.store.job_log(id, &format!("the lookup round could not run: {error}"));
         }
         match state {
             State::Ejected { after_copy: false } if waiting => {
                 self.slots.leave(id);
-                let message = self.lookup_message(id);
+                let message = match &pending {
+                    Ok(_) => self.lookup_message(id),
+                    Err(error) => Some(format!("the lookup round could not run: {error}")),
+                };
                 self.feed(id, Event::LookupPending, message);
             }
             State::Ejected { after_copy: false } => {
