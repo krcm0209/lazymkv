@@ -19,7 +19,7 @@ use crate::codec::{mkvmerge_names, Family};
 use crate::disc::{Flags, Stream, StreamKind, Title, DURATION_MATCH_S};
 use crate::lang::norm_lang;
 use crate::reconcile::{expected_rows, removed_streams};
-use crate::recording::files::{MkvTrack, MkvmergeIdent, Selection, SubsIndexEntry};
+use crate::recording::files::{MkvTrack, MkvmergeIdent, Packet, Selection, SubsIndexEntry};
 use crate::recording::{read_text, Encoding, Errors, PathKey, Tree};
 use crate::review::{sorted_unique, ReviewReason};
 use crate::robot::{parse, Scan};
@@ -568,12 +568,66 @@ pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEn
     serde_json::from_str(&text).map_err(|error| format!("{}: {error}", tree.display(&path)))
 }
 
+/// One sub-<n>.packets.json as read for the subtitle-event rule: `shown` is the tree's display of its path, and
+/// `packets` the packets or the error text `subtitle_events` gives for it (a missing file: the read error, which names
+/// the path; any other read, decode, syntax or shape error: prefixed with `shown` exactly once). Not
+/// `recording::files::PacketsFile` (files.rs:175), the file's serde shape. Spec 6.4 step 10, 8.7, K5. Def: T18. Use: T19.
+#[derive(Clone, Debug)]
+pub struct PacketsFile {
+    pub shown: String,
+    pub packets: Result<Vec<Packet>, String>,
+}
+
+/// `subs_dir/sub-<n>.packets.json` read strictly (UTF-8, a byte-order mark allowed) and parsed by `align::load_packets`,
+/// its error held in `packets` as `PacketsFile` says. Spec 6.4 step 10, K5. Def: T18. Use: T18, T19.
+pub fn read_packets_file(tree: &dyn Tree, subs_dir: &PathKey, n: i64) -> PacketsFile {
+    let path = subs_dir.join(&format!("sub-{n}.packets.json"));
+    let shown = tree.display(&path);
+    let packets = read_text(tree, &path, Encoding::Utf8Sig, Errors::Strict)
+        .map_err(|error| if tree.is_file(&path) { format!("{shown}: {error}") } else { error })
+        .and_then(|text| {
+            // load_packets prefixes its syntax and serde errors with `shown` but returns the AttributeError text of a
+            // top level that is not an object bare, so that one gets the path here.
+            load_packets(&text, &shown)
+                .map_err(|error| if error.starts_with(&shown) { error } else { format!("{shown}: {error}") })
+        });
+    PacketsFile { shown, packets }
+}
+
+/// The one subtitle-event rule over read inputs: for each `index` entry in order that `subs_streams` maps, the
+/// `align::events` of `packets[n]` at `clear_max_bytes` (0 where `align::is_text`), keyed by scan stream. Unmapped
+/// entries are skipped, so their files may be broken or absent. A mapped entry's held error is returned as is, its
+/// events error as "<shown>: <error>", and a mapped entry with no `packets` entry as "sub-<n>.packets.json: not read".
+/// Spec 6.4 step 10, 8.7, K5, S25. Def: T18. Use: T18, T19.
+pub fn subtitle_events_of(
+    index: &[SubsIndexEntry],
+    packets: &BTreeMap<i64, PacketsFile>,
+    report: &VerifyReport,
+    clear_max_bytes: i64,
+) -> Result<BTreeMap<u32, Vec<f64>>, String> {
+    let streams = subs_streams(index, report);
+    let mut by_stream = BTreeMap::new();
+    for entry in index {
+        let Some(&stream) = streams.get(&entry.n) else {
+            continue;
+        };
+        let file = packets.get(&entry.n).ok_or_else(|| format!("sub-{}.packets.json: not read", entry.n))?;
+        let read = file.packets.as_ref().map_err(Clone::clone)?;
+        let limit = if is_text(entry.codec.as_deref()) { 0 } else { clear_max_bytes };
+        let starts = events(read, limit).map_err(|error| format!("{}: {error}", file.shown))?;
+        by_stream.insert(stream, starts);
+    }
+    Ok(by_stream)
+}
+
 /// `align::events` of every subs/index.json entry under `subs_dir` (packets through `align::load_packets`), keyed by
 /// scan stream (`subs_streams`): `clear_max_bytes` (spec 14 `sub_clear_max_bytes`) for image codecs, 0 where
 /// `align::is_text`. index.json is read as `align::index_streams` reads it (a byte-order mark allowed, invalid bytes
-/// replaced), each packets file strictly; only mapped entries are read. Err with the read error's text for a missing
-/// file (it names the path), or with the file's path before a decode error's, serde's or `align::events`' message, so a
-/// failure always names its file. Spec 6.4 step 10, 8.7.
+/// replaced), each packets file strictly (`read_packets_file`); only mapped entries are read. Err with the read error's
+/// text for a missing file (it names the path), or with the file's path before a decode error's, serde's or
+/// `align::events`' message, so a failure always names its file. The reading half of the rule `subtitle_events_of`
+/// holds. Spec 6.4 step 10, 8.7, K5. Def: phase 1, rewritten over `subtitle_events_of` in T18. Use:
+/// `subtitle::labels::row14` (retune --subtitles).
 pub fn subtitle_events(
     tree: &dyn Tree,
     subs_dir: &PathKey,
@@ -582,24 +636,12 @@ pub fn subtitle_events(
 ) -> Result<BTreeMap<u32, Vec<f64>>, String> {
     let index = subs_index(tree, subs_dir)?;
     let streams = subs_streams(&index, report);
-    let mut by_stream = BTreeMap::new();
-    for entry in &index {
-        let Some(&stream) = streams.get(&entry.n) else {
-            continue;
-        };
-        let path = subs_dir.join(&format!("sub-{}.packets.json", entry.n));
-        let shown = tree.display(&path);
-        let text = read_text(tree, &path, Encoding::Utf8Sig, Errors::Strict)
-            .map_err(|error| if tree.is_file(&path) { format!("{shown}: {error}") } else { error })?;
-        // load_packets prefixes its syntax and serde errors with `shown` but returns the AttributeError text of a
-        // top level that is not an object bare, so that one gets the path here.
-        let packets = load_packets(&text, &shown)
-            .map_err(|error| if error.starts_with(&shown) { error } else { format!("{shown}: {error}") })?;
-        let limit = if is_text(entry.codec.as_deref()) { 0 } else { clear_max_bytes };
-        let starts = events(&packets, limit).map_err(|error| format!("{shown}: {error}"))?;
-        by_stream.insert(stream, starts);
-    }
-    Ok(by_stream)
+    let packets: BTreeMap<i64, PacketsFile> = index
+        .iter()
+        .filter(|entry| streams.contains_key(&entry.n))
+        .map(|entry| (entry.n, read_packets_file(tree, subs_dir, entry.n)))
+        .collect();
+    subtitle_events_of(&index, &packets, report, clear_max_bytes)
 }
 
 /// A map keyed by subs/index.json's `n` (such as `text::decide`'s decisions) re-keyed by scan stream through `streams`
@@ -1985,6 +2027,81 @@ mod tests {
         assert_eq!(
             subtitle_events(&tree, &PathKey::new("subs"), &dvd_report(), 64),
             Ok(BTreeMap::from([(3, vec![21.0, 23.0]), (5, vec![10.0])]))
+        );
+    }
+
+    /// The packets files of `ns` under subs/ in `tree`, read as `subtitle_events` reads them.
+    fn read_all(tree: &MemTree, ns: &[i64]) -> BTreeMap<i64, PacketsFile> {
+        ns.iter().map(|&n| (n, read_packets_file(tree, &PathKey::new("subs"), n))).collect()
+    }
+
+    /// subs/index.json's entries.
+    fn index_of(text: &str) -> Vec<SubsIndexEntry> {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn events_of_read_packets_equal_the_tree_form() {
+        let tree = subs_tree(&[("subs/index.json", INDEX), ("subs/sub-0.packets.json", TEXT_PACKETS), ("subs/sub-1.packets.json", IMAGE_PACKETS)]);
+        let packets = read_all(&tree, &[0, 1]);
+        assert_eq!(packets[&0].shown, "rec/subs/sub-0.packets.json");
+        for limit in [64, 0] {
+            assert_eq!(
+                subtitle_events_of(&index_of(INDEX), &packets, &dvd_report(), limit),
+                subtitle_events(&tree, &PathKey::new("subs"), &dvd_report(), limit)
+            );
+        }
+        assert_eq!(
+            subtitle_events_of(&index_of(INDEX), &packets, &dvd_report(), 64),
+            Ok(BTreeMap::from([(3, vec![21.0, 23.0]), (5, vec![10.0, 12.5, 15.25])]))
+        );
+    }
+
+    #[test]
+    fn a_broken_unmapped_packets_file_is_silent() {
+        // n 1 names track 9, which no pair holds.
+        let unmapped = r#"[{"n": 0, "track_id": 2, "codec": "SubRip/SRT"}, {"n": 1, "track_id": 9, "codec": "VobSub"}]"#;
+        let tree = subs_tree(&[("subs/index.json", unmapped), ("subs/sub-0.packets.json", TEXT_PACKETS), ("subs/sub-1.packets.json", "[]")]);
+        let packets = read_all(&tree, &[0, 1]);
+        assert_eq!(
+            packets[&1].packets.as_ref().err().map(String::as_str),
+            Some("rec/subs/sub-1.packets.json: 'list' object has no attribute 'get'")
+        );
+        assert_eq!(
+            subtitle_events_of(&index_of(unmapped), &packets, &dvd_report(), 64),
+            Ok(BTreeMap::from([(5, vec![10.0, 12.5, 15.25])]))
+        );
+    }
+
+    #[test]
+    fn a_broken_mapped_packets_file_names_its_path() {
+        let missing = subs_tree(&[("subs/index.json", INDEX), ("subs/sub-1.packets.json", IMAGE_PACKETS)]);
+        assert_eq!(
+            subtitle_events_of(&index_of(INDEX), &read_all(&missing, &[0, 1]), &dvd_report(), 64),
+            Err("[Errno 2] No such file or directory: 'rec/subs/sub-0.packets.json'".to_string())
+        );
+        for (text, error) in [
+            ("[]", "rec/subs/sub-0.packets.json: 'list' object has no attribute 'get'"),
+            (
+                r#"{"packets": [{"pts_time": "1.0", "size": "big"}]}"#,
+                "rec/subs/sub-0.packets.json: invalid literal for int() with base 10: 'big'",
+            ),
+        ] {
+            let tree = subs_tree(&[("subs/index.json", INDEX), ("subs/sub-0.packets.json", text), ("subs/sub-1.packets.json", IMAGE_PACKETS)]);
+            assert_eq!(
+                subtitle_events_of(&index_of(INDEX), &read_all(&tree, &[0, 1]), &dvd_report(), 64),
+                Err(error.to_string()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mapped_entry_whose_file_was_not_read_is_refused_naming_it() {
+        let tree = subs_tree(&[("subs/index.json", INDEX), ("subs/sub-0.packets.json", TEXT_PACKETS), ("subs/sub-1.packets.json", IMAGE_PACKETS)]);
+        assert_eq!(
+            subtitle_events_of(&index_of(INDEX), &read_all(&tree, &[0]), &dvd_report(), 64),
+            Err("sub-1.packets.json: not read".to_string())
         );
     }
 
