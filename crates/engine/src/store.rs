@@ -165,7 +165,6 @@ impl Store {
     /// `<data>/remembered/<fingerprint>.json` through `check_format(REMEMBERED_FORMAT)` (design part 7.4), with the
     /// file's bytes for remembered.json. An Err is "<path>: <reason>". Absent gives Ok(None).
     /// Def: T21. Use: T22, T23, T25, T26.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 23's Plan step reads the remembered decision"))]
     pub(crate) fn remembered(&self, fingerprint: &str) -> Result<Option<(Remembered, Vec<u8>)>, String> {
         let path = self.data.join(REMEMBERED_DIR).join(format!("{fingerprint}.json"));
         read_checked(&path, REMEMBERED_FORMAT)

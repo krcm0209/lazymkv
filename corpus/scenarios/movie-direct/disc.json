@@ -1,0 +1,6 @@
+{"label":"SYNTHETIC_MOVIE","files":[
+ {"path":"BDMV/index.bdmv","text":"INDX0200"},
+ {"path":"BDMV/PLAYLIST/00800.mpls","text":"MPLS0200"},
+ {"path":"BDMV/META/DL/bdmt_eng.xml","text":"<?xml version=\"1.0\" encoding=\"utf-8\"?><disclib><di:discinfo><di:title><di:name>Synthetic Movie</di:name></di:title></di:discinfo></disclib>"},
+ {"path":"AACS/Unit_Key_RO.inf","hex":"00112233445566778899aabbccddeeff"},
+ {"path":"BDMV/STREAM/00001.m2ts","size":4096}]}

@@ -30,6 +30,8 @@ use lazymkv_tools::CancelToken;
 
 use crate::arrival::{spawn_arrival, spawn_recording, Arrival};
 use crate::notify::{self, spawn_notifier, NotifySink};
+use crate::space::{Promises, PromisedStep};
+use crate::steps::RealSteps;
 use crate::store::Store;
 use crate::timers::Timers;
 use crate::EngineConfig;
@@ -140,21 +142,26 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
 }
 
 /// `start` with the testkit's stop hook. It writes the engine.log line `engine started (lazymkv <version>)` before it
-/// returns (design part 3.5). With `services.steps` None it refuses with `ErrorKind::Unsupported` until Task 23 builds
-/// the real runner. Def: T22. Use: T22.
+/// returns (design part 3.5). With `services.steps` None it runs the real runner, `RealSteps` (Task 23), over the
+/// owner's Outbox, the space promises and the last scan's Java use, which the owner keeps for Task 26's self-test.
+/// Def: T22. Use: T22.
 pub(crate) fn start_until(
     config: EngineConfig,
     services: Services,
     stop_after: Option<StopAfter>,
 ) -> io::Result<EngineHandle> {
-    let Services { platform, http: _, notify, timers, steps } = services;
-    let steps = steps.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Unsupported, "lazymkv-engine: the real step runner is not built yet")
-    })?;
-    let Platform { drives, ejector, awake, host, .. } = platform;
-    let clock = Arc::clone(&host);
+    let Services { platform, http, notify, timers, steps } = services;
+    let clock = Arc::clone(&platform.host);
     let store = Arc::new(Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), None));
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
+    let outbox = Outbox::default();
+    let promises = Arc::new(Mutex::new(Promises::default()));
+    let java_in_use = Arc::new(Mutex::new(None));
+    let steps = steps.unwrap_or_else(|| {
+        let (store, outbox, promises) = (Arc::clone(&store), outbox.clone(), Arc::clone(&promises));
+        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, Arc::clone(&java_in_use)))
+    });
+    let Platform { drives, ejector, awake, host, .. } = platform;
     let (delivered, notifier_done) = channel::<()>();
     let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }));
     let (sender, inbox) = channel::<Msg>();
@@ -162,7 +169,7 @@ pub(crate) fn start_until(
     let drive_stop = Arc::new(AtomicBool::new(false));
     let owner = Owner::load(
         Arc::clone(&store),
-        Parts { host, ejector, awake, timers, steps },
+        Parts { host, ejector, awake, timers, steps, outbox, promises, java_in_use },
         sender.clone(),
         notifications,
         stop_after,
@@ -251,13 +258,11 @@ pub(crate) struct Posted {
 
 impl Outbox {
     /// Posts an edit of `job`'s record (design part 5.2). Def: T22. Use: T23, T24.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 23's real steps post their record edits here"))]
     pub(crate) fn edit(&self, job: &str, edit: impl FnOnce(&mut JobRecord) + Send + 'static) {
         lock(&self.0).entry(job.to_string()).or_default().edits.push(Box::new(edit));
     }
 
     /// Posts an event fed before the step's result (design part 5.2). Def: T22. Use: T23, T24.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 23's real steps post ToolMissing { Java } here"))]
     pub(crate) fn feed_first(&self, job: &str, event: Event) {
         lock(&self.0).entry(job.to_string()).or_default().first.push(event);
     }
@@ -442,13 +447,20 @@ impl NotifySink for Delivered {
     }
 }
 
-/// The platform parts and services the owner thread uses.
+/// The platform parts and services the owner thread uses, and what it shares with the step runner.
 struct Parts {
     host: Arc<dyn Host>,
     ejector: Arc<dyn Ejector>,
     awake: Arc<dyn KeepAwake>,
     timers: Arc<dyn Timers>,
     steps: Arc<dyn StepRunner>,
+    /// The steps' posts, taken with each result (design part 5.2).
+    outbox: Outbox,
+    /// The space promised to unfinished steps (design part 5.8), released here as steps finish.
+    promises: Arc<Mutex<Promises>>,
+    /// The last scan's MSG:3344 verdict (design part 5.4 step 4), which `RealSteps` writes.
+    #[expect(dead_code, reason = "Task 26's self-test reads Java use from the last scan (design part 9.4)")]
+    java_in_use: Arc<Mutex<Option<bool>>>,
 }
 
 /// One job as the owner holds it.
@@ -500,7 +512,6 @@ struct Owner {
     /// False when drives.json was refused: the records are then kept in memory only (design part 7.4).
     drives_writable: bool,
     token: DiscToken,
-    outbox: Outbox,
     workers: Vec<Worker>,
     /// Ejects of already-ripped discs not yet returned.
     ejects: usize,
@@ -554,7 +565,6 @@ impl Owner {
             drive_records,
             drives_writable,
             token: DiscToken::default(),
-            outbox: Outbox::default(),
             workers: Vec::new(),
             ejects: 0,
             threads: Vec::new(),
@@ -601,7 +611,7 @@ impl Owner {
                 Ok(Msg::StepDone { job, generation, result }) => {
                     self.log_panic(&job, &result);
                     self.finish_worker(&job, generation);
-                    drop(self.outbox.take(&job));
+                    drop(self.parts.outbox.take(&job));
                 }
                 Ok(Msg::Ejected { .. }) => self.ejects = self.ejects.saturating_sub(1),
                 Ok(_) => {}
@@ -882,6 +892,7 @@ impl Owner {
         if let Some(job) = self.jobs.get_mut(id) {
             job.record = record;
         }
+        self.release_promises(id, &transition);
         if self.stop_after.as_ref().is_some_and(|stop| stop(&transition)) {
             self.stopping = true;
             self.drive_stop.store(true, Ordering::SeqCst);
@@ -893,6 +904,19 @@ impl Owner {
         }
         let next = self.token.after(id, &transition.new, &transition.actions);
         self.route_queue(next);
+    }
+
+    /// Design part 5.8's promises released as steps finish: leaving Ripping releases the job's Rip promise, and a new
+    /// Failed or waiting state releases both of its promises.
+    fn release_promises(&self, id: &str, transition: &Transition) {
+        let mut promises = lock(&self.parts.promises);
+        if transition.old == Some(State::Ripping) && transition.new != State::Ripping {
+            promises.release(id, PromisedStep::Rip);
+        }
+        if transition.new.is_waiting() || matches!(transition.new, State::Failed { .. }) {
+            promises.release(id, PromisedStep::Rip);
+            promises.release(id, PromisedStep::Remux);
+        }
     }
 
     /// Releases the token `id` holds although it cannot go on (its folder or a transition could not be written), so
@@ -1070,11 +1094,11 @@ impl Owner {
         let worker = self.finish_worker(id, generation);
         if self.jobs.get(id).map(|job| job.generation) != Some(generation) {
             if !self.workers.iter().any(|worker| worker.job == id) {
-                drop(self.outbox.take(id));
+                drop(self.parts.outbox.take(id));
             }
             return;
         }
-        let posted = self.outbox.take(id);
+        let posted = self.parts.outbox.take(id);
         if let Some(job) = self.jobs.get_mut(id) {
             for edit in posted.edits {
                 edit(&mut job.record);

@@ -1,0 +1,6 @@
+{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:0"],"stdout":"scan.txt","timing":"scan.txt.timing.jsonl"},
+ {"args_contain":["info","disc:0"],"stdout":"scan-drift.txt"},
+ {"args_contain":["mkv","disc:0","t00-00800"],"stdout":"rip-drift.txt"},
+ {"args_contain":["mkv","disc:0","t00-00800"],"stdout":"rip-index1.txt","creates":[{"dir_arg_from_end":1,"name":"title_t00.mkv","copy_from":"placeholder.mkv"}]}]}

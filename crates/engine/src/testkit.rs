@@ -7,26 +7,36 @@
 //! (PF-2): the stand-in tools match their needles by substring, so a root holding `mkv` would make the rip needle match
 //! every scan's `--profile=<root>/.../job.mmcp.xml` argument, and a second scan in one tools folder would replay the
 //! rip's response.
+//!
+//! `Harness::new` runs the real step runner on stand-in tools (Task 23): it copies a scenario of `corpus/scenarios`
+//! and the stand-in into `<root>/tools`, never running a stand-in inside `corpus/` (S12), builds the scenario's disc
+//! from its `disc.json`, and replays its `http.json`.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::RecordedTransport;
+use lazymkv_clients::{search_url, RecordedTransport};
+use lazymkv_core::disc::bdmt_name;
 use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
-use lazymkv_core::job::Action;
+use lazymkv_core::job::{Action, Tool};
+use lazymkv_core::lookup::name::disc_name;
 use lazymkv_core::record::{JobRecord, Transition};
+use lazymkv_core::snapshot::{disc_meta, unit_key_file};
+use lazymkv_core::testsupport::{default_profile_xml, ustar_build};
 use lazymkv_platform::fakes::{
     CountingKeepAwake, DriveScript, FakeHost, FakeShares, MemoryConnector, MemoryIpc, MemorySecrets, RecordingEjector,
     ScriptedDrives,
 };
-use lazymkv_platform::{DriveEvent, DriveWatcher, Platform, ProcessGuard, StdProcessGuard};
-use lazymkv_tools::{list_files, CancelToken, Limits};
+use lazymkv_platform::{DriveEvent, DriveWatcher, GuardedChild, Platform, ProcessGuard, Spawn, StdProcessGuard};
+use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
 
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, NO_EVENT_ACTIONS};
@@ -44,6 +54,8 @@ const RUN_UNTIL_CAP: Duration = Duration::from_secs(60);
 const QUIET: Duration = Duration::from_millis(300);
 /// `settle`'s cap.
 const SETTLE_CAP: Duration = Duration::from_secs(10);
+/// How long a scan waits for the recorded lookups' files (R23.2).
+const LOOKUP_WAIT_CAP: Duration = Duration::from_secs(5);
 
 /// Locks `mutex`, ignoring a poison a panicked thread left, so one failed assertion does not cascade.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -220,7 +232,8 @@ enum Queued {
 }
 
 /// A real engine over a scratch folder `<root>/{data, staging, library/Movies, tuning, volumes}`, with the platform
-/// fakes, scripted steps, a memory sink and manual timers (design part 12.1, the interface sheet's helper list). Every
+/// fakes, scripted steps (or, from `new`, the real step runner on stand-in tools in `<root>/tools`), a memory sink and
+/// manual timers (design parts 12.1, 12.2, the interface sheet's helper list). Every
 /// method takes `&self`. `insert`, `insert_root` and `remove` only queue their drive event; every other method first
 /// hands the queued events to the `DriveScript`, in order (R22.1), except `restart`, which hands them over once the
 /// old engine has stopped, so the new engine reads them (R22.9). The data-folder readers work while the engine is
@@ -231,6 +244,14 @@ pub struct Harness {
     staging: PathBuf,
     library: PathBuf,
     volumes: PathBuf,
+    /// `<root>/tools`: the merged scenario folder, holding the tool copies (`Harness::new`).
+    tools: PathBuf,
+    /// The first scenario's name and its `disc.json`, which `insert` of that name builds (`Harness::new`).
+    disc: Option<(String, Value)>,
+    /// Whether a scan waits for the recorded lookups' files (R23.2), shared with the `TestGuard`.
+    lookups_wait: Arc<AtomicBool>,
+    /// True for `new_scripted`: the engine runs `steps`; false for `new`: the real runner.
+    scripted: bool,
     script: DriveScript,
     drives: Arc<Mutex<ScriptedDrives>>,
     queued: Mutex<Vec<Queued>>,
@@ -260,54 +281,68 @@ impl Harness {
     /// ejector pushes the removal its eject causes (R22.6), and the secrets hold `tmdb_token`. The engine starts at
     /// once. Def: T22. Use: T22 to T29.
     pub fn new_scripted(script: Vec<(&'static str, StepScript)>, settings: Value) -> Harness {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!("engine-harness-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let (data, staging, library, tuning, volumes) = (
-            root.join("data"),
-            root.join("staging"),
-            root.join("library").join("Movies"),
-            root.join("tuning"),
-            root.join("volumes"),
-        );
-        for dir in [&data, &staging, &library, &tuning, &volumes] {
-            fs::create_dir_all(dir).expect("the harness makes its scratch folders");
+        let folders = Folders::make();
+        let defaults = folders.defaults();
+        let runner = Runner::scripted(ScriptedSteps::new(script), folders.root.join("tools"));
+        let harness = folders.harness(defaults, settings, runner);
+        harness.start();
+        harness
+    }
+
+    /// A harness whose engine runs the real step runner on stand-in tools (design part 12.2, Task 23).
+    /// - It copies `corpus/scenarios/<first>` into `<root>/tools`, then each later folder over it, and copies
+    ///   `fake_tool` there as `exe_name(tool)` for every Tool, with an `appdata.tar` holding
+    ///   `default_profile_xml()` as `data/default.mmcp.xml`. `tool_paths` names the copies; each key of
+    ///   `settings.tool_paths` replaces one (R22.5).
+    /// - `insert` of the first scenario's name builds `<root>/volumes/<name>/` from its `disc.json` (`text`,
+    ///   hex-decoded `hex`, or `size` zero bytes) and labels it with the file's `label`; any other name gets
+    ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
+    /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
+    ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
+    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files.
+    ///
+    /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
+    pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
+        let folders = Folders::make();
+        let tools = folders.root.join("tools");
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("corpus").join("scenarios");
+        for name in scenarios {
+            copy_folder(&corpus.join(name), &tools)
+                .unwrap_or_else(|error| panic!("the harness copies the scenario {name}: {error}"));
         }
-        let text = |path: &Path| Value::String(path.display().to_string());
-        let mut merged = json!({
-            "staging_root": text(&staging), "movies_root": text(&library), "tuning_root": text(&tuning),
-            "keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1,
+        let mut tool_paths = serde_json::Map::new();
+        for tool in Tool::ALL {
+            let copy = tools.join(exe_name(tool));
+            fs::copy(fake_tool, &copy).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+            tool_paths.insert(tool.as_str().to_string(), Value::String(copy.display().to_string()));
+        }
+        let appdata = ustar_build(&[("data/default.mmcp.xml", default_profile_xml().as_bytes())]);
+        fs::write(tools.join("appdata.tar"), appdata).expect("the harness writes appdata.tar");
+        let disc = scenarios.first().and_then(|first| {
+            let text = fs::read(tools.join("disc.json")).ok()?;
+            let spec: Value = serde_json::from_slice(&text).expect("the scenario's disc.json is JSON");
+            Some((first.to_string(), spec))
         });
-        merge_settings(&mut merged, settings);
-        let written = serde_json::to_vec_pretty(&merged).expect("the harness settings serialise");
-        fs::write(data.join("settings.json"), written).expect("the harness writes data/settings.json");
-        let (drives, script_end) = ScriptedDrives::new();
-        let (ipc, connector) = MemoryIpc::new();
-        let harness = Harness {
-            root,
-            data,
-            staging,
-            library,
-            volumes,
-            ejector: Arc::new(RecordingEjector::new().with_removals(script_end.clone())),
-            script: script_end,
-            drives: Arc::new(Mutex::new(drives)),
-            queued: Mutex::default(),
-            processes: Arc::new(StdProcessGuard),
-            awake: Arc::new(CountingKeepAwake::new()),
-            shares: Arc::new(FakeShares::new()),
-            secrets: Arc::new(MemorySecrets::new().with("tmdb_token", "test-token")),
-            ipc: Arc::new(ipc),
-            _connector: connector,
-            host: Arc::new(FakeHost::new("2026-10-23", 1_792_800_000)),
-            http: Arc::new(RecordedTransport::new()),
-            timers: Arc::new(ManualTimers::new()),
-            steps: Arc::new(ScriptedSteps::new(script)),
-            sent: Arc::default(),
-            hook: Arc::default(),
-            engine: Mutex::default(),
+        let http_file = tools.join("http.json");
+        let (http, urls) = match (&disc, http_file.is_file()) {
+            (Some((name, spec)), true) => recorded_http(&http_file, &folders.volumes.join(name), spec),
+            (None, true) => (RecordedTransport::from_file(&http_file, &[]).expect("the scenario's http.json"), 0),
+            (_, false) => (RecordedTransport::new(), 0),
         };
+        let mut defaults = folders.defaults();
+        defaults["tool_paths"] = Value::Object(tool_paths);
+        let lookups_wait = Arc::new(AtomicBool::new(true));
+        let guard = TestGuard { wait: Arc::clone(&lookups_wait), urls };
+        let runner = Runner {
+            steps: ScriptedSteps::new(Vec::new()),
+            scripted: false,
+            processes: Arc::new(guard),
+            http,
+            tools,
+            disc,
+            lookups_wait,
+        };
+        let harness = folders.harness(defaults, settings, runner);
         harness.start();
         harness
     }
@@ -329,7 +364,7 @@ impl Harness {
             http: Arc::clone(&self.http) as _,
             notify: Box::new(MemorySink { list: Arc::clone(&self.sent) }),
             timers: Arc::clone(&self.timers) as _,
-            steps: Some(Arc::clone(&self.steps) as _),
+            steps: self.scripted.then(|| Arc::clone(&self.steps) as _),
         };
         let config = EngineConfig {
             data: self.data.clone(),
@@ -376,11 +411,17 @@ impl Harness {
         }
     }
 
-    /// `<root>/volumes/<disc>`, built on first use: `BDMV/index.bdmv` "INDX0200", `BDMV/PLAYLIST/00800.mpls`
-    /// "MPLS0200", `BDMV/STREAM/00001.m2ts` of 1000 plus the sum of the name's bytes zero bytes and
-    /// `AACS/Unit_Key_RO.inf` the name's bytes, labelled with the name in upper case.
+    /// `<root>/volumes/<disc>`, built on first use. The first scenario's name is built from its `disc.json` and
+    /// labelled with its `label` (`Harness::new`). Any other name gets `BDMV/index.bdmv` "INDX0200",
+    /// `BDMV/PLAYLIST/00800.mpls` "MPLS0200", `BDMV/STREAM/00001.m2ts` of 1000 plus the sum of the name's bytes zero
+    /// bytes and `AACS/Unit_Key_RO.inf` the name's bytes, labelled with the name in upper case.
     fn volume(&self, disc: &str) -> PathBuf {
         let root = self.volumes.join(disc);
+        if let Some((_, spec)) = self.disc.as_ref().filter(|(name, _)| name == disc) {
+            build_volume(&root, spec).unwrap_or_else(|error| panic!("{}: {error}", root.display()));
+            self.host.set_label(&root, &label_of(spec));
+            return root;
+        }
         if !root.join("BDMV").is_dir() {
             let stream = vec![0u8; 1000 + disc.bytes().map(usize::from).sum::<usize>()];
             let files: [(&str, &[u8]); 4] = [
@@ -669,6 +710,19 @@ impl Harness {
         self.deliver();
         self.timers.fire_all();
     }
+
+    /// The merged scenario folder, `<root>/tools`, holding the tool copies (design part 12.2). Def: T23. Use: T23 to
+    /// T29.
+    pub fn tools(&self) -> &Path {
+        self.deliver();
+        &self.tools
+    }
+
+    /// Whether a scan waits for the recorded lookups' files, true by default (R23.2). Def: T23. Use: T23 to T29.
+    pub fn scan_waits_for_lookups(&self, wait: bool) {
+        self.deliver();
+        self.lookups_wait.store(wait, Ordering::SeqCst);
+    }
 }
 
 impl Drop for Harness {
@@ -679,6 +733,226 @@ impl Drop for Harness {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// The harness's scratch folders, `<temp>/engine-harness-<pid>-<n>/{data, staging, library/Movies, tuning, volumes}`,
+/// made empty (PF-2 names the root).
+struct Folders {
+    root: PathBuf,
+    data: PathBuf,
+    staging: PathBuf,
+    library: PathBuf,
+    tuning: PathBuf,
+    volumes: PathBuf,
+}
+
+impl Folders {
+    fn make() -> Folders {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("engine-harness-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let folders = Folders {
+            data: root.join("data"),
+            staging: root.join("staging"),
+            library: root.join("library").join("Movies"),
+            tuning: root.join("tuning"),
+            volumes: root.join("volumes"),
+            root,
+        };
+        for dir in [&folders.data, &folders.staging, &folders.library, &folders.tuning, &folders.volumes] {
+            fs::create_dir_all(dir).expect("the harness makes its scratch folders");
+        }
+        folders
+    }
+
+    /// The harness's settings defaults (R22.5): the scratch folders as `staging_root`, `movies_root` and
+    /// `tuning_root`, `keep_tuning_evidence` false, `drive_settle_s` 0 and `drive_ready_timeout_s` 1.
+    fn defaults(&self) -> Value {
+        let text = |path: &Path| Value::String(path.display().to_string());
+        json!({
+            "staging_root": text(&self.staging), "movies_root": text(&self.library), "tuning_root": text(&self.tuning),
+            "keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1,
+        })
+    }
+
+    /// The harness over these folders, its `data/settings.json` holding `defaults` with `settings` merged in (R22.5).
+    fn harness(self, defaults: Value, settings: Value, runner: Runner) -> Harness {
+        let mut merged = defaults;
+        merge_settings(&mut merged, settings);
+        let written = serde_json::to_vec_pretty(&merged).expect("the harness settings serialise");
+        fs::write(self.data.join("settings.json"), written).expect("the harness writes data/settings.json");
+        let (drives, script_end) = ScriptedDrives::new();
+        let (ipc, connector) = MemoryIpc::new();
+        Harness {
+            root: self.root,
+            data: self.data,
+            staging: self.staging,
+            library: self.library,
+            volumes: self.volumes,
+            tools: runner.tools,
+            disc: runner.disc,
+            lookups_wait: runner.lookups_wait,
+            scripted: runner.scripted,
+            ejector: Arc::new(RecordingEjector::new().with_removals(script_end.clone())),
+            script: script_end,
+            drives: Arc::new(Mutex::new(drives)),
+            queued: Mutex::default(),
+            processes: runner.processes,
+            awake: Arc::new(CountingKeepAwake::new()),
+            shares: Arc::new(FakeShares::new()),
+            secrets: Arc::new(MemorySecrets::new().with("tmdb_token", "test-token")),
+            ipc: Arc::new(ipc),
+            _connector: connector,
+            host: Arc::new(FakeHost::new("2026-10-23", 1_792_800_000)),
+            http: Arc::new(runner.http),
+            timers: Arc::new(ManualTimers::new()),
+            steps: Arc::new(runner.steps),
+            sent: Arc::default(),
+            hook: Arc::default(),
+            engine: Mutex::default(),
+        }
+    }
+}
+
+/// What `new_scripted` and `new` set differently.
+struct Runner {
+    steps: ScriptedSteps,
+    scripted: bool,
+    processes: Arc<dyn ProcessGuard>,
+    http: RecordedTransport,
+    tools: PathBuf,
+    disc: Option<(String, Value)>,
+    lookups_wait: Arc<AtomicBool>,
+}
+
+impl Runner {
+    /// `new_scripted`'s: the script, the std process guard, a transport with no answers and no scenario.
+    fn scripted(steps: ScriptedSteps, tools: PathBuf) -> Runner {
+        Runner {
+            steps,
+            scripted: true,
+            processes: Arc::new(StdProcessGuard),
+            http: RecordedTransport::new(),
+            tools,
+            disc: None,
+            lookups_wait: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+/// Ruling R23.2: stand-in runs are faster than the recorded lookups' file writes. Before it spawns a scan (arguments
+/// holding `info` and a `--profile=` argument), this guard waits, at most 5 s, until `<the profile's
+/// folder>/lookup-status.txt` has one line per distinct URL of the merged `http.json` and no line ends in `000`. The
+/// engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
+/// each outcome to the book before it saves the status file. Every spawn then goes to `StdProcessGuard`.
+struct TestGuard {
+    /// `scan_waits_for_lookups`.
+    wait: Arc<AtomicBool>,
+    /// The distinct URLs of the merged `http.json`; 0 waits for nothing.
+    urls: usize,
+}
+
+impl ProcessGuard for TestGuard {
+    fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
+        let scan = spawn.args.iter().any(|arg| arg == "info");
+        let profile = spawn.args.iter().find_map(|arg| arg.strip_prefix("--profile="));
+        if let (true, Some(profile)) = (scan && self.urls > 0 && self.wait.load(Ordering::SeqCst), profile) {
+            let status = Path::new(profile).parent().map(|folder| folder.join("lookup-status.txt"));
+            let deadline = Instant::now() + LOOKUP_WAIT_CAP;
+            while !status.as_deref().is_some_and(|status| answered(status, self.urls)) && Instant::now() < deadline {
+                thread::sleep(POLL);
+            }
+        }
+        StdProcessGuard.spawn(spawn)
+    }
+}
+
+/// Whether `status` has `urls` lines and none ends in `000` (R23.2).
+fn answered(status: &Path, urls: usize) -> bool {
+    fs::read_to_string(status).is_ok_and(|text| {
+        let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+        lines.len() == urls && !lines.iter().any(|line| line.trim_end().ends_with("000"))
+    })
+}
+
+/// Copies every file under `from` into `to`, keeping relative paths and replacing files already there.
+fn copy_folder(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_folder(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// A scenario `disc.json`'s `label`, "" when absent.
+fn label_of(spec: &Value) -> String {
+    spec["label"].as_str().unwrap_or_default().to_string()
+}
+
+/// `text` as bytes, two hex digits each.
+fn decode_hex(text: &str) -> io::Result<Vec<u8>> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, format!("{text:?} is not hex"));
+    if !text.is_ascii() || text.len() % 2 != 0 {
+        return Err(invalid());
+    }
+    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(&text[at..at + 2], 16).map_err(|_| invalid())).collect()
+}
+
+/// Builds the volume at `root` from a scenario's `disc.json` (`files`, each a `path` and one of `text`, `hex` or
+/// `size` zero bytes), unless `root` is already there.
+fn build_volume(root: &Path, spec: &Value) -> io::Result<()> {
+    if root.is_dir() {
+        return Ok(());
+    }
+    for file in spec["files"].as_array().into_iter().flatten() {
+        let relative = file["path"].as_str().ok_or_else(|| io::Error::other("a disc.json file has no path"))?;
+        let bytes = match (file["text"].as_str(), file["hex"].as_str()) {
+            (Some(text), _) => text.as_bytes().to_vec(),
+            (None, Some(hex)) => decode_hex(hex)?,
+            (None, None) => vec![0u8; usize::try_from(file["size"].as_u64().unwrap_or(0)).unwrap_or(0)],
+        };
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap_or(root))?;
+        fs::write(&path, bytes)?;
+    }
+    Ok(())
+}
+
+/// The merged `http.json` with the vars of the scenario's disc, built at `root` (S31): `fingerprint` and `disc_id` in
+/// upper-case hex, and `search`, `search_url` of the cleaned disc name from `bdmt_eng.xml` and the label; with the
+/// number of distinct URLs in the file.
+fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, usize) {
+    build_volume(root, spec).unwrap_or_else(|error| panic!("{}: {error}", root.display()));
+    let files = list_files(root).expect("the harness lists the scenario's volume");
+    let unit_key = unit_key_file(&files).and_then(|key| fs::read(root.join(&key.path)).ok());
+    let label = label_of(spec);
+    let meta = disc_meta(&files, &label, unit_key.as_deref(), 0);
+    let bdmt = spec["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|file| file["path"].as_str().is_some_and(|path| path.ends_with("bdmt_eng.xml")))
+        .and_then(|file| file["text"].as_str())
+        .and_then(bdmt_name);
+    let name = disc_name(bdmt.as_deref(), Some(&label)).expect("the scenario's disc has a name");
+    let search = search_url(&name.cleaned);
+    let fingerprint = meta.fingerprint.unwrap_or_default();
+    let disc_id = meta.disc_id.unwrap_or_default();
+    let vars = [("fingerprint", fingerprint.as_str()), ("disc_id", disc_id.as_str()), ("search", search.as_str())];
+    let transport =
+        RecordedTransport::from_file(file, &vars).unwrap_or_else(|error| panic!("the scenario's http.json: {error}"));
+    let text = fs::read_to_string(file).expect("the scenario's http.json");
+    let document: Value = serde_json::from_str(&text).expect("the scenario's http.json is JSON");
+    let urls: BTreeSet<&str> =
+        document["answers"].as_array().into_iter().flatten().filter_map(|answer| answer["url"].as_str()).collect();
+    (transport, urls.len())
 }
 
 /// Puts each key of `given` into `defaults`, and each key inside `tool_paths` into the default `tool_paths` (R22.5:

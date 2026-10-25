@@ -3,6 +3,8 @@
 mod arrival;
 mod notify;
 mod owner;
+mod space;
+mod steps;
 mod store;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;

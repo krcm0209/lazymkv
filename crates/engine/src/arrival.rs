@@ -130,7 +130,6 @@ pub(crate) fn spawn_recording(
 /// `<di:name>` of the first of `bdmt_candidates` under `nav/BDMV/META/DL/` (design part 5.4 step 1, spec 8.1). The name
 /// is `disc_name(bdmt, Some(volume_label))`. An unreadable meta.json, or one without a `fingerprint`, is an Err naming
 /// meta.json. Def: T22. Use: T23, T24, T25.
-#[cfg_attr(not(test), expect(dead_code, reason = "Task 23's RunScan and Plan read the chain's inputs"))]
 pub(crate) fn chain_inputs(job_dir: &Path) -> Result<ChainInputs, String> {
     let path = job_dir.join("meta.json");
     let shown = path.display();

@@ -327,8 +327,9 @@ fn replace_bytes(data: &[u8], key: &[u8], with: &[u8]) -> Vec<u8> {
 /// The class every failure of the drivers has unless the summary says otherwise.
 const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
 
-/// The message of a scan killed past `limits.scan`, which the engine retries once (RP-5).
-const SCAN_PAST_LIMIT: &str = "the scan did not finish within scan_timeout_min and was killed";
+/// The message of a scan killed past `limits.scan`, which the engine retries once after a fresh drive listing (RP-5,
+/// design part 5.3). Def: T13. Use: T13, T23.
+pub const SCAN_PAST_LIMIT: &str = "the scan did not finish within scan_timeout_min and was killed";
 
 /// The message of a run killed by the exit wait (S57).
 const EXIT_WAIT_PASSED: &str = "makemkvcon did not exit within exit_wait_min of its final message and was killed";

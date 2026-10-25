@@ -1,0 +1,7 @@
+MSG:1005,0,1,"MakeMKV v2.0.0 win(x64-release) started","%1 started","MakeMKV v2.0.0 win(x64-release)"
+MSG:3307,16777216,2,"File 00800.mpls was added as title #0","File %1 was added as title #%2","00800.mpls","0"
+MSG:5015,0,0,"Saving 1 titles into directory","Saving %1 titles into directory %2","1","file://title"
+PRGV:0,32768,65536
+PRGV:0,65536,65536
+MSG:5005,0,1,"1 titles saved","%1 titles saved","1"
+MSG:5036,260,1,"Copy complete. 1 titles saved.","Copy complete. %1 titles saved.","1"
