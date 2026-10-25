@@ -723,6 +723,77 @@ fn an_entry_without_a_tmdb_id_and_several_results_is_ambiguous() {
 }
 
 #[test]
+fn record_to_fetch_prefers_the_entry_kind_and_year() {
+    let fingerprint = without_tmdb_id("Example Film", 1986);
+    let results = search(&[
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("movie", 1002, "Example Film", "Example Film", "2021-03-01"),
+        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
+    ]);
+    let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&results), ..LookupInputs::default() };
+    assert_eq!(record_to_fetch(&inputs), Some(movie(1001)));
+    assert_eq!(record_to_fetch(&inputs), identify(&inputs, Kind::Tv, &RuntimeFacts::default(), &Settings::default()).tmdb);
+    // Two results of TheDiscDB's kind and year stay ambiguous: no record is fetched.
+    let several = search(&[
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("movie", 1004, "Example Film", "Example Film", "1986-11-01"),
+    ]);
+    let inputs = LookupInputs { discdb_by_fingerprint: Some(&fingerprint), search: Some(&several), ..LookupInputs::default() };
+    assert_eq!(record_to_fetch(&inputs), None);
+}
+
+#[test]
+fn record_to_fetch_takes_thediscdbs_tmdb_id_before_any_search() {
+    let fingerprint = by_fingerprint(JOHN_WICK_UHD_BY_FINGERPRINT);
+    let name = label("JOHN_WICK");
+    // The one plausible search result is another ID: TheDiscDB's ID wins.
+    let results = search(&[("movie", 900001, "John Wick", "John Wick", "2099-01-01")]);
+    let inputs = LookupInputs {
+        name: Some(&name),
+        discdb_by_fingerprint: Some(&fingerprint),
+        search: Some(&results),
+        ..LookupInputs::default()
+    };
+    assert_eq!(record_to_fetch(&inputs), Some(movie(245891)));
+}
+
+#[test]
+fn record_to_fetch_names_the_reviewed_identity_then_the_remembered_one() {
+    let fingerprint = by_fingerprint(JOHN_WICK_UHD_BY_FINGERPRINT);
+    let both = LookupInputs {
+        discdb_by_fingerprint: Some(&fingerprint),
+        reviewed: Some(movie(7)),
+        remembered: Some(movie(8)),
+        ..LookupInputs::default()
+    };
+    assert_eq!(record_to_fetch(&both), Some(movie(7)));
+    assert_eq!(record_to_fetch(&LookupInputs { reviewed: None, ..both }), Some(movie(8)));
+}
+
+#[test]
+fn record_to_fetch_takes_the_one_plausible_result_of_the_name_search() {
+    let name = label("JOHN_WICK_UHD");
+    let results = search(&JOHN_WICK_RESULTS);
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), ..LookupInputs::default() };
+    assert_eq!(record_to_fetch(&inputs), Some(movie(245891)));
+    assert_eq!(record_to_fetch(&inputs), identify(&inputs, Kind::Movie, &RuntimeFacts::default(), &Settings::default()).tmdb);
+}
+
+#[test]
+fn record_to_fetch_fetches_nothing_for_several_plausible_results_a_generic_name_or_no_search() {
+    let name = label("EXAMPLE_FILM");
+    let both = search(&[
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
+    ]);
+    // identify shows the movie for a movie-shaped disc, but the step stays 5 (8.1 row 5): nothing to fetch.
+    assert_eq!(record_to_fetch(&LookupInputs { name: Some(&name), search: Some(&both), ..LookupInputs::default() }), None);
+    let generic = label("LOGICAL_VOLUME_ID");
+    assert_eq!(record_to_fetch(&LookupInputs { name: Some(&generic), search: Some(&both), ..LookupInputs::default() }), None);
+    assert_eq!(record_to_fetch(&LookupInputs { name: Some(&name), ..LookupInputs::default() }), None);
+}
+
+#[test]
 fn an_entry_that_states_no_kind_is_never_narrowed_by_the_structural_kind() {
     // TheDiscDB's media has a title and a year but no type: the structural kind may only pick the result shown
     // (settled items 5 and 6), so two same-year results of different kinds stay ambiguous.

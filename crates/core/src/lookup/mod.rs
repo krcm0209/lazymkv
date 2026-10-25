@@ -452,6 +452,35 @@ pub fn identify(
     }
 }
 
+/// The TMDb record spec 8.1's chain fetches next for the answers in `inputs` (design part 8.2 items 3 and 4), by the
+/// same rule `identify` applies, so the fetched record and the plan's identity never disagree: the owner's reviewed
+/// identity, else the remembered one; else the TheDiscDB match's TMDb ID (`discdb_match`); else, for a match without a
+/// TMDb ID but with a title, the one result `search_by_entry` keeps after preferring the entry's kind and year, read
+/// over `inputs.search`; else, for a non-generic disc name, the one result `plausible_by_name` leaves. None when
+/// several results stay plausible, when no search answer is in hand, or for a generic or absent name. Equals
+/// `identify(..).tmdb` except when the disc name's search leaves several plausible results. Def: T16. Use: T16.
+pub fn record_to_fetch(inputs: &LookupInputs<'_>) -> Option<tmdb::TmdbIdentity> {
+    // The same steps as `find_identity`; the evidence is thrown away, and no runtime check runs.
+    let mut evidence = Vec::new();
+    if let Some(identity) = inputs.reviewed.or(inputs.remembered) {
+        return Some(identity);
+    }
+    if let Some((step, record)) = discdb_match(inputs, &mut evidence) {
+        if let Some(identity) = record.tmdb_identity() {
+            return Some(identity);
+        }
+        if let Some((title, year)) = record.title_and_year() {
+            return search_by_entry(inputs, step, record, &title, year, &mut evidence).tmdb;
+        }
+    }
+    let disc_name = inputs.name.filter(|disc_name| !disc_name.generic)?;
+    let search = inputs.search?;
+    match plausible_by_name(search, disc_name, &mut evidence).as_slice() {
+        [(identity, _)] => Some(*identity),
+        _ => None,
+    }
+}
+
 /// The step `identify` reached and what it rests on: the TheDiscDB record whose media may name the work, and the one
 /// plausible search result.
 struct IdentityFound<'a> {
