@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use lazymkv_core::job::{Action, Event, FailureClass, Held, State};
 use lazymkv_core::record::{JobRecord, Transition};
-use lazymkv_engine::testkit::Harness;
+use lazymkv_engine::testkit::{ci_factor, Harness};
 use serde_json::json;
 
 /// The disc of the base scenario, as Task 22's Harness::insert names it.
@@ -307,7 +307,9 @@ fn awaiting_lookup_recreates_its_timer() {
     let before = transitions(&dir).len();
     h.fire_timers();
     let after = std::time::Instant::now();
-    while transitions(&dir).len() == before && after.elapsed() < std::time::Duration::from_secs(10) {
+    // 10 s, 40 s under CI (Ruling R29.c5).
+    let wait = std::time::Duration::from_secs(10) * ci_factor();
+    while transitions(&dir).len() == before && after.elapsed() < wait {
         std::thread::yield_now();
     }
     let fired = transitions(&dir).pop().unwrap();

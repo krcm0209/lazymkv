@@ -18,6 +18,8 @@ use lazymkv_engine::StepResult;
 use lazymkv_platform::{IpcConnector, Reach};
 use serde_json::{json, Value};
 
+/// The tests' own waits: 20 s, times `ci_factor` wherever a test waits for something to happen (Rulings R29.c2,
+/// R29.c5).
 const WAIT: Duration = Duration::from_secs(20);
 /// Task 22's disc names: the base scenario's disc, and two discs with their own fingerprints.
 const DISC_A: &str = "movie-direct";
@@ -67,9 +69,9 @@ fn scripted(script: Vec<(&'static str, StepScript)>) -> Harness {
 }
 
 fn wait_for_call(h: &Harness, tag: &str, count: usize) {
-    let start = Instant::now();
+    let (start, wait) = (Instant::now(), WAIT * ci_factor());
     while h.steps().calls().iter().filter(|c| c.as_str() == tag).count() < count {
-        assert!(start.elapsed() < WAIT, "{tag} was not called {count} times: {:?}", h.steps().calls());
+        assert!(start.elapsed() < wait, "{tag} was not called {count} times within {wait:?}: {:?}", h.steps().calls());
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -941,10 +943,10 @@ fn a_makemkv_check_holds_the_disc_phase_token_until_its_listing_ends() {
     let gate = std::sync::Mutex::new(gate);
     h.on_spawn(&["info", "disc:9999"], move || {
         let _ = entered.send(());
-        let _ = gate.lock().unwrap().recv_timeout(WAIT);
+        let _ = gate.lock().unwrap().recv_timeout(WAIT * ci_factor());
     });
     c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
-    in_listing.recv_timeout(WAIT).expect("the self-test's listing starts");
+    in_listing.recv_timeout(WAIT * ci_factor()).expect("the self-test's listing starts");
     h.insert("tok0", DISC_A);
     h.deliver();
     h.wait("the arrival to be walked", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_string());

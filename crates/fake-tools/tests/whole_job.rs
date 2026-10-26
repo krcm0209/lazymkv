@@ -8,7 +8,7 @@ use lazymkv_core::lookup::name::disc_name;
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
-use lazymkv_engine::testkit::Harness;
+use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::Host;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -68,14 +68,15 @@ fn filed_job() -> (Harness, PathBuf) {
         json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1}),
     );
     harness.insert("tok0", "movie-direct");
-    let start = Instant::now();
+    // 120 s, 480 s under CI (Ruling R29.c5).
+    let (start, cap) = (Instant::now(), Duration::from_secs(120) * ci_factor());
     loop {
         let last = harness.notifications().iter().any(|n| n.event != NotifyEvent::DiscDone);
         if last && harness.awake().holders() == 0 {
             break;
         }
         let sent: Vec<String> = harness.notifications().iter().map(|n| serde_json::to_string(n).unwrap()).collect();
-        assert!(start.elapsed() < Duration::from_secs(120), "no last notification; sent: {sent:?}");
+        assert!(start.elapsed() < cap, "no last notification; sent: {sent:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
     let jobs: Vec<PathBuf> =
