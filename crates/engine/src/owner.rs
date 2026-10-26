@@ -2042,7 +2042,8 @@ impl Owner {
         self.reply(client, id, answer);
     }
 
-    /// `settings_set` (design part 9.4, ENG-19): `changes` over the settings in force, read through
+    /// `settings_set` (design part 9.4, ENG-19): `changes` over the settings in force, one level deep, so an object
+    /// value such as `tool_paths` changes only the keys it names (ruling at the final review), read through
     /// `Settings::from_json`. An unreadable result is refused with its error, one with problems with `settings_set
     /// refused: <n> problems` and the problems; then nothing changes. Otherwise settings.json is written, the slot
     /// takes the new `file_phase_concurrency`, the reply carries the new settings, and every disc already in a drive is
@@ -2051,7 +2052,13 @@ impl Owner {
         let (current, _) = self.store.settings();
         let mut merged = serde_json::to_value(&current).unwrap_or_else(|_| Value::Object(Map::new()));
         if let Value::Object(object) = &mut merged {
-            object.extend(changes);
+            for (key, value) in changes {
+                if let (Some(Value::Object(current)), Value::Object(inner)) = (object.get_mut(&key), &value) {
+                    current.extend(inner.clone());
+                    continue;
+                }
+                object.insert(key, value);
+            }
         }
         let line = match Settings::from_json(&merged.to_string()) {
             Err(error) => reply_error(id, &error, &[]),

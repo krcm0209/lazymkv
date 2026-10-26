@@ -310,6 +310,27 @@ fn settings_set_with_a_problem_changes_nothing_and_lists_problems() {
     assert_eq!(fs::read(h.data().join("settings.json")).unwrap(), before);
 }
 
+/// Design part 9.4 ("names only the keys it changes"; ruling at the final review): a settings_set naming one tool path
+/// keeps the other four, as `ToolPaths` lets a file name only the programs it overrides.
+#[test]
+fn settings_set_of_one_tool_path_keeps_the_others() {
+    let h = stand_in(&["movie-direct"], settings());
+    let stored = |h: &Harness| -> Value {
+        serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap()
+    };
+    let before = stored(&h);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let java = h.tools().join("another-java").display().to_string();
+    let result = c.ok("settings_set", json!({"tool_paths": {"java": java}}));
+    assert_eq!(result["tool_paths"]["java"], json!(java));
+    for tool in ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg"] {
+        assert_eq!(result["tool_paths"][tool], before["tool_paths"][tool], "{tool}");
+        assert!(before["tool_paths"][tool].is_string(), "{tool}");
+    }
+    assert_eq!(stored(&h)["tool_paths"], result["tool_paths"]);
+}
+
 #[test]
 fn settings_set_clearing_the_last_problem_turns_present_discs_into_arrivals() {
     let h = Harness::new_scripted(main_line(), json!({"keep_tuning_evidence": false, "drive_settle_s": 0,

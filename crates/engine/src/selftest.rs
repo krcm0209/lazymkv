@@ -222,17 +222,24 @@ fn probe(dir: &Path) -> Result<(), String> {
     fs::remove_file(&renamed).map_err(|error| at(&renamed, error))
 }
 
-/// The write, rename and delete probe of spec 7 in `root` (in `<root>/.lazymkv-partial` when `library`). Def: T26.
-/// Use: T26.
+/// The write, rename and delete probe of spec 7 in `root` (in `<root>/.lazymkv-partial` when `library`). A library
+/// root that is not a folder fails with `<root> is not a folder`, and only the partial folder inside an existing root
+/// is made, so a mistyped or unmounted root never passes or leaves a folder behind (ruling at the final review).
+/// Def: T26. Use: T26.
 pub(crate) fn root_check(name: &str, root: Option<&str>, library: bool) -> SelfTestCheck {
     let Some(root) = root else {
         return check(name, false, format!("{name} is unset"));
     };
     let dir = if library { Path::new(root).join(PARTIAL_FOLDER) } else { PathBuf::from(root) };
-    let made = if library {
-        fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))
-    } else {
+    let made = if !library {
         Ok(())
+    } else if !Path::new(root).is_dir() {
+        Err(format!("{root} is not a folder"))
+    } else {
+        match fs::create_dir(&dir) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(format!("{}: {error}", dir.display())),
+            _ => Ok(()),
+        }
     };
     let (ok, detail) = match made.and_then(|()| probe(&dir)) {
         Ok(()) => (true, format!("{} takes a write, a rename and a delete", dir.display())),
@@ -561,6 +568,19 @@ mod tests {
         assert!(partial.is_dir());
         assert_eq!(std::fs::read_dir(&partial).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(&s.0).unwrap().count(), 1);
+    }
+
+    /// A library root that is not a folder (mistyped, or not mounted) fails its check, and the check creates nothing
+    /// (ruling at the final review).
+    #[test]
+    fn a_missing_library_root_fails_its_check_and_is_not_created() {
+        let s = Scratch::new("probe-missing");
+        let missing = s.0.join("Moives");
+        let check = root_check("movies_root", Some(missing.to_str().unwrap()), true);
+        assert!(!check.ok);
+        assert_eq!(check.detail, format!("{} is not a folder", missing.display()));
+        assert_eq!(check.path.as_deref(), missing.to_str());
+        assert!(!missing.exists());
     }
 
     #[test]

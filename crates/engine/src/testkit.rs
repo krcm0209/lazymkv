@@ -836,12 +836,17 @@ impl Harness {
 }
 
 impl Drop for Harness {
+    /// Stops a running engine and removes the scratch folder. An engine thread that panicked fails the test here, as
+    /// `run_until` and `restart` do, unless the test is already panicking (ruling at the final review).
     fn drop(&mut self) {
         let engine = lock(&self.engine).take();
-        if let Some(engine) = engine {
-            let _ = engine.stop();
-        }
+        let stopped = engine.map(EngineHandle::stop);
         let _ = fs::remove_dir_all(&self.root);
+        if let Some(Err(error)) = stopped {
+            if !thread::panicking() {
+                panic!("the harness's engine stops: {error}");
+            }
+        }
     }
 }
 
