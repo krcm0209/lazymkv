@@ -58,13 +58,15 @@ const QUIET: Duration = Duration::from_millis(300);
 const BUSY_QUIET: Duration = Duration::from_secs(2);
 /// `settle`'s cap.
 const SETTLE_CAP: Duration = Duration::from_secs(10);
-/// How long a scan waits for the recorded lookups' files (R23.2), times `ci_factor` (Ruling R29.c2a).
+/// How long a scan waits for the recorded lookups' files (R23.2). It is not scaled by `ci_factor` (Ruling R29.c2b):
+/// the recorder starts its time-limit clock before the spawn, so this wait counts against the harness's 10 s scan
+/// limit, and a scan whose lookups never answer, as a second synthetic disc's do, would be killed at that limit.
 const LOOKUP_WAIT_CAP: Duration = Duration::from_secs(5);
 
 /// What the harness's waiting bounds are multiplied by: 4 when the `CI` environment variable is set, as GitHub Actions
-/// sets it, else 1 (Rulings R29.c2, R29.c2a). A shared CI runner can be several times slower than the mini PC, so
-/// `wait`'s, `run_until`'s and `fire_timers`' caps, a scan's wait for the recorded lookups and the IPC tests' line
-/// wait stretch there; `settle`'s quiet windows and cap do not. Def: T29. Use: T29.
+/// sets it, else 1 (Rulings R29.c2, R29.c2a, R29.c2b). A shared CI runner can be several times slower than the mini
+/// PC, so `wait`'s, `run_until`'s and `fire_timers`' caps and the IPC tests' line wait stretch there; `settle`'s quiet
+/// windows and cap and a scan's wait for the recorded lookups (`LOOKUP_WAIT_CAP`) do not. Def: T29. Use: T29.
 pub fn ci_factor() -> u32 {
     if std::env::var_os("CI").is_some() {
         4
@@ -328,8 +330,8 @@ impl Harness {
     ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
     /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
     ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
-    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s (20 s under CI, `ci_factor`) for the recorded
-    ///   lookups' files, and `on_spawn`'s actions run before the spawns they name.
+    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files, and
+    ///   `on_spawn`'s actions run before the spawns they name.
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
@@ -950,7 +952,7 @@ impl ProcessGuard for TestGuard {
         let profile = spawn.args.iter().find_map(|arg| arg.strip_prefix("--profile="));
         if let (true, Some(profile)) = (scan && self.urls > 0 && self.wait.load(Ordering::SeqCst), profile) {
             let status = Path::new(profile).parent().map(|folder| folder.join("lookup-status.txt"));
-            let deadline = Instant::now() + LOOKUP_WAIT_CAP * ci_factor();
+            let deadline = Instant::now() + LOOKUP_WAIT_CAP;
             while !status.as_deref().is_some_and(|status| answered(status, self.urls)) && Instant::now() < deadline {
                 thread::sleep(POLL);
             }
