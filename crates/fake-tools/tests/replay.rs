@@ -1,26 +1,11 @@
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
+// Every direct run of a freshly copied stand-in goes through `retry_busy` (Rulings R29.c3, R29.c4).
+use lazymkv_engine::testkit::retry_busy;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
-
-/// Runs `attempt` again while it fails with `ExecutableFileBusy`, up to 20 tries 50 ms apart, and then returns its
-/// last result (Ruling R29.c3). On Linux, executing a freshly copied stand-in can fail with ETXTBSY: while the copy's
-/// write handle is open, another test thread may fork for its own process, and that child holds the handle until its
-/// own exec closes it.
-fn retry_busy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let mut tries = 1;
-    loop {
-        match attempt() {
-            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && tries < 20 => {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            result => return result,
-        }
-    }
-}
 
 #[test]
 fn replays_output_creates_files_and_returns_the_exit_code() {

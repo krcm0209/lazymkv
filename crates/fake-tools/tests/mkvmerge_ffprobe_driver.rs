@@ -3,6 +3,7 @@
 use lazymkv_core::ipc::OutputStream;
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use lazymkv_platform::fakes::FakeHost;
+use lazymkv_engine::testkit::BusyRetry;
 use lazymkv_platform::StdProcessGuard;
 use lazymkv_tools::{ident, probe, remux, CancelToken, Limits, ToolCtx};
 use std::fs;
@@ -39,7 +40,8 @@ impl Env {
     fn run<R>(&self, f: impl FnOnce(&ToolCtx) -> R) -> R {
         let on_output = |_: OutputStream, _: &str| {};
         let on_progress = |fraction: f64| self.progress.lock().unwrap().push(fraction);
-        let ctx = ToolCtx { guard: &StdProcessGuard, host: &self.host, limits: &self.limits, cancel: CancelToken::default(),
+        let guard = BusyRetry(StdProcessGuard);
+        let ctx = ToolCtx { guard: &guard, host: &self.host, limits: &self.limits, cancel: CancelToken::default(),
             on_output: &on_output, on_progress: &on_progress };
         f(&ctx)
     }

@@ -5,6 +5,7 @@ use lazymkv_core::ipc::OutputStream;
 use lazymkv_core::job::{Failure, FailureClass, OutputCause};
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use lazymkv_platform::fakes::FakeHost;
+use lazymkv_engine::testkit::BusyRetry;
 use lazymkv_platform::StdProcessGuard;
 use lazymkv_tools::{
     list_drives, rip, scan, CancelToken, Limits, MakemkvFlags, RipOutcome, RipRun, ScanOutcome, StagingHealth, ToolCtx,
@@ -63,7 +64,7 @@ impl Env {
         let on_output = |_: OutputStream, _: &str| {};
         let on_progress = |fraction: f64| self.progress.lock().unwrap().push(fraction);
         let ctx = ToolCtx {
-            guard: &StdProcessGuard,
+            guard: &BusyRetry(StdProcessGuard),
             host: &self.host,
             limits: &self.limits,
             cancel: self.cancel.clone(),

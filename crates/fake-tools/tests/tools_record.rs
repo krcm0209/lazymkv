@@ -4,6 +4,7 @@
 use lazymkv_core::ipc::OutputStream;
 use lazymkv_core::settings::Settings;
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
+use lazymkv_engine::testkit::BusyRetry;
 use lazymkv_platform::fakes::FakeHost;
 use lazymkv_platform::{GuardedChild, KillHandle, ProcessGuard, Spawn, StdProcessGuard};
 use lazymkv_tools::{run_recorded, with_suffix, CancelToken, LineAction, Limits, RunResult, ToolCtx};
@@ -33,7 +34,7 @@ fn run(
     cancel: CancelToken,
     on_line: &mut dyn FnMut(&str) -> LineAction,
 ) -> io::Result<(RunResult, Seen)> {
-    let guard = StdProcessGuard;
+    let guard = BusyRetry(StdProcessGuard);
     let host = FakeHost::new("2026-10-23", NOW);
     let limits = Limits::from_settings(&Settings::default());
     let seen = Mutex::new(Vec::new());
@@ -167,7 +168,7 @@ struct Reaping(Arc<AtomicBool>);
 
 impl ProcessGuard for Reaping {
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
-        Ok(Box::new(ReapingChild { inner: StdProcessGuard.spawn(spawn)?, reaped: Arc::clone(&self.0) }))
+        Ok(Box::new(ReapingChild { inner: BusyRetry(StdProcessGuard).spawn(spawn)?, reaped: Arc::clone(&self.0) }))
     }
 }
 
@@ -230,4 +231,50 @@ fn a_panicking_line_callback_kills_the_child_and_run_recorded_panics() {
     let panicked = receiver.recv_timeout(Duration::from_secs(10)).expect("run_recorded did not return within 10 s");
     assert!(panicked, "run_recorded swallowed the panic");
     assert!(reaped.load(Ordering::SeqCst), "the child was not killed and waited for");
+}
+
+/// A process runner that refuses its first `busy` spawns with `ExecutableFileBusy`, as Linux does while another test
+/// thread's fork holds a freshly copied stand-in open (R29.c4), and counts every spawn.
+struct BusyFirst {
+    busy: usize,
+    calls: Mutex<usize>,
+}
+
+impl ProcessGuard for BusyFirst {
+    fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if *calls <= self.busy {
+            return Err(io::Error::from(io::ErrorKind::ExecutableFileBusy));
+        }
+        StdProcessGuard.spawn(spawn)
+    }
+}
+
+#[test]
+fn busy_retry_starts_a_spawn_refused_as_busy_again_and_gives_up_after_twenty_tries() {
+    let dir = Scratch::new("rec-busy");
+    let tool = stand_in(&dir, r#"{"responses":[{"args_contain":["info"],"stdout":"out.txt"}]}"#);
+    dir.write("out.txt", "TCOUNT:0\n");
+    let host = FakeHost::new("2026-10-23", NOW);
+    let limits = Limits::from_settings(&Settings::default());
+    let args = ["info".to_string(), "disc:0".to_string()];
+    for (busy, calls) in [(2, 3), (25, 20)] {
+        let guard = BusyRetry(BusyFirst { busy, calls: Mutex::new(0) });
+        let on_output = |_: OutputStream, _: &str| {};
+        let ctx = ToolCtx {
+            guard: &guard,
+            host: &host,
+            limits: &limits,
+            cancel: CancelToken::default(),
+            on_output: &on_output,
+            on_progress: &|_: f64| {},
+        };
+        let ran = run_recorded(&ctx, &tool, &args, &dir.0.join("scan.txt"), None, false, &mut |_| LineAction::Continue);
+        assert_eq!(*guard.0.calls.lock().unwrap(), calls, "{busy} refusals");
+        match ran {
+            Ok(result) => assert!(busy < 20 && (result.exit_code, result.lines) == (Some(0), 1), "{busy} refusals"),
+            Err(error) => assert!(busy >= 20 && error.kind() == io::ErrorKind::ExecutableFileBusy, "{busy}: {error}"),
+        }
+    }
 }

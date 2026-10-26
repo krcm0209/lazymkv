@@ -75,6 +75,39 @@ pub fn ci_factor() -> u32 {
     }
 }
 
+/// How many times `retry_busy` tries in all, and how long it pauses between tries (Ruling R29.c4).
+const BUSY_TRIES: u32 = 20;
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
+
+/// Runs `attempt` again while it fails with `ExecutableFileBusy`, up to 20 tries 50 ms apart, and then returns its last
+/// result (Rulings R29.c3, R29.c4). On Linux, executing a freshly copied stand-in can fail with ETXTBSY: while the
+/// copy's write handle is open, another test thread may fork for its own process, and that child holds the handle
+/// until its own exec closes it. Def: T29. Use: T29 tests.
+pub fn retry_busy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut tries = 1;
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && tries < BUSY_TRIES => {
+                tries += 1;
+                thread::sleep(BUSY_PAUSE);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// A process guard that starts its inner guard's spawn again, through `retry_busy`, while the operating system refuses
+/// it with `ExecutableFileBusy` (Linux ETXTBSY: a freshly copied stand-in executed while another test thread's fork
+/// still holds the copy's write handle), and otherwise hands over the inner guard's own child, so its pipes, kill
+/// handle and wait are unchanged (Ruling R29.c4). Def: T29. Use: T29 tests.
+pub struct BusyRetry<G: ProcessGuard>(pub G);
+
+impl<G: ProcessGuard> ProcessGuard for BusyRetry<G> {
+    fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
+        retry_busy(|| self.0.spawn(spawn))
+    }
+}
+
 /// `Harness::on_spawn`'s actions, each with its needles; an action is taken out when it runs.
 type SpawnHooks = Arc<Mutex<Vec<(Vec<String>, Option<Box<dyn Fn() + Send + Sync>>)>>>;
 
@@ -926,7 +959,8 @@ impl Runner {
 /// folder>/lookup-status.txt` has one line per distinct URL of the merged `http.json` and no line ends in `000`. The
 /// engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
 /// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
-/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `StdProcessGuard`.
+/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `StdProcessGuard` through `BusyRetry`
+/// (Ruling R29.c4).
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,
@@ -957,7 +991,7 @@ impl ProcessGuard for TestGuard {
                 thread::sleep(POLL);
             }
         }
-        StdProcessGuard.spawn(spawn)
+        BusyRetry(StdProcessGuard).spawn(spawn)
     }
 }
 
