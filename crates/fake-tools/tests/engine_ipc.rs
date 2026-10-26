@@ -13,7 +13,7 @@ use lazymkv_core::job::{Event, Failure, FailureClass, NotifyEvent, State};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
-use lazymkv_engine::testkit::{Harness, StepScript};
+use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
 use lazymkv_platform::{IpcConnector, Reach};
 use serde_json::{json, Value};
@@ -92,10 +92,12 @@ impl Client {
     }
     /// The next line, or None once the engine closed the connection.
     fn line(&mut self) -> Option<String> {
-        match self.lines.recv_timeout(WAIT) {
+        // 20 s, 80 s under CI (Ruling R29.c2).
+        let wait = WAIT * ci_factor();
+        match self.lines.recv_timeout(wait) {
             Ok(line) => Some(line),
             Err(RecvTimeoutError::Disconnected) => None,
-            Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {WAIT:?}"),
+            Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {wait:?}"),
         }
     }
     fn raw(&mut self, line: &str) {

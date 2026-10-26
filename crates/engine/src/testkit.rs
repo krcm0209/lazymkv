@@ -48,9 +48,9 @@ use crate::{EngineConfig, JobContext, NotifySink, Services, StepResult, StepRunn
 const POLL: Duration = Duration::from_millis(20);
 /// How often a hanging scripted step looks at its cancel token.
 const HANG_POLL: Duration = Duration::from_millis(5);
-/// `wait`'s cap.
+/// `wait`'s cap, times `ci_factor`.
 const WAIT_CAP: Duration = Duration::from_secs(10);
-/// `run_until`'s cap.
+/// `run_until`'s cap, times `ci_factor`.
 const RUN_UNTIL_CAP: Duration = Duration::from_secs(60);
 /// How long `settle` needs everything unchanged.
 const QUIET: Duration = Duration::from_millis(300);
@@ -60,6 +60,17 @@ const BUSY_QUIET: Duration = Duration::from_secs(2);
 const SETTLE_CAP: Duration = Duration::from_secs(10);
 /// How long a scan waits for the recorded lookups' files (R23.2).
 const LOOKUP_WAIT_CAP: Duration = Duration::from_secs(5);
+
+/// What the harness's waiting bounds are multiplied by: 4 when the `CI` environment variable is set, as GitHub Actions
+/// sets it, else 1 (Ruling R29.c2). A shared CI runner can be several times slower than the mini PC, so `wait`'s and
+/// `run_until`'s caps and the IPC tests' line wait stretch there; `settle`'s quiet windows do not. Def: T29. Use: T29.
+pub fn ci_factor() -> u32 {
+    if std::env::var_os("CI").is_some() {
+        4
+    } else {
+        1
+    }
+}
 
 /// `Harness::on_spawn`'s actions, each with its needles; an action is taken out when it runs.
 type SpawnHooks = Arc<Mutex<Vec<(Vec<String>, Option<Box<dyn Fn() + Send + Sync>>)>>>;
@@ -486,11 +497,11 @@ impl Harness {
     }
 
     /// Arms the stop hook for the first transition into `state`, hands the queued drive events to the engine, waits
-    /// (60 s cap, then panics naming `state` and the states persisted so far) until the owner stopped after persisting
-    /// that transition and before running any of its actions, and joins the engine's threads. The hook also logs every
-    /// state it sees; when that log, kept since the last `restart` or `run_until`, already holds `state` (possible only
-    /// right after `restart`, whose resumed actions start at once), it stops the engine at once instead. Def: T22. Use:
-    /// T22 to T29.
+    /// (60 s cap, 240 s under CI as `ci_factor` says, then panics naming `state` and the states persisted so far) until
+    /// the owner stopped after persisting that transition and before running any of its actions, and joins the
+    /// engine's threads. The hook also logs every state it sees; when that log, kept since the last `restart` or
+    /// `run_until`, already holds `state` (possible only right after `restart`, whose resumed actions start at once),
+    /// it stops the engine at once instead. Def: T22. Use: T22 to T29.
     pub fn run_until(&self, state: &str) {
         let passed = {
             let mut hook = lock(&self.hook);
@@ -503,7 +514,8 @@ impl Harness {
         };
         if !passed {
             self.deliver();
-            let deadline = Instant::now() + RUN_UNTIL_CAP;
+            let cap = RUN_UNTIL_CAP * ci_factor();
+            let deadline = Instant::now() + cap;
             loop {
                 let (armed, seen) = {
                     let hook = lock(&self.hook);
@@ -514,7 +526,7 @@ impl Harness {
                 }
                 if Instant::now() >= deadline {
                     lock(&self.hook).0 = None;
-                    panic!("run_until({state}): no transition into {state} within 60 s; persisted: {seen:?}");
+                    panic!("run_until({state}): no transition into {state} within {cap:?}; persisted: {seen:?}");
                 }
                 thread::sleep(POLL);
             }
@@ -612,13 +624,15 @@ impl Harness {
         &self.steps
     }
 
-    /// Polls every 20 ms until `done` holds; panics naming `what` after 10 s. Def: T22. Use: T22 to T29.
+    /// Polls every 20 ms until `done` holds; panics naming `what` after 10 s, 40 s under CI (`ci_factor`). Def: T22.
+    /// Use: T22 to T29.
     pub fn wait(&self, what: &str, done: impl Fn(&Harness) -> bool) {
         self.deliver();
-        let deadline = Instant::now() + WAIT_CAP;
+        let cap = WAIT_CAP * ci_factor();
+        let deadline = Instant::now() + cap;
         while !done(self) {
             if Instant::now() >= deadline {
-                panic!("waited 10 s for {what}");
+                panic!("waited {cap:?} for {what}");
             }
             thread::sleep(POLL);
         }
