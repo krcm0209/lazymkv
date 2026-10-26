@@ -455,3 +455,31 @@ fn a_second_arrival_of_a_present_disc_feeds_nothing() {
     assert!(h.engine_log().contains(&format!("tok1: the disc of job {a} is already in tok0")), "{}", h.engine_log());
     assert_eq!(h.record(&a).drive, "tok0");
 }
+
+/// R29.c2a: a transition is persisted before its actions run, so a StartTimer timer can start just after a test sees
+/// the state; `fire_timers` waits for it instead of firing nothing.
+#[test]
+fn fire_timers_waits_for_a_timer_that_starts_after_it_is_called() {
+    use crate::Timers;
+    let h = Harness::new_scripted(Vec::new(), json!({}));
+    let fired = Arc::new(AtomicBool::new(false));
+    let timers = h.timers();
+    thread::scope(|scope| {
+        let fired = Arc::clone(&fired);
+        scope.spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            timers.start(60, Box::new(move || fired.store(true, Ordering::SeqCst)));
+        });
+        h.fire_timers();
+    });
+    assert!(fired.load(Ordering::SeqCst));
+    assert!(h.timers().pending().is_empty());
+}
+
+/// R29.c2a: with no timer to fire, `fire_timers` says so instead of returning as if it had fired one.
+#[test]
+#[should_panic(expected = "fire_timers: no timer became pending within")]
+fn fire_timers_panics_when_no_timer_becomes_pending() {
+    let h = Harness::new_scripted(Vec::new(), json!({}));
+    h.fire_timers();
+}

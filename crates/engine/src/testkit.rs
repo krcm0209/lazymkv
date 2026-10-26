@@ -58,12 +58,13 @@ const QUIET: Duration = Duration::from_millis(300);
 const BUSY_QUIET: Duration = Duration::from_secs(2);
 /// `settle`'s cap.
 const SETTLE_CAP: Duration = Duration::from_secs(10);
-/// How long a scan waits for the recorded lookups' files (R23.2).
+/// How long a scan waits for the recorded lookups' files (R23.2), times `ci_factor` (Ruling R29.c2a).
 const LOOKUP_WAIT_CAP: Duration = Duration::from_secs(5);
 
 /// What the harness's waiting bounds are multiplied by: 4 when the `CI` environment variable is set, as GitHub Actions
-/// sets it, else 1 (Ruling R29.c2). A shared CI runner can be several times slower than the mini PC, so `wait`'s and
-/// `run_until`'s caps and the IPC tests' line wait stretch there; `settle`'s quiet windows do not. Def: T29. Use: T29.
+/// sets it, else 1 (Rulings R29.c2, R29.c2a). A shared CI runner can be several times slower than the mini PC, so
+/// `wait`'s, `run_until`'s and `fire_timers`' caps, a scan's wait for the recorded lookups and the IPC tests' line
+/// wait stretch there; `settle`'s quiet windows and cap do not. Def: T29. Use: T29.
 pub fn ci_factor() -> u32 {
     if std::env::var_os("CI").is_some() {
         4
@@ -327,8 +328,8 @@ impl Harness {
     ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
     /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
     ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
-    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files, and
-    ///   `on_spawn`'s actions run before the spawns they name.
+    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s (20 s under CI, `ci_factor`) for the recorded
+    ///   lookups' files, and `on_spawn`'s actions run before the spawns they name.
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
@@ -752,9 +753,20 @@ impl Harness {
         &self.timers
     }
 
-    /// Runs and drops every pending timer (design part 5.2). Def: T22. Use: T22 to T29.
+    /// Waits until at least one timer is pending, then runs and drops every pending timer (design part 5.2). A
+    /// transition is persisted before its actions run and StartTimer is one of them, so a test that fires as soon as
+    /// it sees the state could otherwise find no timer and leave the job waiting for good (Ruling R29.c2a). Panics
+    /// when no timer becomes pending within 10 s, 40 s under CI (`ci_factor`). Def: T22. Use: T22 to T29.
     pub fn fire_timers(&self) {
         self.deliver();
+        let cap = WAIT_CAP * ci_factor();
+        let deadline = Instant::now() + cap;
+        while self.timers.pending().is_empty() {
+            if Instant::now() >= deadline {
+                panic!("fire_timers: no timer became pending within {} s", cap.as_secs());
+            }
+            thread::sleep(POLL);
+        }
         self.timers.fire_all();
     }
 
@@ -938,7 +950,7 @@ impl ProcessGuard for TestGuard {
         let profile = spawn.args.iter().find_map(|arg| arg.strip_prefix("--profile="));
         if let (true, Some(profile)) = (scan && self.urls > 0 && self.wait.load(Ordering::SeqCst), profile) {
             let status = Path::new(profile).parent().map(|folder| folder.join("lookup-status.txt"));
-            let deadline = Instant::now() + LOOKUP_WAIT_CAP;
+            let deadline = Instant::now() + LOOKUP_WAIT_CAP * ci_factor();
             while !status.as_deref().is_some_and(|status| answered(status, self.urls)) && Instant::now() < deadline {
                 thread::sleep(POLL);
             }
