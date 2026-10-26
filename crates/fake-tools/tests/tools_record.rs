@@ -27,6 +27,22 @@ fn stand_in(dir: &Scratch, scenario: &str) -> PathBuf {
 
 type Seen = Vec<(&'static str, String)>;
 
+/// A backstop for the tests of a kill: a long limit, past which a run whose kill regressed ends as timed out and fails
+/// its test instead of hanging it (and CI).
+const BACKSTOP: Option<Duration> = Some(Duration::from_secs(30));
+
+/// A token raised after 30 s, so a run whose time limit regressed ends as cancelled and fails its test instead of
+/// hanging it.
+fn watchdog() -> CancelToken {
+    let token = CancelToken::default();
+    let raise = token.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        raise.cancel();
+    });
+    token
+}
+
 fn run(
     tool: &Path,
     out: &Path,
@@ -106,8 +122,7 @@ fn a_header_call_past_its_limit_is_killed_and_reported_timed_out() {
     dir.write("out.txt", "never\n");
     let out = dir.0.join("mkvmerge.json");
 
-    let (result, _) =
-        run(&tool, &out, Some(Duration::from_millis(200)), CancelToken::default(), &mut |_| LineAction::Continue).unwrap();
+    let (result, _) = run(&tool, &out, Some(Duration::from_millis(200)), watchdog(), &mut |_| LineAction::Continue).unwrap();
 
     assert!(result.timed_out);
     assert!(!result.cancelled);
@@ -126,7 +141,7 @@ fn a_cancelled_run_is_killed() {
     let trigger = token.clone();
 
     let (result, _) =
-        run(&tool, &dir.0.join("rip.txt"), None, token, &mut |_| { trigger.cancel(); LineAction::Continue }).unwrap();
+        run(&tool, &dir.0.join("rip.txt"), BACKSTOP, token, &mut |_| { trigger.cancel(); LineAction::Continue }).unwrap();
 
     assert!(result.cancelled);
     assert!(!result.timed_out);
@@ -142,7 +157,8 @@ fn a_line_action_kill_stops_the_run() {
     let mut calls = 0;
 
     let (result, _) =
-        run(&tool, &dir.0.join("rip.txt"), None, CancelToken::default(), &mut |_| { calls += 1; LineAction::Kill }).unwrap();
+        run(&tool, &dir.0.join("rip.txt"), BACKSTOP, CancelToken::default(), &mut |_| { calls += 1; LineAction::Kill })
+            .unwrap();
 
     assert_eq!(calls, 1);
     assert_eq!(result.lines, 1);

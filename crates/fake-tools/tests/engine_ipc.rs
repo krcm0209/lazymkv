@@ -102,9 +102,10 @@ impl Client {
             Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {wait:?}"),
         }
     }
+    /// Writes `line` and its newline in one write: the engine answers a line over 4 MiB as soon as it has read that
+    /// much and then drops the client, so a second write could meet a closed pipe.
     fn raw(&mut self, line: &str) {
-        self.writer.write_all(line.as_bytes()).unwrap();
-        self.writer.write_all(b"\n").unwrap();
+        self.writer.write_all(format!("{line}\n").as_bytes()).unwrap();
         self.writer.flush().unwrap();
     }
     fn request(&mut self, kind: &str, payload: Value) -> Reply {
@@ -792,6 +793,7 @@ fn a_cancelled_disc_phase_job_is_not_ejected() {
     h.deliver();
     let id = c.until_state(None, "Ripping")["id"].as_str().unwrap().to_string();
     c.ok("cancel", json!({"job": id}));
+    h.settle();
     assert!(h.ejector().calls().is_empty());
 }
 
@@ -1295,6 +1297,8 @@ fn progress_pushes_name_the_action_and_the_title() {
     let fraction = progress.payload["fraction"].as_f64().unwrap();
     assert!((0.0..=1.0).contains(&fraction));
     assert!(["RipTitle", "Remux"].contains(&progress.payload["step"].as_str().unwrap()));
+    assert_eq!(progress.payload["title"], json!("t00-00800"));
+    assert_eq!(progress.payload["job"], json!(h.job_ids().pop().unwrap()));
 }
 
 #[test]

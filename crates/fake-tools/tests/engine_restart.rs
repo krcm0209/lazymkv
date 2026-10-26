@@ -128,6 +128,7 @@ fn a_disc_left_in_after_a_copy_mode_failure_starts_nothing_at_a_restart() {
     let before = fs::read(h.job_dir(&id).join("transitions.jsonl")).unwrap();
     let ejects = h.ejector().calls().len();
     h.restart();
+    h.settle();
     assert_eq!(job_ids(&h), vec![id.clone()]);
     assert_eq!(fs::read(h.job_dir(&id).join("transitions.jsonl")).unwrap(), before);
     assert_eq!(h.ejector().calls().len(), ejects);
@@ -195,6 +196,7 @@ fn a_disc_already_in_a_drive_is_an_arrival_at_start() {
                                                    "drive_ready_timeout_s": 1, "file_phase_concurrency": 0}));
     h.insert("tok0", DISC);
     h.restart(); // the settings problem keeps the arrival waiting; no job folder exists
+    h.settle();
     assert!(job_ids(&h).is_empty());
     let path = h.data().join("settings.json");
     let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

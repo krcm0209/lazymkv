@@ -25,7 +25,7 @@ fn stand_in(scratch: &Scratch, stem: &str, scenario: &str, files: &[(&str, &[u8]
     program
 }
 
-struct Env { host: FakeHost, limits: Limits, progress: Mutex<Vec<f64>> }
+struct Env { host: FakeHost, limits: Limits, cancel: CancelToken, progress: Mutex<Vec<f64>> }
 
 impl Env {
     fn new() -> Env {
@@ -33,15 +33,25 @@ impl Env {
             host: FakeHost::new("2026-10-23", 1_800_000_000),
             limits: Limits { header: Duration::from_secs(120), scan: Duration::from_secs(60),
                 exit_wait: Duration::from_secs(60), after_kill: Duration::from_millis(10) },
+            cancel: CancelToken::default(),
             progress: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Cancels after 30 s, so that a broken kill fails the test instead of hanging it (as `makemkv_driver`'s does).
+    fn watchdog(&self) {
+        let cancel = self.cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(30));
+            cancel.cancel();
+        });
     }
 
     fn run<R>(&self, f: impl FnOnce(&ToolCtx) -> R) -> R {
         let on_output = |_: OutputStream, _: &str| {};
         let on_progress = |fraction: f64| self.progress.lock().unwrap().push(fraction);
         let guard = BusyRetry(StdProcessGuard);
-        let ctx = ToolCtx { guard: &guard, host: &self.host, limits: &self.limits, cancel: CancelToken::default(),
+        let ctx = ToolCtx { guard: &guard, host: &self.host, limits: &self.limits, cancel: self.cancel.clone(),
             on_output: &on_output, on_progress: &on_progress };
         f(&ctx)
     }
@@ -82,6 +92,7 @@ fn an_ident_past_the_header_limit_fails_saying_so() {
     let mut env = Env::new();
     env.limits.header = Duration::from_millis(300);
     env.limits.after_kill = Duration::from_millis(300);
+    env.watchdog();
     let program = stand_in(&scratch, "mkvmerge",
         r#"{"responses":[{"args_contain":["-J"],"stdout":"ident.json","hang_after_line":0}]}"#, &[("ident.json", IDENT.as_bytes())]);
     let out = scratch.0.join("job/mkvmerge.json");
