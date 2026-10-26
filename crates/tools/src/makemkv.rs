@@ -115,8 +115,9 @@ pub enum ScanOutcome {
     Failed { failure: Failure, message: String },
 }
 
-/// Runs and records the scan into `out`, killing it past `limits.scan`; the engine lists the drives and retries once
-/// (RP-5; design parts 5.3, 5.4 step 4). Every call writes `out` from the start (S58). A licence message gives
+/// Runs and records the scan into `out`, killing it past `limits.scan` while it has not printed its final message, and
+/// by the exit wait after it (S57); the engine lists the drives and retries once after the limit's kill (RP-5; design
+/// parts 5.3, 5.4 step 4). Every call writes `out` from the start (S58). A licence message gives
 /// `Failed { Licence }`, `MSG:1009` gives `ProfileRejected`, and a scan without `MSG:5011` and a `TCOUNT` line fails
 /// whatever its exit code. Def: T13. Use: T23.
 pub fn scan(ctx: &ToolCtx, program: &Path, flags: &MakemkvFlags, drive: u32, out: &Path) -> io::Result<ScanOutcome> {
@@ -331,8 +332,9 @@ const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
 /// design part 5.3). Def: T13. Use: T13, T23.
 pub const SCAN_PAST_LIMIT: &str = "the scan did not finish within scan_timeout_min and was killed";
 
-/// The message of a run killed by the exit wait (S57).
-const EXIT_WAIT_PASSED: &str = "makemkvcon did not exit within exit_wait_min of its final message and was killed";
+/// The message of a run killed by the exit wait (S57), also the engine's for a drive listing it killed (design part
+/// 5.3). Def: T13. Use: T13, T23.
+pub const EXIT_WAIT_PASSED: &str = "makemkvcon did not exit within exit_wait_min of its final message and was killed";
 
 /// The process names, lower-cased and without `.exe`, that stop a call when running: the two command-line programs
 /// and the graphical one (S55).
@@ -349,7 +351,7 @@ const WATCH_EVERY: Duration = Duration::from_millis(20);
 enum Kill {
     /// No kill: the tool ended by itself.
     None,
-    /// The run passed its whole-run limit.
+    /// The run passed its limit before its final message.
     Limit,
     /// The tool did not exit within `limits.exit_wait` of its final message.
     ExitWait,
@@ -443,12 +445,14 @@ impl Drop for StopWatcher<'_> {
     }
 }
 
-/// The run all three drivers share (design part 5.3): S55's check, then `run_recorded` with a `LineReader` fed each
-/// line, `Progress` forwarded to `ctx.on_progress`, an `IndexMismatch` answered with a kill, and a watcher that copies
-/// `ctx.cancel` and kills once `limits.exit_wait` has passed since the call's final message (S57). The result's
-/// `cancelled` reflects only `ctx.cancel`, and its `timed_out` is also true after the exit wait's kill. After any kill
-/// it sleeps `limits.after_kill` (S56). It sleeps too when the recorder gives `Err`, because the recorder kills the
-/// tool on its error paths without saying so.
+/// The run all three drivers share (design part 5.3): S55's check, then `run_recorded` with no limit of its own, a
+/// `LineReader` fed each line, `Progress` forwarded to `ctx.on_progress`, an `IndexMismatch` answered with a kill, and
+/// a watcher that copies `ctx.cancel`, kills once `limit` has passed since the call started while no final message has
+/// come, and kills once `limits.exit_wait` has passed since the final message (S57). A final message ends the limit,
+/// so a call that printed it and then hangs is the exit wait's, never reported as past its limit (ruling at the final
+/// review). The result's `cancelled` reflects only `ctx.cancel`, and its `timed_out` is true after the limit's or the
+/// exit wait's kill. After any kill it sleeps `limits.after_kill` (S56). It sleeps too when the recorder gives `Err`,
+/// because the recorder kills the tool on its error paths without saying so.
 fn run_makemkv(
     ctx: &ToolCtx,
     program: &Path,
@@ -468,6 +472,8 @@ fn run_makemkv(
     let reason: OnceLock<Kill> = OnceLock::new();
     let done = AtomicBool::new(false);
     let mut line_kill = false;
+    // Taken before the spawn, as `run_recorded`'s own limit clock is (Ruling R29.c2b).
+    let started = Instant::now();
     let ran = std::thread::scope(|scope| {
         let (cancel, exit_wait) = (ctx.cancel.clone(), ctx.limits.exit_wait);
         let (inner_ref, final_ref, reason_ref, done_ref) = (&inner, &final_at, &reason, &done);
@@ -478,6 +484,9 @@ fn run_makemkv(
                     inner_ref.cancel();
                 } else if final_ref.get().is_some_and(|at| at.elapsed() >= exit_wait) {
                     let _ = reason_ref.set(Kill::ExitWait);
+                    inner_ref.cancel();
+                } else if limit.is_some_and(|limit| final_ref.get().is_none() && started.elapsed() >= limit) {
+                    let _ = reason_ref.set(Kill::Limit);
                     inner_ref.cancel();
                 }
                 std::thread::park_timeout(WATCH_EVERY);
@@ -492,7 +501,7 @@ fn run_makemkv(
             on_output: ctx.on_output,
             on_progress: ctx.on_progress,
         };
-        run_recorded(&inner_ctx, program, args, out, limit, false, &mut |line| {
+        run_recorded(&inner_ctx, program, args, out, None, false, &mut |line| {
             let line = line.strip_suffix('\r').unwrap_or(line);
             if ending.is_final(line) {
                 let _ = final_at.set(Instant::now());
@@ -519,10 +528,8 @@ fn run_makemkv(
             return Err(error);
         }
     };
-    // `run_recorded` records a time limit or a raised `inner`, whichever came first, and neither after a line kill.
-    let kill = if run.timed_out {
-        Kill::Limit
-    } else if run.cancelled {
+    // `run_recorded` records a raised `inner`, whose reason the watcher set, and not a line kill.
+    let kill = if run.cancelled {
         reason.get().copied().unwrap_or(Kill::Cancel)
     } else if line_kill {
         Kill::LineKill
@@ -530,9 +537,7 @@ fn run_makemkv(
         Kill::None
     };
     run.cancelled = ctx.cancel.is_cancelled();
-    if kill == Kill::ExitWait {
-        run.timed_out = true;
-    }
+    run.timed_out = matches!(kill, Kill::Limit | Kill::ExitWait);
     if kill != Kill::None {
         std::thread::sleep(ctx.limits.after_kill);
     }

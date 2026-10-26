@@ -225,6 +225,34 @@ fn a_scan_past_its_limit_is_killed_and_fails_as_unknown() {
     assert_eq!(fs::read_to_string(scratch.0.join("tools/makemkvcon64.calls.json")).unwrap(), r#"{"0":1}"#);
 }
 
+/// S57 (ruling at the final review): the scan's limit runs only until its final message, so a scan that printed
+/// `MSG:5011` and `TCOUNT` and then hangs is killed by the exit wait and says it did not exit, instead of being
+/// reported past its limit and scanned again. Here the limit is shorter than the exit wait: at the 30 and 30 defaults
+/// the limit, timed from the spawn, also ran out first whenever the final message came after the spawn.
+#[test]
+fn a_scan_that_hangs_after_its_final_message_is_killed_by_the_exit_wait() {
+    let scratch = Scratch::new("scan-exit-wait");
+    let mut env = Env::new();
+    env.limits.scan = Duration::from_secs(4);
+    env.limits.exit_wait = Duration::from_secs(5);
+    env.watchdog();
+    let text = format!("{VERSION}{ADDED_0}{TITLE}{COMPLETE}");
+    let program = stand_in(&scratch,
+        r#"{"responses":[{"args_contain":["info","disc:0"],"stdout":"scan.txt","hang_after_line":100}]}"#,
+        &[("scan.txt", text.as_bytes())]);
+    let out = scratch.0.join("job/scan.txt");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let started = Instant::now();
+    let outcome = env.run(|ctx| scan(ctx, &program, &flags(&scratch), 0, &out)).unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(
+        scan_failure(&outcome),
+        (UNKNOWN, "makemkvcon did not exit within exit_wait_min of its final message and was killed".to_string())
+    );
+    assert_eq!(fs::read(&out).unwrap(), text.as_bytes());
+}
+
 #[test]
 fn a_scan_line_with_invalid_utf8_is_recorded_byte_for_byte_and_read_with_replacement() {
     let scratch = Scratch::new("scan-1252");
@@ -252,6 +280,38 @@ fn a_rip_succeeds_with_one_saved_title_and_one_mkv() {
     assert_eq!(ran.summary.index_guard, Some(true));
     assert_eq!(*env.progress.lock().unwrap(), vec![0.5]);
     assert_eq!(fs::read(&out).unwrap(), text.as_bytes());
+}
+
+/// Spec 9.2 and design part 12.2's exit without a completion message (ruling at the final review): a rip whose output
+/// stops before `MSG:5036` fails with exit code 0. The stand-in returns before its `creates`, so no file is written.
+#[test]
+fn a_rip_that_stops_before_its_success_summary_fails() {
+    let scratch = Scratch::new("rip-cut");
+    let env = Env::new();
+    let scenario =
+        r#"{"responses":[{"args_contain":["mkv","disc:0"],"stdout":"rip.txt","stop_after_line":4,"exit_code":0}]}"#;
+    let text = format!("{VERSION}{ADDED_0}{SAVING}{PROGRESS}{SAVED}");
+    let (ran, dir, out) = rip_once(&scratch, &env, scenario, &text, HEALTHY);
+    let message = "the rip ended without a success summary (exit code 0)".to_string();
+    assert_eq!(ran.outcome, RipOutcome::Failed { failure: UNKNOWN, message });
+    assert_eq!(ran.run.exit_code, Some(0));
+    assert!(!ran.summary.title_saved);
+    assert_eq!(fs::read(&out).unwrap(), format!("{VERSION}{ADDED_0}{SAVING}{PROGRESS}").as_bytes());
+    assert!(fs::read_dir(&dir).unwrap().next().is_none());
+}
+
+/// The other half of spec 9.2's rule (ruling at the final review): one `.mkv` in the title folder and exit 0 are not
+/// enough without `MSG:5036`. The stand-in cannot write a partial file and exit with a non-zero code in one response,
+/// so this pins the exit-0 case, which is the one a dropped `title_saved` check would accept.
+#[test]
+fn a_rip_with_one_mkv_and_exit_0_but_no_success_summary_fails() {
+    let scratch = Scratch::new("rip-unsaved");
+    let env = Env::new();
+    let (ran, dir, _) = rip_once(&scratch, &env, ONE_MKV, &format!("{VERSION}{ADDED_0}{SAVING}{PROGRESS}"), HEALTHY);
+    assert!(dir.join("title_t00.mkv").is_file());
+    assert_eq!(ran.run.exit_code, Some(0));
+    let message = "the rip ended without a success summary (exit code 0)".to_string();
+    assert_eq!(rip_failure(&ran.outcome), (UNKNOWN, message));
 }
 
 #[test]

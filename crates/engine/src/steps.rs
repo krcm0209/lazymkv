@@ -45,7 +45,7 @@ use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_platform::{
     rename_no_replace, write_atomic, Ejector, Host, Platform, ProcessGuard, Reach, SecretStore, ShareConnector,
 };
-use lazymkv_tools::makemkv::SCAN_PAST_LIMIT;
+use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, SCAN_PAST_LIMIT};
 use lazymkv_tools::{
     drive_list_args, find_tool, ident, ident_args, list_drives, probe, probe_args, remux, remux_args, rip, rip_args,
     save_debug_log, scan, scan_args, snapshot, with_suffix, CancelToken, Limits, MakemkvFlags, RipOutcome, RunResult,
@@ -550,8 +550,9 @@ impl Step<'_> {
     /// The drive listing before a makemkvcon call (design part 5.4 step 1): recorded as `drive-list.txt` at the job's
     /// first listing and as `drive-list-<n>.txt` after it (RP-1), with the job.log line `drive listing <n>: <drive> is
     /// index <index>`. Its (version, licence code) is observed into the engine's MakeMKV state (S79), unless the step
-    /// was cancelled. A listing with no DRV line for the job's drive gives `failed(Unknown)` with `MakeMKV's drive
-    /// listing has no drive <drive>` (RP-2).
+    /// was cancelled. A listing the exit wait killed after its final message gives `failed(Unknown)` with
+    /// `EXIT_WAIT_PASSED`, the process not having exited (design part 5.3, spec 10.4). A listing with no DRV line for
+    /// the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>` (RP-2).
     fn listing(&self, program: &Path, failed: fn(Failure) -> Event) -> Result<(u32, RunSummary), StepResult> {
         let drive = self.job.record.drive.as_str();
         if drive.is_empty() {
@@ -576,6 +577,9 @@ impl Step<'_> {
         self.check_cancel()?;
         let summary = &listing.summary;
         self.steps.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
+        if listing.run.timed_out {
+            return Err(unknown(failed, EXIT_WAIT_PASSED));
+        }
         match listing.index {
             Some(index) => {
                 self.log(&format!("drive listing {n}: {drive} is index {index}"));

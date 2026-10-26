@@ -2,12 +2,13 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use lazymkv_core::job::{Event, FailureClass, NotifyEvent, State, Tool, WaitReason};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::plan::Mode;
 use lazymkv_core::review::{Note, ReviewReason};
-use lazymkv_engine::testkit::Harness;
+use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::{Host, Reach};
 use serde_json::{json, Value};
 
@@ -416,6 +417,35 @@ fn a_missing_drive_index_fails_the_scan_naming_the_drive() {
     let record = h.record(&id);
     assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Fingerprinted) });
     assert_eq!(record.message.as_deref(), Some("MakeMKV's drive listing has no drive tok1"));
+    assert!(!h.job_dir(&id).join("scan.txt").exists());
+}
+
+/// Design part 5.3 and spec 10.4 (ruling at the final review): a drive listing that printed its final `MSG:5010` and
+/// then hangs is killed by the exit wait and fails the scan as Unknown saying so; nothing is scanned with its index.
+/// The harness's exit wait is 10 s, so this test takes more than 10 s.
+#[test]
+fn a_drive_listing_killed_by_the_exit_wait_fails_the_scan() {
+    let h = harness(&[], json!({}));
+    // The MakeMKV check at the engine's start used the first listing response; the job's listing prints every line of
+    // drive-list.txt and then hangs.
+    let scenario = r#"{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":100},
+ {"args_contain":["info","disc:0"],"stdout":"scan.txt","timing":"scan.txt.timing.jsonl"}]}"#;
+    fs::write(h.tools().join("makemkvcon64.json"), scenario).unwrap();
+    h.insert("tok0", "movie-direct");
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    let (started, cap) = (Instant::now(), Duration::from_secs(40) * ci_factor());
+    let ended = |h: &Harness| h.transitions(&id).iter().any(|line| matches!(line.new.as_str(), "Failed" | "Scanned"));
+    while !ended(&h) {
+        assert!(started.elapsed() < cap, "no Failed or Scanned within {cap:?}: {:?}", h.transitions(&id));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Fingerprinted) });
+    let message = "makemkvcon did not exit within exit_wait_min of its final message and was killed";
+    assert_eq!(record.message.as_deref(), Some(message));
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
     assert!(!h.job_dir(&id).join("scan.txt").exists());
 }
 

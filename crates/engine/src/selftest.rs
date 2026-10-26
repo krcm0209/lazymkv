@@ -113,10 +113,12 @@ impl MakeMkv {
         MakeMkv { state: Mutex::new(state), changed: AtomicBool::new(false) }
     }
 
-    /// `MakeMkvState::observe`; a change raises the flag (design part 3.7, S79). Def: T26. Use: T26 (with every job's
-    /// drive listing in steps.rs).
+    /// `MakeMkvState::observe` of a listing that printed a version; a change raises the flag (design part 3.7, S79). A
+    /// listing with no version (a `makemkvcon` that started and died) says nothing about MakeMKV and is not observed,
+    /// so it raises no change and leaves the recorded check alone (ruling at the final review). Def: T26. Use: T26
+    /// (with every job's drive listing in steps.rs).
     pub(crate) fn observe(&self, version: Option<String>, licence: Option<u32>) {
-        if lock(&self.state).observe(version, licence) {
+        if version.is_some() && lock(&self.state).observe(version, licence) {
             self.changed.store(true, Ordering::SeqCst);
         }
     }
@@ -624,6 +626,21 @@ mod tests {
         assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), None);
         shares.set_reach("/movies", Reach::Reachable);
         assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), Some(Event::ShareBack));
+    }
+
+    /// A listing that printed no version says nothing about MakeMKV's version (a makemkvcon that started and died),
+    /// so it is not observed: no change is raised and the recorded check stays (ruling at the final review).
+    #[test]
+    fn a_listing_with_no_version_is_not_observed() {
+        let s = Scratch::new("makemkv-no-version");
+        let makemkv = MakeMkv::new(MakeMkvState::open(&s.0));
+        makemkv.observe(Some("2.0.0".to_string()), None);
+        assert!(!makemkv.take_changed());
+        makemkv.observe(None, None);
+        assert!(!makemkv.take_changed());
+        assert_eq!(MakeMkvState::open(&s.0).recorded, Some((Some("2.0.0".to_string()), None)));
+        makemkv.observe(Some("2.0.0".to_string()), None);
+        assert!(!makemkv.take_changed());
     }
 
     #[test]
