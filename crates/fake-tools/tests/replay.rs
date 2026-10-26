@@ -1,9 +1,26 @@
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
+
+/// Runs `attempt` again while it fails with `ExecutableFileBusy`, up to 20 tries 50 ms apart, and then returns its
+/// last result (Ruling R29.c3). On Linux, executing a freshly copied stand-in can fail with ETXTBSY: while the copy's
+/// write handle is open, another test thread may fork for its own process, and that child holds the handle until its
+/// own exec closes it.
+fn retry_busy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut tries = 1;
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
 
 #[test]
 fn replays_output_creates_files_and_returns_the_exit_code() {
@@ -27,11 +44,7 @@ fn replays_output_creates_files_and_returns_the_exit_code() {
     .unwrap();
 
     let run = |args: &[&str]| {
-        Command::new(&tool)
-            .args(args)
-            .env("LAZYMKV_FAKE_DIR", &dir)
-            .output()
-            .unwrap()
+        retry_busy(|| Command::new(&tool).args(args).env("LAZYMKV_FAKE_DIR", &dir).output()).unwrap()
     };
 
     let rip = run(&["-r", "mkv", "disc:0", "0", out_dir.to_str().unwrap()]);
@@ -41,6 +54,29 @@ fn replays_output_creates_files_and_returns_the_exit_code() {
 
     assert_eq!(run(&["-r", "backup", "disc:0", "x"]).status.code(), Some(7));
     assert_eq!(run(&["-r", "info", "disc:0"]).status.code(), Some(2));
+}
+
+#[test]
+fn a_spawn_refused_as_busy_is_retried_and_the_error_kept_after_twenty_tries() {
+    let busy = || io::Error::from(io::ErrorKind::ExecutableFileBusy);
+    let mut calls = 0;
+    let answered = retry_busy(|| {
+        calls += 1;
+        if calls < 3 { Err(busy()) } else { Ok(calls) }
+    });
+    assert_eq!(answered.unwrap(), 3);
+    let mut calls = 0;
+    let refused: io::Result<()> = retry_busy(|| {
+        calls += 1;
+        Err(busy())
+    });
+    assert_eq!((refused.unwrap_err().kind(), calls), (io::ErrorKind::ExecutableFileBusy, 20));
+    let mut calls = 0;
+    let missing: io::Result<()> = retry_busy(|| {
+        calls += 1;
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    });
+    assert_eq!((missing.unwrap_err().kind(), calls), (io::ErrorKind::NotFound, 1));
 }
 
 const SAVED: &str = "MSG:5036,0,1,\"Copy complete. 1 titles saved.\"\n";
@@ -58,7 +94,7 @@ fn run_in(tool: &Path, fake_dir: Option<&Path>, args: &[&str]) -> Output {
         Some(dir) => command.env("LAZYMKV_FAKE_DIR", dir),
         None => command.env_remove("LAZYMKV_FAKE_DIR"),
     };
-    command.output().unwrap()
+    retry_busy(|| command.output()).unwrap()
 }
 
 const REMUX: &str = r#"{"responses":[{"args_contain":["--gui-mode","-o"],"stdout":"remux.txt",
@@ -161,12 +197,14 @@ fn a_hanging_run_sleeps_until_killed() {
     let tool = stand_in(&dir.0, "makemkvcon64");
     dir.write("makemkvcon64.json", r#"{"responses":[{"args_contain":["mkv"],"stdout":"rip.txt","hang_after_line":1}]}"#);
     dir.write("rip.txt", format!("MSG:5015,0,0,\"Saving 1 titles\"\n{SAVED}"));
-    let mut child = Command::new(&tool)
-        .args(["-r", "mkv", "disc:0", "0", "out"])
-        .env_remove("LAZYMKV_FAKE_DIR")
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = retry_busy(|| {
+        Command::new(&tool)
+            .args(["-r", "mkv", "disc:0", "0", "out"])
+            .env_remove("LAZYMKV_FAKE_DIR")
+            .stdout(Stdio::piped())
+            .spawn()
+    })
+    .unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
 
     // The blocking read waits for the first line however slowly a freshly copied executable starts.
