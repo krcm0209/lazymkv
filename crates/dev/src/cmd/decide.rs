@@ -2781,9 +2781,9 @@ SINFO:0,4,6,0,"PGS"
     }
 
     /// Where `printed` first differs from `stored`, as `<JSON path> (<stored> vs <printed>)` with `at` the path so far,
-    /// or None when they are equal (R29.c1). Object keys and their order, arrays, strings, bools and nulls compare
-    /// exactly; two integers compare exactly, and any other two numbers are equal when
-    /// `|a - b| <= 1e-12 * max(|a|, |b|, 1.0)`.
+    /// or None when they are equal (R29.c1, R29.c1a). Object keys and their order, arrays, strings, bools and nulls
+    /// compare exactly; an integer and a float always differ; two integers compare exactly; and two floats are equal
+    /// when `|a - b| <= 1e-12 * max(|a|, |b|, 1.0)`.
     fn first_difference(stored: &Value, printed: &Value, at: &str) -> Option<String> {
         match (stored, printed) {
             (Value::Object(a), Value::Object(b)) => {
@@ -2800,7 +2800,9 @@ SINFO:0,4,6,0,"PGS"
                 a.iter().zip(b).enumerate().find_map(|(i, (x, y))| first_difference(x, y, &format!("{at}[{i}]")))
             }
             (Value::Number(a), Value::Number(b)) => {
-                let same = if !a.is_f64() && !b.is_f64() {
+                let same = if a.is_f64() != b.is_f64() {
+                    false
+                } else if !a.is_f64() {
                     a == b
                 } else {
                     let (x, y) = (a.as_f64().unwrap(), b.as_f64().unwrap());
@@ -2822,6 +2824,8 @@ SINFO:0,4,6,0,"PGS"
             first_difference(&json!({"a": [1.0, 2.0]}), &json!({"a": [1.0, 2.000001]}), "$").as_deref(),
             Some("$.a[1] (2.0 vs 2.000001)")
         );
+        // A number's type is part of the document: an integer and a float of the same value differ.
+        assert_eq!(first_difference(&json!(1.0), &json!(1), "$").as_deref(), Some("$ (1.0 vs 1)"));
         // Integers compare exactly, even where the float tolerance would let them pass.
         assert_eq!(
             first_difference(&json!(1_000_000_000_000_000_i64), &json!(1_000_000_000_000_001_i64), "$").as_deref(),
@@ -2839,10 +2843,11 @@ SINFO:0,4,6,0,"PGS"
     }
 
     /// decide's output on each made-up fixture is its characterised document (Task 17, K5), with the matching exit
-    /// code. The documents compare structurally, not byte for byte (R29.c1): some numbers come from audio measures
-    /// computed through the C library's pow, cos, sin and hypot, whose last digit differs between the Windows runtime,
-    /// glibc and Apple's libm, so `first_difference` lets two numbers differ by 1e-12 of their size and holds
-    /// everything else exact. The Windows goldens of crates/dev/tests/decide.rs keep pinning the bytes.
+    /// code. On every OS the two compare structurally through `first_difference` (R29.c1): some numbers come from
+    /// audio measures computed through the C library's pow, cos, sin and hypot, whose last digit differs between the
+    /// Windows runtime, glibc and Apple's libm, so two floats may differ by 1e-12 of their size and everything else,
+    /// a number's type included, must match. On Windows, where the files were written, the output must also equal its
+    /// file byte for byte (R29.c1a); nothing else pins these fixtures' bytes, so the Windows leg of this test does.
     #[test]
     fn decide_prints_the_characterised_document_for_each_made_up_fixture() {
         let cases: [(&str, fn(&Path), &[&str]); 8] = [
@@ -2886,12 +2891,20 @@ SINFO:0,4,6,0,"PGS"
                 differing.push(format!("{name}: exit code ({want} vs {code})"));
                 continue;
             }
-            match serde_json::from_str::<Value>(&printed) {
-                Ok(output) => {
-                    differing.extend(first_difference(&value, &output, "$").map(|at| format!("{name}: {at}")))
+            let structural = match serde_json::from_str::<Value>(&printed) {
+                Ok(output) => first_difference(&value, &output, "$"),
+                Err(error) => Some(format!("decide's output is not JSON ({error})")),
+            };
+            // R29.c1a: on Windows, where the files were written, the bytes are pinned too.
+            let bytes = || {
+                let mut lines = stored.lines().zip(printed.lines()).enumerate();
+                match lines.find(|(_, (a, b))| a != b) {
+                    Some((i, (a, b))) => format!("line {} differs on Windows ({a} vs {b})", i + 1),
+                    None => format!("the bytes differ on Windows ({} vs {} bytes)", stored.len(), printed.len()),
                 }
-                Err(error) => differing.push(format!("{name}: decide's output is not JSON ({error})")),
-            }
+            };
+            let difference = structural.or_else(|| (cfg!(windows) && printed != stored).then(bytes));
+            differing.extend(difference.map(|at| format!("{name}: {at}")));
         }
         assert!(differing.is_empty(), "characterisation files that differ from decide's output: {differing:?}");
     }
