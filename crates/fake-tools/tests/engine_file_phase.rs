@@ -30,6 +30,14 @@ fn run_to(h: &Harness, state: &str) -> String {
     id
 }
 
+/// Fires AwaitingLookup's 60-minute timer once the owner has started it. `run_to` returns when the transition into
+/// AwaitingLookup is persisted, which is before its actions run, and StartTimer is one of them, so firing at once can
+/// find no timer and the job then waits for one that never fires.
+fn fire_lookup_timer(h: &Harness) {
+    h.wait("the 60-minute lookup timer", |h| h.timers().pending() == vec![60]);
+    h.fire_timers();
+}
+
 fn json_of(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).unwrap()
 }
@@ -72,7 +80,7 @@ fn a_timer_expiry_that_answers_returns_with_refresh_identity_first() {
     let h = harness(&["movie-direct-lookup-later"], json!({}));
     h.scan_waits_for_lookups(false);
     let id = run_to(&h, "AwaitingLookup");
-    h.fire_timers();
+    fire_lookup_timer(&h);
     h.wait("Filed", |h| h.state_of(&id) == "Filed");
     let answered = h.transitions(&id).into_iter().find(|l| l.event == Some(Event::LookupAnswered)).unwrap();
     assert_eq!(answered.new, State::Ejected { after_copy: false });
@@ -127,7 +135,7 @@ fn a_partial_answer_is_saved_and_the_job_keeps_waiting() {
     let h = harness(&["movie-direct-lookup-partial"], json!({}));
     h.scan_waits_for_lookups(false);
     let id = run_to(&h, "AwaitingLookup");
-    h.fire_timers();
+    fire_lookup_timer(&h);
     h.wait("dischash saved", |h| fs::read_to_string(h.job_dir(&id).join("lookup-status.txt")).unwrap().contains("dischash 404"));
     h.settle();
     assert_eq!(h.state_of(&id), "AwaitingLookup");
