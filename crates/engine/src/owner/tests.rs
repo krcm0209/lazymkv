@@ -414,26 +414,62 @@ fn the_engine_logs_its_start_and_stop() {
     assert_eq!(h.engine_log().matches("engine stopped").count(), 1);
 }
 
-/// A step that panics is reported as a result with no event and its panic, and gives the disc-phase token back, so
-/// the engine still stops and a later disc still starts.
+/// A step that panics fails its job as Unknown with the panic's text (design part 5.2; ruling at the final review),
+/// writes its job.log and engine.log lines and gives the disc-phase token back, so the engine still stops and a later
+/// disc still starts.
 #[test]
-fn a_panicking_step_reports_no_event_and_gives_the_token_back() {
+fn a_panicking_step_fails_its_job_and_gives_the_token_back() {
     let script = vec![("RunScan", StepScript::Panic("scripted panic")), ("RunScan", StepScript::Hang)];
     let h = Harness::new_scripted(script, json!({}));
     h.insert("tok0", "disc-a");
     let a = id_of(&h, "disc-a");
-    h.wait("RunScan called", |h| h.steps().calls() == ["RunScan"]);
-    h.settle();
-    assert_eq!(h.state_of(&a), "Fingerprinted");
+    h.wait("Failed", |h| h.state_of(&a) == "Failed");
+    let record = h.record(&a);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Fingerprinted) });
+    assert_eq!(record.message.as_deref(), Some("the step panicked: scripted panic"));
+    assert!(matches!(h.transitions(&a).pop().unwrap().event, Some(Event::ScanFailed { .. })));
     let job_log = std::fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap_or_default();
     assert!(job_log.contains("RunScan returned no event: the step panicked: scripted panic"), "{job_log}");
     assert!(h.engine_log().contains(&format!("{a}: the step panicked: scripted panic")), "{}", h.engine_log());
+    h.wait("the failed notification", |h| {
+        h.notifications().iter().any(|n| n.event == NotifyEvent::Failed { class: FailureClass::Unknown })
+    });
+    h.settle();
     assert_eq!(h.awake().holders(), 0);
     h.insert("tok1", "disc-b");
     h.wait("disc-b scanning", |h| h.steps().calls() == ["RunScan", "RunScan"]);
     h.restart();
     h.settle();
     assert_eq!(h.job_ids().len(), 2);
+}
+
+/// Design part 5.3 ("After any kill the engine waits 10 s before the next `makemkvcon` call"; ruling at the final
+/// review): a disc pulled mid-rip has its rip killed, and the token passes to the next disc only once that stale step
+/// has reported, after its pause, so the next disc's first `makemkvcon` never starts beside the killed one.
+#[test]
+fn a_pulled_discs_killed_step_holds_the_token_until_it_reports() {
+    let pause = Duration::from_secs(3);
+    let mut script = disc_phase();
+    script[3] = ("RipTitle", StepScript::After(pause, StepResult { event: Some(Event::TitleRipped), message: None }));
+    script.push(("RunScan", StepScript::Hang));
+    let h = Harness::new_scripted(script, json!({}));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("ripping", |h| h.steps().calls().last().map(String::as_str) == Some("RipTitle"));
+    let ripping = Instant::now();
+    h.insert("tok1", "disc-b");
+    let b = h.fingerprint("disc-b");
+    h.wait("disc-b queued", |h| h.drives_json()["drives"]["tok1"]["fingerprint"] == json!(b));
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&a).last().unwrap().event == Some(Event::MediaRemoved));
+    thread::sleep(Duration::from_millis(300));
+    assert!(ripping.elapsed() < pause, "the test took too long to see the removal: {:?}", ripping.elapsed());
+    assert_eq!(h.drives_json()["drives"]["tok1"]["handled"], json!(false), "disc-b was routed beside the killed rip");
+    assert_eq!(h.steps().calls().len(), 4, "{:?}", h.steps().calls());
+    h.wait("disc-b scanning", |h| h.steps().calls().len() == 5);
+    assert!(ripping.elapsed() >= pause - Duration::from_millis(200), "disc-b started after {:?}", ripping.elapsed());
+    assert_eq!(h.steps().calls(), ["RunScan", "Plan", "CheckSpace", "RipTitle", "RunScan"]);
+    assert!(h.transitions(&a).iter().all(|line| line.event != Some(Event::TitleRipped)), "the stale result was fed");
 }
 
 /// R22.7: only a job that waits for its disc gets MediaArrived (design part 5.4 step 3), so a second arrival of a disc

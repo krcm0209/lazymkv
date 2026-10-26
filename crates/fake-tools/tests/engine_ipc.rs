@@ -581,6 +581,81 @@ fn a_retry_queues_behind_an_earlier_arrival() {
     assert_eq!(order[1], a);
 }
 
+/// Ruling at the final review (spec 10.3, design part 5.5, L1a): a copy plan fails with its disc left in; after a
+/// restart the failed job has that disc noted, so a Retry plans again at once instead of feeding a MediaRemoved that
+/// never happened and waiting for a pull and a reinsertion.
+#[test]
+fn a_retry_after_a_restart_plans_again_with_the_disc_left_in() {
+    let h = stand_in(&["movie-direct", "movie-direct-copy-plan"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Failed");
+    let id = h.job_ids().pop().unwrap();
+    h.restart();
+    h.settle();
+    let before = h.transitions(&id).len();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retry and its plan", |h| h.transitions(&id).len() >= before + 2);
+    let lines = h.transitions(&id);
+    let after = &lines[before..];
+    assert!(after.iter().all(|t| t.event != Some(Event::MediaRemoved)), "{after:?}");
+    let retried = (after[0].event.clone(), after[0].actions.clone());
+    assert_eq!(retried, (Some(Event::Retry), vec![lazymkv_core::job::Action::Plan]));
+    assert!(matches!(after[1].event, Some(Event::PlanFailed { .. })), "{after:?}");
+}
+
+/// S73, widened at the final review (design part 8.4): a failed job's lookup book is rebuilt from its folder at a
+/// restart, so the Retry's Plan reads the answers saved there instead of an empty book.
+#[test]
+fn a_retry_after_a_restart_plans_with_the_saved_answers() {
+    let h = stand_in(&["movie-direct", "movie-direct-copy-plan"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Failed");
+    let id = h.job_ids().pop().unwrap();
+    let planned = h.record(&id).plan.unwrap();
+    assert!(!planned.identity.lookup_pending, "the first plan had every answer");
+    h.restart();
+    h.settle();
+    let before = h.transitions(&id).len();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retried plan", |h| h.transitions(&id).len() >= before + 2);
+    assert!(matches!(h.transitions(&id)[before + 1].event, Some(Event::PlanFailed { .. })));
+    assert_eq!(h.record(&id).plan.unwrap().identity, planned.identity);
+}
+
+/// S73, widened at the final review (design part 8.4): a job that failed before Decide with a lookup-pending plan
+/// decides, after a restart and a Retry, from the late answer saved in its folder; an empty book would overwrite its
+/// identity with an unknown one and hold it for review.
+#[test]
+fn a_retry_after_a_restart_decides_with_the_saved_late_answer() {
+    let h = stand_in(&["movie-direct", "movie-direct-lookup-late", "movie-direct-probe-error"], settings());
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    h.run_until("Failed");
+    let id = h.job_ids().pop().unwrap();
+    assert_eq!(h.record(&id).state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    assert!(fs::read_to_string(h.job_dir(&id).join("lookup-status.txt")).unwrap().contains("dischash 404"));
+    assert!(h.record(&id).plan.unwrap().identity.lookup_pending, "the refresh before Decide has not run yet");
+    // The probe works again for the retry.
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/ffprobe.json");
+    fs::copy(base, h.tools().join("ffprobe.json")).unwrap();
+    h.restart();
+    h.settle();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retried job filed or held", |h| matches!(h.state_of(&id).as_str(), "Filed" | "NeedsReview"));
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Filed);
+    let plan = record.plan.unwrap();
+    assert!(!plan.identity.lookup_pending);
+    assert_eq!(plan.identity.title.as_deref(), Some("Synthetic Movie"));
+    assert_eq!(Path::new(&record.titles[0].filed.as_ref().unwrap().path), h.library().join(FINAL).as_path());
+}
+
 #[test]
 fn rip_again_arms_the_job_and_the_next_insertion_starts_a_new_job() {
     let mut script = main_line();
@@ -717,6 +792,58 @@ fn cancel_during_a_rip_kills_it_and_fails_with_cancelled_by_the_owner() {
         .map(|p| p.join("rip.txt.exit.json")).find(|p| p.is_file()).unwrap();
     let exit: Value = serde_json::from_slice(&fs::read(exit).unwrap()).unwrap();
     assert_ne!(exit["exit_code"], json!(0));
+}
+
+/// Ruling at the final review: after a removal the job's killed step is stale, not the job's running step, so a
+/// cancel names no running step instead of failing the job and dropping a later step's result.
+#[test]
+fn a_cancel_while_only_a_pulled_discs_killed_step_runs_is_refused() {
+    let mut script = main_line();
+    let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3), ripped));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let id = h.job_ids().pop().unwrap();
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&id).last().unwrap().event == Some(Event::MediaRemoved));
+    assert_eq!(c.err("cancel", json!({"job": id})), format!("job {id} has no running step: it is Ripping"));
+    h.settle();
+    let last = h.transitions(&id).pop().unwrap();
+    assert_eq!((last.event, last.new), (Some(Event::MediaRemoved), State::Ripping));
+}
+
+/// Design part 5.2 (ruling at the final review): a step that panics fails its job as Unknown, so a file-phase job
+/// lets the slot go to the next job and can be retried, instead of holding the slot with no step for ever.
+#[test]
+fn a_panicking_remux_fails_the_job_frees_the_slot_and_retry_resumes_it() {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(10).collect(); // A up to Remux
+    script.push(("Remux", StepScript::Panic("scripted remux panic")));
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // B lets the slot go
+    script.extend([("Remux", step(Event::RemuxDone)), ("VerifyFile", step(Event::FileVerified)),
+                   ("File", step(Event::FileDone))]); // A after its retry
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert_eq!(failed.message.as_deref(), Some("the step panicked: scripted remux panic"));
+    h.wait("A's failed notification", |h| h.notifications().iter().any(|n| {
+        n.job_id.as_deref() == Some(a.as_str()) && n.event == NotifyEvent::Failed { class: FailureClass::Unknown }
+    }));
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A let go
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
 }
 
 // ---- Review actions (design part 9.4, P25, R-A8) ----
@@ -1054,6 +1181,28 @@ fn shutdown_is_refused_while_a_step_runs_and_force_cancels_and_deletes_partials(
     assert_eq!(fs::read(staged.join("title_t00.mkv")).unwrap(), b"raw");
     let stopped = h.record(&id);
     assert_eq!(stopped.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert_eq!(stopped.message.as_deref(), Some(CANCELLED));
+}
+
+/// S83, narrowed at the final review (design part 3.8: what stays is for Retry): a forced shutdown during File keeps
+/// the job's partial file, the verified remux its Retry renames.
+#[test]
+fn a_forced_shutdown_during_file_keeps_the_verified_partial() {
+    let h = scripted(hanging_at("File", 0));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "File", 1);
+    let id = h.job_ids().pop().unwrap();
+    let partial = h.library().join(".lazymkv-partial");
+    fs::create_dir_all(&partial).unwrap();
+    let verified = partial.join(format!("{id}-t00-00800.mkv.partial"));
+    fs::write(&verified, b"verified").unwrap();
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    assert_eq!(fs::read(&verified).unwrap(), b"verified");
+    let stopped = h.record(&id);
+    assert_eq!(stopped.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
     assert_eq!(stopped.message.as_deref(), Some(CANCELLED));
 }
 

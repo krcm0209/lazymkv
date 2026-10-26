@@ -67,6 +67,11 @@ pub(crate) const NO_EVENT_ACTIONS: [&str; 3] = ["EmptyTitleDirectory", "DeletePa
 /// job ID, which is a lower-case fingerprint, a dash and a number (K3). Def: T26. Use: T26.
 pub(crate) const CHECK_HOLDER: &str = "the MakeMKV check";
 
+/// The disc-phase token's holder from the removal of a disc whose `makemkvcon` step was killed until that stale step
+/// has reported (design part 5.3: "After any kill the engine waits 10 s before the next `makemkvcon` call"; the pause
+/// runs inside the killed step): never a job ID, as `CHECK_HOLDER`. Def: T22. Use: T22.
+pub(crate) const KILLED_HOLDER: &str = "the killed MakeMKV step";
+
 /// The start of the message of a step, recording or eject that panicked (R22.11): the owner writes an engine.log line
 /// naming the job for every result whose message holds it. Def: T22. Use: T22.
 pub(crate) const PANICKED: &str = "the step panicked: ";
@@ -440,6 +445,12 @@ impl DiscToken {
         }
     }
 
+    /// Hands the token to `holder`, a sentinel that is never a job ID, so that a job's release leaves it held
+    /// (`KILLED_HOLDER`, design part 5.3). Def: T22. Use: T22.
+    pub(crate) fn hold_for(&mut self, holder: &str) {
+        self.holder = Some(holder.to_string());
+    }
+
     /// Queues `waiting` behind everything already waiting (design part 5.4). Def: T22. Use: T22, T25, T26.
     pub(crate) fn wait(&mut self, waiting: Waiting) {
         self.queue.push_back(waiting);
@@ -658,6 +669,14 @@ struct Worker {
     cancelled: Option<Cancelled>,
 }
 
+impl Worker {
+    /// Whether the worker runs a `makemkvcon`: a RunScan or RipTitle, whose drive listing is part of it (design parts
+    /// 3.7, 5.3, S80).
+    fn runs_makemkv(&self) -> bool {
+        self.tags.iter().any(|tag| tag == "RunScan" || tag == "RipTitle")
+    }
+}
+
 /// A running step the owner cancelled (design part 9.4, R-A7): the failure fed once the step has ended, in place of
 /// its own result, and the `cancel` requests answered then (S78).
 struct Cancelled {
@@ -681,11 +700,11 @@ enum CheckWork {
 }
 
 /// A forced shutdown waiting for its steps to end (design part 3.8, S83): the `shutdown` request to answer and the
-/// jobs whose step it cancelled.
+/// jobs whose step it cancelled, each with that step's main action tag.
 struct Quiet {
     client: u64,
     id: Option<u64>,
-    cancelled: Vec<String>,
+    cancelled: Vec<(String, String)>,
 }
 
 /// The job-owner thread's state (design part 4.4).
@@ -739,7 +758,8 @@ struct Owner {
 
 impl Owner {
     /// The owner over the store's jobs and drives.json (design parts 5.10, 7.4), after the restart sequence over the
-    /// discs `present` in the drives (`Owner::restart`), showing `selftest` until the first `run_selftest`. A refused
+    /// discs `present` in the drives (`Owner::restart`), showing `selftest` until the first `run_selftest`. Each loaded
+    /// job but a Filed or Discarded one has its lookup book rebuilt from its folder (`rebuild_book`, S73). A refused
     /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only.
     #[allow(clippy::too_many_arguments)]
     fn load(
@@ -757,9 +777,18 @@ impl Owner {
         for loaded in store.load_jobs() {
             match loaded {
                 Ok(record) => {
-                    let settings = job_settings(&store, &store.job_dir(&record.id));
+                    let job_dir = store.job_dir(&record.id);
+                    let settings = job_settings(&store, &job_dir);
+                    // S73, widened at the final review: every job that can still run a step, a failed or held one
+                    // included, has its book rebuilt from its folder, so a Retry's Plan or Decide reads the saved
+                    // answers (design part 8.4). A filed or discarded job runs no step.
+                    let book = match record.state {
+                        State::Filed | State::Discarded => LookupBook::default(),
+                        _ => rebuild_book(&job_dir),
+                    };
                     lock(&shown).insert(record.id.clone(), record.clone());
-                    let job = Job { record, settings, generation: 0, disc: None, lookups: Arc::default() };
+                    let lookups = Arc::new(Mutex::new(book));
+                    let job = Job { record, settings, generation: 0, disc: None, lookups };
                     jobs.insert(job.record.id.clone(), job);
                 }
                 Err(error) => store.log(&format!("a job is refused and left alone: {error}")),
@@ -814,9 +843,11 @@ impl Owner {
     /// 1. each disc in a drive is fingerprinted as an arrival's walk would be (`read_arrival`), and a drive record
     ///    whose drive holds no disc now is emptied, as a removal would;
     /// 2. `plan_restart` over the loaded jobs, those discs and drives.json;
-    /// 3. each fed job has its disc noted (the token job's drive becomes its record's drive) and its book rebuilt
-    ///    (`rebuild_book`), and its EngineRestart transition is persisted through the stop hook, whose true answer
-    ///    stops the engine before any resume action runs;
+    /// 3. each fed job has its disc noted (the token job's drive becomes its record's drive), and its EngineRestart
+    ///    transition is persisted through the stop hook, whose true answer stops the engine before any resume action
+    ///    runs; then, in each noted drive no fed job holds, the disc of the latest job of its fingerprint is noted when
+    ///    that job failed in its disc phase, and the drive becomes its record's drive, so a Retry uses the disc
+    ///    (spec 10.3);
     /// 4. the space promises of the resumed jobs (`rebuild_promises`), the token and the slot are
     ///    rebuilt, and the noted drives are recorded handled;
     /// 5. the resume actions are performed, the slot is granted, then the arrivals are routed as fresh insertions.
@@ -853,7 +884,6 @@ impl Owner {
         let plan = plan_restart(&records, &discs, &self.drive_records);
         let mut resumed = Vec::new();
         for (id, disc_present) in &plan.feeds {
-            let job_dir = self.store.job_dir(id);
             let Some(job) = self.jobs.get_mut(id) else {
                 continue;
             };
@@ -865,7 +895,6 @@ impl Owner {
                 job.record.drive = drive.clone();
             }
             job.disc = drive;
-            job.lookups = Arc::new(Mutex::new(rebuild_book(&job_dir)));
             let event = Event::EngineRestart { disc_present: *disc_present };
             let (new, actions) = match reduce(&job.record.state, &event) {
                 Ok(next) => next,
@@ -887,6 +916,7 @@ impl Owner {
             self.publish(id);
             resumed.push((id.clone(), transition.actions));
         }
+        self.note_failed_discs(&plan.noted, &discs);
         {
             let mut promises = lock(&self.parts.promises);
             for (id, _) in &resumed {
@@ -921,6 +951,33 @@ impl Owner {
                 return;
             }
             self.on_arrival(outcome);
+        }
+    }
+
+    /// Step 3's second half (spec 10.3, L1a): in each of the `noted` drives that no job's disc is in, the disc's
+    /// latest job, by (`created_unix`, `id`), has its disc noted there when it is `Failed` from a disc-phase state, and
+    /// that drive becomes its record's drive (written with its next transition). A Retry then plans or rips with the
+    /// disc, as it would have before the restart, instead of waiting for a removal and a reinsertion.
+    fn note_failed_discs(&mut self, noted: &[String], discs: &[(String, Option<String>)]) {
+        for drive in noted {
+            let Some(fingerprint) = discs.iter().find(|(id, _)| id == drive).and_then(|(_, found)| found.clone()) else {
+                continue;
+            };
+            if self.jobs.values().any(|job| job.disc.as_deref() == Some(drive.as_str())) {
+                continue;
+            }
+            let latest = self
+                .jobs
+                .values_mut()
+                .filter(|job| job.record.fingerprint == fingerprint)
+                .max_by(|a, b| (a.record.created_unix, &a.record.id).cmp(&(b.record.created_unix, &b.record.id)));
+            let Some(job) = latest else {
+                continue;
+            };
+            if job.disc.is_none() && matches!(&job.record.state, State::Failed { from, .. } if from.is_disc_phase()) {
+                job.disc = Some(drive.clone());
+                job.record.drive = drive.clone();
+            }
         }
     }
 
@@ -1721,10 +1778,13 @@ impl Owner {
     /// A worker's result (design part 5.2). The result of a step the owner cancelled is dropped with what it posted,
     /// and the cancel's failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its
     /// `ok` (design part 9.4, R-A7, S78). A stale one is dropped with what its step posted (R-A7), unless a newer
-    /// step of the job runs, whose posts it must not take. Otherwise the posted edits are applied, each posted event
-    /// is fed, then the result's event. A result with no event, from an action other than those that report none,
-    /// writes `<tag> returned no event` to job.log, followed by `: <message>` when it has one, and gives the token
-    /// back, since no step of the job runs any more (L2).
+    /// step of the job runs, whose posts it must not take; once no `makemkvcon` step is listed, the token
+    /// `KILLED_HOLDER` held for it is freed and what waited is routed (design part 5.3). Otherwise the posted edits
+    /// are applied, each posted event is fed, then the result's event. A result with no event, from an action other
+    /// than those that report none, writes `<tag> returned no event` to job.log, followed by `: <message>` when it has
+    /// one; then, unless another step of the job runs (one a posted event handed out), a step that panicked fails its
+    /// job (`panic_failure`, design part 5.2) and any other gives the token back, since no step of the job runs any
+    /// more (L2).
     fn on_step_done(&mut self, id: &str, generation: u64, result: StepResult) {
         self.log_panic(id, &result);
         let mut worker = self.finish_worker(id, generation);
@@ -1742,7 +1802,7 @@ impl Owner {
             if !self.workers.iter().any(|worker| worker.job == id) {
                 drop(self.parts.outbox.take(id));
             }
-            return;
+            return self.release_killed_token();
         }
         let posted = self.parts.outbox.take(id);
         if let Some(job) = self.jobs.get_mut(id) {
@@ -1759,18 +1819,49 @@ impl Owner {
         match result.event {
             Some(event) => self.feed(id, event, result.message),
             None => {
-                let tag = worker.and_then(|worker| worker.tags.last().cloned()).unwrap_or_default();
-                if !NO_EVENT_ACTIONS.contains(&tag.as_str()) {
-                    let line = match &result.message {
-                        Some(message) => format!("{tag} returned no event: {message}"),
-                        None => format!("{tag} returned no event"),
-                    };
-                    self.store.job_log(id, &line);
-                    if self.quiet.is_none() {
-                        self.give_back(id);
-                    }
+                let tags = worker.map(|worker| worker.tags).unwrap_or_default();
+                let tag = tags.last().cloned().unwrap_or_default();
+                if NO_EVENT_ACTIONS.contains(&tag.as_str()) {
+                    return;
+                }
+                let line = match &result.message {
+                    Some(message) => format!("{tag} returned no event: {message}"),
+                    None => format!("{tag} returned no event"),
+                };
+                self.store.job_log(id, &line);
+                if self.workers.iter().any(|worker| worker.job == id) {
+                    // A posted event handed the job a new step, which holds what the job holds and reports for itself.
+                    return;
+                }
+                let panicked = result.message.as_deref().is_some_and(|message| message.contains(PANICKED));
+                match self.panic_failure(id, &tags).filter(|_| panicked) {
+                    Some(event) => self.feed(id, event, result.message),
+                    None if self.quiet.is_none() => self.give_back(id),
+                    None => {}
                 }
             }
+        }
+    }
+
+    /// The failure a step that panicked feeds, so its job leaves the working state it would otherwise keep with no
+    /// step, the token and the file-phase slot with it (design part 5.2; ruling at the final review): `cancel_event`'s
+    /// row for the worker's main action, with EjectFailed for an Eject and ShareLost for a CheckSpace, which have
+    /// none. None when the job's state does not take it.
+    fn panic_failure(&self, id: &str, tags: &[String]) -> Option<Event> {
+        let state = &self.jobs.get(id)?.record.state;
+        let event = match main_tag(tags).as_str() {
+            "Eject" => Event::EjectFailed,
+            "CheckSpace" => Event::ShareLost,
+            tag => cancel_event(tag, state),
+        };
+        reduce(state, &event).is_ok().then_some(event)
+    }
+
+    /// Frees the token `KILLED_HOLDER` holds once no `makemkvcon` step is listed any more, and routes what waited
+    /// (design part 5.3: the killed step's after-kill pause has then passed).
+    fn release_killed_token(&mut self) {
+        if self.token.holder() == Some(KILLED_HOLDER) && !self.makemkv_busy() {
+            self.give_back(KILLED_HOLDER);
         }
     }
 
@@ -1783,7 +1874,9 @@ impl Owner {
 
     /// Design part 5.4's removal: the drive leaves the queue and its record empties. An ejecting drive is not fed.
     /// The token holder whose disc it held, in a disc-phase state, has its running step cancelled and dropped and is
-    /// fed MediaRemoved; any other job whose disc was in the drive only has it marked absent.
+    /// fed MediaRemoved; any other job whose disc was in the drive only has it marked absent. When the cancelled step
+    /// runs a `makemkvcon`, the token passes to `KILLED_HOLDER` until that step has reported, so the next
+    /// `makemkvcon` call waits for the killed one's after-kill pause (design part 5.3).
     fn on_removed(&mut self, drive: &str) {
         self.rescans.retain(|(rescanned, _)| rescanned != drive);
         let slot = self.drive(drive);
@@ -1808,8 +1901,13 @@ impl Owner {
                 continue;
             }
             job.generation += 1;
+            let mut killed = false;
             for worker in self.workers.iter().filter(|worker| worker.job == id) {
                 worker.cancel.cancel();
+                killed |= worker.runs_makemkv();
+            }
+            if killed {
+                self.token.hold_for(KILLED_HOLDER);
             }
             self.feed(&id, Event::MediaRemoved, None);
             if self.stopping {
@@ -2101,13 +2199,19 @@ impl Owner {
     }
 
     /// `cancel` (design part 9.4, R-A7, S78): refused for a job with no running step, naming its state, and for a
-    /// CheckSpace or Eject. Otherwise the step's CancelToken is raised, the job's generation bumped so the step's own
-    /// result is stale, and the `ok` waits until the step has ended and its failure is persisted (`on_step_done`).
+    /// CheckSpace or Eject. The running step is the worker of the job's current generation, or one an earlier `cancel`
+    /// is stopping; a stale step left by a removal is not one. Otherwise the step's CancelToken is raised, the job's
+    /// generation bumped so the step's own result is stale, and the `ok` waits until the step has ended and its
+    /// failure is persisted (`on_step_done`).
     fn cancel(&mut self, client: u64, id: Option<u64>, job_id: &str) {
         let Some(job) = self.jobs.get_mut(job_id) else {
             return self.reply(client, id, Err(no_job(job_id)));
         };
-        let Some(worker) = self.workers.iter_mut().find(|worker| worker.job == job_id) else {
+        let generation = job.generation;
+        let live = self.workers.iter().position(|worker| worker.job == job_id && worker.generation == generation);
+        let stopping = || self.workers.iter().position(|worker| worker.job == job_id && worker.cancelled.is_some());
+        let at = live.or_else(stopping);
+        let Some(worker) = at.map(|at| &mut self.workers[at]) else {
             let refusal = no_running_step(job_id, &job.record.state);
             return self.reply(client, id, Err(refusal));
         };
@@ -2167,7 +2271,7 @@ impl Owner {
     /// Whether a `makemkvcon` runs for a job: a RunScan or RipTitle worker, whose listing is part of it (design part
     /// 3.7, S80).
     fn makemkv_busy(&self) -> bool {
-        self.workers.iter().any(|worker| worker.tags.iter().any(|tag| tag == "RunScan" || tag == "RipTitle"))
+        self.workers.iter().any(Worker::runs_makemkv)
     }
 
     /// Whether `work` runs the MakeMKV check's drive listing: a self-test, or the re-check of a job in AwaitingMakeMkv
@@ -2348,7 +2452,7 @@ impl Owner {
             if tag == "CheckSpace" || tag == "Eject" {
                 continue;
             }
-            cancelled.push(worker.job.clone());
+            cancelled.push((worker.job.clone(), tag.clone()));
             if worker.cancelled.is_none() {
                 let state = self.jobs.get(&worker.job).map_or(State::Discarded, |job| job.record.state.clone());
                 worker.cancelled = Some(Cancelled { event: cancel_event(&tag, &state), replies: Vec::new() });
@@ -2361,14 +2465,18 @@ impl Owner {
         self.quiet = Some(Quiet { client, id, cancelled });
     }
 
-    /// The end of a forced shutdown, once no step runs (S83): each cancelled job's partial files are deleted, the
-    /// `shutdown` gets its `ok`, every client is closed and the owner stops.
+    /// The end of a forced shutdown, once no step runs (S83, narrowed at the final review): the partial files of each
+    /// cancelled job are deleted, but not those of a job whose cancelled step was File, whose partial files are the
+    /// verified remuxes its Retry renames (design part 3.8: what stays is for Retry); then the `shutdown` gets its
+    /// `ok`, every client is closed and the owner stops.
     fn finish_shutdown(&mut self) {
         let Some(quiet) = self.quiet.take() else {
             return;
         };
-        for job in &quiet.cancelled {
-            self.delete_partials(job);
+        for (job, tag) in &quiet.cancelled {
+            if tag != "File" {
+                self.delete_partials(job);
+            }
         }
         self.reply(quiet.client, quiet.id, Ok(Value::Null));
         self.close_and_stop();
