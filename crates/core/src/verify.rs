@@ -574,7 +574,9 @@ pub fn subs_index(tree: &dyn Tree, subs_dir: &PathKey) -> Result<Vec<SubsIndexEn
 /// `recording::files::PacketsFile` (files.rs:175), the file's serde shape. Spec 6.4 step 10, 8.7, K5. Def: T18. Use: T19.
 #[derive(Clone, Debug)]
 pub struct PacketsFile {
+    /// The tree's display of the file's path.
     pub shown: String,
+    /// The packets, or the error text `subtitle_events` gives for the file.
     pub packets: Result<Vec<Packet>, String>,
 }
 

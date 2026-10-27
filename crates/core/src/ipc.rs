@@ -21,9 +21,11 @@ pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// The error text for a line over MAX_LINE_BYTES, from parse_request and from the engine's capped reader (design part
 /// 9.1). Def: T7. Use: T7, T26.
 pub const LINE_TOO_LONG: &str = "the line is longer than 4 MiB";
-/// How many finished jobs one `history` reply holds (design part 9.3). Def: T7. Use: T26.
+/// How many finished jobs one `history` reply holds, and how many the snapshot lists after the unfinished ones (design
+/// parts 9.2, 9.3). Def: T7. Use: T26.
 pub const HISTORY_PAGE: usize = 50;
-/// The message of a job the owner cancelled (design part 9.3). Def: T7. Use: T26.
+/// The message of a job the owner cancelled (design part 9.3), also the drivers' message for a run the cancel killed.
+/// Def: T7. Use: T13, T14, T22, T23, T26.
 pub const CANCELLED: &str = "cancelled by the owner";
 /// The names `secret_set` takes besides a share's (design part 9.4). Def: T7. Use: T26.
 pub const SECRET_NAMES: [&str; 3] = ["tmdb_token", "ha_webhook_url", "webhook_url"];
@@ -438,7 +440,8 @@ pub struct Snapshot {
     pub jobs: Vec<JobSummary>,
     /// The settings in force.
     pub settings: Settings,
-    /// The problems `Settings::validate` finds in them.
+    /// The problems `Settings::validate` finds in them, then the engine's own when `staging_root` is unset (design
+    /// part 9.4: the engine starts no job until it is set).
     pub problems: Vec<SettingsProblem>,
     /// Which secrets are set, by name; a value is never sent.
     pub secrets: BTreeMap<String, SecretState>,
@@ -491,7 +494,8 @@ pub struct SelfTestCheck {
     pub path: Option<String>,
     /// The version found, or None.
     pub version: Option<String>,
-    /// What was found, or None.
+    /// Where the tool was found: `settings`, `resources`, `install_folder` or `path` (design parts 3.6, 9.2); None for
+    /// a check that is not a tool's, or a tool that was not found.
     pub found: Option<String>,
     /// Whether the check could not run because a job was using the resource.
     pub busy: bool,

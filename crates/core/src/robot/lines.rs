@@ -57,7 +57,7 @@ pub struct RunSummary {
     pub drives: Vec<Drive>,
 }
 
-/// Spec 9.4's licence and key messages. Def: T5. Use: T13.
+/// Spec 9.4's licence and key messages, which `LineReader` reports as `LineEvent::Licence`. Def: T5. Use: T5.
 pub const LICENCE_CODES: [u32; 5] = [5021, 5050, 5052, 5055, 5095];
 
 /// The per-line reader (PIPE-10); holds a scratch `Scan` so `robot::message` builds each Message. Def: T5. Use: T13.

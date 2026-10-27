@@ -1,8 +1,12 @@
 //! lazymkv-tools: the makemkvcon, mkvmerge and ffprobe drivers, their capture-style recorded runs under ProcessGuard, the tool lookup of design part 3.6, and the disc snapshot's file I/O moved from capture (design part 4.1, R-B2).
 
+/// The ffprobe driver (design parts 5.3, 5.11). Def: T14. Use: T24.
 pub mod ffprobe;
 mod lookup;
+/// The makemkvcon drivers: the drive listing, the scan and the rip (design parts 5.3, 5.4, 5.6). Def: T13. Use: T23,
+/// T26.
 pub mod makemkv;
+/// The mkvmerge drivers: the identification and the remux (design parts 5.3, 5.7). Def: T14. Use: T23, T24.
 pub mod mkvmerge;
 mod record;
 mod snapshot;

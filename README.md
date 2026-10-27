@@ -35,7 +35,8 @@ install.
 ## Layout
 
 - `crates/` - the Rust workspace: `capture` (records tool output with timing, snapshots a disc, ejects),
-  `fake-tools` (a stand-in that replays recorded MakeMKV output for tests), `core` (the decision rules, with no I/O:
+  `fake-tools` (the stand-in for `makemkvcon`, `mkvmerge`, `ffprobe`, `ffmpeg` and `java`, chosen by its file name,
+  which replays a scenario's responses, and every test that runs it), `core` (the decision rules, with no I/O:
   the robot-output parser and the typed disc model, identification, the title planner, the audio and subtitle track
   rules, the namer, the verification of a rip, confidence and disposition, the job state reducer, the persisted job and
   drive records and the IPC messages, the `makemkvcon` line reader, and phase 0's track reconciler, audio content rule
@@ -67,7 +68,8 @@ install.
   Before a commit the corpus is checked for tokens, unit-key files, machine user names and any path under
   `corpus/owner/` (`scripts/phase0/check-names.sh`), as [`corpus/README.md`](corpus/README.md) describes.
 - `docs/` - the design spec and the port's design, the implementation plans, the experiment reports, the environment
-  notes, and the phase 1 notes (`docs/phase1/`: the port's test mapping and the decision core).
+  notes, the phase 1 notes (`docs/phase1/`: the port's test mapping and the decision core) and the phase 2 notes
+  (`docs/phase2/`: the engine).
 - `experiments/ocrs-trial/` - the trial that compared the ocrs OCR engine with Tesseract on subtitle frames.
 
 ## Credits

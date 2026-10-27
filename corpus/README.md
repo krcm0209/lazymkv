@@ -5,8 +5,13 @@ the evidence repository included: subtitle text and audio proxies stay in the tu
 (decision D16).
 
 - `scenarios/` - replay scenarios for the stand-in executables (`crates/fake-tools`): a scenario file per tool
-  (`makemkvcon64.json`) and the recorded output it replays with its original timing. `disc-a-scan/` is Disc A's online
-  scan, with the machine user name in it replaced by `USER` and the drive's serial number by `SERIAL`. Public, part of this repository.
+  (`makemkvcon64.json`, `mkvmerge.json`, `ffprobe.json` and so on), whose responses are chosen by needles in the
+  arguments, and the output each response replays, with its timing when one was recorded. `disc-a-scan/` is Disc A's
+  online scan, with the machine user name in it replaced by `USER` and the drive's serial number by `SERIAL`.
+  `movie-direct/` is a made-up movie disc for the engine's tests: every tool's scenario, `disc.json` (the volume the
+  engine's test harness builds) and `http.json` (the TheDiscDB and TMDb answers it replays). Each `movie-direct-*/`
+  variant holds only the files it changes and is laid over `movie-direct/` at test time (S51). Every value in the
+  `movie-direct` family is synthetic (ruling RP21). Public, part of this repository.
 - `thediscdb/` - real `makemkvcon` scan logs with TheDiscDB's parsed form and human-labelled title types, pinned from
   TheDiscDB's data repository; the `core` tests read them. MIT-licensed: see its `README.md` and `LICENSE`.
 - `thediscdb-api/` - TheDiscDB's API answers for those discs, saved on 2026-10-04; its `README.md` gives their source

@@ -287,7 +287,8 @@ pub struct DecideInputs {
     pub audio: Vec<AudioEntry>,
     pub subtitles: SubtitleEntry,
     pub plan: PlanEntry,
-    /// `recorded_answers(rec)`, its `Refused.line` held back.
+    /// `replay_answers(ctx, rec, options)`: the recording's answers with `--tmdb-record`'s record in place of
+    /// tmdb.json's (S49), the refusal's line held back as the Err. The engine fills it the same way (R-B1).
     pub answers: Result<RecordedAnswers, String>,
     pub file: FileFacts,
     /// The readers' are `LibraryFacts::default()`.
@@ -2774,6 +2775,7 @@ SINFO:0,4,6,0,"PGS"
 
     /// `out` with the scratch root written as `<root>`, in its JSON-escaped and its plain spelling, and then each
     /// JSON-escaped Windows separator (`\\` in the printed text) written as `/`, so the files compare equal on every OS.
+    /// The stored files were written in this masked form, so no comparison sees how decide spells a path's separators.
     fn masked(out: &str, root: &Path) -> String {
         let plain = root.display().to_string();
         let escaped = plain.replace('\\', "\\\\");
@@ -2847,7 +2849,9 @@ SINFO:0,4,6,0,"PGS"
     /// audio measures computed through the C library's pow, cos, sin and hypot, whose last digit differs between the
     /// Windows runtime, glibc and Apple's libm, so two floats may differ by 1e-12 of their size and everything else,
     /// a number's type included, must match. On Windows, where the files were written, the output must also equal its
-    /// file byte for byte (R29.c1a); nothing else pins these fixtures' bytes, so the Windows leg of this test does.
+    /// file byte for byte after `masked` (R29.c1a); nothing else pins these fixtures' bytes, so the Windows leg of this
+    /// test does, except the path separators, which `masked` writes as `/` on every OS. The files are K5's evidence,
+    /// written once on the code before the split (Task 17), and are never regenerated (R29.c1).
     #[test]
     fn decide_prints_the_characterised_document_for_each_made_up_fixture() {
         let cases: [(&str, fn(&Path), &[&str]); 8] = [
@@ -2865,7 +2869,6 @@ SINFO:0,4,6,0,"PGS"
             ),
         ];
         let folder = characterisation_dir();
-        let writing = std::env::var_os("LAZYMKV_WRITE_CHARACTERISATION").is_some_and(|value| value == "1");
         let mut differing = Vec::new();
         for (name, setup, args) in cases {
             let tmp = Scratch::new("characterised");
@@ -2875,14 +2878,13 @@ SINFO:0,4,6,0,"PGS"
             assert_eq!(err, "", "{name}");
             let printed = masked(&out, &root);
             let path = folder.join(name);
-            if writing {
-                fs::create_dir_all(&folder).unwrap();
-                fs::write(&path, &printed).unwrap();
-                continue;
-            }
             let stored = fs::read_to_string(&path)
                 .unwrap_or_else(|error| {
-                    panic!("{}: {error}: run once with LAZYMKV_WRITE_CHARACTERISATION=1 on the pre-split code (Task 17)", path.display())
+                    panic!(
+                        "{}: {error}: the characterised documents are K5's evidence, written once on the code before \
+                         the split (Task 17); restore the file from git, never regenerate it (R29.c1)",
+                        path.display()
+                    )
                 })
                 .replace("\r\n", "\n");
             let value: Value = serde_json::from_str(&stored).unwrap();

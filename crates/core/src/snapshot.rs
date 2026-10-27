@@ -9,12 +9,19 @@ use crate::fingerprint::{aacs_disc_id, content_hash, disc_format, DiscFile, Disc
 /// Def: T3. Use: T12, T22.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DiscMeta {
+    /// The volume's label, as the caller read it.
     pub volume_label: String,
+    /// "bluray" or "dvd" from `disc_format`, None when it gives neither.
     pub format: Option<String>,
+    /// TheDiscDB's content hash, `content_hash` of the listing (spec 5).
     pub fingerprint: Option<String>,
+    /// The AACS disc ID, `aacs_disc_id` of the unit key file when the caller read one.
     pub disc_id: Option<String>,
+    /// How many files the listing holds.
     pub file_count: usize,
+    /// The listing's files' sizes, summed.
     pub total_bytes: u64,
+    /// When the snapshot was taken, in Unix seconds.
     pub captured_unix: u64,
 }
 

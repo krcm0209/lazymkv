@@ -7,10 +7,10 @@ pub const ALL_TRACKS_SELECTION: &str = "+sel:all,-sel:mvcvideo,=100:all";
 /// The 1009 fallback profile's selection: every stream but 3D video (design part 5.4, K6, L4). Def: T4. Use: T23.
 pub const FALLBACK_SELECTION: &str = "+sel:all,-sel:mvcvideo";
 
-/// The job profile's file name in the job folder (design part 7.1). Def: T4. Use: T13, T23.
+/// The job profile's file name in the job folder (design part 7.1). Def: T4. Use: T22, T23, T25.
 pub const JOB_PROFILE_FILE: &str = "job.mmcp.xml";
 
-/// The fallback profile's file name in the job folder (design part 7.1, K6). Def: T4. Use: T13, T23.
+/// The fallback profile's file name in the job folder (design part 7.1, K6). Def: T4. Use: T23.
 pub const FALLBACK_PROFILE_FILE: &str = "fallback.mmcp.xml";
 
 #[derive(Debug, PartialEq, Eq)]
