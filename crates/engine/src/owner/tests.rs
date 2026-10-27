@@ -3,7 +3,7 @@
 use super::*;
 use crate::testkit::{Harness, StepScript};
 use crate::StepResult;
-use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
+use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State, WaitReason};
 use lazymkv_core::plan::Mode;
 use serde_json::json;
 
@@ -547,4 +547,157 @@ fn fire_timers_waits_for_a_timer_that_starts_after_it_is_called() {
 fn fire_timers_panics_when_no_timer_becomes_pending() {
     let h = Harness::new_scripted(Vec::new(), json!({}));
     h.fire_timers();
+}
+
+/// Review round 1 (V11, RR1-12): a CheckSpace that panics in Planned, whose state takes no failure row, still feeds
+/// ShareLost: the job waits for the share with the panic's text and gives the disc-phase token back.
+#[test]
+fn a_panicking_space_check_before_the_rip_waits_for_the_share_and_gives_the_token_back() {
+    let script = vec![
+        ("RunScan", ok(Event::ScanDone)),
+        ("Plan", ok(Event::PlanDone { mode: Mode::Direct })),
+        ("CheckSpace", StepScript::Panic("scripted space check panic")),
+        ("RunScan", StepScript::Hang),
+    ];
+    let h = Harness::new_scripted(script, json!({}));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("AwaitingShare", |h| h.state_of(&a) == "AwaitingShare");
+    let record = h.record(&a);
+    assert_eq!(record.state, State::AwaitingShare { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
+    assert_eq!(record.message.as_deref(), Some("the step panicked: scripted space check panic"));
+    let job_log = std::fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap_or_default();
+    let no_event = "CheckSpace returned no event: the step panicked: scripted space check panic";
+    assert!(job_log.contains(no_event), "{job_log}");
+    let share = NotifyEvent::Waiting { reason: WaitReason::Share };
+    h.wait("the waiting notification", |h| h.notifications().iter().any(|n| n.event == share));
+    let waiting = h.notifications().into_iter().find(|n| n.event == share).unwrap();
+    assert_eq!(waiting.message, "waiting: share: the step panicked: scripted space check panic");
+    h.insert("tok1", "disc-b");
+    h.wait("disc-b scanning", |h| h.steps().calls().len() == 4);
+    assert_eq!(h.steps().calls(), ["RunScan", "Plan", "CheckSpace", "RunScan"]);
+}
+
+/// Disc-a scanned in tok0 and waiting in AwaitingNetwork, then pulled and inserted in tok1, where the waiting job only
+/// has it noted (design part 5.4 step 3): no MediaRemoved and no MediaArrived is fed.
+fn moved_while_waiting() -> (Harness, String) {
+    let script = vec![("RunScan", ok(Event::ScanDone)), ("Plan", ok(Event::NetworkNeeded)), ("Plan", StepScript::Hang)];
+    let h = Harness::new_scripted(script, json!({}));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("AwaitingNetwork", |h| h.state_of(&a) == "AwaitingNetwork");
+    h.remove("tok0");
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    let fingerprint = h.fingerprint("disc-a");
+    h.insert("tok1", "disc-a");
+    h.wait("tok1 noted", |h| h.drives_json()["drives"]["tok1"] == json!({"fingerprint": fingerprint, "handled": true}));
+    let lines = h.transitions(&a);
+    let disc_event = |event: &Option<Event>| matches!(event, Some(Event::MediaRemoved | Event::MediaArrived));
+    assert!(!lines.iter().any(|line| disc_event(&line.event)), "{lines:?}");
+    (h, a)
+}
+
+/// The persisted line of `id`'s first transition with `event`, once there is one.
+fn line_of(h: &Harness, id: &str, event: &Event) -> Transition {
+    h.wait("the transition", |h| h.transitions(id).iter().any(|line| line.event.as_ref() == Some(event)));
+    h.transitions(id).into_iter().find(|line| line.event.as_ref() == Some(event)).unwrap()
+}
+
+/// Review round 1 (V2): a waiting job whose disc is noted in another drive takes that drive as its record's drive, so
+/// its return lists, scans and ejects the drive the disc is in.
+#[test]
+fn a_waiting_jobs_disc_moved_to_another_drive_becomes_its_records_drive() {
+    let (h, a) = moved_while_waiting();
+    h.fire_timers();
+    let back = line_of(&h, &a, &Event::NetworkRetry);
+    let resumed = vec![Action::Plan, Action::Notify { event: NotifyEvent::Resumed }];
+    assert_eq!((back.new, back.actions), (State::Scanned, resumed));
+    assert_eq!(h.record(&a).drive, "tok1");
+    h.wait("planning again", |h| h.steps().calls() == ["RunScan", "Plan", "Plan"]);
+}
+
+/// Review round 1 (V2): at a restart, a waiting job that returns to the disc phase takes the drive its disc is in as
+/// its record's drive, written with its EngineRestart line, although the drive is noted rather than an arrival.
+#[test]
+fn a_restart_makes_a_waiting_jobs_moved_disc_drive_its_records_drive() {
+    let (h, a) = moved_while_waiting();
+    h.restart();
+    let restarted = line_of(&h, &a, &Event::EngineRestart { disc_present: true });
+    assert_eq!(restarted.new, State::AwaitingNetwork { return_to: Box::new(State::Scanned) });
+    assert_eq!(h.record(&a).drive, "tok1");
+    h.fire_timers();
+    let back = line_of(&h, &a, &Event::NetworkRetry);
+    assert_eq!(back.new, State::Scanned);
+    assert_eq!(h.record(&a).drive, "tok1");
+}
+
+/// Sends one request over a new IPC connection and returns its reply, skipping the snapshot and pushes before it.
+fn request(h: &Harness, kind: &str, payload: serde_json::Value) -> serde_json::Value {
+    use lazymkv_platform::IpcConnector;
+    use std::io::{BufRead, Write};
+    let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
+    let (mut reader, mut writer) = (stream.reader, stream.writer);
+    let line = json!({"v": 1, "type": kind, "id": 1, "payload": payload});
+    writer.write_all(format!("{line}\n").as_bytes()).unwrap();
+    writer.flush().unwrap();
+    loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0, "the engine closed the connection");
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if reply["id"] == json!(1) {
+            return reply;
+        }
+    }
+}
+
+/// Review round 1 (V1): a rip result whose transition cannot be persisted feeds the state's failure row, persisted as
+/// usual, so the job fails as Unknown and the disc-phase token passes to the next disc; its Retry waits for the token.
+#[test]
+fn a_rip_result_that_cannot_be_persisted_fails_the_job_and_gives_the_token_back() {
+    let mut script = disc_phase();
+    script.truncate(4); // RunScan, Plan, CheckSpace, then a RipTitle whose TitleRipped is refused
+    script.push(("RunScan", StepScript::Hang)); // disc-b holds the token
+    script.push(("RipTitle", StepScript::Hang)); // disc-a's retry
+    let h = Harness::new_scripted(script, json!({}));
+    h.refuse_persists(|_, transition| transition.event == Some(Event::TitleRipped));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("Failed", |h| h.state_of(&a) == "Failed");
+    let record = h.record(&a);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    let message = "the TitleRipped transition into Ripping could not be persisted: refused by the test";
+    assert_eq!(record.message.as_deref(), Some(message));
+    let lines = h.transitions(&a);
+    assert!(matches!(lines.last().unwrap().event, Some(Event::TitleRipFailed { .. })), "{lines:?}");
+    assert!(lines.iter().all(|line| line.event != Some(Event::TitleRipped)), "{lines:?}");
+    let refused = format!("{a}: the transition into Ripping could not be persisted, so none of its actions ran");
+    assert!(h.engine_log().contains(&refused), "{}", h.engine_log());
+    h.insert("tok1", "disc-b");
+    h.wait("disc-b scanning", |h| h.steps().calls().len() == 5);
+    assert_eq!(request(&h, "retry", json!({"job": a}))["type"], json!("ok"));
+    h.settle();
+    let retried = h.transitions(&a).iter().any(|line| line.event == Some(Event::Retry));
+    assert!(!retried, "the Retry did not wait for the token");
+    h.remove("tok1");
+    h.wait("disc-a ripping again", |h| h.steps().calls().iter().filter(|call| *call == "RipTitle").count() == 2);
+    let retried = line_of(&h, &a, &Event::Retry);
+    assert_eq!((retried.new, retried.actions), (State::Ripping, vec![Action::EmptyTitleDirectory, Action::RipTitle]));
+}
+
+/// Review round 1 (V1, RR1-3): a transition whose state.json was replaced but whose transitions line could not be
+/// appended counts as persisted: its actions run, and engine.log names the lost line.
+#[test]
+fn a_transition_whose_log_line_is_lost_still_runs_its_actions() {
+    let script = vec![("RunScan", ok(Event::ScanDone)), ("Plan", StepScript::Hang)];
+    let h = Harness::new_scripted(script, json!({}));
+    h.lose_log_lines(|_, transition| transition.event == Some(Event::ScanDone));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("Plan called", |h| h.steps().calls() == ["RunScan", "Plan"]);
+    assert_eq!(h.record(&a).state, State::Scanned);
+    let lines = h.transitions(&a);
+    let states: Vec<&str> = lines.iter().map(|line| line.new.as_str()).collect();
+    assert_eq!(states, ["Detected", "Fingerprinted"]);
+    let lost = format!("{a}: the transitions line of ScanDone into Scanned was lost: lost by the test");
+    assert!(h.engine_log().contains(&lost), "{}", h.engine_log());
 }

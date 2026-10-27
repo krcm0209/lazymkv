@@ -29,7 +29,7 @@ use lazymkv_core::profile::JOB_PROFILE_FILE;
 use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, DRIVES_FORMAT, JOB_FORMAT};
 use lazymkv_core::remembered::Overrides;
 use lazymkv_core::review::{Note, Noted};
-use lazymkv_core::settings::Settings;
+use lazymkv_core::settings::{Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_platform::{
     DriveEvent, DriveWatcher, Ejector, Host, IpcStream, KeepAwake, Platform, SecretStore, ShareConnector,
@@ -40,17 +40,19 @@ use serde_json::{Map, Value};
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
-    cancel_event, history_page, main_tag, no_job, no_retry, no_rip_again, no_running_step, not_a_secret,
-    not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs, spawn_reader, spawn_serve,
-    staging_unset, steps_running, waits_for_review, Clients, ProgressGate, COMMAND_REFUSED, DISCARD_REFUSED, STOPPING,
-    UI_QUIT_REFUSED,
+    cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
+    no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
+    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, COMMAND_REFUSED,
+    DISCARD_REFUSED, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink};
-use crate::restart::{plan_restart, rebuild_book};
+use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
 use crate::space::{rebuild_promises, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
-use crate::store::Store;
+#[cfg(any(test, feature = "testkit"))]
+use crate::store::PersistFaults;
+use crate::store::{Persisted, Store};
 use crate::timers::Timers;
 use crate::EngineConfig;
 
@@ -144,6 +146,17 @@ pub struct Services {
 /// them and stop as `EngineHandle::stop` does. Only the testkit passes one (`Harness::run_until`). Def: T22. Use: T22.
 pub(crate) type StopAfter = Arc<dyn Fn(&Transition) -> bool + Send + Sync>;
 
+/// The testkit's hooks on an engine (`Harness`, design part 12.1): the stop hook, and under the testkit the faults the
+/// store's `persist` meets (review round 1, V1). `start` passes none. Def: T22, PR #6 review (V1). Use: T22, testkit.
+#[derive(Default)]
+pub(crate) struct TestHooks {
+    /// The stop hook.
+    pub(crate) stop_after: Option<StopAfter>,
+    /// The persists that meet a fault (`Store::with_faults`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) persist_faults: Option<PersistFaults>,
+}
+
 /// Everything that reaches the owner thread, on its one channel (design part 4.4). Def: T22. Use: T22, T24, T26.
 pub(crate) enum Msg {
     /// A drive event from the drive thread.
@@ -183,25 +196,28 @@ pub(crate) enum CheckOutcome {
 }
 
 /// Starts the drive, owner and notifier threads over `config.data` (design part 4.4); `start_until(config, services,
-/// None)`. Def: T22. Use: T22 to T29.
+/// TestHooks::default())`. Def: T22. Use: T22 to T29.
 pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandle> {
-    start_until(config, services, None)
+    start_until(config, services, TestHooks::default())
 }
 
-/// `start` with the testkit's stop hook. It writes the engine.log line `engine started (lazymkv <version>)`, runs the
-/// MakeMKV check to its end (design part 3.7, S79, PF-28) and then the restart sequence (design part 5.10, Ruling S70;
-/// `Owner::load`) before it returns, so a restart's EngineRestart lines are persisted by then (design part 3.5); the
-/// IPC server's serve thread starts last (Task 26). With `services.steps` None it runs the real runner, `RealSteps`
-/// (Task 23), over the owner's Outbox, the space promises, the last scan's Java use and the MakeMKV state, which the
-/// owner keeps for the self-test. Def: T22. Use: T22.
-pub(crate) fn start_until(
-    config: EngineConfig,
-    services: Services,
-    stop_after: Option<StopAfter>,
-) -> io::Result<EngineHandle> {
+/// `start` with the testkit's hooks: the stop hook, and the persist faults the store meets. It writes the engine.log
+/// line `engine started (lazymkv <version>)`, runs the MakeMKV check to its end (design part 3.7, S79, PF-28) and then
+/// the restart sequence (design part 5.10, Ruling S70; `Owner::load`) before it returns, so a restart's EngineRestart
+/// lines are persisted by then (design part 3.5); the IPC server's serve thread starts last (Task 26). With
+/// `services.steps` None it runs the real runner, `RealSteps` (Task 23), over the owner's Outbox, the space promises,
+/// the last scan's Java use and the MakeMKV state, which the owner keeps for the self-test. Def: T22. Use: T22.
+pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
     let Services { platform, http, notify, timers, steps } = services;
     let clock = Arc::clone(&platform.host);
-    let store = Arc::new(Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), None));
+    let store = Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), None);
+    #[cfg(any(test, feature = "testkit"))]
+    let store = match hooks.persist_faults {
+        Some(faults) => store.with_faults(faults),
+        None => store,
+    };
+    let store = Arc::new(store);
+    let stop_after = hooks.stop_after;
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
     let outbox = Outbox::default();
     let promises = Arc::new(Mutex::new(Promises::default()));
@@ -645,6 +661,16 @@ struct Job {
     lookups: Arc<Mutex<LookupBook>>,
 }
 
+impl Job {
+    /// Notes the job's disc in `drive`, which becomes its record's drive, written with its next transition (I3; review
+    /// round 1, V2): the drive listing that picks `makemkvcon`'s `disc:` index, the Eject and the ejecting mark read
+    /// the record's drive, so a disc moved to another drive is listed, ripped and ejected there.
+    fn note_disc(&mut self, drive: &str) {
+        self.disc = Some(drive.to_string());
+        self.record.drive = drive.to_string();
+    }
+}
+
 /// One drive as the owner knows it.
 #[derive(Default)]
 struct Drive {
@@ -754,6 +780,10 @@ struct Owner {
     rescans: BTreeSet<(String, u64)>,
     /// A forced shutdown waiting for its steps (design part 3.8).
     quiet: Option<Quiet>,
+    /// The jobs that keep their persisted state with no step because a transition and then its failure could not be
+    /// persisted (review round 1, V1, RR1-1): each left its file-phase place, so the restart sequence seeds none of
+    /// them as a holder. A later persisted transition of the job takes it out.
+    kept: BTreeSet<String>,
 }
 
 impl Owner {
@@ -834,6 +864,7 @@ impl Owner {
             retry_rounds: BTreeSet::new(),
             rescans: BTreeSet::new(),
             quiet: None,
+            kept: BTreeSet::new(),
         };
         owner.restart(present);
         owner
@@ -843,13 +874,15 @@ impl Owner {
     /// 1. each disc in a drive is fingerprinted as an arrival's walk would be (`read_arrival`), and a drive record
     ///    whose drive holds no disc now is emptied, as a removal would;
     /// 2. `plan_restart` over the loaded jobs, those discs and drives.json;
-    /// 3. each fed job has its disc noted (the token job's drive becomes its record's drive), and its EngineRestart
-    ///    transition is persisted through the stop hook, whose true answer stops the engine before any resume action
-    ///    runs; then, in each noted drive no fed job holds, the disc of the latest job of its fingerprint is noted when
-    ///    that job failed in its disc phase, and the drive becomes its record's drive, so a Retry uses the disc
-    ///    (spec 10.3);
-    /// 4. the space promises of the resumed jobs (`rebuild_promises`), the token and the slot are
-    ///    rebuilt, and the noted drives are recorded handled;
+    /// 3. each fed job has its disc noted, and each fed job that may still run a disc-phase step (`reads_drive`) has
+    ///    that drive become its record's drive (review round 1, V2), and its EngineRestart transition is persisted
+    ///    through the stop hook, whose true answer stops the engine before any resume action runs; an EngineRestart
+    ///    that cannot be persisted feeds the state's failure row (`unpersisted`, V1); then, in each noted drive no fed
+    ///    job holds, the disc of the latest job of its fingerprint is noted when that job failed in its disc phase, and
+    ///    the drive becomes its record's drive, so a Retry uses the disc (spec 10.3);
+    /// 4. the space promises of the resumed jobs (`rebuild_promises`), the token and the slot are rebuilt, the slot
+    ///    seeded only with the planned holders whose state still holds a place and that `unpersisted` did not leave
+    ///    with their persisted state (RR1-1, RR1-5), and the noted drives are recorded handled;
     /// 5. the resume actions are performed, the slot is granted, then the arrivals are routed as fresh insertions.
     fn restart(&mut self, present: Vec<(String, PathBuf)>) {
         let host = Arc::clone(&self.parts.host);
@@ -891,10 +924,11 @@ impl Owner {
             let carrier = discs.iter().find(|(_, found)| found.as_deref() == fingerprint);
             let drive = carrier.map(|(drive, _)| drive.clone()).filter(|_| *disc_present);
             let token = plan.token.as_deref() == Some(id.as_str());
-            if let (true, Some(drive)) = (token, &drive) {
-                job.record.drive = drive.clone();
+            match &drive {
+                // V2: written with the EngineRestart line below; a file-phase job's drive, the one it ripped in, stays.
+                Some(found) if reads_drive(&job.record.state) => job.note_disc(found),
+                _ => job.disc = drive.clone(),
             }
-            job.disc = drive;
             let event = Event::EngineRestart { disc_present: *disc_present };
             let (new, actions) = match reduce(&job.record.state, &event) {
                 Ok(next) => next,
@@ -927,7 +961,16 @@ impl Owner {
                 rebuild_promises(&mut promises, shares, &job.record, &job.settings, &job_dir);
             }
         }
-        self.slots.seed(&plan.slot_holders, &plan.slot_queue);
+        // RR1-5: a job whose EngineRestart could not be persisted was failed, and holds no place; one whose failure
+        // could not be persisted either keeps its persisted state with no step and left its place (RR1-1).
+        let holders: Vec<String> = plan
+            .slot_holders
+            .iter()
+            .filter(|id| !self.kept.contains(*id))
+            .filter(|id| self.jobs.get(*id).is_some_and(|job| holds_slot(&job.record.state)))
+            .cloned()
+            .collect();
+        self.slots.seed(&holders, &plan.slot_queue);
         for drive in &plan.noted {
             let fingerprint = discs.iter().find(|(id, _)| id == drive).and_then(|(_, found)| found.clone());
             let record = DriveRecord { fingerprint: fingerprint.clone(), handled: true };
@@ -975,8 +1018,7 @@ impl Owner {
                 continue;
             };
             if job.disc.is_none() && matches!(&job.record.state, State::Failed { from, .. } if from.is_disc_phase()) {
-                job.disc = Some(drive.clone());
-                job.record.drive = drive.clone();
+                job.note_disc(drive);
             }
         }
     }
@@ -1171,20 +1213,21 @@ impl Owner {
         }
     }
 
-    /// Design part 5.4 step 3: the settings gate, then `job_lookup` over the jobs of the fingerprint.
+    /// Design part 5.4 step 3: the settings gate, then `job_lookup` over the jobs of the fingerprint. A settings.json
+    /// that cannot be read is named before the unset `staging_root` of its stand-in defaults, as the snapshot names it
+    /// (review round 1, V13).
     fn route(&mut self, arrival: Arrival) {
         let drive = arrival.drive.clone();
-        let (settings, problems) = self.store.settings();
+        let (settings, problems) = match self.store.settings_file() {
+            Ok(read) => read,
+            Err(unreadable) => return self.no_job_starts(&drive, &unreadable),
+        };
         if settings.staging_root.is_none() {
             self.store.log(&format!("{drive}: no job starts: staging_root is unset"));
             return;
         }
         if let Some(problem) = problems.first() {
-            self.store.log(&format!(
-                "{drive}: no job starts: the settings have a problem: {}: {}",
-                problem.key, problem.problem
-            ));
-            return;
+            return self.no_job_starts(&drive, problem);
         }
         let fingerprint = arrival.meta.fingerprint.clone().unwrap_or_default();
         let earlier: Vec<(String, State, bool)> = self
@@ -1196,9 +1239,10 @@ impl Owner {
         match job_lookup(&earlier) {
             JobLookup::AlreadyRipped(id) => self.already_ripped(&id, &drive, fingerprint),
             JobLookup::Resume(id) if self.jobs.get(&id).is_some_and(|job| job.record.state.is_waiting()) => {
-                // A waiting job only has its disc noted: the reducer takes MediaArrived in no waiting state.
+                // A waiting job only has its disc noted: the reducer takes MediaArrived in no waiting state. The drive
+                // becomes its record's drive, which its return lists, rips and ejects (review round 1, V2).
                 if let Some(job) = self.jobs.get_mut(&id) {
-                    job.disc = Some(drive.clone());
+                    job.note_disc(&drive);
                 }
                 self.record_drive(&drive, Some(fingerprint), true);
             }
@@ -1215,8 +1259,7 @@ impl Owner {
                     return;
                 }
                 if let Some(job) = self.jobs.get_mut(&id) {
-                    job.disc = Some(drive.clone());
-                    job.record.drive = drive.clone();
+                    job.note_disc(&drive);
                 }
                 self.record_drive(&drive, Some(fingerprint), true);
                 self.feed(&id, Event::MediaArrived, None);
@@ -1230,6 +1273,12 @@ impl Owner {
                 }
             }
         }
+    }
+
+    /// The engine.log line `<drive>: no job starts: the settings have a problem: <key>: <problem>` (design part 9.4).
+    fn no_job_starts(&self, drive: &str, problem: &SettingsProblem) {
+        let (key, text) = (&problem.key, &problem.problem);
+        self.store.log(&format!("{drive}: no job starts: the settings have a problem: {key}: {text}"));
     }
 
     /// The drive holding the disc of `id` when it is a disc-phase job with its disc in a drive: such a job is not
@@ -1306,24 +1355,27 @@ impl Owner {
         self.commit(&id, None, state, actions, None, Some((arrival, job_dir)));
     }
 
-    /// Feeds `event` to `id`'s reducer. A rejected event writes the job.log line `rejected <event> in <state>` and
-    /// changes nothing.
-    fn feed(&mut self, id: &str, event: Event, message: Option<String>) {
+    /// Feeds `event` to `id`'s reducer; true when its transition was persisted (`commit`). A rejected event writes the
+    /// job.log line `rejected <event> in <state>`, changes nothing and gives false.
+    fn feed(&mut self, id: &str, event: Event, message: Option<String>) -> bool {
         let Some(job) = self.jobs.get(id) else {
-            return;
+            return false;
         };
         match reduce(&job.record.state, &event) {
             Ok((new, actions)) => self.commit(id, Some(event), new, actions, message, None),
             Err(rejected) => {
                 let line = format!("rejected {} in {}", event_tag(&event), rejected.state.as_str());
                 self.store.job_log(id, &line);
+                false
             }
         }
     }
 
     /// One transition (design part 7.3, R22.3, R24.2): `persist_transition`, then the actions, the `job_update`
     /// push (S84), the token and the file-phase slot. During a forced shutdown only the transition's notifications
-    /// are performed and nothing new starts (PF-29).
+    /// are performed and nothing new starts (PF-29). True when the transition was persisted, the case of the stop hook
+    /// included, which persists it and then stops the engine (review round 1, V1: `grant_next` undoes a grant, and
+    /// `step_done` answers a cancel, by it).
     fn commit(
         &mut self,
         id: &str,
@@ -1332,32 +1384,38 @@ impl Owner {
         actions: Vec<Action>,
         message: Option<String>,
         recording: Option<(Arrival, PathBuf)>,
-    ) {
+    ) -> bool {
+        let stopping = self.stopping;
         let Some(transition) = self.persist_transition(id, event, new, actions, message) else {
-            return;
+            return self.stopping && !stopping;
         };
         if self.quiet.is_some() {
             self.notify_only(id, &transition.actions);
             self.publish(id);
-            return;
+            return true;
         }
         self.perform(id, &transition.actions, recording);
         self.publish(id);
         if self.stopping {
-            return;
+            return true;
         }
         let next = self.token.after(id, &transition.new, &transition.actions);
         self.route_queue(next);
         if self.stopping {
-            return;
+            return true;
         }
         self.file_slot(id, &transition);
+        true
     }
 
     /// A transition persisted before any of its actions runs (design part 7.3, R22.3, R24.2): the record actions
     /// applied (RefreshIdentity's refreshed plan among them), `filed_unix` on entering Filed, `updated_unix`, the
     /// message, then `Store::persist`; then the promises released or rebuilt and the stop hook. None when it could not
-    /// be persisted, or when the stop hook stopped the engine.
+    /// be persisted, or when the stop hook stopped the engine. A transition whose state.json was replaced but whose
+    /// transitions line was lost counts as persisted, with the engine.log line `<id>: the transitions line of <event>
+    /// into <state> was lost: <error>` (review round 1, V1, RR1-3). One that could not be persisted writes its
+    /// engine.log line and gives the token back; a new job is then removed (S29), and an existing one goes to
+    /// `unpersisted`.
     fn persist_transition(
         &mut self,
         id: &str,
@@ -1392,20 +1450,34 @@ impl Owner {
         record.state = new.clone();
         record.updated_unix = now;
         let transition = Transition { time_unix: now, event, old, new, actions };
-        if let Err(error) = self.store.persist(&record, &transition) {
-            self.store.log(&format!(
-                "{id}: the transition into {} could not be persisted, so none of its actions ran: {error}",
-                transition.new.as_str()
-            ));
-            if transition.old.is_none() {
-                // A new job whose first line could not be written does not exist (S29): the arrival is unhandled.
-                self.jobs.remove(id);
-                lock(&self.shown).remove(id);
-                self.record_drive(&record.drive, Some(record.fingerprint.clone()), false);
+        match self.store.persist(&record, &transition) {
+            Ok(Persisted::Whole) => {}
+            Ok(Persisted::LogLineLost(error)) => {
+                // RR1-3: state.json holds the new state, so its actions run (design part 7.3: a lost line, never a
+                // state).
+                let what = transition.event.as_ref().map_or_else(|| "the first transition".to_string(), event_tag);
+                let into = transition.new.as_str();
+                self.store.log(&format!("{id}: the transitions line of {what} into {into} was lost: {error}"));
             }
-            self.give_back(id);
-            return None;
+            Err(error) => {
+                self.store.log(&format!(
+                    "{id}: the transition into {} could not be persisted, so none of its actions ran: {error}",
+                    transition.new.as_str()
+                ));
+                if transition.old.is_none() {
+                    // A new job whose first line could not be written does not exist (S29): the arrival is unhandled.
+                    self.jobs.remove(id);
+                    lock(&self.shown).remove(id);
+                    self.record_drive(&record.drive, Some(record.fingerprint.clone()), false);
+                }
+                self.give_back(id);
+                if transition.old.is_some() {
+                    self.unpersisted(id, &transition, &error);
+                }
+                return None;
+            }
         }
+        self.kept.remove(id);
         lock(&self.shown).insert(id.to_string(), record.clone());
         if let Some(job) = self.jobs.get_mut(id) {
             job.record = record;
@@ -1418,6 +1490,52 @@ impl Owner {
             return None;
         }
         Some(transition)
+    }
+
+    /// A transition of the existing job `id` that could not be persisted, so none of its actions ran and the job holds
+    /// its persisted state with no step (design parts 5.2, 7.3; review round 1, V1). Nothing is done during a forced
+    /// shutdown or a stop (PF-29), nor while a step of the job's current generation runs, which a posted event handed
+    /// out and which reports for itself (Task 22's escalated minor).
+    /// - A transition not into Failed: when the job's state has a failure row (`failure_event` with no tag), it is fed
+    ///   with the message `the <event> transition into <state> could not be persisted: <error>` and persisted as usual,
+    ///   so the job fails as Unknown, releases its promises, the token and its file-phase place, is notified, and can
+    ///   be retried. A state with no failure row gets nothing: Planned and RipVerified wait for a restart (listed for
+    ///   pull request 3), a waiting, failed or held job can be retried or approved again, and an Ejected job's grant is
+    ///   undone in `grant_next`.
+    /// - A transition into Failed, the failure itself (also the guard against feeding again), follows RR1-1: no state
+    ///   is changed in memory and nothing is notified or published; the job keeps its persisted state, its promises are
+    ///   released, it leaves its file-phase place, which is granted again, and engine.log says `<id>: keeps its
+    ///   persisted state <state> until a restart resumes it`.
+    fn unpersisted(&mut self, id: &str, transition: &Transition, error: &io::Error) {
+        if self.quiet.is_some() || self.stopping {
+            return;
+        }
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        let generation = job.generation;
+        if self.workers.iter().any(|worker| worker.job == id && worker.generation == generation) {
+            return;
+        }
+        let state = job.record.state.clone();
+        if !matches!(transition.new, State::Failed { .. }) {
+            if let Some(failure) = failure_event("", &state) {
+                let what = transition.event.as_ref().map(event_tag).unwrap_or_default();
+                let into = transition.new.as_str();
+                let message = format!("the {what} transition into {into} could not be persisted: {error}");
+                self.feed(id, failure, Some(message));
+            }
+            return;
+        }
+        {
+            let mut promises = lock(&self.parts.promises);
+            promises.release(id, PromisedStep::Rip);
+            promises.release(id, PromisedStep::Remux);
+        }
+        self.kept.insert(id.to_string());
+        self.slots.leave(id);
+        self.store.log(&format!("{id}: keeps its persisted state {} until a restart resumes it", state.as_str()));
+        self.grant_next();
     }
 
     /// RefreshIdentity (design part 8.4, R24.2): the record's plan replaced by `refreshed_plan` over the job's book and
@@ -1450,19 +1568,33 @@ impl Owner {
     /// approval is granted its place and fed it (Task 26); a head whose persisted plan is lookup-pending gets one
     /// lookup round first (design part 8.3), and nothing is granted while that round runs; any other head is granted
     /// its place and fed FilePhaseSlot. A head that is no longer an Ejected job, or whose waiting event its state no
-    /// longer takes, leaves the queue. Nothing is granted during a forced shutdown (PF-29).
+    /// longer takes, leaves the queue. Nothing is granted during a forced shutdown (PF-29). A grant whose transition
+    /// could not be persisted is undone (review round 1, V1): a Retry or approval leaves the queue, with the job.log
+    /// line `<event> was not delivered: its transition could not be persisted`, so a later `retry` or approval queues
+    /// it again; a FilePhaseSlot goes to the back of the queue and is tried again at the next grant. A head already
+    /// tried in this pass ends it, so a refused grant is never tried in a loop.
     fn grant_next(&mut self) {
         if self.quiet.is_some() {
             return;
         }
+        let mut tried = BTreeSet::new();
         while let Some(head) = self.slots.next() {
+            if !tried.insert(head.clone()) {
+                return;
+            }
             if let Some(event) = self.slot_events.remove(&head) {
                 let state = self.jobs.get(&head).map(|job| job.record.state.clone());
                 if state.as_ref().is_some_and(|state| reduce(state, &event).is_ok()) {
                     self.slots.grant(&head);
-                    self.feed(&head, event, None);
+                    let tag = event_tag(&event);
+                    let delivered = self.feed(&head, event, None);
                     if self.stopping {
                         return;
+                    }
+                    if !delivered {
+                        self.slots.leave(&head);
+                        let line = format!("{tag} was not delivered: its transition could not be persisted");
+                        self.store.job_log(&head, &line);
                     }
                 } else {
                     self.slots.leave(&head);
@@ -1484,9 +1616,13 @@ impl Owner {
                 return;
             }
             self.slots.grant(&head);
-            self.feed(&head, Event::FilePhaseSlot, None);
+            let granted = self.feed(&head, Event::FilePhaseSlot, None);
             if self.stopping {
                 return;
+            }
+            if !granted {
+                self.slots.leave(&head);
+                self.slots.join(&head);
             }
         }
     }
@@ -1558,7 +1694,9 @@ impl Owner {
                     let message = self.lookup_message(id);
                     self.feed(id, Event::LookupPending, message);
                 }
-                Ok(_) => self.feed(id, Event::LookupAnswered, None),
+                Ok(_) => {
+                    self.feed(id, Event::LookupAnswered, None);
+                }
                 Err(_) if by_retry => {}
                 Err(error) => {
                     let message = format!("the lookup round could not run: {error}");
@@ -1788,7 +1926,8 @@ impl Owner {
 
     /// One worker's result. The result of a step the owner cancelled is dropped with what it posted, and the cancel's
     /// failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its `ok` (design part
-    /// 9.4, R-A7, S78). A stale one is dropped with what its step posted (R-A7), unless a newer step of the job runs,
+    /// 9.4, R-A7, S78), or, when that failure could not be persisted, the error `cancel_not_persisted` (review round 1,
+    /// V1, RR1-4). A stale one is dropped with what its step posted (R-A7), unless a newer step of the job runs,
     /// whose posts it must not take. Otherwise the posted edits are applied, each posted event is fed, then the
     /// result's event. A result with no event, from an action other than those that report none, writes `<tag>
     /// returned no event` to job.log, followed by `: <message>` when it has one; then, unless another step of the
@@ -1802,9 +1941,14 @@ impl Owner {
             if !self.workers.iter().any(|worker| worker.job == id) {
                 drop(self.parts.outbox.take(id));
             }
-            self.feed(id, cancelled.event, Some(CANCELLED.to_string()));
+            let persisted = self.feed(id, cancelled.event, Some(CANCELLED.to_string()));
             for (client, request) in cancelled.replies {
-                self.parts.clients.send(client, reply_ok(request, Value::Null));
+                let line = if persisted {
+                    reply_ok(request, Value::Null)
+                } else {
+                    reply_error(request, &cancel_not_persisted(id), &[])
+                };
+                self.parts.clients.send(client, line);
             }
             return;
         }
@@ -1827,7 +1971,9 @@ impl Owner {
             }
         }
         match result.event {
-            Some(event) => self.feed(id, event, result.message),
+            Some(event) => {
+                self.feed(id, event, result.message);
+            }
             None => {
                 let tags = worker.map(|worker| worker.tags).unwrap_or_default();
                 let tag = tags.last().cloned().unwrap_or_default();
@@ -1846,7 +1992,9 @@ impl Owner {
                 }
                 let panicked = result.message.as_deref().is_some_and(|message| message.contains(PANICKED));
                 match self.panic_failure(id, &tags).filter(|_| panicked) {
-                    Some(event) => self.feed(id, event, result.message),
+                    Some(event) => {
+                        self.feed(id, event, result.message);
+                    }
                     None if self.quiet.is_none() => self.give_back(id),
                     None => {}
                 }
@@ -1855,17 +2003,13 @@ impl Owner {
     }
 
     /// The failure a step that panicked feeds, so its job leaves the working state it would otherwise keep with no
-    /// step, the token and the file-phase slot with it (design part 5.2; ruling at the final review): `cancel_event`'s
-    /// row for the worker's main action, with EjectFailed for an Eject and ShareLost for a CheckSpace, which have
-    /// none. None when the job's state does not take it.
+    /// step, the token and the file-phase slot with it (design part 5.2; the final review's I2, amended at review round
+    /// 1, V11, RR1-12): `failure_event` of the worker's main action, the state's own failure row, `cancel_event`'s,
+    /// with EjectFailed for an Eject. A CheckSpace in Decided gets DecisionFailed, so it fails as Unknown and frees the
+    /// slot; only a CheckSpace in Planned, whose state takes no failure row, gets ShareLost. None when the job's state
+    /// takes neither.
     fn panic_failure(&self, id: &str, tags: &[String]) -> Option<Event> {
-        let state = &self.jobs.get(id)?.record.state;
-        let event = match main_tag(tags).as_str() {
-            "Eject" => Event::EjectFailed,
-            "CheckSpace" => Event::ShareLost,
-            tag => cancel_event(tag, state),
-        };
-        reduce(state, &event).is_ok().then_some(event)
+        failure_event(&main_tag(tags), &self.jobs.get(id)?.record.state)
     }
 
     /// Frees the token `KILLED_HOLDER` holds once no `makemkvcon` step is listed any more, and routes what waited
@@ -2058,9 +2202,19 @@ impl Owner {
     /// `Settings::from_json`. An unreadable result is refused with its error, one with problems with `settings_set
     /// refused: <n> problems` and the problems; then nothing changes. Otherwise settings.json is written, the slot
     /// takes the new `file_phase_concurrency`, the reply carries the new settings, and every disc already in a drive is
-    /// an arrival, but one whose drive record says it was handled (L1, L1a). Each job keeps its own settings.
+    /// an arrival, but one whose drive record says it was handled (L1, L1a). Each job keeps its own settings. A
+    /// settings.json that cannot be read is refused with `settings_set refused: 1 problems` and the store's
+    /// `settings.json` problem, and is left as it is: nothing is merged or written, the slot keeps its capacity and no
+    /// disc becomes an arrival (review round 1, V13; design part 7.4: reported, never overwritten). The owner fixes or
+    /// removes the file by hand; an absent file is the defaults.
     fn settings_set(&mut self, client: u64, id: Option<u64>, changes: Map<String, Value>) {
-        let (current, _) = self.store.settings();
+        let current = match self.store.settings_file() {
+            Ok((current, _)) => current,
+            Err(unreadable) => {
+                let line = reply_error(id, &settings_refused(1), &[unreadable]);
+                return self.parts.clients.send(client, line);
+            }
+        };
         let mut merged = serde_json::to_value(&current).unwrap_or_else(|_| Value::Object(Map::new()));
         if let Value::Object(object) = &mut merged {
             for (key, value) in changes {
@@ -2173,7 +2327,8 @@ impl Owner {
             }
         };
         if !new.is_disc_phase() {
-            return self.feed(id, event, None);
+            self.feed(id, event, None);
+            return;
         }
         if !self.token.take(id) {
             if !self.token.queued_job(id) {
@@ -2449,9 +2604,19 @@ impl Owner {
     /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, closes every client and stops. With a
     /// step running and no `force`, it is refused naming the jobs. With `force`, each running step is cancelled as
     /// `cancel` does, but a CheckSpace or Eject is let finish, and a running check is cancelled; the owner then waits
-    /// for every step (`quiet_message`) and ends in `finish_shutdown`.
+    /// for every step (`quiet_message`) and ends in `finish_shutdown`. A pulled disc's killed step is not a running
+    /// step (M3, `is_running_step`; review round 1, V4, RR1-10): it is neither counted nor cancelled, so its job keeps
+    /// waiting for its disc, and the owner still waits for it and drops its result (`step_done`, `shut_down`).
     fn shutdown(&mut self, client: u64, id: Option<u64>, force: bool) {
-        let mut running: Vec<String> = self.workers.iter().map(|worker| worker.job.clone()).collect();
+        // Read before the loop below bumps the generations, which would make a second worker of a job look stale.
+        let running_step: Vec<bool> = self.workers.iter().map(|worker| self.is_running_step(worker)).collect();
+        let mut running: Vec<String> = self
+            .workers
+            .iter()
+            .zip(&running_step)
+            .filter(|(_, live)| **live)
+            .map(|(worker, _)| worker.job.clone())
+            .collect();
         running.sort();
         running.dedup();
         if running.is_empty() {
@@ -2465,9 +2630,9 @@ impl Owner {
             cancel.cancel();
         }
         let mut cancelled = Vec::new();
-        for worker in &mut self.workers {
+        for (worker, live) in self.workers.iter_mut().zip(running_step) {
             let tag = main_tag(&worker.tags);
-            if tag == "CheckSpace" || tag == "Eject" {
+            if !live || tag == "CheckSpace" || tag == "Eject" {
                 continue;
             }
             cancelled.push((worker.job.clone(), tag.clone()));
@@ -2481,6 +2646,13 @@ impl Owner {
             }
         }
         self.quiet = Some(Quiet { client, id, cancelled });
+    }
+
+    /// Whether `worker` is its job's running step as `cancel` counts it (M3; review round 1, V4): the worker of the
+    /// job's current generation, or one a `cancel` or a forced shutdown is stopping. A pulled disc's killed step, left
+    /// stale by the removal, is not one.
+    fn is_running_step(&self, worker: &Worker) -> bool {
+        worker.cancelled.is_some() || self.jobs.get(&worker.job).is_none_or(|job| job.generation == worker.generation)
     }
 
     /// The end of a forced shutdown, once no step runs (S83, narrowed at the final review): the partial files of each

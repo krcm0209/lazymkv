@@ -41,7 +41,8 @@ use lazymkv_platform::{
 use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
 
-use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, NO_EVENT_ACTIONS};
+use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
+use crate::store::{PersistFault, PersistFaults};
 use crate::{EngineConfig, JobContext, NotifySink, Services, StepResult, StepRunner, Timers};
 
 /// How often the harness looks again while it waits.
@@ -293,6 +294,12 @@ enum StopAt {
     Event(Box<dyn Fn(&Event) -> bool + Send + Sync>),
 }
 
+/// A test's choice of the persists that meet a fault (`Harness::refuse_persists`, `Harness::lose_log_lines`).
+type PersistChoice = Box<dyn Fn(&JobRecord, &Transition) -> bool + Send + Sync>;
+
+/// The fault a test armed, with the persists it applies to; None while every persist works.
+type ArmedFault = Option<(PersistFault, PersistChoice)>;
+
 /// A drive event a test asked for, held until the next Harness call (R22.1).
 enum Queued {
     Arrive(String, PathBuf),
@@ -341,6 +348,8 @@ pub struct Harness {
     sent: Arc<Mutex<Vec<Notification>>>,
     /// The stop hook's target and the states it saw since the last `restart`, `run_until` or `run_until_event`.
     hook: Arc<Mutex<(Option<StopAt>, Vec<String>)>>,
+    /// The persist fault a test armed, shared with every engine the harness starts (review round 1, V1).
+    faults: Arc<Mutex<ArmedFault>>,
     engine: Mutex<Option<EngineHandle>>,
 }
 
@@ -466,7 +475,13 @@ impl Harness {
             }
             stop
         });
-        let engine = start_until(config, services, Some(stop_after)).expect("the harness's engine starts");
+        let armed = Arc::clone(&self.faults);
+        let persist_faults: PersistFaults = Arc::new(move |record: &JobRecord, transition: &Transition| {
+            let armed = lock(&armed);
+            armed.as_ref().filter(|(_, applies)| applies(record, transition)).map(|(fault, _)| *fault)
+        });
+        let hooks = TestHooks { stop_after: Some(stop_after), persist_faults: Some(persist_faults) };
+        let engine = start_until(config, services, hooks).expect("the harness's engine starts");
         // MemoryIpc::accept holds its lock while it waits, so the engine's stop wakes its serve thread with a
         // connection of its own before it joins it, and the next engine's accept is not queued behind the old one.
         let connector = self.connector.clone();
@@ -548,6 +563,30 @@ impl Harness {
     /// Queues the removal of `drive`'s disc (R22.1). Def: T22. Use: T22 to T29.
     pub fn remove(&self, drive: &str) {
         lock(&self.queued).push(Queued::Remove(drive.to_string()));
+    }
+
+    /// Makes every persist that `refused` accepts, asked with the record and the transition about to be written, write
+    /// nothing and fail with `PermissionDenied`, "refused by the test", until `allow_persists`, as a refused rename or
+    /// a full data volume would (review round 1, V1). It replaces any fault armed before, and holds across `restart`,
+    /// so it can be armed for a restart's EngineRestart lines. Def: PR #6 review (V1). Use: owner/tests.rs,
+    /// engine_ipc.rs.
+    pub fn refuse_persists(&self, refused: impl Fn(&JobRecord, &Transition) -> bool + Send + Sync + 'static) {
+        self.deliver();
+        *lock(&self.faults) = Some((PersistFault::Refuse, Box::new(refused)));
+    }
+
+    /// Makes every persist that `lost` accepts replace state.json and append no transitions line, as a failed append
+    /// would, until `allow_persists` (review round 1, V1, RR1-3). It replaces any fault armed before. Def: PR #6 review
+    /// (V1). Use: owner/tests.rs.
+    pub fn lose_log_lines(&self, lost: impl Fn(&JobRecord, &Transition) -> bool + Send + Sync + 'static) {
+        self.deliver();
+        *lock(&self.faults) = Some((PersistFault::LoseLogLine, Box::new(lost)));
+    }
+
+    /// Lets every persist work again (review round 1, V1). Def: PR #6 review (V1). Use: owner/tests.rs, engine_ipc.rs.
+    pub fn allow_persists(&self) {
+        self.deliver();
+        *lock(&self.faults) = None;
     }
 
     /// Arms the stop hook for the first transition into `state`, hands the queued drive events to the engine, waits
@@ -967,6 +1006,7 @@ impl Folders {
             steps: Arc::new(runner.steps),
             sent: Arc::default(),
             hook: Arc::default(),
+            faults: Arc::default(),
             engine: Mutex::default(),
         }
     }

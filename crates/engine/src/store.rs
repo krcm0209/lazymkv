@@ -5,6 +5,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
+use std::time::Duration;
 
 use lazymkv_core::record::{
     check_format, DrivesFile, JobRecord, Transition, DRIVES_FORMAT, JOB_FORMAT, REMEMBERED_FORMAT,
@@ -31,6 +33,38 @@ const REMEMBERED_DIR: &str = "remembered";
 const ENGINE_LOG: &str = "engine.log";
 /// A job's own log (design part 7.1).
 const JOB_LOG: &str = "job.log";
+/// How many times `persist` tries to replace a state.json another process holds open, and the pause between two tries
+/// (RR1-2).
+#[cfg(windows)]
+const REPLACE_TRIES: u32 = 5;
+#[cfg(windows)]
+const REPLACE_PAUSE: Duration = Duration::from_millis(100);
+
+/// What `Store::persist` wrote (design part 7.3; review round 1, V1, RR1-3). Def: PR #6 review (V1). Use: owner.rs.
+#[derive(Debug)]
+pub(crate) enum Persisted {
+    /// state.json was replaced and the transitions line appended and flushed.
+    Whole,
+    /// state.json was replaced, but the transitions line could not be appended or flushed. The transition counts as
+    /// persisted: design part 7.3's crash "loses at most one log line, never a state" (RR1-3).
+    LogLineLost(io::Error),
+}
+
+/// A fault a test makes `Store::persist` meet (review round 1, V1). Def: PR #6 review (V1). Use: testkit.
+#[cfg(any(test, feature = "testkit"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistFault {
+    /// `persist` writes nothing and fails with `PermissionDenied`, "refused by the test".
+    Refuse,
+    /// `persist` replaces state.json and appends no transitions line, as a failed append would: `LogLineLost` with
+    /// "lost by the test".
+    LoseLogLine,
+}
+
+/// Which persists meet a fault, asked with the record and transition before each `persist` (review round 1, V1).
+/// Def: PR #6 review (V1). Use: testkit, owner.rs.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) type PersistFaults = Arc<dyn Fn(&JobRecord, &Transition) -> Option<PersistFault> + Send + Sync>;
 
 /// The data folder's persisted files (design parts 3.5, 7.3, 7.4): `<data>/jobs/<id>/state.json` and
 /// `transitions.jsonl`, `<data>/drives.json`, `<data>/remembered/<fingerprint>.json`, `<data>/settings.json` and
@@ -45,6 +79,9 @@ pub(crate) struct Store {
     console: Mutex<Option<Box<dyn Write + Send>>>,
     /// Held across every write of a persisted file (design part 7.4), so the store is the one writer per path.
     writing: Mutex<()>,
+    /// The faults a test makes `persist` meet (review round 1, V1); None unless the testkit set them.
+    #[cfg(any(test, feature = "testkit"))]
+    faults: Option<PersistFaults>,
 }
 
 impl Store {
@@ -55,7 +92,22 @@ impl Store {
         now: Arc<dyn Fn() -> u64 + Send + Sync>,
         console: Option<Box<dyn Write + Send>>,
     ) -> Store {
-        Store { data, now, console: Mutex::new(console), writing: Mutex::new(()) }
+        Store {
+            data,
+            now,
+            console: Mutex::new(console),
+            writing: Mutex::new(()),
+            #[cfg(any(test, feature = "testkit"))]
+            faults: None,
+        }
+    }
+
+    /// The store with `faults`, which `persist` asks before each write (review round 1, V1). Def: PR #6 review (V1).
+    /// Use: owner.rs (`start_until`), for the testkit.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn with_faults(mut self, faults: PersistFaults) -> Store {
+        self.faults = Some(faults);
+        self
     }
 
     /// `<data>/jobs/<id>` (design part 7.3). Def: T21. Use: T22, T23, T25, T26.
@@ -117,28 +169,35 @@ impl Store {
     /// `sync_data` flushes it, all before the transition's actions run. It refuses (`ErrorKind::InvalidData`, the
     /// path and the check_format text) when an existing state.json fails `check_format(JOB_FORMAT)` or is not JSON,
     /// and then writes nothing (design part 7.4). RP-8: when transitions.jsonl does not end in "\n", a crash tore its
-    /// last line, and the append writes that "\n" first. Def: T21. Use: T22, T23, T25, T26.
-    pub(crate) fn persist(&self, record: &JobRecord, transition: &Transition) -> io::Result<()> {
+    /// last line, and the append writes that "\n" first. Amended at review round 1 (V1): on Windows the replace of
+    /// state.json is tried again while another process holds the file (`replace`, RR1-2), and an append or flush that
+    /// fails after the replace gives `Persisted::LogLineLost`, not an error, because state.json already holds the new
+    /// state (RR1-3); the append is never tried again, so a line is never written twice. Under the testkit it first
+    /// asks the faults `with_faults` set. Def: T21. Use: T22, T23, T25, T26.
+    pub(crate) fn persist(&self, record: &JobRecord, transition: &Transition) -> io::Result<Persisted> {
+        #[cfg(any(test, feature = "testkit"))]
+        let lose_line = match self.faults.as_ref().and_then(|faults| faults(record, transition)) {
+            Some(PersistFault::Refuse) => {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refused by the test"));
+            }
+            Some(PersistFault::LoseLogLine) => true,
+            None => false,
+        };
+        #[cfg(not(any(test, feature = "testkit")))]
+        let lose_line = false;
         let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = self.job_dir(&record.id);
         let state = dir.join(STATE_FILE);
         refuse_foreign(&state, JOB_FORMAT)?;
         fs::create_dir_all(&dir)?;
-        write_atomic(&state, &pretty(record)?)?;
-        let mut log = OpenOptions::new().read(true).append(true).create(true).open(dir.join(TRANSITIONS_FILE))?;
-        let mut line = Vec::new();
-        if log.metadata()?.len() > 0 {
-            let mut last = [0u8; 1];
-            log.seek(SeekFrom::End(-1))?;
-            log.read_exact(&mut last)?;
-            if last[0] != b'\n' {
-                line.push(b'\n');
-            }
+        replace(&state, &pretty(record)?)?;
+        if lose_line {
+            return Ok(Persisted::LogLineLost(io::Error::other("lost by the test")));
         }
-        serde_json::to_writer(&mut line, transition)?;
-        line.push(b'\n');
-        log.write_all(&line)?;
-        log.sync_data()
+        match append_line(&dir.join(TRANSITIONS_FILE), transition) {
+            Ok(()) => Ok(Persisted::Whole),
+            Err(error) => Ok(Persisted::LogLineLost(error)),
+        }
     }
 
     /// `<data>/drives.json` through `check_format(DRIVES_FORMAT)` (design part 7.4). An Err is "<path>: <reason>". An
@@ -172,21 +231,29 @@ impl Store {
 
     /// `<data>/settings.json` through `Settings::from_json` (design parts 3.5, 7.4). Absent gives
     /// `Settings::default()` with its `validate()`. An unreadable file gives `Settings::default()` and one problem
-    /// { key: "settings.json", problem: "<path>: <error>" }. Def: T21. Use: T22, T23, T25, T26.
+    /// { key: "settings.json", problem: "<path>: <error>" } (Task 21's ruling), which is `settings_file`'s Err.
+    /// Def: T21. Use: T22, T23, T25, T26.
     pub(crate) fn settings(&self) -> (Settings, Vec<SettingsProblem>) {
+        self.settings_file().unwrap_or_else(|problem| (Settings::default(), vec![problem]))
+    }
+
+    /// `<data>/settings.json` as the file says (review round 1, V13): Ok with the file's settings and `validate()`'s
+    /// problems, or with `Settings::default()` and its problems when the file is absent; Err with the one problem
+    /// { key: "settings.json", problem: "<path>: <error>" } when it cannot be read: not JSON, an unknown or ill-typed
+    /// key, not UTF-8, a byte-order mark, or a read error other than NotFound. `settings_set` never merges into the
+    /// stand-in defaults of an unreadable file (design part 7.4: reported, never overwritten). Def: PR #6 review (V13).
+    /// Use: owner.rs (`settings_set`, `route`).
+    pub(crate) fn settings_file(&self) -> Result<(Settings, Vec<SettingsProblem>), SettingsProblem> {
         let path = self.data.join(SETTINGS_FILE);
-        let unreadable = |error: String| {
-            let problem = SettingsProblem { key: SETTINGS_FILE.to_string(), problem: at(&path, error) };
-            (Settings::default(), vec![problem])
-        };
+        let unreadable = |error: String| SettingsProblem { key: SETTINGS_FILE.to_string(), problem: at(&path, error) };
         match fs::read_to_string(&path) {
-            Ok(text) => Settings::from_json(&text).unwrap_or_else(unreadable),
+            Ok(text) => Settings::from_json(&text).map_err(unreadable),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let settings = Settings::default();
                 let problems = settings.validate();
-                (settings, problems)
+                Ok((settings, problems))
             }
-            Err(error) => unreadable(error.to_string()),
+            Err(error) => Err(unreadable(error.to_string())),
         }
     }
 
@@ -212,6 +279,51 @@ impl Store {
             let _ = console.flush();
         }
     }
+}
+
+/// `write_atomic(path, bytes)`, tried again on Windows while another process holds the file (RR1-2): a sharing or lock
+/// violation, or the access denied a rename over a file open without delete sharing gives (os errors 32, 33 and 5),
+/// is tried again up to `REPLACE_TRIES` times in all, `REPLACE_PAUSE` apart, as an indexer or virus scanner holding
+/// state.json for a moment would otherwise fail the transition. Every other error, and every error elsewhere, is
+/// returned at once. The retry stays when pull request 3 swaps in `MoveFileExW`. It is the engine's first production
+/// retry loop (R29.c3 and R29.c4 keep theirs in test code).
+#[cfg(windows)]
+fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tries = 1;
+    loop {
+        match write_atomic(path, bytes) {
+            Err(error) if tries < REPLACE_TRIES && matches!(error.raw_os_error(), Some(5 | 32 | 33)) => {
+                tries += 1;
+                std::thread::sleep(REPLACE_PAUSE);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// `write_atomic(path, bytes)`: outside Windows no other process's handle stops a rename, so nothing is tried again.
+#[cfg(not(windows))]
+fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic(path, bytes)
+}
+
+/// Appends `to_string(transition)` plus "\n" to the transitions log at `path` and flushes it with `sync_data`, first
+/// writing the "\n" a torn last line lacks (RP-8).
+fn append_line(path: &Path, transition: &Transition) -> io::Result<()> {
+    let mut log = OpenOptions::new().read(true).append(true).create(true).open(path)?;
+    let mut line = Vec::new();
+    if log.metadata()?.len() > 0 {
+        let mut last = [0u8; 1];
+        log.seek(SeekFrom::End(-1))?;
+        log.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.push(b'\n');
+        }
+    }
+    serde_json::to_writer(&mut line, transition)?;
+    line.push(b'\n');
+    log.write_all(&line)?;
+    log.sync_data()
 }
 
 /// "<path>: <reason>", the form of every error the store reports.
@@ -516,6 +628,65 @@ mod tests {
         assert_eq!(problems[0].key, "settings.json");
         let path = tmp.0.join("settings.json");
         assert!(problems[0].problem.starts_with(&format!("{}: ", path.display())), "{problems:?}");
+    }
+
+    /// Review round 1 (V13): `settings_file` reads an absent file as the defaults and a readable one with its problems,
+    /// and gives an unreadable one as its one `settings.json` problem, which `settings` turns into the defaults.
+    #[test]
+    fn settings_file_is_err_for_an_unreadable_file_and_ok_for_an_absent_one() {
+        let tmp = Temp::new("settings-file");
+        let store = store_in(&tmp.0);
+        let path = tmp.0.join("settings.json");
+        let keys =
+            |problems: &[SettingsProblem]| problems.iter().map(|problem| problem.key.clone()).collect::<Vec<_>>();
+        let (absent, problems) = store.settings_file().unwrap();
+        assert_eq!((absent, keys(&problems)), (Settings::default(), vec!["tuning_root".to_string()]));
+        fs::write(&path, r#"{"file_phase_concurrency": 0, "keep_tuning_evidence": false}"#).unwrap();
+        let (read, problems) = store.settings_file().unwrap();
+        assert_eq!((read.file_phase_concurrency, keys(&problems)), (0, vec!["file_phase_concurrency".to_string()]));
+        for text in ["{", r#"{"movie_root": "x"}"#, "\u{feff}{}"] {
+            fs::write(&path, text).unwrap();
+            let problem = store.settings_file().unwrap_err();
+            assert_eq!(problem.key, "settings.json", "{text}");
+            assert!(problem.problem.starts_with(&format!("{}: ", path.display())), "{text}: {problem:?}");
+            assert_eq!(store.settings(), (Settings::default(), vec![problem]), "{text}");
+        }
+    }
+
+    /// Review round 1 (V1, RR1-2): a state.json another process holds open without delete sharing, as an indexer or a
+    /// virus scanner may, is replaced once that process lets it go, within the store's five tries, and the
+    /// transitions line is written once. The holder shares reading, so the format check before the replace still reads
+    /// the file.
+    #[cfg(windows)]
+    #[test]
+    fn persist_retries_a_state_json_another_process_holds_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::Instant;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        let tmp = Temp::new("held");
+        let store = store_in(&tmp.0);
+        store.persist(&record(State::Detected, 7), &first()).unwrap();
+        let state = tmp.0.join("jobs/abc-1/state.json");
+        let held = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(&state).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        let second = Transition {
+            time_unix: 8, event: Some(Event::FingerprintDone), old: Some(State::Detected), new: State::Fingerprinted,
+            actions: vec![Action::RunScan],
+        };
+        let started = Instant::now();
+        let persisted = store.persist(&record(State::Fingerprinted, 8), &second);
+        let took = started.elapsed();
+        release.join().unwrap();
+        assert!(matches!(persisted, Ok(Persisted::Whole)), "{persisted:?}");
+        assert!(took >= Duration::from_millis(100), "the replace did not wait for the holder: {took:?}");
+        let lines = fs::read_to_string(tmp.0.join("jobs/abc-1/transitions.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2, "{lines}");
+        let written: JobRecord = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+        assert_eq!(written, record(State::Fingerprinted, 8));
     }
 
     #[test]

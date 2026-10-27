@@ -110,8 +110,10 @@ fn is_fed(state: &State) -> bool {
 }
 
 /// Ruling S72: Inspecting, Decided, Remuxing and Verified hold the file-phase slot, and so does a waiting state that
-/// returns to one of them (design part 5.7: the slot is held through any wait entered after the grant).
-fn holds_slot(state: &State) -> bool {
+/// returns to one of them (design part 5.7: the slot is held through any wait entered after the grant). The restart
+/// sequence also seeds the slot by it, so a job failed at the restart holds no place (review round 1, V1, RR1-5).
+/// Def: T25. Use: T25, owner.rs.
+pub(crate) fn holds_slot(state: &State) -> bool {
     let granted = |state: &State| {
         matches!(state, State::Inspecting | State::Decided { .. } | State::Remuxing | State::Verified)
     };
@@ -123,6 +125,22 @@ fn holds_slot(state: &State) -> bool {
         | State::AwaitingLookup { return_to }
         | State::AwaitingTool { return_to } => granted(return_to),
         other => granted(other),
+    }
+}
+
+/// Whether a job in `state` may still run a disc-phase step, so the drive its disc is noted in becomes its record's
+/// drive (review round 1, V2): a disc-phase state, or a waiting state that returns to one. The drive listing that picks
+/// `makemkvcon`'s `disc:` index, the Eject and the ejecting mark read the record's drive; a file-phase job keeps the
+/// drive it ripped in, which its notifications and summary name. Def: PR #6 review (V2). Use: owner.rs.
+pub(crate) fn reads_drive(state: &State) -> bool {
+    match state {
+        State::AwaitingShare { return_to }
+        | State::AwaitingSpace { return_to }
+        | State::AwaitingMakeMkv { return_to }
+        | State::AwaitingNetwork { return_to }
+        | State::AwaitingLookup { return_to }
+        | State::AwaitingTool { return_to } => return_to.is_disc_phase(),
+        other => other.is_disc_phase(),
     }
 }
 
@@ -353,6 +371,19 @@ mod tests {
         let plan = plan_restart(&jobs, &present(&[]), &drives(&[]));
         assert_eq!(plan.slot_holders, vec!["aaa-1".to_string(), "eee-1".to_string()]);
         assert_eq!(plan.slot_queue, vec!["ccc-1".to_string(), "bbb-1".to_string()]);
+    }
+
+    /// Review round 1 (V2): a disc-phase state, or a wait returning to one, takes the drive its disc is noted in; a
+    /// file-phase state, or a wait returning to one, keeps the drive it ripped in.
+    #[test]
+    fn only_a_job_that_may_still_run_a_disc_phase_step_reads_the_drive() {
+        assert!(reads_drive(&State::Ripping));
+        assert!(reads_drive(&State::AwaitingMakeMkv { return_to: back(State::Fingerprinted) }));
+        assert!(reads_drive(&State::AwaitingShare { return_to: back(State::Planned { mode: Mode::Direct }) }));
+        assert!(!reads_drive(&State::Ejected { after_copy: false }));
+        assert!(!reads_drive(&State::AwaitingLookup { return_to: back(State::Ejected { after_copy: false }) }));
+        assert!(!reads_drive(&State::AwaitingSpace { return_to: back(State::Decided { approved: None }) }));
+        assert!(!reads_drive(&State::Failed { class: FailureClass::Unknown, from: back(State::Ripping) }));
     }
 
     #[test]

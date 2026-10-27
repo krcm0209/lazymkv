@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Envelope, Reply, CANCELLED, MAX_LINE_BYTES};
-use lazymkv_core::job::{Event, Failure, FailureClass, NotifyEvent, State};
+use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
@@ -387,6 +387,60 @@ fn a_settings_set_mid_job_leaves_the_running_jobs_flags() {
     let data: Value = serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap();
     assert_eq!(data["cache_mb"], json!(512));
     c.ok("cancel", json!({"job": id}));
+}
+
+/// Review round 1 (V13; design parts 7.4 and 9.4): a settings_set while settings.json cannot be read is refused with
+/// the store's settings.json problem and leaves the file as the owner wrote it, instead of merging the change into the
+/// stand-in defaults and replacing the owner's whole file; an arrival names the same problem.
+#[test]
+fn settings_set_while_settings_json_is_unreadable_is_refused_and_leaves_the_file() {
+    let h = scripted(vec![]);
+    let path = h.data().join("settings.json");
+    let typo = fs::read_to_string(&path).unwrap().replace("\"movies_root\"", "\"movie_root\"");
+    fs::write(&path, &typo).unwrap();
+    let mut c = Client::open(&h);
+    assert_eq!(c.snapshot()["problems"][0]["key"], json!("settings.json"));
+    let tuning = h.data().parent().unwrap().join("tuning").display().to_string();
+    for (text, payload, named) in [
+        (typo.as_str(), json!({"keep_tuning_evidence": false}), "movie_root"),
+        (typo.as_str(), json!({"tuning_root": tuning}), "movie_root"),
+        ("{", json!({"keep_tuning_evidence": false}), "EOF"),
+    ] {
+        fs::write(&path, text).unwrap();
+        match c.request("settings_set", payload.clone()) {
+            Reply::Error { message, problems, .. } => {
+                assert_eq!(message, "settings_set refused: 1 problems", "{payload}");
+                assert_eq!(problems.len(), 1, "{payload}: {problems:?}");
+                assert_eq!(problems[0].key, "settings.json", "{payload}");
+                assert!(problems[0].problem.contains(named), "{payload}: {problems:?}");
+            }
+            other => panic!("{payload}: {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), text, "{payload}");
+    }
+    // An arrival under the unreadable file would wait the default 10 s settle; a disc in a drive at a restart is
+    // routed at once (L1), and its refusal names settings.json, as the snapshot does.
+    h.insert("tok0", "disc-a");
+    h.restart();
+    let refused = "tok0: no job starts: the settings have a problem: settings.json: ";
+    assert!(h.engine_log().contains(refused), "{}", h.engine_log());
+    assert!(h.job_ids().is_empty());
+}
+
+/// Review round 1 (V13): with no settings.json at all, a settings_set still merges into the defaults and writes the
+/// file, as the store reads an absent file as the defaults.
+#[test]
+fn settings_set_with_no_settings_json_merges_into_the_defaults() {
+    let h = scripted(vec![]);
+    let path = h.data().join("settings.json");
+    fs::remove_file(&path).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let staging = h.staging().display().to_string();
+    let result = c.ok("settings_set", json!({"keep_tuning_evidence": false, "staging_root": staging}));
+    assert_eq!((result["cache_mb"].clone(), result["staging_root"].clone()), (json!(1024), json!(staging)));
+    let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(stored, result);
 }
 
 #[test]
@@ -1038,6 +1092,256 @@ fn a_panicking_remux_fails_the_job_frees_the_slot_and_retry_resumes_it() {
     c.until_state(Some(&a), "Filed");
 }
 
+/// Review round 1 (V11, RR1-12): a CheckSpace that panics in Decided feeds its state's own failure row, DecisionFailed,
+/// so the job fails as Unknown and lets the slot go, instead of waiting in AwaitingShare for a share that never left;
+/// its Retry decides again.
+#[test]
+fn a_panicking_remux_space_check_fails_the_job_frees_the_slot_and_retry_resumes_it() {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(9).collect(); // A up to Decide
+    script.push(("CheckSpace", StepScript::Panic("scripted space check panic")));
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // B lets the slot go
+    script.extend([
+        ("Decide", step(Event::DecisionDone { disposition: Disposition::AutoFile, reasons: vec![], has_path: true })),
+        ("CheckSpace", step(Event::SpaceOk)), ("Remux", step(Event::RemuxDone)),
+        ("VerifyFile", step(Event::FileVerified)), ("File", step(Event::FileDone)),
+    ]); // A after its retry
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    let decided = State::Decided { approved: None };
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(decided) });
+    assert_eq!(failed.message.as_deref(), Some("the step panicked: scripted space check panic"));
+    assert!(matches!(h.transitions(&a).pop().unwrap().event, Some(Event::DecisionFailed { .. })));
+    let of_a = |h: &Harness| -> Vec<NotifyEvent> {
+        h.notifications().into_iter().filter(|n| n.job_id.as_deref() == Some(a.as_str())).map(|n| n.event).collect()
+    };
+    h.wait("A's failed notification", |h| of_a(h).contains(&NotifyEvent::Failed { class: FailureClass::Unknown }));
+    assert!(!of_a(&h).iter().any(|event| matches!(event, NotifyEvent::Waiting { .. })), "{:?}", of_a(&h));
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A let go
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+// ---- Persists that fail (review round 1, V1) ----
+
+/// A's disc phase and file phase to its RemuxDone, B's disc phase, B's Probe failing so it lets the slot go, then A's
+/// Remux, VerifyFile and File after its retry.
+fn remux_then_b() -> Vec<(&'static str, StepScript)> {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(11).collect();
+    script.extend(main_line().into_iter().take(6));
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() })));
+    script.extend([("Remux", step(Event::RemuxDone)), ("VerifyFile", step(Event::FileVerified)),
+                   ("File", step(Event::FileDone))]);
+    script
+}
+
+/// The job of `disc` in a scripted harness: its fingerprint in lower case, then `-1` (K3).
+fn id_of(h: &Harness, disc: &str) -> String {
+    format!("{}-1", h.fingerprint(disc).to_ascii_lowercase())
+}
+
+/// Whether a `failed` notification was sent for `id`.
+fn failed_notified(h: &Harness, id: &str) -> bool {
+    h.notifications().iter().any(|n| n.job_id.as_deref() == Some(id) && matches!(n.event, NotifyEvent::Failed { .. }))
+}
+
+/// Review round 1 (V1): a remux result whose transition cannot be persisted feeds the state's failure row, persisted
+/// as usual, so the job fails as Unknown, lets the file-phase slot go and is notified, and its Retry files it.
+#[test]
+fn a_remux_result_whose_failure_persists_fails_the_job_and_frees_the_slot() {
+    let h = scripted(remux_then_b());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::RemuxDone));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let refused = format!("{a}: the transition into Remuxing could not be persisted, so none of its actions ran");
+    assert!(h.engine_log().contains(&refused), "{}", h.engine_log());
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let message = "the RemuxDone transition into Remuxing could not be persisted: refused by the test";
+    assert_eq!(failed.message.as_deref(), Some(message));
+    let lines = h.transitions(&a);
+    let unknown_remux = |event: &Option<Event>| {
+        matches!(event, Some(Event::RemuxFailed { failure }) if failure.class == FailureClass::Unknown)
+    };
+    assert!(unknown_remux(&lines.last().unwrap().event), "{lines:?}");
+    assert!(lines.iter().all(|line| line.event != Some(Event::RemuxDone)));
+    h.wait("A's failed notification", |h| failed_notified(h, &a));
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A let go
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    h.allow_persists();
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V1, RR1-1): when the failure of a transition that could not be persisted cannot be persisted either,
+/// the job keeps its persisted state with no step and nothing is published, but it leaves its file-phase place, so the
+/// next job gets the slot; it cannot be retried, and the next restart resumes it.
+#[test]
+fn a_remux_result_and_its_failure_that_cannot_be_persisted_free_the_slot_until_a_restart() {
+    let h = scripted(remux_then_b());
+    let a = id_of(&h, DISC_A);
+    let refused = a.clone();
+    h.refuse_persists(move |record, transition| {
+        record.id == refused
+            && (transition.event == Some(Event::RemuxDone) || matches!(transition.new, State::Failed { .. }))
+    });
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let kept = format!("{a}: keeps its persisted state Remuxing until a restart resumes it");
+    h.wait("A kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.record(&a).state, State::Remuxing);
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A left
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    assert!(!failed_notified(&h, &a), "{:?}", h.notifications());
+    assert_eq!(h.record(&a).state, State::Remuxing);
+    let refusal =
+        format!("job {a} is Remuxing; retry takes a failed or waiting job that can run again (design part 9.4)");
+    assert_eq!(c.err("retry", json!({"job": a})), refusal);
+    h.allow_persists();
+    h.restart();
+    h.wait("A filed", |h| h.state_of(&a) == "Filed");
+    let restarted = h.transitions(&a).into_iter().find(|line| matches!(line.event, Some(Event::EngineRestart { .. })));
+    assert_eq!(restarted.unwrap().actions, vec![Action::DeletePartialFile, Action::Remux]);
+}
+
+/// Review round 1 (V1): a FilePhaseSlot whose transition cannot be persisted is undone: the job stays in Ejected and
+/// holds no place, the owner does not loop on it, the next job gets the slot, and the job is granted it later.
+#[test]
+fn a_file_phase_slot_grant_that_cannot_be_persisted_lets_the_next_job_have_the_slot() {
+    let mut script = main_line();
+    script.truncate(6); // A's disc phase
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", StepScript::Hang)); // B holds the slot
+    script.extend(main_line().into_iter().skip(6)); // A's file phase, after B
+    let h = scripted(script);
+    let a = id_of(&h, DISC_A);
+    let refused = a.clone();
+    h.refuse_persists(move |record, transition| record.id == refused && transition.event == Some(Event::FilePhaseSlot));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let grant = format!("{a}: the transition into Inspecting could not be persisted");
+    h.wait("A's refused grant", |h| h.engine_log().contains(&grant));
+    h.settle();
+    assert_eq!(h.state_of(&a), "Ejected");
+    assert_eq!(h.awake().holders(), 0, "A holds a place");
+    Client::open(&h).snapshot(); // the owner still answers: no loop over the refused grant
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 1); // B is granted the slot
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    assert_eq!(h.state_of(&a), "Ejected");
+    h.allow_persists();
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V1): a Retry delivered with the file-phase slot whose transition cannot be persisted is undone:
+/// the job stays Failed, holds no place and says so in job.log, and a second retry resumes it.
+#[test]
+fn a_retry_whose_slot_delivery_cannot_be_persisted_leaves_the_slot_free() {
+    let mut script = main_line();
+    script.truncate(6); // A's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // A fails in its file phase
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", StepScript::Hang)); // B holds the slot
+    let h = scripted(script);
+    h.refuse_persists(|_, transition| transition.event == Some(Event::Retry));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    c.ok("retry", json!({"job": a}));
+    assert_eq!(h.state_of(&a), "Failed");
+    let job_log = fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap();
+    assert!(job_log.contains("Retry was not delivered: its transition could not be persisted"), "{job_log}");
+    h.allow_persists();
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot: A holds none
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.ok("retry", json!({"job": a})); // A waits for the slot B holds
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Inspecting");
+}
+
+/// Review round 1 (V1, RR1-5): a restart whose EngineRestart line cannot be persisted for a job holding the slot fails
+/// that job through its failure row, and the restart seeds no place for it, so the queued job is granted the slot and
+/// the failed job's Retry files it. (In this file rather than engine_restart.rs, for its IPC client.)
+#[test]
+fn a_restart_whose_engine_restart_cannot_be_persisted_holds_no_slot() {
+    let mut script = hanging_at("Remux", 0); // A holds the slot in Remuxing
+    script.extend(main_line().into_iter().take(6)); // B's disc phase: B queues in Ejected
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // B, after the restart
+    script.extend([("Remux", step(Event::RemuxDone)), ("VerifyFile", step(Event::FileVerified)),
+                   ("File", step(Event::FileDone))]); // A after its retry
+    let h = scripted(script);
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "Remux", 1);
+    let a = h.job_ids().pop().unwrap();
+    h.insert("tok1", DISC_B);
+    let b = id_of(&h, DISC_B);
+    h.wait("B queued in Ejected", |h| h.state_of(&b) == "Ejected");
+    let refused = a.clone();
+    h.refuse_persists(move |record, transition| {
+        record.id == refused && matches!(transition.event, Some(Event::EngineRestart { .. }))
+    });
+    h.restart();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let message = "the EngineRestart transition into Remuxing could not be persisted: refused by the test";
+    assert_eq!(failed.message.as_deref(), Some(message));
+    wait_for_call(&h, "Probe", 2); // B is granted the slot after the restart
+    h.wait("B failed", |h| h.state_of(&b) == "Failed");
+    h.allow_persists();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V1, RR1-4; S78 amended): a cancel whose failure transition cannot be persisted is answered with
+/// the error naming it, not `ok`; the job keeps its persisted state until a restart resumes it.
+#[test]
+fn a_cancel_whose_failure_cannot_be_persisted_is_answered_with_the_error() {
+    let h = scripted(hanging_at("RipTitle", 0));
+    h.refuse_persists(|_, transition| matches!(transition.new, State::Failed { .. }));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let id = h.job_ids().pop().unwrap();
+    let answer =
+        format!("the step of {id} was cancelled, but its failure could not be persisted; a restart resumes it");
+    assert_eq!(c.err("cancel", json!({"job": id})), answer);
+    assert_eq!(h.record(&id).state, State::Ripping);
+    let kept = format!("{id}: keeps its persisted state Ripping until a restart resumes it");
+    assert!(h.engine_log().contains(&kept), "{}", h.engine_log());
+    assert!(!failed_notified(&h, &id), "{:?}", h.notifications());
+}
+
 // ---- Review actions (design part 9.4, P25, R-A8) ----
 
 fn held_script() -> Vec<(&'static str, StepScript)> {
@@ -1198,6 +1502,33 @@ fn another_discs_listing_with_a_changed_version_returns_a_job_from_awaiting_make
         }
     }
     assert!(h.transitions(&a).iter().any(|t| t.event == Some(Event::MakeMkvChanged)));
+}
+
+/// Review round 1 (V2): a disc moved to the other drive while its job waits is listed, scanned, ripped and ejected in
+/// that drive once the job returns, because the drive listing and the Eject read the record's drive, which now follows
+/// the disc.
+#[test]
+fn a_waiting_jobs_disc_moved_to_the_other_drive_is_scanned_ripped_and_ejected_there() {
+    let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingMakeMkv")["id"].as_str().unwrap().to_string();
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    h.insert("tok1", DISC_A);
+    h.deliver();
+    h.wait("tok1 noted", |h| h.drives_json()["drives"]["tok1"]["handled"] == json!(true));
+    c.ok("run_selftest", Value::Null); // its listing is the third, which prints the new version
+    c.until_state(Some(&a), "Ejected");
+    let log = fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap();
+    assert!(log.contains("drive listing 2: tok1 is index 1"), "{log}");
+    let calls: Value = serde_json::from_slice(&fs::read(h.tools().join("makemkvcon64.calls.json")).unwrap()).unwrap();
+    assert_eq!(calls["5"], json!(1), "info disc:1 ran once: {calls}");
+    assert_eq!(h.ejector().calls(), vec!["tok1".to_string()]);
+    assert_eq!(h.record(&a).drive, "tok1");
 }
 
 #[test]
@@ -1450,6 +1781,72 @@ fn a_forced_shutdown_lets_an_in_flight_eject_finish_then_persists_it() {
     assert_eq!(c.line(), None);
     let last = h.transitions(&id).pop().unwrap();
     assert_eq!((last.event, last.new), (Some(Event::Ejected), State::Ejected { after_copy: false }));
+}
+
+/// Disc A pulled mid-rip: its rip is killed and stale, still listed for the 3 s it takes to report (M3), and the job
+/// waits for its disc in Ripping.
+fn pulled_mid_rip() -> (Harness, Client, String) {
+    let mut script = main_line();
+    let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3), ripped));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let ripping = Instant::now();
+    let id = h.job_ids().pop().unwrap();
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&id).last().unwrap().event == Some(Event::MediaRemoved));
+    assert!(ripping.elapsed() < Duration::from_secs(2), "the removal came late: {:?}", ripping.elapsed());
+    (h, c, id)
+}
+
+/// The job of a pulled disc still waits for its disc: no rip result or failure was fed, and no `failed` was sent.
+fn assert_waits_for_its_disc(h: &Harness, id: &str) {
+    let lines = h.transitions(id);
+    let rip = |event: &Option<Event>| matches!(event, Some(Event::TitleRipFailed { .. } | Event::TitleRipped));
+    assert!(!lines.iter().any(|line| rip(&line.event)), "{lines:?}");
+    let last = lines.iter().rev().find(|line| !matches!(line.event, Some(Event::EngineRestart { .. }))).unwrap();
+    assert_eq!((last.event.clone(), last.new.clone()), (Some(Event::MediaRemoved), State::Ripping));
+    assert_ne!(h.record(id).message.as_deref(), Some(CANCELLED));
+    let failed = |n: &lazymkv_core::ipc::Notification| matches!(n.event, NotifyEvent::Failed { .. });
+    assert!(!h.notifications().iter().any(failed), "{:?}", h.notifications());
+}
+
+/// Review round 1 (V4): a forced shutdown cancels only the steps `cancel` would pick (M3), so a pulled disc's killed
+/// rip, which is stale, is neither cancelled nor fed, and its job keeps waiting for its disc.
+#[test]
+fn a_forced_shutdown_leaves_a_pulled_discs_job_waiting_for_its_disc() {
+    let (h, mut c, id) = pulled_mid_rip();
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    assert_waits_for_its_disc(&h, &id);
+}
+
+/// Review round 1 (V4, RR1-10): a plain shutdown does not count a pulled disc's killed step as a running step (design
+/// part 3.8, "waiting jobs do not count"), so it is accepted; the engine still waits for that step and drops its
+/// result.
+#[test]
+fn a_shutdown_without_force_is_accepted_while_only_a_pulled_discs_killed_step_runs() {
+    let (h, mut c, id) = pulled_mid_rip();
+    assert_eq!(c.ok("shutdown", json!({"force": false})), Value::Null);
+    assert_eq!(c.line(), None);
+    h.restart(); // the old engine has waited for the killed rip and dropped its result
+    assert_waits_for_its_disc(&h, &id);
+}
+
+/// Review round 1 (V4): after a forced shutdown beside a pulled disc's killed step, the disc inserted again resumes its
+/// own job with MediaArrived instead of starting a new job.
+#[test]
+fn a_pulled_disc_reinserted_after_a_forced_shutdown_resumes_its_job() {
+    let (h, mut c, id) = pulled_mid_rip();
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    h.restart();
+    h.insert("tok0", DISC_A);
+    h.wait("MediaArrived", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::MediaArrived)));
+    assert_eq!(h.job_ids(), vec![id]);
 }
 
 #[test]

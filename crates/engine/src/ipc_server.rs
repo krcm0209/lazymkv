@@ -16,7 +16,7 @@ use lazymkv_core::ipc::{
     job_summary, parse_request, reply_error, JobSummary, SecretState, HISTORY_PAGE, LINE_TOO_LONG, MAX_LINE_BYTES,
     SECRET_NAMES,
 };
-use lazymkv_core::job::{Event, Failure, FailureClass, State};
+use lazymkv_core::job::{reduce, Event, Failure, FailureClass, State};
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::SettingsProblem;
 use lazymkv_platform::{IpcTransport, SecretStore};
@@ -77,6 +77,12 @@ pub(crate) fn not_a_secret(name: &str) -> String {
     format!("{name} is not a secret name (design part 9.4)")
 }
 
+/// The answer to a `cancel` whose failure transition could not be persisted (S78 as amended at review round 1, V1,
+/// RR1-4): the job keeps its persisted state until a restart resumes it. Def: PR #6 review (V1). Use: owner.rs.
+pub(crate) fn cancel_not_persisted(id: &str) -> String {
+    format!("the step of {id} was cancelled, but its failure could not be persisted; a restart resumes it")
+}
+
 /// A `settings_set` whose result has problems (Ruling S76). Def: T26. Use: T26.
 pub(crate) fn settings_refused(count: usize) -> String {
     format!("settings_set refused: {count} problems")
@@ -132,6 +138,21 @@ pub(crate) fn cancel_event(tag: &str, state: &State) -> Event {
         (_, State::Ripping) => Event::TitleRipFailed { failure },
         _ => Event::FileFailed { failure },
     }
+}
+
+/// The failure a step `tag` that ended with no event of its own feeds in `state`, so its job leaves the working state
+/// it would otherwise keep with no step (design part 5.2; the final review's I2, amended at review round 1, V11,
+/// RR1-12): EjectFailed for an Eject, else `cancel_event`'s row, when the reducer takes it in `state`; otherwise
+/// ShareLost for a CheckSpace whose state takes no failure row (Planned); None when the state takes neither. A
+/// CheckSpace in Decided gets `cancel_event`'s DecisionFailed, so it fails as Unknown and frees the file-phase slot.
+/// With the tag "" it is the failure row of the state itself, which a transition that could not be persisted feeds
+/// (review round 1, V1). Def: PR #6 review (V11). Use: owner.rs.
+pub(crate) fn failure_event(tag: &str, state: &State) -> Option<Event> {
+    let failed = if tag == "Eject" { Event::EjectFailed } else { cancel_event(tag, state) };
+    if reduce(state, &failed).is_ok() {
+        return Some(failed);
+    }
+    (tag == "CheckSpace" && reduce(state, &Event::ShareLost).is_ok()).then_some(Event::ShareLost)
 }
 
 /// Locks `mutex`, ignoring a poison a panicked thread left.
@@ -501,5 +522,27 @@ mod tests {
         let next = history_page(&jobs, Some(&first[49].id)).unwrap();
         assert_eq!(next.iter().map(|s| s.updated_unix).collect::<Vec<_>>(), (1..=10).rev().collect::<Vec<_>>());
         assert_eq!(history_page(&jobs, Some("nope-1")), Err("no job nope-1".to_string()));
+    }
+
+    /// Review round 1 (V11, RR1-12; V1): a step that ended with no event feeds its state's own failure row; ShareLost
+    /// only for a CheckSpace whose state takes no failure (Planned); with no tag, the state's row or nothing.
+    #[test]
+    fn a_failure_event_is_the_states_failure_row_and_share_lost_only_for_a_space_check_in_planned() {
+        use lazymkv_core::plan::Mode;
+        let unknown = Failure { class: FailureClass::Unknown, output: None };
+        let decision_failed = Some(Event::DecisionFailed { failure: unknown });
+        assert_eq!(failure_event("CheckSpace", &State::Decided { approved: None }), decision_failed);
+        assert_eq!(failure_event("CheckSpace", &State::Decided { approved: Some(vec![]) }), decision_failed);
+        assert_eq!(failure_event("CheckSpace", &State::Planned { mode: Mode::Direct }), Some(Event::ShareLost));
+        assert_eq!(failure_event("Eject", &State::RipVerified { after_copy: false }), Some(Event::EjectFailed));
+        assert_eq!(failure_event("Remux", &State::Remuxing), Some(Event::RemuxFailed { failure: unknown }));
+        assert_eq!(failure_event("RunScan", &State::Fingerprinted), Some(Event::ScanFailed { failure: unknown }));
+        assert_eq!(failure_event("CheckSpace", &State::Filed), None);
+        assert_eq!(failure_event("", &State::Remuxing), Some(Event::RemuxFailed { failure: unknown }));
+        assert_eq!(failure_event("", &State::Ripping), Some(Event::TitleRipFailed { failure: unknown }));
+        assert_eq!(failure_event("", &State::Planned { mode: Mode::Direct }), None);
+        assert_eq!(failure_event("", &State::Ejected { after_copy: false }), None);
+        let failed = State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) };
+        assert_eq!(failure_event("", &failed), None);
     }
 }
