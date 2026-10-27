@@ -19,7 +19,8 @@ use lazymkv_core::reconcile::{reconcile, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{EditionStyle, Settings};
 use lazymkv_dev::cmd::decide::{
-    no_text_entry, read_decide_inputs, rec_folder, replay_answers, DecideInputs, FileFacts, PlanEntry, RipLogText,
+    no_text_entry, read_decide_inputs, rec_folder, replay_answers, replay_remembered, DecideInputs, FileFacts,
+    PlanEntry, RipLogText,
 };
 use lazymkv_dev::cmd::plan::{plan_doc, PlanOptions, PlanSource};
 use lazymkv_dev::evidence::Ctx;
@@ -149,8 +150,10 @@ fn replay_options(job_dir: &Path) -> PlanOptions {
 /// scan title with `Selection::All` (the one value both the inputs and `reconcile` take), scan.txt, the title's
 /// mkvmerge.json and rip log, `reconcile`, no audio section, the subtitles section of a run with no OCR text, the plan
 /// section of `plan_doc` over the job folder with its `.plan` replaced by `plan`, the plan the job decides with (RP-4),
-/// the answers of `replay_answers` with the same replay files, the probe the engine ran and no other file fact, and
-/// `library`. Err is the sentence of a file that could not be read, or reconcile's. Def: T24. Use: T24, T25.
+/// the answers of `replay_answers` with the same replay files, the remembered decision of `replay_remembered` over the
+/// job's own remembered.json (the copy the plan applied, never the data folder's file, which can change after Plan:
+/// R-B1, the PR #6 review's V14), the probe the engine ran and no other file fact, and `library`. Err is the sentence
+/// of a file that could not be read, or reconcile's. Def: T24. Use: T24, T25.
 pub(crate) fn engine_decide_inputs(
     ctx: &Ctx,
     job: &JobContext,
@@ -186,6 +189,7 @@ pub(crate) fn engine_decide_inputs(
         Err(refused) => PlanEntry::Skipped { skipped: refused.line },
     };
     let answers = replay_answers(ctx, &rec, &options);
+    let remembered = replay_remembered(ctx, &options);
     let file = FileFacts {
         level_md5: Ok(Vec::new()),
         probes: Ok(Some(probes.clone())),
@@ -205,6 +209,7 @@ pub(crate) fn engine_decide_inputs(
         subtitles: no_text_entry(),
         plan: plan_entry,
         answers,
+        remembered,
         file,
         library,
         overrides: None,
@@ -213,8 +218,9 @@ pub(crate) fn engine_decide_inputs(
 
 /// The DecideInputs of a title whose probe the engine no longer holds, as after a restart (design part 5.10, PF-27):
 /// `read_decide_inputs` over the rip label `<job dir>/<key>` with no OCR text, `Selection::All` and the replay files of
-/// `engine_decide_inputs`, its plan section's `.plan` replaced by `plan` when the section has results (RP-4). Err is
-/// the readers' refusal line. Def: T24. Use: T24, T25.
+/// `engine_decide_inputs`, its plan section's `.plan` replaced by `plan` when the section has results (RP-4); the
+/// readers' `replay_remembered` reads the same remembered.json. Err is the readers' refusal line. Def: T24. Use: T24,
+/// T25.
 pub(crate) fn read_back_inputs(ctx: &Ctx, job_dir: &Path, plan: &Plan, key: &str) -> Result<DecideInputs, String> {
     let (rec, label) = rec_folder(ctx, &job_dir.join(key).display().to_string()).map_err(|refused| refused.line)?;
     let options = replay_options(job_dir);

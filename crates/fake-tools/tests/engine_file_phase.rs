@@ -197,6 +197,64 @@ fn a_lookup_pending_job_decides_with_the_refreshed_plan() {
     assert_eq!(doc["plan"]["plan"], persisted);
 }
 
+/// A remembered decision for movie-direct's disc `fp` whose one title, the feature 00800.mpls, keeps its one audio
+/// stream (English DTS-HD MA 5.1, signature position 0) first and as the default (spec 5, 11 "Override tracks").
+fn remembered_keep(fp: &str) -> String {
+    format!(concat!(
+        r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","tmdb":{{"kind":"movie","id":900001}},"titles":[{{"#,
+        r#""source_file":"00800.mpls","dvd_title":null,"segment_map":"1","seconds":7150,"role":{{"role":"feature"}},"#,
+        r#""audio":[{{"signature":{{"kind":"audio","language":"eng","codec":"dts-hd-ma","channels":6,"position":0}},"#,
+        r#""action":"keep","order":0,"default":true}}],"subtitles":[]}}]}}"#), fp = fp)
+}
+
+/// The PR #6 review's V14 (spec 5, F10, RR1-14): a remembered decision's track overrides reach decide.json. The Keep
+/// covers the title's only audio stream, so the audio part is 1.00 (0.95 without it); the track confidence stays 0.95,
+/// the case of a title with no English subtitle stream. The filed file is the one without the override, and decide.json
+/// is what `read_decide_inputs` renders over the finished job folder with the job's remembered.json (R-B1).
+#[test]
+fn a_remembered_decisions_track_overrides_reach_decide_json() {
+    let plain = harness(&[], json!({}));
+    let plain_id = run_to(&plain, "Filed");
+    let plain_doc = json_of(&plain.job_dir(&plain_id).join(KEY).join("decide.json"));
+    assert_eq!(plain_doc["decision"]["decision"]["audio"]["confidence"], json!(0.95));
+
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    fs::create_dir_all(h.data().join("remembered")).unwrap();
+    fs::write(h.data().join("remembered").join(format!("{fp}.json")), remembered_keep(&fp)).unwrap();
+    let id = run_to(&h, "Filed");
+    let dir = h.job_dir(&id);
+    let doc = json_of(&dir.join(KEY).join("decide.json"));
+    let decision = &doc["decision"]["decision"];
+    assert_eq!(decision["audio"]["confidence"], json!(1.0));
+    assert_eq!(decision["confidences"]["track"], json!(0.95));
+    assert_eq!(decision["layout"], plain_doc["decision"]["decision"]["layout"]);
+    assert_eq!(decision["audio"]["kept"], plain_doc["decision"]["decision"]["audio"]["kept"]);
+    let record = h.record(&id);
+    assert_eq!(Path::new(&record.titles[0].filed.as_ref().unwrap().path), final_path(&h).as_path());
+
+    let ctx = Ctx::for_test(h.data());
+    let (rec, label) = rec_folder(&ctx, &dir.join(KEY).display().to_string()).unwrap_or_else(|r| panic!("{}", r.line));
+    // The replay files the engine reads, as `lazymkvctl decide` is given them (the engine's replay_options).
+    let given = |name: &str| Some(dir.join(name)).filter(|path| path.is_file());
+    assert!(given("remembered.json").is_some());
+    let options = PlanOptions {
+        settings: given("settings.json"),
+        tmdb_search: given("tmdb-search.json"),
+        tmdb_record: given("tmdb-record.json"),
+        remembered: given("remembered.json"),
+    };
+    let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
+    let mut written = doc.clone();
+    let object = written.as_object_mut().unwrap();
+    object.remove("audio_rule_version");
+    object.remove("lazymkv_version");
+    assert_eq!(
+        dumps(&written, Style::INDENT1_ASCII),
+        dumps(&serde_json::to_value(decide_doc(&read)).unwrap(), Style::INDENT1_ASCII)
+    );
+}
+
 #[test]
 fn two_english_subtitle_streams_fail_the_decision_until_step_10_exists() {
     let h = harness(&["movie-direct-two-subs"], json!({}));

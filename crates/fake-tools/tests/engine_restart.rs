@@ -496,6 +496,36 @@ fn a_decide_after_restart_reads_its_inputs_back_with_devs_readers() {
     assert_eq!(fs::read(key.join("decide.json")).unwrap(), first);
 }
 
+/// The PR #6 review's V14 (R-B1, RR1-14): a Decide after a restart reads the job's remembered.json back with dev's
+/// readers and applies the same track overrides, even with the data folder's remembered decision gone: Decide never
+/// reads the data folder's file. The remembered decision keeps movie-direct's one audio stream first and as the
+/// default, which sets the audio part to 1.00.
+#[test]
+fn a_decide_after_restart_applies_the_jobs_remembered_track_overrides() {
+    let h = harness(&["movie-direct"], settings());
+    let fp = h.fingerprint(DISC);
+    let data_copy = h.data().join("remembered").join(format!("{fp}.json"));
+    fs::create_dir_all(data_copy.parent().unwrap()).unwrap();
+    fs::write(&data_copy, format!(concat!(
+        r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","tmdb":{{"kind":"movie","id":900001}},"titles":[{{"#,
+        r#""source_file":"00800.mpls","dvd_title":null,"segment_map":"1","seconds":7150,"role":{{"role":"feature"}},"#,
+        r#""audio":[{{"signature":{{"kind":"audio","language":"eng","codec":"dts-hd-ma","channels":6,"position":0}},"#,
+        r#""action":"keep","order":0,"default":true}}],"subtitles":[]}}]}}"#), fp = fp)).unwrap();
+    h.insert("tok0", DISC);
+    h.run_until("Decided");
+    let dir = h.job_dir(&only_job(&h));
+    let key = dir.join("t00-00800");
+    let first = fs::read(key.join("decide.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(doc["decision"]["decision"]["audio"]["confidence"], json!(1.0));
+    fs::remove_file(&data_copy).unwrap();
+    h.restart();
+    h.run_until("Filed");
+    assert!(fs::read_to_string(dir.join("job.log")).unwrap().contains(
+        "decide inputs read back from the job folder with lazymkv-dev's readers (design part 5.10)"));
+    assert_eq!(fs::read(key.join("decide.json")).unwrap(), first);
+}
+
 #[test]
 fn awaiting_lookup_recreates_its_timer() {
     use lazymkv_engine::testkit::StepScript;
