@@ -1342,6 +1342,61 @@ fn a_cancel_whose_failure_cannot_be_persisted_is_answered_with_the_error() {
     assert!(!failed_notified(&h, &id), "{:?}", h.notifications());
 }
 
+/// The final review of review round 1 (S1, RR1-16): a VerifyFile whose `TitleVerified { last: true }` cannot be
+/// persisted takes its posted edit with it, so the failure fed in its place is written over the persisted record, where
+/// the title is not verified; the Retry then rips the title again and the job goes on. Before the fix the failure
+/// carried `verified: true`, and the Retry's RipTitle found no title left and stalled the job in Ripping for good.
+#[test]
+fn a_lost_last_verification_is_not_persisted_with_its_failure_and_retry_rips_again() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::TitleVerified { last: true }));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    let message = "the TitleVerified transition into RipVerified could not be persisted: refused by the test";
+    assert_eq!(failed.message.as_deref(), Some(message));
+    let title = &failed.titles[0];
+    assert!(!title.verified && title.rip_reviews.is_empty(), "{title:?}");
+    assert_eq!(title.attempts, 1);
+    h.allow_persists();
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+    let title = h.record(&a).titles[0].clone();
+    assert!(title.verified, "{title:?}");
+    assert_eq!(title.attempts, 2);
+}
+
+/// The final review of review round 1 (S1, RR1-16): the same for a second failed verification of the last title,
+/// whose posted edit counts it and marks it `verify_failed`: the lost transition takes both with it, so the persisted
+/// count stays 1 (the count follows the persisted record, V12) and the Retry rips the title again; its third
+/// verification fails as the second, and the title goes on with `verify_failed`.
+#[test]
+fn a_lost_second_verify_failure_is_not_counted_and_retry_rips_again() {
+    let h = stand_in(&["movie-direct", "movie-direct-verify-twice"], settings());
+    let second = Event::TitleVerifyFailed { second: true, last: true };
+    h.refuse_persists(move |_, transition| transition.event.as_ref() == Some(&second));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    let title = &failed.titles[0];
+    assert!(!title.verified && title.rip_reviews.is_empty(), "{title:?}");
+    assert_eq!((title.attempts, title.verify_failures), (2, 1));
+    h.allow_persists();
+    c.ok("retry", json!({"job": a}));
+    h.wait("Ejected", |h| h.transitions(&a).iter().any(|line| line.new.as_str() == "Ejected"));
+    let title = h.record(&a).titles[0].clone();
+    assert_eq!(title.rip_reviews, vec![ReviewReason::VerifyFailed]);
+    assert_eq!((title.attempts, title.verify_failures), (3, 2));
+}
+
 // ---- Review actions (design part 9.4, P25, R-A8) ----
 
 fn held_script() -> Vec<(&'static str, StepScript)> {
@@ -1784,11 +1839,12 @@ fn a_forced_shutdown_lets_an_in_flight_eject_finish_then_persists_it() {
 }
 
 /// Disc A pulled mid-rip: its rip is killed and stale, still listed for the 3 s it takes to report (M3), and the job
-/// waits for its disc in Ripping.
+/// waits for its disc in Ripping. The 3 s and the 2 s bound on the removal scale by `ci_factor` (R29.c2, R29.c5; the
+/// final review of review round 1, C5), so the removal still comes before the report on a slow runner.
 fn pulled_mid_rip() -> (Harness, Client, String) {
     let mut script = main_line();
     let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
-    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3), ripped));
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3) * ci_factor(), ripped));
     let h = scripted(script);
     let mut c = Client::open(&h);
     c.snapshot();
@@ -1798,7 +1854,8 @@ fn pulled_mid_rip() -> (Harness, Client, String) {
     let id = h.job_ids().pop().unwrap();
     h.remove("tok0");
     h.wait("MediaRemoved", |h| h.transitions(&id).last().unwrap().event == Some(Event::MediaRemoved));
-    assert!(ripping.elapsed() < Duration::from_secs(2), "the removal came late: {:?}", ripping.elapsed());
+    let late = Duration::from_secs(2) * ci_factor();
+    assert!(ripping.elapsed() < late, "the removal came late: {:?}", ripping.elapsed());
     (h, c, id)
 }
 

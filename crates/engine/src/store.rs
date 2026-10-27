@@ -5,7 +5,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-#[cfg(windows)]
 use std::time::Duration;
 
 use lazymkv_core::record::{
@@ -33,11 +32,9 @@ const REMEMBERED_DIR: &str = "remembered";
 const ENGINE_LOG: &str = "engine.log";
 /// A job's own log (design part 7.1).
 const JOB_LOG: &str = "job.log";
-/// How many times `persist` tries to replace a state.json another process holds open, and the pause between two tries
-/// (RR1-2).
-#[cfg(windows)]
-const REPLACE_TRIES: u32 = 5;
-#[cfg(windows)]
+/// How many times `persist` tries to check and replace a state.json another process holds open, and the pause between
+/// two tries (RR1-2): 5 on Windows; elsewhere no other process's handle stops a read or a rename, so one try.
+const REPLACE_TRIES: u32 = if cfg!(windows) { 5 } else { 1 };
 const REPLACE_PAUSE: Duration = Duration::from_millis(100);
 
 /// What `Store::persist` wrote (design part 7.3; review round 1, V1, RR1-3). Def: PR #6 review (V1). Use: owner.rs.
@@ -169,11 +166,13 @@ impl Store {
     /// `sync_data` flushes it, all before the transition's actions run. It refuses (`ErrorKind::InvalidData`, the
     /// path and the check_format text) when an existing state.json fails `check_format(JOB_FORMAT)` or is not JSON,
     /// and then writes nothing (design part 7.4). RP-8: when transitions.jsonl does not end in "\n", a crash tore its
-    /// last line, and the append writes that "\n" first. Amended at review round 1 (V1): on Windows the replace of
-    /// state.json is tried again while another process holds the file (`replace`, RR1-2), and an append or flush that
-    /// fails after the replace gives `Persisted::LogLineLost`, not an error, because state.json already holds the new
-    /// state (RR1-3); the append is never tried again, so a line is never written twice. Under the testkit it first
-    /// asks the faults `with_faults` set. Def: T21. Use: T22, T23, T25, T26.
+    /// last line, and the append writes that "\n" first. Amended at review round 1 (V1): on Windows the format check's
+    /// read and the replace of state.json are tried again while another process holds the file (`replace_state`,
+    /// RR1-2), and an append or flush that fails after the replace gives `Persisted::LogLineLost`, not an error,
+    /// because state.json already holds the new state (RR1-3); the append is never tried again, so a line is never
+    /// written twice. Every error, the lost line's included, names its file in the store's `<path>: <reason>` form,
+    /// keeping its `ErrorKind` (the final review of review round 1, C3). Under the testkit it first asks the faults
+    /// `with_faults` set, whose errors name no file. Def: T21. Use: T22, T23, T25, T26.
     pub(crate) fn persist(&self, record: &JobRecord, transition: &Transition) -> io::Result<Persisted> {
         #[cfg(any(test, feature = "testkit"))]
         let lose_line = match self.faults.as_ref().and_then(|faults| faults(record, transition)) {
@@ -188,15 +187,15 @@ impl Store {
         let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = self.job_dir(&record.id);
         let state = dir.join(STATE_FILE);
-        refuse_foreign(&state, JOB_FORMAT)?;
-        fs::create_dir_all(&dir)?;
-        replace(&state, &pretty(record)?)?;
+        let bytes = pretty(record).map_err(|error| located(&state, error))?;
+        replace_state(&state, &bytes)?;
         if lose_line {
             return Ok(Persisted::LogLineLost(io::Error::other("lost by the test")));
         }
-        match append_line(&dir.join(TRANSITIONS_FILE), transition) {
+        let transitions = dir.join(TRANSITIONS_FILE);
+        match append_line(&transitions, transition) {
             Ok(()) => Ok(Persisted::Whole),
-            Err(error) => Ok(Persisted::LogLineLost(error)),
+            Err(error) => Ok(Persisted::LogLineLost(located(&transitions, error))),
         }
     }
 
@@ -281,30 +280,58 @@ impl Store {
     }
 }
 
-/// `write_atomic(path, bytes)`, tried again on Windows while another process holds the file (RR1-2): a sharing or lock
-/// violation, or the access denied a rename over a file open without delete sharing gives (os errors 32, 33 and 5),
-/// is tried again up to `REPLACE_TRIES` times in all, `REPLACE_PAUSE` apart, as an indexer or virus scanner holding
-/// state.json for a moment would otherwise fail the transition. Every other error, and every error elsewhere, is
+/// A job's state.json at `path` replaced with `bytes` (design parts 7.3, 7.4): `refuse_foreign`'s check, the job folder
+/// made, then `write_atomic`. Each error names its file, `<path>: <reason>`, with its `ErrorKind` kept (the final
+/// review of review round 1, C3). On Windows the whole is tried again while another process holds state.json (RR1-2,
+/// with the final review's C2): a check whose read meets a sharing or lock violation (os errors 32 and 33), or a
+/// replace that meets one or the access denied a rename over a file open without delete sharing gives (os errors 5,
+/// 32 and 33), starts again up to `REPLACE_TRIES` tries in all, `REPLACE_PAUSE` apart, as an indexer or virus scanner
+/// holding state.json for a moment would otherwise fail the transition. The decision reads the raw OS error, so the
+/// path is added only after it. Every other error, and every error outside Windows, where `REPLACE_TRIES` is 1, is
 /// returned at once. The retry stays when pull request 3 swaps in `MoveFileExW`. It is the engine's first production
 /// retry loop (R29.c3 and R29.c4 keep theirs in test code).
-#[cfg(windows)]
-fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn replace_state(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tries = 1;
     loop {
-        match write_atomic(path, bytes) {
-            Err(error) if tries < REPLACE_TRIES && matches!(error.raw_os_error(), Some(5 | 32 | 33)) => {
-                tries += 1;
-                std::thread::sleep(REPLACE_PAUSE);
+        let (error, held) = match check_and_replace(path, bytes) {
+            Ok(()) => return Ok(()),
+            Err(Replace::Located(error)) => return Err(error),
+            Err(Replace::Check(error)) => {
+                let held = matches!(error.raw_os_error(), Some(32 | 33));
+                (error, held)
             }
-            result => return result,
+            Err(Replace::Write(error)) => {
+                let held = matches!(error.raw_os_error(), Some(5 | 32 | 33));
+                (error, held)
+            }
+        };
+        if !held || tries >= REPLACE_TRIES {
+            return Err(located(path, error));
         }
+        tries += 1;
+        std::thread::sleep(REPLACE_PAUSE);
     }
 }
 
-/// `write_atomic(path, bytes)`: outside Windows no other process's handle stops a rename, so nothing is tried again.
-#[cfg(not(windows))]
-fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_atomic(path, bytes)
+/// Where `check_and_replace` failed: the check's read and the replace give the raw error, which `replace_state` may try
+/// again; every other error already names its file.
+enum Replace {
+    Check(io::Error),
+    Write(io::Error),
+    Located(io::Error),
+}
+
+/// One try of `replace_state`: `refuse_foreign(path, JOB_FORMAT)`, the parent folder made, then `write_atomic`.
+fn check_and_replace(path: &Path, bytes: &[u8]) -> Result<(), Replace> {
+    match read_existing(path) {
+        Ok(Some(existing)) => check_bytes(path, &existing, JOB_FORMAT).map_err(Replace::Located)?,
+        Ok(None) => {}
+        Err(error) => return Err(Replace::Check(error)),
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|error| Replace::Located(located(dir, error)))?;
+    }
+    write_atomic(path, bytes).map_err(Replace::Write)
 }
 
 /// Appends `to_string(transition)` plus "\n" to the transitions log at `path` and flushes it with `sync_data`, first
@@ -331,6 +358,12 @@ fn at(path: &Path, reason: impl std::fmt::Display) -> String {
     format!("{}: {reason}", path.display())
 }
 
+/// `error` in the store's form, `<path>: <error>`, keeping its `ErrorKind` (the final review of review round 1, C3).
+fn located(path: &Path, error: io::Error) -> io::Error {
+    let kind = error.kind();
+    io::Error::new(kind, at(path, error))
+}
+
 /// `value` as `to_vec_pretty` plus "\n", the form of every JSON file the store writes.
 fn pretty<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
@@ -354,15 +387,28 @@ fn read_checked<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Option
 
 /// Ok when no file is at `path`, or when it is JSON that passes `check_format(format)`. Otherwise
 /// `ErrorKind::InvalidData` with "<path>: <reason>": design part 7.4's refused file, which is never overwritten. It
-/// reads the file at each write, so a refusal needs no state in the store.
+/// reads the file at each write, so a refusal needs no state in the store. A read error is returned as the OS gave it.
 fn refuse_foreign(path: &Path, format: &str) -> io::Result<()> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
+    match read_existing(path)? {
+        Some(bytes) => check_bytes(path, &bytes, format),
+        None => Ok(()),
+    }
+}
+
+/// The bytes of the file at `path`, None when there is none; a read error as the OS gave it.
+fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `refuse_foreign`'s check of the bytes read from `path`: Ok when they are JSON that passes `check_format(format)`,
+/// else `ErrorKind::InvalidData` with "<path>: <reason>".
+fn check_bytes(path: &Path, bytes: &[u8], format: &str) -> io::Result<()> {
     let refused = |reason: String| io::Error::new(io::ErrorKind::InvalidData, at(path, reason));
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| refused(error.to_string()))?;
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| refused(error.to_string()))?;
     check_format(&value, format).map_err(refused)
 }
 
@@ -534,6 +580,33 @@ mod tests {
         assert!(!tmp.0.join("jobs/abc-1/transitions.jsonl").exists());
     }
 
+    /// The final review of review round 1 (C3): a persist that cannot read, make or replace a job's files names the
+    /// file it met in the store's `<path>: <reason>` form, and so does a lost transitions line. Each case is a folder
+    /// where a file belongs, or a file where a folder belongs, which fails on every OS.
+    #[test]
+    fn persist_errors_name_the_file_they_met() {
+        let shown = |path: PathBuf| path.display().to_string();
+        let tmp = Temp::new("persist-path-folder");
+        fs::create_dir_all(tmp.0.join("jobs")).unwrap();
+        fs::write(tmp.0.join("jobs/abc-1"), "").unwrap();
+        let error = store_in(&tmp.0).persist(&record(State::Detected, 7), &first()).unwrap_err().to_string();
+        assert!(error.starts_with(&shown(tmp.0.join("jobs").join("abc-1"))), "{error}");
+        let tmp = Temp::new("persist-path-state");
+        let state = tmp.0.join("jobs").join("abc-1").join("state.json");
+        fs::create_dir_all(&state).unwrap();
+        let error = store_in(&tmp.0).persist(&record(State::Detected, 7), &first()).unwrap_err().to_string();
+        assert!(error.starts_with(&format!("{}: ", shown(state))), "{error}");
+        let tmp = Temp::new("persist-path-line");
+        let transitions = tmp.0.join("jobs").join("abc-1").join("transitions.jsonl");
+        fs::create_dir_all(&transitions).unwrap();
+        match store_in(&tmp.0).persist(&record(State::Detected, 7), &first()) {
+            Ok(Persisted::LogLineLost(error)) => {
+                assert!(error.to_string().starts_with(&format!("{}: ", shown(transitions))), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn an_absent_drives_json_is_an_empty_record() {
         let tmp = Temp::new("drives-absent");
@@ -653,10 +726,10 @@ mod tests {
         }
     }
 
-    /// Review round 1 (V1, RR1-2): a state.json another process holds open without delete sharing, as an indexer or a
-    /// virus scanner may, is replaced once that process lets it go, within the store's five tries, and the
-    /// transitions line is written once. The holder shares reading, so the format check before the replace still reads
-    /// the file.
+    /// Review round 1 (V1, RR1-2, with the final review's C2): a state.json another process holds open without delete
+    /// sharing, as an indexer or a virus scanner may, is replaced once that process lets it go, within the store's five
+    /// tries, and the transitions line is written once: a holder that shares reading fails the replace, which is tried
+    /// again, and one that shares nothing fails the format check's read, which is tried again too.
     #[cfg(windows)]
     #[test]
     fn persist_retries_a_state_json_another_process_holds_open() {
@@ -664,29 +737,31 @@ mod tests {
         use std::time::Instant;
         const FILE_SHARE_READ: u32 = 0x1;
         const FILE_SHARE_WRITE: u32 = 0x2;
-        let tmp = Temp::new("held");
-        let store = store_in(&tmp.0);
-        store.persist(&record(State::Detected, 7), &first()).unwrap();
-        let state = tmp.0.join("jobs/abc-1/state.json");
-        let held = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(&state).unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
-            drop(held);
-        });
-        let second = Transition {
-            time_unix: 8, event: Some(Event::FingerprintDone), old: Some(State::Detected), new: State::Fingerprinted,
-            actions: vec![Action::RunScan],
-        };
-        let started = Instant::now();
-        let persisted = store.persist(&record(State::Fingerprinted, 8), &second);
-        let took = started.elapsed();
-        release.join().unwrap();
-        assert!(matches!(persisted, Ok(Persisted::Whole)), "{persisted:?}");
-        assert!(took >= Duration::from_millis(100), "the replace did not wait for the holder: {took:?}");
-        let lines = fs::read_to_string(tmp.0.join("jobs/abc-1/transitions.jsonl")).unwrap();
-        assert_eq!(lines.lines().count(), 2, "{lines}");
-        let written: JobRecord = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
-        assert_eq!(written, record(State::Fingerprinted, 8));
+        for share in [FILE_SHARE_READ | FILE_SHARE_WRITE, 0] {
+            let tmp = Temp::new("held");
+            let store = store_in(&tmp.0);
+            store.persist(&record(State::Detected, 7), &first()).unwrap();
+            let state = tmp.0.join("jobs/abc-1/state.json");
+            let held = OpenOptions::new().read(true).share_mode(share).open(&state).unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                drop(held);
+            });
+            let second = Transition {
+                time_unix: 8, event: Some(Event::FingerprintDone), old: Some(State::Detected),
+                new: State::Fingerprinted, actions: vec![Action::RunScan],
+            };
+            let started = Instant::now();
+            let persisted = store.persist(&record(State::Fingerprinted, 8), &second);
+            let took = started.elapsed();
+            release.join().unwrap();
+            assert!(matches!(persisted, Ok(Persisted::Whole)), "share {share:#x}: {persisted:?}");
+            assert!(took >= Duration::from_millis(100), "share {share:#x}: the persist did not wait: {took:?}");
+            let lines = fs::read_to_string(tmp.0.join("jobs/abc-1/transitions.jsonl")).unwrap();
+            assert_eq!(lines.lines().count(), 2, "share {share:#x}: {lines}");
+            let written: JobRecord = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+            assert_eq!(written, record(State::Fingerprinted, 8), "share {share:#x}");
+        }
     }
 
     #[test]

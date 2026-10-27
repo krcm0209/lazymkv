@@ -255,6 +255,32 @@ fn a_remembered_decisions_track_overrides_reach_decide_json() {
     );
 }
 
+/// The final review of review round 1 (C6; R-B1, RR1-14): the engine's first-pass Decide, which holds the probe it
+/// ran, reads the job's remembered.json, never the data folder's file. That file is removed after the job is planned
+/// and ejected, and the engine restarted before the file phase, so the Decide that follows runs over the probe of its
+/// own run: decide.json still carries the job copy's Keep (audio part 1.00), and no read-back line is written.
+#[test]
+fn a_first_pass_decide_applies_the_jobs_remembered_copy_not_the_data_folders_file() {
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    let data_copy = h.data().join("remembered").join(format!("{fp}.json"));
+    fs::create_dir_all(data_copy.parent().unwrap()).unwrap();
+    fs::write(&data_copy, remembered_keep(&fp)).unwrap();
+    h.insert("tok0", "movie-direct");
+    h.run_until("Ejected");
+    let id = h.job_ids().pop().unwrap();
+    let dir = h.job_dir(&id);
+    assert!(dir.join("remembered.json").is_file());
+    assert!(!dir.join(KEY).join("decide.json").exists());
+    fs::remove_file(&data_copy).unwrap();
+    h.restart();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    let doc = json_of(&dir.join(KEY).join("decide.json"));
+    assert_eq!(doc["decision"]["decision"]["audio"]["confidence"], json!(1.0));
+    let log = fs::read_to_string(dir.join("job.log")).unwrap();
+    assert!(!log.contains("decide inputs read back"), "{log}");
+}
+
 #[test]
 fn two_english_subtitle_streams_fail_the_decision_until_step_10_exists() {
     let h = harness(&["movie-direct-two-subs"], json!({}));
@@ -367,17 +393,22 @@ fn a_remux_exit_2_fails_remux_failed_unknown_and_keeps_the_raw() {
     assert!(!final_path(&h).exists());
 }
 
-/// Stops the engine at the first transition into `state` (before its actions), puts a regular file in place of the
-/// title's staging folder `<staging>/<id>/rip/<KEY>`, whose own files are moved aside, and restarts the engine, so
-/// listing the folder fails on every OS with an error other than NotFound (review round 1, V3). Returns the job and the
-/// folder.
-fn restart_with_the_title_folder_blocked(h: &Harness, state: &str) -> (String, PathBuf) {
+/// Stops the engine at the first transition into `state` (before its actions) and puts a regular file in place of the
+/// title's staging folder `<staging>/<id>/rip/<KEY>`, whose own files are moved aside, so listing the folder fails on
+/// every OS with an error other than NotFound (review round 1, V3). Returns the job and the folder.
+fn block_the_title_folder(h: &Harness, state: &str) -> (String, PathBuf) {
     h.insert("tok0", "movie-direct");
     h.run_until(state);
     let id = h.job_ids().pop().unwrap();
     let dir = h.staging().join(&id).join("rip").join(KEY);
     fs::rename(&dir, dir.with_extension("aside")).unwrap();
     fs::write(&dir, b"").unwrap();
+    (id, dir)
+}
+
+/// `block_the_title_folder`, then the engine restarted and run until the job fails.
+fn restart_with_the_title_folder_blocked(h: &Harness, state: &str) -> (String, PathBuf) {
+    let (id, dir) = block_the_title_folder(h, state);
     h.restart();
     h.wait("Failed", |h| h.state_of(&id) == "Failed");
     h.settle();
@@ -421,6 +452,27 @@ fn an_unreadable_title_folder_at_the_remux_check_uses_the_planned_promise() {
     assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
     let message = record.message.unwrap_or_default();
     assert!(message.starts_with(&format!("{}: ", dir.display())), "{message}");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    let line = format!("check space: the staged files could not be read: {}: ", dir.display());
+    assert!(log.contains(&line), "{log}");
+}
+
+/// The final review of review round 1 (N1): when the staged sizes cannot be read and the plan's estimate does not fit
+/// the library, the job waits in AwaitingSpace saying what any shortage says, `waiting: space`, and the read error is
+/// only a job.log line.
+#[test]
+fn an_unreadable_title_folder_at_a_short_remux_check_waits_naming_only_the_shortage() {
+    let h = harness(&[], json!({}));
+    let (id, dir) = block_the_title_folder(&h, "Decided");
+    h.shares().set_free(h.library().to_str().unwrap(), 1);
+    h.restart();
+    h.wait("AwaitingSpace", |h| h.state_of(&id) == "AwaitingSpace");
+    h.settle();
+    let record = h.record(&id);
+    assert_eq!(record.message, None);
+    let waiting = h.notifications().into_iter().last().unwrap();
+    assert_eq!(waiting.event, NotifyEvent::Waiting { reason: WaitReason::Space });
+    assert_eq!(waiting.message, "waiting: space");
     let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
     let line = format!("check space: the staged files could not be read: {}: ", dir.display());
     assert!(log.contains(&line), "{log}");

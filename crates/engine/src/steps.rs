@@ -212,6 +212,13 @@ fn staging_write_failure(health: StagingHealth) -> Failure {
     classify_title_failure(health.share_healthy, health.out_of_space, true, false)
 }
 
+/// The class of a title folder VerifyFile cannot list after a rip (review round 1, V3 with V9, RR1-7): classed by the
+/// share check with no write error and no read errors, so Output while staging does not answer (AwaitingShare) or is
+/// out of space (AwaitingSpace), and Unknown otherwise, never a write error a healthy staging would wait on.
+fn unlisted_title_failure(health: StagingHealth) -> Failure {
+    classify_title_failure(health.share_healthy, health.out_of_space, false, false)
+}
+
 /// A plain sentence for a profile the default profile could not become.
 fn profile_error(error: ProfileError) -> &'static str {
     match error {
@@ -749,9 +756,11 @@ impl Step<'_> {
     /// Plan (design part 5.4 step 5, S30): `core::plan::plan` over the scan, the book as it stands (R23.1: a book a
     /// running round holds counts as empty, so every lookup is pending) and the remembered decision, persisted with
     /// one TitleRecord per planned title. A Copy plan gives PlanFailed { Unknown } (P1, design part 5.5). The data
-    /// folder's remembered decision is copied to `<job>/remembered.json`; when there is none, or it is refused, a copy
-    /// an earlier Plan of the job left there is removed, so the job folder never holds a remembered file the plan did
-    /// not use (review round 1, the prerequisite of V14).
+    /// folder's remembered decision is copied to `<job>/remembered.json`; when there is none, when it is refused, or
+    /// when the copy cannot be written (`<path>: <error>` in job.log), a copy an earlier Plan of the job left there is
+    /// removed, so the job folder never holds a remembered file the plan did not use, unless that copy can be neither
+    /// replaced nor removed, both errors then in job.log (review round 1, the prerequisite of V14; the final review's
+    /// C7).
     fn plan(&self) -> Outcome {
         let failed = |failure| Event::PlanFailed { failure };
         let record = &self.job.record;
@@ -767,6 +776,8 @@ impl Step<'_> {
                 let path = self.job.job_dir.join("remembered.json");
                 if let Err(error) = write_atomic(&path, &bytes) {
                     self.log(&format!("{}: {error}", path.display()));
+                    // An older copy left in place would hand Decide overrides this plan did not use (C7).
+                    self.drop_remembered_copy();
                 }
                 Some(remembered)
             }
@@ -833,13 +844,19 @@ impl Step<'_> {
 
     /// CheckSpace's result from a check's `(event, sentence)` (design part 6.1, "the error says which"; review round 1,
     /// V15): with a sentence, the job.log line `check space: <sentence>` and the event carrying it, so the record, the
-    /// waiting notification and job.log name the root and why; otherwise the event alone. Called once the `Promises`
-    /// guard is dropped.
+    /// waiting notification and job.log name the root and why; otherwise the event alone. A SpaceShort never carries
+    /// its sentence, which only `staged_remux_check` gives it (staged files that could not be read): the sentence stays
+    /// a job.log line, and AwaitingSpace's message and notification say what any shortage says, `waiting: space` (the
+    /// final review of review round 1, N1). Called once the `Promises` guard is dropped.
     fn space_result(&self, (found, why): (Event, Option<String>)) -> StepResult {
         match why {
             Some(why) => {
                 self.log(&format!("check space: {why}"));
-                with(found, why)
+                if found == Event::SpaceShort {
+                    event(found)
+                } else {
+                    with(found, why)
+                }
             }
             None => event(found),
         }
@@ -1061,7 +1078,8 @@ impl Step<'_> {
     ///   TitleRipFailed { Unknown } with their sentence, as `cancel` counts the step (design parts 5.3, 9.4; review
     ///   round 1, V9): no comparison was made, so nothing is counted and no re-rip is silent.
     /// - A folder that cannot be listed writes no rip-summary.json and gives TitleRipFailed classed by the share check
-    ///   with `<folder>: <error>`: Output while staging does not answer or is full, else Unknown (RR1-7).
+    ///   (`unlisted_title_failure`) with `<folder>: <error>`: Output while staging does not answer or is full, else
+    ///   Unknown (RR1-7).
     fn verify_rip(&self) -> Outcome {
         let failed = |failure| Event::TitleRipFailed { failure };
         let record = &self.job.record;
@@ -1077,8 +1095,7 @@ impl Step<'_> {
             Ok(files) => files,
             Err(message) => {
                 self.log(&format!("{key}/rip-summary.json was not written: {message}"));
-                let health = self.staging_health();
-                let failure = classify_title_failure(health.share_healthy, health.out_of_space, false, false);
+                let failure = unlisted_title_failure(self.staging_health());
                 return Ok(with(failed(failure), message));
             }
         };
@@ -1776,5 +1793,18 @@ mod tests {
         assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
         assert_eq!(classed(true, false), output(OutputCause::WriteError));
+    }
+
+    /// The final review of review round 1 (C1, RR1-7): a title folder VerifyFile cannot list is classed by the share
+    /// check with no write error, so a healthy staging fails Unknown rather than cycling through AwaitingShare.
+    #[test]
+    fn a_title_folder_verify_cannot_list_is_unknown_on_a_healthy_staging() {
+        use lazymkv_core::job::OutputCause;
+        let output = |cause| Failure { class: FailureClass::Output, output: Some(cause) };
+        let classed = |share_healthy, out_of_space| unlisted_title_failure(StagingHealth { share_healthy, out_of_space });
+        assert_eq!(classed(true, false), Failure { class: FailureClass::Unknown, output: None });
+        assert_eq!(classed(false, false), output(OutputCause::ShareUnreachable));
+        assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
+        assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
     }
 }

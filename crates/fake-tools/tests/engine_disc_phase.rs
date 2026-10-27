@@ -496,6 +496,33 @@ fn plan_removes_a_remembered_copy_the_data_folder_no_longer_holds() {
     assert_ne!(h.record(&id).plan.unwrap().identity.step, IdentityStep::Remembered);
 }
 
+/// The final review of review round 1 (C7): a Plan whose copy of the remembered decision cannot be written removes the
+/// copy an earlier Plan of the job left, so Decide never reads overrides this plan did not use; the plan still applies
+/// the data folder's decision, and job.log names the copy that was not written.
+#[test]
+fn a_remembered_copy_that_cannot_be_written_removes_the_earlier_copy() {
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    fs::create_dir_all(h.data().join("remembered")).unwrap();
+    fs::write(h.data().join("remembered").join(format!("{fp}.json")), format!(concat!(
+        r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","tmdb":{{"kind":"movie","id":900001}},"titles":[{{"#,
+        r#""source_file":"00800.mpls","dvd_title":null,"segment_map":"1","seconds":7150,"role":{{"role":"feature"}},"#,
+        r#""audio":[],"subtitles":[]}}]}}"#), fp = fp)).unwrap();
+    h.insert("tok0", "movie-direct");
+    h.run_until("Scanned");
+    let id = format!("{}-1", fp.to_ascii_lowercase());
+    let copy = h.job_dir(&id).join("remembered.json");
+    fs::write(&copy, format!(r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","titles":[]}}"#)).unwrap();
+    // A folder where write_atomic puts its temporary file fails the write before it touches the copy, on every OS.
+    fs::create_dir_all(h.job_dir(&id).join(format!("remembered.json{}", lazymkv_platform::TEMP_SUFFIX))).unwrap();
+    h.restart();
+    h.run_until("Planned");
+    assert!(!copy.exists());
+    assert_eq!(h.record(&id).plan.unwrap().identity.step, IdentityStep::Remembered);
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(&format!("{}: ", copy.display())), "{log}");
+}
+
 #[test]
 fn a_remembered_file_of_another_major_version_is_ignored_and_reported_in_engine_log() {
     let h = harness(&[], json!({}));

@@ -158,8 +158,10 @@ pub(crate) fn staged_bytes(staging: &str, id: &str, plan: &Plan) -> Result<u64, 
 /// unreachable gives ShareLost naming it, the staging error after it, and no promise is touched; staging that answers
 /// gives `remux_check` of the rip check's estimate, `planned_remux_promise(plan)`, never 0 bytes (design part 5.8: a
 /// passed check means the job can finish), with `the staged files could not be read: <error>` as the sentence when the
-/// check gives none. ShareLost is never fed for a staging error on a share that answers, which S81's re-check, testing
-/// only `reach`, could not clear. Def: PR #6 review (V3). Use: `remux_space`, `space_freed`.
+/// check gives none: CheckSpace carries it with SpaceOk and writes it only to job.log with SpaceShort, whose message
+/// stays the shortage's (`space_result`; the final review of review round 1, N1). ShareLost is never fed for a staging
+/// error on a share that answers, which S81's re-check, testing only `reach`, could not clear. Def: PR #6 review (V3).
+/// Use: `remux_space`, `space_freed`.
 pub(crate) fn staged_remux_check(
     staged: Result<u64, String>,
     plan: &Plan,

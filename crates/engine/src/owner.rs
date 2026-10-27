@@ -394,15 +394,20 @@ impl EngineHandle {
 }
 
 /// A step's changes to its job's record and the events it feeds before its own result, taken by the owner with the
-/// step's result and persisted in that result's transition (design part 5.2). Def: T22. Use: T23, T24.
+/// step's result (design part 5.2). The edits are persisted in the first transition the report feeds, a posted event's
+/// or else the result's, and only there: a transition that cannot be persisted drops them (R22.3; the final review of
+/// review round 1, S1, RR1-16). Def: T22. Use: T23, T24.
 #[derive(Clone, Default)]
 pub(crate) struct Outbox(Arc<Mutex<BTreeMap<String, Posted>>>);
+
+/// One edit of a job's record that a step posted (design part 5.2). Def: PR #6 review (RR1-16). Use: owner.rs.
+pub(crate) type RecordEdit = Box<dyn FnOnce(&mut JobRecord) + Send>;
 
 /// What a step posted for its job (design part 5.2). Def: T22. Use: T23, T24.
 #[derive(Default)]
 pub(crate) struct Posted {
     /// Edits of the job's record, applied in order.
-    pub(crate) edits: Vec<Box<dyn FnOnce(&mut JobRecord) + Send>>,
+    pub(crate) edits: Vec<RecordEdit>,
     /// Events fed, in order, before the step's own result.
     pub(crate) first: Vec<Event>,
 }
@@ -659,6 +664,10 @@ struct Job {
     /// The drive holding the job's disc, None while it is out.
     disc: Option<String>,
     lookups: Arc<Mutex<LookupBook>>,
+    /// The record edits the job's last step posted, held for the write of the transition they came with: the next
+    /// `persist_transition` takes them, a successful persist installs them and a failed one drops them, and
+    /// `step_done` drops what no transition took (R22.3; the final review of review round 1, S1, RR1-16).
+    edits: Vec<RecordEdit>,
 }
 
 impl Job {
@@ -818,7 +827,7 @@ impl Owner {
                     };
                     lock(&shown).insert(record.id.clone(), record.clone());
                     let lookups = Arc::new(Mutex::new(book));
-                    let job = Job { record, settings, generation: 0, disc: None, lookups };
+                    let job = Job { record, settings, generation: 0, disc: None, lookups, edits: Vec::new() };
                     jobs.insert(job.record.id.clone(), job);
                 }
                 Err(error) => store.log(&format!("a job is refused and left alone: {error}")),
@@ -1348,7 +1357,8 @@ impl Owner {
             }
         };
         let record = new_record(&id, &arrival.meta, &drive, self.parts.host.now_unix());
-        let job = Job { record, settings, generation: 0, disc: Some(drive.clone()), lookups: Arc::default() };
+        let disc = Some(drive.clone());
+        let job = Job { record, settings, generation: 0, disc, lookups: Arc::default(), edits: Vec::new() };
         self.jobs.insert(id.clone(), job);
         self.record_drive(&drive, arrival.meta.fingerprint.clone(), true);
         let (state, actions) = new_job();
@@ -1408,14 +1418,16 @@ impl Owner {
         true
     }
 
-    /// A transition persisted before any of its actions runs (design part 7.3, R22.3, R24.2): the record actions
-    /// applied (RefreshIdentity's refreshed plan among them), `filed_unix` on entering Filed, `updated_unix`, the
-    /// message, then `Store::persist`; then the promises released or rebuilt and the stop hook. None when it could not
-    /// be persisted, or when the stop hook stopped the engine. A transition whose state.json was replaced but whose
-    /// transitions line was lost counts as persisted, with the engine.log line `<id>: the transitions line of <event>
-    /// into <state> was lost: <error>` (review round 1, V1, RR1-3). One that could not be persisted writes its
-    /// engine.log line and gives the token back; a new job is then removed (S29), and an existing one goes to
-    /// `unpersisted`.
+    /// A transition persisted before any of its actions runs (design part 7.3, R22.3, R24.2): the edits the job's
+    /// step posted with it applied in order (`Job::edits`), then the record actions (RefreshIdentity's refreshed plan
+    /// among them), `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`; then the
+    /// promises released or rebuilt and the stop hook. None when it could not be persisted, or when the stop hook
+    /// stopped the engine. All of it is applied to a copy of the record, which becomes the job's record only once
+    /// persisted, so a transition that could not be persisted takes its posted edits with it (RR1-16). A transition
+    /// whose state.json was replaced but whose transitions line was lost counts as persisted, with the engine.log line
+    /// `<id>: the transitions line of <event> into <state> was lost: <error>` (review round 1, V1, RR1-3). One that
+    /// could not be persisted writes its engine.log line and gives the token back; a new job is then removed (S29), and
+    /// an existing one goes to `unpersisted`.
     fn persist_transition(
         &mut self,
         id: &str,
@@ -1424,10 +1436,14 @@ impl Owner {
         actions: Vec<Action>,
         message: Option<String>,
     ) -> Option<Transition> {
+        let edits = std::mem::take(&mut self.jobs.get_mut(id)?.edits);
         let job = self.jobs.get(id)?;
         let now = self.parts.host.now_unix();
         let mut record = job.record.clone();
         let old = event.as_ref().map(|_| record.state.clone());
+        for edit in edits {
+            edit(&mut record);
+        }
         for action in &actions {
             match action {
                 Action::RecordNote { note } => add_note(&mut record.notes, *note),
@@ -1499,7 +1515,9 @@ impl Owner {
     /// - A transition not into Failed: when the job's state has a failure row (`failure_event` with no tag), it is fed
     ///   with the message `the <event> transition into <state> could not be persisted: <error>` and persisted as usual,
     ///   so the job fails as Unknown, releases its promises, the token and its file-phase place, is notified, and can
-    ///   be retried. A state with no failure row gets nothing: Planned and RipVerified wait for a restart (listed for
+    ///   be retried. The failure is written over the job's persisted record, since the lost transition's posted edits
+    ///   went with it (RR1-16): a Retry resumes from what state.json held, so a title whose verification was lost is
+    ///   ripped again. A state with no failure row gets nothing: Planned and RipVerified wait for a restart (listed for
     ///   pull request 3), a waiting, failed or held job can be retried or approved again, and an Ejected job's grant is
     ///   undone in `grant_next`.
     /// - A transition into Failed, the failure itself (also the guard against feeding again), follows RR1-1: no state
@@ -1928,12 +1946,16 @@ impl Owner {
     /// failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its `ok` (design part
     /// 9.4, R-A7, S78), or, when that failure could not be persisted, the error `cancel_not_persisted` (review round 1,
     /// V1, RR1-4). A stale one is dropped with what its step posted (R-A7), unless a newer step of the job runs,
-    /// whose posts it must not take. Otherwise the posted edits are applied, each posted event is fed, then the
-    /// result's event. A result with no event, from an action other than those that report none, writes `<tag>
-    /// returned no event` to job.log, followed by `: <message>` when it has one; then, unless another step of the
-    /// job's current generation runs (one a posted event handed out; a stale step does not count), a step that
-    /// panicked fails its job (`panic_failure`, design part 5.2) and any other gives the token back, since no step of
-    /// the job runs any more (L2).
+    /// whose posts it must not take. Otherwise each posted event is fed, then the result's event. The posted edits
+    /// travel with them in `Job::edits` and land in the write of the first transition the report feeds, the one they
+    /// came with: `persist_transition` applies them to its copy of the record, so they reach the job's record only with
+    /// a persisted transition, and a transition that could not be persisted drops them before `unpersisted` feeds the
+    /// failure row (R22.3; the final review of review round 1, S1, RR1-16). Edits no transition took, because every
+    /// event was rejected or the step reported none, are dropped, so a panic's failure carries none. A result with no
+    /// event, from an action other than those that report none, writes `<tag> returned no event` to job.log, followed
+    /// by `: <message>` when it has one; then, unless another step of the job's current generation runs (one a posted
+    /// event handed out; a stale step does not count), a step that panicked fails its job (`panic_failure`, design
+    /// part 5.2) and any other gives the token back, since no step of the job runs any more (L2).
     fn step_done(&mut self, id: &str, generation: u64, result: StepResult) {
         self.log_panic(id, &result);
         let mut worker = self.finish_worker(id, generation);
@@ -1960,21 +1982,22 @@ impl Owner {
         }
         let posted = self.parts.outbox.take(id);
         if let Some(job) = self.jobs.get_mut(id) {
-            for edit in posted.edits {
-                edit(&mut job.record);
-            }
+            job.edits = posted.edits;
         }
         for event in posted.first {
             self.feed(id, event, None);
             if self.stopping {
+                self.drop_edits(id);
                 return;
             }
         }
         match result.event {
             Some(event) => {
                 self.feed(id, event, result.message);
+                self.drop_edits(id);
             }
             None => {
+                self.drop_edits(id);
                 let tags = worker.map(|worker| worker.tags).unwrap_or_default();
                 let tag = tags.last().cloned().unwrap_or_default();
                 if NO_EVENT_ACTIONS.contains(&tag.as_str()) {
@@ -1999,6 +2022,14 @@ impl Owner {
                     None => {}
                 }
             }
+        }
+    }
+
+    /// Drops the posted edits of `id` that no transition took (RR1-16): an edit lands only in the write of the
+    /// transition it came with, never in a later one.
+    fn drop_edits(&mut self, id: &str) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.edits.clear();
         }
     }
 

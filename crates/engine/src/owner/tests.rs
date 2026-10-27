@@ -631,18 +631,37 @@ fn a_restart_makes_a_waiting_jobs_moved_disc_drive_its_records_drive() {
     assert_eq!(h.record(&a).drive, "tok1");
 }
 
-/// Sends one request over a new IPC connection and returns its reply, skipping the snapshot and pushes before it.
+/// Sends one request over a new IPC connection and returns its reply, skipping the snapshot and pushes before it. The
+/// lines are read on a helper thread and each is waited for 20 s, times `ci_factor` (R29.c2, R29.c5; the final review
+/// of review round 1, C4), so an engine that never answers fails the test instead of hanging the binary.
 fn request(h: &Harness, kind: &str, payload: serde_json::Value) -> serde_json::Value {
     use lazymkv_platform::IpcConnector;
     use std::io::{BufRead, Write};
+    use std::sync::mpsc::{channel, RecvTimeoutError};
     let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
     let (mut reader, mut writer) = (stream.reader, stream.writer);
+    let (send, lines) = channel();
+    std::thread::spawn(move || loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        }
+    });
     let line = json!({"v": 1, "type": kind, "id": 1, "payload": payload});
     writer.write_all(format!("{line}\n").as_bytes()).unwrap();
     writer.flush().unwrap();
+    let wait = std::time::Duration::from_secs(20) * crate::testkit::ci_factor();
     loop {
-        let mut line = String::new();
-        assert!(reader.read_line(&mut line).unwrap() > 0, "the engine closed the connection");
+        let line = match lines.recv_timeout(wait) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Disconnected) => panic!("the engine closed the connection"),
+            Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {wait:?}"),
+        };
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         if reply["id"] == json!(1) {
             return reply;
