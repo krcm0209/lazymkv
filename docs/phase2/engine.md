@@ -517,6 +517,8 @@ The controller of the plan's execution made these while the tasks ran, mostly on
 - M21, M22 and M23. The characterisation test has no write mode any more, and its panic text says the files are never regenerated (R29.c1); `DecideInputs.answers` names `replay_answers` (S49) as its source; the test's doc says that its Windows leg compares bytes after `masked`, which writes path separators as `/`.
 - M25 to M28 (tests). The tool-level kill tests have 30 s backstops so a regressed kill fails instead of hanging CI; three "nothing happens" assertions settle the engine first; the IPC test client writes a line and its newline in one write; the progress test checks the title and the job.
 - M31 and M32 (docs). `README.md` and `corpus/README.md` describe the stand-in and the scenario family, and this file expands its acronyms at first use and words the characterisation tolerance exactly.
+- N1 (the re-review of the fix wave, design part 5.3). The token `KILLED_HOLDER` holds is freed after every worker's report, not only a stale one's, once no `makemkvcon` step is listed, and after the job's own result is handled. Why: a disc pulled while a cancelled rip paused after its kill passed the token to `KILLED_HOLDER`, and the cancelled step's report, which feeds the cancel's failure, never freed it, so every later arrival, Retry and return queued and every self-test reported MakeMKV busy until a restart. The release comes after the result is handled so that a queued reinsertion of the same disc never resumes the job before its failure is fed. Test: `a_disc_pulled_during_a_cancelled_rip_frees_the_token_once_the_rip_reports`.
+- N2 (the re-review). The guard on a no-event result counts only a step of the job's current generation, so a pulled disc's stale step no longer keeps the token with nothing running after a quick reinsertion. Test: `a_no_event_step_gives_the_token_back_beside_a_stale_step_of_its_job`.
 - Not taken from the review's minors, as the fix list leaves them: M4 to M6, M9, M11, M14 to M16, M19, M20, M24, M29 and M30; the PR 3 and PR 4 ones are listed below.
 
 The owner may overturn any of them.
@@ -586,17 +588,18 @@ The plan's "Not covered" list, with the items the reviews of pull request 2 adde
 - the index guard fails open when no `MSG:5014` or `MSG:5015` appears (Task 13, as the plan requires);
 - KeepAwake is held through waits entered after a file-phase slot grant (the review of Task 24; design part 4.2 is to confirm it);
 - `release_promises` never releases the rip check's Remux promise on a transition into NeedsReview or Discarded from the checked states; the next restart drops it (the review of Task 25);
-- after I1, a `shutdown` without `force` is refused, naming the job, for the few seconds a pulled disc's killed step takes to report (the final review).
+- a `shutdown` without `force` is refused, naming the job, for the few seconds a pulled disc's killed step takes to report after its kill, because `shutdown` lists every running worker, a stale one included (so before the final review too; noted there).
 
 ## Tests
 
 `cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree after the final review's fix wave,
-lists 2502 tests: 1711 in `lazymkv-core`, 416 in `lazymkv-dev`, 8 in `lazymkv-capture`, 184 in `fake-tools`, 21 in
-`lazymkv-platform`, 26 in `lazymkv-tools`, 31 in `lazymkv-clients`, 84 in `lazymkv-engine` and 21 in `lazymkv-ctl`.
+lists 2504 tests: 1711 in `lazymkv-core`, 416 in `lazymkv-dev`, 8 in `lazymkv-capture`, 185 in `fake-tools`, 21 in
+`lazymkv-platform`, 26 in `lazymkv-tools`, 31 in `lazymkv-clients`, 85 in `lazymkv-engine` and 21 in `lazymkv-ctl`.
 The baseline is the 2052 tests of docs/phase1/decision-core.md:701, which pull request #5 left unchanged (it added no
-test), so pull request 2 added 450, 15 of them in the fix wave (11 in `fake-tools`, 4 in `lazymkv-engine`). The lists
-are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject test) is in them, and a test
-compiled only on Unix is not. The junction run of that tree on the mini PC passed 2501 tests and ignored 1
+test), so pull request 2 added 452, 17 of them in the fix wave and its re-review (12 in `fake-tools`, 5 in
+`lazymkv-engine`). The lists are the mini PC's: a test compiled only on Windows (such as `lazymkv-capture`'s eject
+test) is in them, and a test compiled only on Unix is not. The junction run of that tree on the mini PC passed 2503
+tests and ignored 1
 (`lazymkv-platform`'s `process::tests::helper_child`, the child the process tests start). Before the fix wave, at
 commit `3a94d84`, the list held 2487 tests, and CI run 40410226751 passed 2486 on windows and 2485 on ubuntu and macos,
 with 1 ignored on each.

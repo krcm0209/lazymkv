@@ -472,6 +472,35 @@ fn a_pulled_discs_killed_step_holds_the_token_until_it_reports() {
     assert!(h.transitions(&a).iter().all(|line| line.event != Some(Event::TitleRipped)), "the stale result was fed");
 }
 
+/// The final review's re-review (N2): a step that returns no event gives the token back although a pulled disc's
+/// stale step of the same job is still listed; only a step of the job's current generation keeps it.
+#[test]
+fn a_no_event_step_gives_the_token_back_beside_a_stale_step_of_its_job() {
+    let planned = StepResult { event: Some(Event::PlanDone { mode: Mode::Direct }), message: None };
+    let script = vec![
+        ("RunScan", ok(Event::ScanDone)),
+        ("Plan", StepScript::After(Duration::from_secs(3), planned)), // stale once disc-a is pulled
+        ("RunScan", StepScript::Hang),                                  // disc-b
+    ];
+    let h = Harness::new_scripted(script, json!({}));
+    h.insert("tok0", "disc-a");
+    let a = id_of(&h, "disc-a");
+    h.wait("planning", |h| h.steps().calls() == ["RunScan", "Plan"]);
+    let planning = Instant::now();
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&a).last().unwrap().event == Some(Event::MediaRemoved));
+    h.insert("tok0", "disc-a");
+    // The second Plan has no scripted result, so it returns no event while the first still runs.
+    h.wait("planning again", |h| h.steps().calls() == ["RunScan", "Plan", "Plan"]);
+    h.wait("the no-event line", |h| {
+        std::fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap_or_default().contains("Plan returned no event")
+    });
+    assert!(planning.elapsed() < Duration::from_secs(3), "the stale Plan ended first: {:?}", planning.elapsed());
+    h.insert("tok1", "disc-b");
+    h.wait("disc-b scanning", |h| h.steps().calls().len() == 4);
+    assert_eq!(h.steps().calls(), ["RunScan", "Plan", "Plan", "RunScan"]);
+}
+
 /// R22.7: only a job that waits for its disc gets MediaArrived (design part 5.4 step 3), so a second arrival of a disc
 /// that is already in a drive feeds nothing and starts no second rip.
 #[test]

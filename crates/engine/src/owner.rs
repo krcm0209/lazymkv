@@ -1775,17 +1775,27 @@ impl Owner {
         Some(worker)
     }
 
-    /// A worker's result (design part 5.2). The result of a step the owner cancelled is dropped with what it posted,
-    /// and the cancel's failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its
-    /// `ok` (design part 9.4, R-A7, S78). A stale one is dropped with what its step posted (R-A7), unless a newer
-    /// step of the job runs, whose posts it must not take; once no `makemkvcon` step is listed, the token
-    /// `KILLED_HOLDER` held for it is freed and what waited is routed (design part 5.3). Otherwise the posted edits
-    /// are applied, each posted event is fed, then the result's event. A result with no event, from an action other
-    /// than those that report none, writes `<tag> returned no event` to job.log, followed by `: <message>` when it has
-    /// one; then, unless another step of the job runs (one a posted event handed out), a step that panicked fails its
-    /// job (`panic_failure`, design part 5.2) and any other gives the token back, since no step of the job runs any
-    /// more (L2).
+    /// A worker's result (design part 5.2), `step_done`; then, once no `makemkvcon` step is listed, the token
+    /// `KILLED_HOLDER` held for a pulled disc's killed step is freed and what waited is routed (design part 5.3). The
+    /// release follows every result, a cancelled step's included, and comes after the job's own result is handled, so
+    /// a queued reinsertion of the same disc never resumes the job before its step's failure is fed.
     fn on_step_done(&mut self, id: &str, generation: u64, result: StepResult) {
+        self.step_done(id, generation, result);
+        if !self.stopping {
+            self.release_killed_token();
+        }
+    }
+
+    /// One worker's result. The result of a step the owner cancelled is dropped with what it posted, and the cancel's
+    /// failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its `ok` (design part
+    /// 9.4, R-A7, S78). A stale one is dropped with what its step posted (R-A7), unless a newer step of the job runs,
+    /// whose posts it must not take. Otherwise the posted edits are applied, each posted event is fed, then the
+    /// result's event. A result with no event, from an action other than those that report none, writes `<tag>
+    /// returned no event` to job.log, followed by `: <message>` when it has one; then, unless another step of the
+    /// job's current generation runs (one a posted event handed out; a stale step does not count), a step that
+    /// panicked fails its job (`panic_failure`, design part 5.2) and any other gives the token back, since no step of
+    /// the job runs any more (L2).
+    fn step_done(&mut self, id: &str, generation: u64, result: StepResult) {
         self.log_panic(id, &result);
         let mut worker = self.finish_worker(id, generation);
         if let Some(cancelled) = worker.as_mut().and_then(|worker| worker.cancelled.take()) {
@@ -1802,7 +1812,7 @@ impl Owner {
             if !self.workers.iter().any(|worker| worker.job == id) {
                 drop(self.parts.outbox.take(id));
             }
-            return self.release_killed_token();
+            return;
         }
         let posted = self.parts.outbox.take(id);
         if let Some(job) = self.jobs.get_mut(id) {
@@ -1829,7 +1839,8 @@ impl Owner {
                     None => format!("{tag} returned no event"),
                 };
                 self.store.job_log(id, &line);
-                if self.workers.iter().any(|worker| worker.job == id) {
+                // This result's generation is the job's current one (the stale branch returned above).
+                if self.workers.iter().any(|worker| worker.job == id && worker.generation == generation) {
                     // A posted event handed the job a new step, which holds what the job holds and reports for itself.
                     return;
                 }

@@ -838,6 +838,46 @@ fn a_cancel_while_only_a_pulled_discs_killed_step_runs_is_refused() {
     assert_eq!((last.event, last.new), (Some(Event::MediaRemoved), State::Ripping));
 }
 
+/// The final review's re-review (N1, design part 5.3): a disc pulled while a cancelled rip still runs passes the token
+/// to `KILLED_HOLDER`; the cancelled step's report fails the job with the cancel's failure and frees the token, so a
+/// queued disc starts instead of waiting for an engine restart.
+#[test]
+fn a_disc_pulled_during_a_cancelled_rip_frees_the_token_once_the_rip_reports() {
+    let mut script = main_line();
+    script.truncate(4); // A: RunScan, Plan, CheckSpace, then a RipTitle that cancel does not cut short
+    let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3), ripped));
+    script.push(("RunScan", StepScript::Hang)); // B
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let ripping = Instant::now();
+    let a = h.job_ids().pop().unwrap();
+    h.insert("tok1", DISC_B);
+    let b = h.fingerprint(DISC_B);
+    h.wait("disc B queued", |h| h.drives_json()["drives"]["tok1"]["fingerprint"] == json!(b));
+    // The cancel's reply waits for the step's end; the history reply after it shows the owner took the cancel.
+    c.raw(&json!({"v": 1, "type": "cancel", "id": 77, "payload": {"job": a}}).to_string());
+    c.ok("history", json!({}));
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&a).last().unwrap().event == Some(Event::MediaRemoved));
+    assert!(ripping.elapsed() < Duration::from_secs(3), "the removal came after the rip's end: {:?}", ripping.elapsed());
+    wait_for_call(&h, "RunScan", 2); // B starts once the cancelled rip has reported
+    assert!(ripping.elapsed() >= Duration::from_millis(2800), "B started after {:?}", ripping.elapsed());
+    loop {
+        match read_reply(c.line().expect("the cancel's reply").trim_end()).unwrap() {
+            Reply::Ok { id: Some(77), .. } => break,
+            Reply::Push(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let record = h.record(&a);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    assert_eq!(record.message.as_deref(), Some(CANCELLED));
+}
+
 /// Design part 5.2 (ruling at the final review): a step that panics fails its job as Unknown, so a file-phase job
 /// lets the slot go to the next job and can be retried, instead of holding the slot with no step for ever.
 #[test]
