@@ -558,7 +558,7 @@ mod tests {
 
     fn title(key: &str, rip_reviews: Vec<ReviewReason>) -> TitleRecord {
         TitleRecord { key: key.to_string(), scan_title: 0, rip_index: Some(0), attempts: 2, verified: true,
-            read_errors: vec![], rip_reviews, decision: None, filed: None }
+            verify_failures: 0, read_errors: vec![], rip_reviews, decision: None, filed: None }
     }
 
     /// The error reply `parse_request` refused `line` with, read back.

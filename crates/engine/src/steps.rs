@@ -21,7 +21,7 @@ use lazymkv_core::audio::rule::RULE_VERSION;
 use lazymkv_core::decision::{same_path_reviews, FileDecision};
 use lazymkv_core::disc::{disc, same_scan_title, Disc, Title};
 use lazymkv_core::ipc::{OutputStream, CANCELLED};
-use lazymkv_core::job::{decision_done, Action, Event, Failure, FailureClass, State, Tool};
+use lazymkv_core::job::{classify_title_failure, decision_done, Action, Event, Failure, FailureClass, State, Tool};
 use lazymkv_core::naming::NamedPath;
 use lazymkv_core::plan::movie::LibraryFacts;
 use lazymkv_core::plan::{plan, Kind, Mode, Plan, PlanInputs, PlannedTitle};
@@ -60,7 +60,7 @@ use crate::file_phase::{
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
 use crate::selftest::MakeMkv;
-use crate::space::{planned_remux_promise, remux_check, remux_promise, rip_check, rip_promise, Promises};
+use crate::space::{planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -187,20 +187,29 @@ fn empty_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-/// The regular `.mkv` files directly in `dir`, sorted; none when `dir` is missing (design part 5.6 step 6: a title's
-/// staging folder holds one). Def: T23. Use: T23, T24, T25.
-pub(crate) fn mkv_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.path())
-                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")))
-                .collect()
-        })
-        .unwrap_or_default();
+/// The regular `.mkv` files directly in `dir`, in any ASCII case, sorted (design part 5.6 step 6: a title's staging
+/// folder holds one). Every caller runs after RipTitle made the folder, so a folder that cannot be listed, a missing
+/// one included, and an entry that cannot be read are an Err naming the folder, `<dir>: <error>` (review round 1, V3;
+/// RR1-6(a)). The tools crate's copy, which reads a missing folder as empty for the rip's own count, stays separate.
+/// Def: T23, its Err PR #6 review (V3). Use: T23, T24, T25.
+pub(crate) fn mkv_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let shown = |error: io::Error| format!("{}: {error}", dir.display());
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).map_err(shown)? {
+        let path = entry.map_err(shown)?.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")) {
+            files.push(path);
+        }
+    }
     files.sort();
-    files
+    Ok(files)
+}
+
+/// The class of a title staging folder that cannot be emptied or made before a rip (spec 7, 10.1, 10.2's last
+/// paragraph; review round 1, V5 and RR1-8): a write error on staging, classed by the share check as a failed rip is,
+/// so Output, which leads to AwaitingShare, or to AwaitingSpace when staging is out of space; never Unknown.
+fn staging_write_failure(health: StagingHealth) -> Failure {
+    classify_title_failure(health.share_healthy, health.out_of_space, true, false)
 }
 
 /// A plain sentence for a profile the default profile could not become.
@@ -336,8 +345,6 @@ pub(crate) struct RealSteps {
     java_in_use: Arc<Mutex<Option<bool>>>,
     /// The MakeMKV state each drive listing is observed into (design part 3.7, S79).
     makemkv: Arc<MakeMkv>,
-    /// The (job, title key) pairs whose verification failed in this engine run (design part 5.6 step 7).
-    verify_failed: Mutex<BTreeSet<(String, String)>>,
     /// The probe of each (job, title key) Probe ran in this engine run, which Decide reads (design part 5.7 step 11.3).
     probes: Mutex<BTreeMap<(String, String), FfprobeStreams>>,
 }
@@ -373,7 +380,6 @@ impl RealSteps {
             promises,
             java_in_use,
             makemkv,
-            verify_failed: Mutex::default(),
             probes: Mutex::default(),
         }
     }
@@ -651,7 +657,9 @@ impl Step<'_> {
         }
     }
 
-    /// RunScan (design parts 5.2, 5.4 steps 1, 3 and 4).
+    /// RunScan (design parts 5.2, 5.4 steps 1, 3 and 4). No makemkvcon, then no mkvmerge, gives ToolMissing for that
+    /// tool before the drives are listed, the lookups start or the job profile is written: without mkvmerge no disc is
+    /// started (spec 10.2; review round 1, V8), since the disc phase's first mkvmerge run is VerifyFile's, after a rip.
     fn run_scan(&self) -> Outcome {
         let failed = |failure| Event::ScanFailed { failure };
         let record = &self.job.record;
@@ -659,6 +667,9 @@ impl Step<'_> {
         let Some(makemkvcon) = self.tool(Tool::Makemkvcon) else {
             return Ok(event(Event::ToolMissing { tool: Tool::Makemkvcon }));
         };
+        if self.tool(Tool::Mkvmerge).is_none() {
+            return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+        }
         let noted = record.notes.iter().any(|noted| noted.note == Note::LabelRuleUnavailable);
         if self.tool(Tool::Java).is_none() && !noted {
             self.check_cancel()?;
@@ -737,7 +748,10 @@ impl Step<'_> {
 
     /// Plan (design part 5.4 step 5, S30): `core::plan::plan` over the scan, the book as it stands (R23.1: a book a
     /// running round holds counts as empty, so every lookup is pending) and the remembered decision, persisted with
-    /// one TitleRecord per planned title. A Copy plan gives PlanFailed { Unknown } (P1, design part 5.5).
+    /// one TitleRecord per planned title. A Copy plan gives PlanFailed { Unknown } (P1, design part 5.5). The data
+    /// folder's remembered decision is copied to `<job>/remembered.json`; when there is none, or it is refused, a copy
+    /// an earlier Plan of the job left there is removed, so the job folder never holds a remembered file the plan did
+    /// not use (review round 1, the prerequisite of V14).
     fn plan(&self) -> Outcome {
         let failed = |failure| Event::PlanFailed { failure };
         let record = &self.job.record;
@@ -756,9 +770,13 @@ impl Step<'_> {
                 }
                 Some(remembered)
             }
-            Ok(None) => None,
+            Ok(None) => {
+                self.drop_remembered_copy();
+                None
+            }
             Err(error) => {
                 self.steps.store.log(&format!("{}: the remembered decision is refused: {error}", self.id));
+                self.drop_remembered_copy();
                 None
             }
         };
@@ -784,6 +802,7 @@ impl Step<'_> {
                 rip_index: None,
                 attempts: 0,
                 verified: false,
+                verify_failures: 0,
                 read_errors: Vec::new(),
                 rip_reviews: Vec::new(),
                 decision: None,
@@ -802,8 +821,33 @@ impl Step<'_> {
         })
     }
 
+    /// Removes `<job>/remembered.json`, the copy an earlier Plan of the job made, when it is there; a removal that
+    /// fails writes `<path>: <error>` in job.log (review round 1, the prerequisite of V14).
+    fn drop_remembered_copy(&self) {
+        let path = self.job.job_dir.join("remembered.json");
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => self.log(&format!("{}: {error}", path.display())),
+            _ => {}
+        }
+    }
+
+    /// CheckSpace's result from a check's `(event, sentence)` (design part 6.1, "the error says which"; review round 1,
+    /// V15): with a sentence, the job.log line `check space: <sentence>` and the event carrying it, so the record, the
+    /// waiting notification and job.log name the root and why; otherwise the event alone. Called once the `Promises`
+    /// guard is dropped.
+    fn space_result(&self, (found, why): (Event, Option<String>)) -> StepResult {
+        match why {
+            Some(why) => {
+                self.log(&format!("check space: {why}"));
+                with(found, why)
+            }
+            None => event(found),
+        }
+    }
+
     /// CheckSpace in Planned (design part 5.8): `rip_check` of the plan's rip and remux promises, staging against the
-    /// library root of the plan's kind.
+    /// library root of the plan's kind, its result through `space_result`. An unset `staging_root` gives ShareLost
+    /// saying so.
     fn check_space(&self) -> Outcome {
         let record = &self.job.record;
         let Some(plan) = &record.plan else {
@@ -811,7 +855,7 @@ impl Step<'_> {
         };
         let settings = &self.job.settings;
         let Some(staging) = settings.staging_root.as_deref() else {
-            return Ok(with(Event::ShareLost, "staging_root is unset"));
+            return Ok(self.space_result((Event::ShareLost, Some("staging_root is unset".to_string()))));
         };
         let library = match plan.kind {
             Kind::Movie => settings.movies_root.as_deref(),
@@ -822,8 +866,11 @@ impl Step<'_> {
         self.check_cancel()?;
         let (rip_bytes, remux_bytes) = (rip_promise(plan, disc_size), planned_remux_promise(plan));
         let shares = self.steps.shares.as_ref();
-        let mut promises = lock(&self.steps.promises);
-        Ok(event(rip_check(rip_bytes, remux_bytes, staging, library, shares, &mut promises, self.id)))
+        let checked = {
+            let mut promises = lock(&self.steps.promises);
+            rip_check(rip_bytes, remux_bytes, staging, library, shares, &mut promises, self.id)
+        };
+        Ok(self.space_result(checked))
     }
 
     /// The staging folder of the title `key`: `<staging>/<job id>/rip/<key>` (design part 5.6 step 6).
@@ -832,8 +879,23 @@ impl Step<'_> {
         Some(Path::new(staging).join(self.id).join("rip").join(key))
     }
 
+    /// The staging share's health as `classify_title_failure` reads it (design part 5.6 step 6): whether `reach` finds
+    /// the staging root reachable, and whether its free space reads as below `OUT_OF_SPACE` (R23.6).
+    fn staging_health(&self) -> StagingHealth {
+        let staging = self.job.settings.staging_root.as_deref().unwrap_or_default();
+        let shares = self.steps.shares.as_ref();
+        StagingHealth {
+            share_healthy: shares.reach(staging) == Reach::Reachable,
+            out_of_space: shares.free_bytes(staging).is_ok_and(|free| free < OUT_OF_SPACE),
+        }
+    }
+
     /// RipTitle (design part 5.6 step 6): the first title not done, its earlier attempt moved aside, its staging folder
-    /// emptied, then the listing and the rip, with the index guard's rescan and remap up to the third mismatch.
+    /// emptied, then the listing and the rip, with the index guard's rescan and remap up to the third mismatch. No
+    /// makemkvcon, then no mkvmerge, gives ToolMissing for that tool before any file is touched, so no title is ripped
+    /// that VerifyFile could not check (spec 10.2; review round 1, V8). A staging folder that cannot be emptied or made
+    /// gives TitleRipFailed classed by the share check, `staging_write_failure` (review round 1, V5 and RR1-8), with
+    /// `<folder>: <error>`.
     fn rip_title(&self) -> Outcome {
         let failed = |failure| Event::TitleRipFailed { failure };
         let record = &self.job.record;
@@ -845,6 +907,9 @@ impl Step<'_> {
         let Some(makemkvcon) = self.tool(Tool::Makemkvcon) else {
             return Ok(event(Event::ToolMissing { tool: Tool::Makemkvcon }));
         };
+        if self.tool(Tool::Mkvmerge).is_none() {
+            return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+        }
         let rip_dir = self.rip_dir(key).ok_or_else(|| unknown(failed, "staging_root is unset"))?;
         let (_, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         let planned = typed.title(title.scan_title).map_err(|error| unknown(failed, error))?;
@@ -853,19 +918,18 @@ impl Step<'_> {
             self.move_aside(&key_dir).map_err(|error| unknown(failed, error))?;
         }
         let flags = self.flags(&record.profile);
-        let staging = self.job.settings.staging_root.clone().unwrap_or_default();
-        let shares = Arc::clone(&self.steps.shares);
-        let health = move || StagingHealth {
-            share_healthy: shares.reach(&staging) == Reach::Reachable,
-            out_of_space: shares.free_bytes(&staging).is_ok_and(|free| free < OUT_OF_SPACE),
-        };
+        let health = || self.staging_health();
         let on_progress = |fraction: f64| (self.progress)(Some(key), fraction);
         let out = key_dir.join("rip.txt");
         let name = format!("{key}/rip.txt");
         let mut index = title.rip_index.unwrap_or(title.scan_title);
         let mut moved = 0;
         loop {
-            empty_dir(&rip_dir).map_err(|error| unknown(failed, format!("{}: {error}", rip_dir.display())))?;
+            if let Err(error) = empty_dir(&rip_dir) {
+                // The share is probed once, after the failure, on this worker thread.
+                let failure = staging_write_failure(self.staging_health());
+                return Ok(with(failed(failure), format!("{}: {error}", rip_dir.display())));
+            }
             let (drive, _) = self.listing(&makemkvcon, failed)?;
             self.started(&name, &makemkvcon, &rip_args(&flags, drive, index, &rip_dir));
             let ripped = self.ctx(&on_progress, |ctx| {
@@ -986,10 +1050,20 @@ impl Step<'_> {
         }
     }
 
-    /// VerifyFile in Ripping (design part 5.6 step 7): rip-summary.json, `mkvmerge -J` of the title's one file, then
-    /// `verify_rip` with `Selection::All`. A pass gives TitleVerified { last }; a mismatch or an ident error gives
-    /// TitleVerifyFailed { second, last }, with `verify_failed` recorded on the second.
+    /// VerifyFile in Ripping (design part 5.6 step 7, spec 6.2 step 7): the title folder listed once, rip-summary.json
+    /// written from it, `mkvmerge -J` of the title's one file, then `verify_rip` with `Selection::All`.
+    /// - A pass gives TitleVerified { last }.
+    /// - A mismatch, or a folder without exactly one `.mkv`, gives TitleVerifyFailed { second, last }, counted in the
+    ///   title's `verify_failures`; the title's earlier count makes it the second (review round 1, V12 and RR1-13). The
+    ///   record handed to the step already holds the earlier failure's posted edit (R22.3).
+    /// - A header read that fails (its time limit, an exit code other than 0 or 1, JSON that does not parse, a spawn
+    ///   error), a planned scan that cannot be read and a scan title whose streams cannot be selected give
+    ///   TitleRipFailed { Unknown } with their sentence, as `cancel` counts the step (design parts 5.3, 9.4; review
+    ///   round 1, V9): no comparison was made, so nothing is counted and no re-rip is silent.
+    /// - A folder that cannot be listed writes no rip-summary.json and gives TitleRipFailed classed by the share check
+    ///   with `<folder>: <error>`: Output while staging does not answer or is full, else Unknown (RR1-7).
     fn verify_rip(&self) -> Outcome {
+        let failed = |failure| Event::TitleRipFailed { failure };
         let record = &self.job.record;
         let Some(at) = current_title(record) else {
             return Ok(none("every planned title is verified"));
@@ -997,9 +1071,17 @@ impl Step<'_> {
         let title = &record.titles[at];
         let key = title.key.as_str();
         let last = record.titles[at + 1..].iter().all(is_done);
-        let second = lock(&self.steps.verify_failed).contains(&(self.id.to_string(), key.to_string()));
+        let second = title.verify_failures > 0;
         let rip_dir = self.rip_dir(key).ok_or_else(|| none("staging_root is unset"))?;
-        let files = mkv_files(&rip_dir);
+        let files = match mkv_files(&rip_dir) {
+            Ok(files) => files,
+            Err(message) => {
+                self.log(&format!("{key}/rip-summary.json was not written: {message}"));
+                let health = self.staging_health();
+                let failure = classify_title_failure(health.share_healthy, health.out_of_space, false, false);
+                return Ok(with(failed(failure), message));
+            }
+        };
         self.write_rip_summary(title, &rip_dir, &files);
         let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
             return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
@@ -1020,14 +1102,15 @@ impl Step<'_> {
         self.check_cancel()?;
         let header = match read {
             Ok(Ok(header)) => header,
-            Ok(Err(message)) => return self.verify_failed(key, second, last, None, message),
+            Ok(Err(message)) => return Ok(self.unverified(key, "the rip's header read failed", message)),
             Err(error) => {
-                return self.verify_failed(key, second, last, None, format!("mkvmerge -J could not run: {error}"));
+                let message = format!("mkvmerge -J could not run: {error}");
+                return Ok(self.unverified(key, "the rip's header read failed", message));
             }
         };
         let (scan, typed) = match self.planned_scan() {
             Ok(read) => read,
-            Err(message) => return self.verify_failed(key, second, last, None, message),
+            Err(message) => return Ok(self.unverified(key, "the rip could not be verified", message)),
         };
         let checked = typed.title(title.scan_title).and_then(|planned| {
             let selection = selected_streams(&scan, title.scan_title, Selection::All)?;
@@ -1038,7 +1121,7 @@ impl Step<'_> {
         });
         let report = match checked {
             Ok(report) => report,
-            Err(message) => return self.verify_failed(key, second, last, None, message),
+            Err(message) => return Ok(self.unverified(key, "the rip could not be verified", message)),
         };
         if !report.ok {
             let message = report.mismatches.join("; ");
@@ -1056,9 +1139,19 @@ impl Step<'_> {
         Ok(event(Event::TitleVerified { last }))
     }
 
-    /// A failed verification of the title `key` (design part 5.6 step 7): remembered for this engine run, the
-    /// job.log line `<key>: the rip's verification failed: <message>`, and on the second failure the reasons of
-    /// `failure_reviews(report, true)` (verify_failed alone when no report was made).
+    /// A rip VerifyFile could not compare (design part 5.3, spec 6.2 step 7; review round 1, V9): the job.log line
+    /// `<key>: <what>: <message>` and TitleRipFailed { Unknown } with the message, never counted as a failed
+    /// verification.
+    fn unverified(&self, key: &str, what: &str, message: String) -> StepResult {
+        self.log(&format!("{key}: {what}: {message}"));
+        unknown(|failure| Event::TitleRipFailed { failure }, message)
+    }
+
+    /// A failed verification of the title `key` (design part 5.6 step 7, spec 6.2 step 7): the job.log line `<key>: the
+    /// rip's verification failed: <message>`, and one posted edit of the title that counts it in `verify_failures`
+    /// (review round 1, V12 and RR1-13) and, on the second failure, sets the reasons of `failure_reviews(report, true)`
+    /// (verify_failed alone when no report was made) and the report's read errors. A refused post is the cancelled
+    /// result.
     fn verify_failed(
         &self,
         key: &str,
@@ -1068,20 +1161,22 @@ impl Step<'_> {
         message: String,
     ) -> Outcome {
         self.check_cancel()?;
-        lock(&self.steps.verify_failed).insert((self.id.to_string(), key.to_string()));
         self.log(&format!("{key}: the rip's verification failed: {message}"));
-        if second {
+        let kept = second.then(|| {
             let reviews = match &report {
                 Some(report) => failure_reviews(report, true),
                 None => vec![ReviewReason::VerifyFailed],
             };
-            let read_errors = report.map(|report| report.read_errors).unwrap_or_default();
-            if !self.post_title(key, move |title| {
+            (reviews, report.map(|report| report.read_errors).unwrap_or_default())
+        });
+        if !self.post_title(key, move |title| {
+            title.verify_failures = title.verify_failures.saturating_add(1);
+            if let Some((reviews, read_errors)) = kept {
                 title.read_errors = read_errors;
                 title.rip_reviews = reviews;
-            }) {
-                return Err(cancelled());
             }
+        }) {
+            return Err(cancelled());
         }
         Ok(with(Event::TitleVerifyFailed { second, last }, message))
     }
@@ -1114,10 +1209,12 @@ impl Step<'_> {
         self.job.record.plan.as_ref().ok_or_else(|| unknown(failed, "the job has no plan"))
     }
 
-    /// The staged file of the title `key`: the one `.mkv` of its staging folder (design part 5.6 step 6).
+    /// The staged file of the title `key`: the one `.mkv` of its staging folder (design part 5.6 step 6). A folder that
+    /// cannot be listed is an Err naming it and the error, which Probe and Remux feed as class Unknown (design part
+    /// 5.2, K9; review round 1, V3).
     fn staged_file(&self, key: &str) -> Result<PathBuf, String> {
         let dir = self.rip_dir(key).ok_or_else(|| "staging_root is unset".to_string())?;
-        match mkv_files(&dir).as_slice() {
+        match mkv_files(&dir)?.as_slice() {
             [file] => Ok(file.clone()),
             files => Err(format!("{} holds {} .mkv files, not one", dir.display(), files.len())),
         }
@@ -1310,8 +1407,10 @@ impl Step<'_> {
         Ok(event(decision_done(&decisions)))
     }
 
-    /// CheckSpace in Decided (design part 5.8, S54): `remux_check` of `remux_promise` of the staged files' sizes
-    /// against the library root of the plan's kind.
+    /// CheckSpace in Decided (design part 5.8, S54): `staged_remux_check` of the staged files' sizes, read before the
+    /// `Promises` lock, against the library root of the plan's kind, its result through `space_result`. Sizes that
+    /// cannot be read give ShareLost only when staging does not answer, and otherwise the plan's estimate (review round
+    /// 1, V3 and RR1-6(b)). An unset library root or `staging_root` gives ShareLost saying so.
     fn remux_space(&self) -> Outcome {
         let Some(plan) = &self.job.record.plan else {
             return Ok(none("the job has no plan"));
@@ -1322,16 +1421,19 @@ impl Step<'_> {
             Kind::Tv => ("tv_root", settings.tv_root.as_deref()),
         };
         let Some(library) = library else {
-            return Ok(with(Event::ShareLost, format!("{name} is unset")));
+            return Ok(self.space_result((Event::ShareLost, Some(format!("{name} is unset")))));
         };
-        let dirs = plan.titles.iter().filter_map(|planned| self.rip_dir(&planned.key));
-        let files: Vec<PathBuf> = dirs.flat_map(|dir| mkv_files(&dir)).collect();
-        let staged = files.iter().filter_map(|file| fs::metadata(file).ok()).map(|meta| meta.len());
-        let staged = staged.fold(0, u64::saturating_add);
+        let Some(staging) = settings.staging_root.as_deref() else {
+            return Ok(self.space_result((Event::ShareLost, Some("staging_root is unset".to_string()))));
+        };
+        let staged = staged_bytes(staging, self.id, plan);
         self.check_cancel()?;
         let shares = self.steps.shares.as_ref();
-        let mut promises = lock(&self.steps.promises);
-        Ok(event(remux_check(remux_promise(staged), library, shares, &mut promises, self.id)))
+        let checked = {
+            let mut promises = lock(&self.steps.promises);
+            staged_remux_check(staged, plan, staging, library, shares, &mut promises, self.id)
+        };
+        Ok(self.space_result(checked))
     }
 
     /// Remux (design part 5.7 step 13): for each planned title in plan order, the partial folder of its library root
@@ -1443,6 +1545,13 @@ impl Step<'_> {
     /// between its hard link and its remove left both names on one file (`one_file`), whose partial name is then
     /// removed. A partial file that is gone otherwise gives FileFailed { Unknown }, as does a remove that fails after
     /// the link, with a message saying the final path holds the file.
+    ///
+    /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
+    /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
+    /// and ERROR_BAD_NET_NAME as NotFound: only a NotFound on a share that answers counts as a partial file gone or a
+    /// final path holding no file. A root that does not answer, or any other metadata error, gives FileFailed
+    /// { Unknown } naming the title, the root or path, and the error (design part 5.2 keeps the class; review round
+    /// 1, V7 and RR1-9).
     fn file(&self) -> Outcome {
         let failed = |failure| Event::FileFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1451,10 +1560,41 @@ impl Step<'_> {
             let (_, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
             let partial = partial_path(&path.root, self.id, key);
             let target = Path::new(&path.path);
-            if !partial.exists() {
+            let unanswered = |why: &str| {
+                let (root, stays) = (&path.root, partial.display());
+                format!(
+                    "{key}: the library share holding {root} does not answer ({why}); the partial file {stays} was not \
+                     checked or renamed, and a retry once the share answers files it"
+                )
+            };
+            if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
+                return Ok(unknown(failed, unanswered(&why)));
+            }
+            let present = match fs::metadata(&partial) {
+                Ok(_) => true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    let shown = partial.display();
+                    let message =
+                        format!("{key}: {shown}: {error}; the partial file was not checked, so it was not renamed");
+                    return Ok(unknown(failed, message));
+                }
+            };
+            if !present {
                 let title = self.job.record.titles.iter().find(|title| title.key == key);
                 let verified = title.and_then(|title| title.filed.as_ref()).map(|filed| filed.size);
-                let found = fs::metadata(target).ok().filter(|meta| meta.is_file());
+                let found = match fs::metadata(target) {
+                    Ok(meta) => Some(meta).filter(|meta| meta.is_file()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        let (shown, gone) = (&path.path, partial.display());
+                        let message = format!(
+                            "{key}: {shown}: {error}; the final path was not checked, and the partial file {gone} was \
+                             not found"
+                        );
+                        return Ok(unknown(failed, message));
+                    }
+                };
                 match (found, verified) {
                     (Some(meta), Some(size)) if meta.len() == size => {
                         let shown = &path.path;
@@ -1475,6 +1615,10 @@ impl Step<'_> {
                         return Ok(unknown(failed, message));
                     }
                     (None, _) => {
+                        // A share that stopped answering since the first `reach` reports a missing path as NotFound.
+                        if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
+                            return Ok(unknown(failed, unanswered(&why)));
+                        }
                         let (gone, shown) = (partial.display(), &path.path);
                         let message = format!("the partial file {gone} is gone and {shown} holds no file");
                         return Ok(unknown(failed, message));
@@ -1588,5 +1732,49 @@ mod tests {
         assert_eq!(next_attempt_dir(&s.0), s.0.join("attempt-1"));
         s.write("attempt-1/rip.txt", "");
         assert_eq!(next_attempt_dir(&s.0), s.0.join("attempt-2"));
+    }
+
+    /// Review round 1, V3: only the regular files whose extension is `mkv` in any ASCII case, sorted.
+    #[test]
+    fn mkv_files_lists_the_regular_mkv_files_sorted_in_any_case() {
+        let s = Scratch::new("mkv-files");
+        s.write("b.mkv", "b");
+        s.write("A.MKV", "a");
+        s.write("c.txt", "c");
+        fs::create_dir_all(s.0.join("d.mkv")).unwrap();
+        assert_eq!(mkv_files(&s.0), Ok(vec![s.0.join("A.MKV"), s.0.join("b.mkv")]));
+    }
+
+    /// Review round 1, V3 (RR1-6(a)): every caller runs after RipTitle made the folder, so a missing one is an error
+    /// naming it, not an empty list.
+    #[test]
+    fn a_missing_title_folder_is_an_error_naming_it() {
+        let s = Scratch::new("mkv-files-missing");
+        let dir = s.0.join("t00-00800");
+        let error = mkv_files(&dir).unwrap_err();
+        assert!(error.starts_with(&format!("{}: ", dir.display())), "{error}");
+    }
+
+    /// Review round 1, V3: a path that is a regular file cannot be listed, on every OS, and the error names it.
+    #[test]
+    fn a_title_folder_that_is_a_file_is_an_error_naming_it() {
+        let s = Scratch::new("mkv-files-file");
+        s.write("t00-00800", "");
+        let dir = s.0.join("t00-00800");
+        let error = mkv_files(&dir).unwrap_err();
+        assert!(error.starts_with(&format!("{}: ", dir.display())), "{error}");
+    }
+
+    /// Review round 1, V5 (RR1-8): a staging folder that cannot be emptied is a write error on staging, so its class is
+    /// Output whatever the share check says, never Unknown or MediaReadError.
+    #[test]
+    fn a_title_folder_that_cannot_be_emptied_is_classed_by_the_share_check() {
+        use lazymkv_core::job::OutputCause;
+        let output = |cause| Failure { class: FailureClass::Output, output: Some(cause) };
+        let classed = |share_healthy, out_of_space| staging_write_failure(StagingHealth { share_healthy, out_of_space });
+        assert_eq!(classed(false, false), output(OutputCause::ShareUnreachable));
+        assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
+        assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
+        assert_eq!(classed(true, false), output(OutputCause::WriteError));
     }
 }

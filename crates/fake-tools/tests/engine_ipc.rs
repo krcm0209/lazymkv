@@ -516,6 +516,135 @@ fn retry_in_each_waiting_state_rechecks_its_condition() {
     assert_eq!(h.state_of(&id), "AwaitingLookup");
 }
 
+/// Review round 1, V15 (S81, design part 6.1): a Planned return waits on the library root its CheckSpace reads, so a
+/// retry while the library still does not answer feeds nothing and sends no `resumed`, and one after it answers files
+/// the job.
+#[test]
+fn retry_with_the_library_still_unreachable_feeds_nothing() {
+    let h = stand_in(&["movie-direct"], settings());
+    let library = h.library().to_str().unwrap().to_string();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.transitions(&id).len(), lines);
+    assert!(!h.notifications().iter().any(|n| n.event == NotifyEvent::Resumed));
+    h.shares().set_reach(&library, Reach::Reachable);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+}
+
+/// Review round 1, V8 (spec 10.2, S81): a job that waits for mkvmerge before its scan stays while a retry still finds
+/// none, and scans once a retry finds it.
+#[test]
+fn a_job_waiting_for_mkvmerge_scans_once_a_retry_finds_it() {
+    let h = stand_in(&["movie-direct"], settings());
+    let stored: Value = serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap();
+    let tool = std::path::PathBuf::from(stored["tool_paths"]["mkvmerge"].as_str().unwrap());
+    let aside = tool.with_extension("aside");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    fs::rename(&tool, &aside).unwrap();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingTool")["id"].as_str().unwrap().to_string();
+    assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Fingerprinted) });
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    assert_eq!(h.transitions(&id).len(), lines);
+    fs::rename(&aside, &tool).unwrap();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Scanned");
+    assert!(h.transitions(&id).iter().any(|t| matches!(t.event, Some(Event::ToolFound { .. }))));
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
+}
+
+/// Review round 1, V5 (RR1-8, S81): a rip waiting for the share because its title folder could not be made rips again
+/// after a retry once the folder can be made, counting one attempt.
+#[test]
+fn a_rip_waiting_for_the_share_rips_again_after_retry() {
+    let h = stand_in(&["movie-direct"], settings());
+    let id = format!("{}-1", h.fingerprint(DISC_A).to_ascii_lowercase());
+    let blocker = h.staging().join(&id);
+    fs::write(&blocker, b"").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    c.until_state(Some(&id), "AwaitingShare");
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Ripping) });
+    fs::remove_file(&blocker).unwrap();
+    h.shares().set_reach(h.staging().to_str().unwrap(), Reach::Reachable);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    assert_eq!(h.record(&id).titles[0].attempts, 1);
+}
+
+/// Review round 1, V3 (RR1-6(b)): at the remux check, a title folder that cannot be read while staging does not answer
+/// feeds ShareLost, so the job waits instead of failing its remux; a retry once both are back files it.
+#[test]
+fn an_unreachable_staging_at_the_remux_check_waits_for_the_share_and_retry_files_it() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Decided");
+    let id = h.job_ids().pop().unwrap();
+    let dir = h.staging().join(&id).join("rip").join("t00-00800");
+    let aside = dir.with_extension("aside");
+    fs::rename(&dir, &aside).unwrap();
+    fs::write(&dir, b"").unwrap();
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    h.restart();
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Decided { approved: None }) });
+    assert!(!h.transitions(&id).iter().any(|t| matches!(t.event, Some(Event::RemuxFailed { .. }))));
+    fs::remove_file(&dir).unwrap();
+    fs::rename(&aside, &dir).unwrap();
+    h.shares().set_reach(&staging, Reach::Reachable);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+}
+
+/// Review round 1, V7 (RR1-9): File with the library share not answering fails naming the share, the title and the way
+/// out in the failed notification, and a retry once the share answers files the verified partial.
+#[test]
+fn file_with_the_library_share_unreachable_fails_naming_the_share_and_a_retry_files_it() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Verified");
+    let id = h.job_ids().pop().unwrap();
+    let library = h.library().to_str().unwrap().to_string();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".to_string()));
+    h.restart();
+    h.wait("File's failure", |h| matches!(h.state_of(&id).as_str(), "Failed" | "Filed"));
+    h.settle();
+    assert_eq!(h.record(&id).state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let failed = h.notifications().into_iter().last().unwrap();
+    assert_eq!(failed.event, NotifyEvent::Failed { class: FailureClass::Unknown });
+    for part in ["t00-00800", "cable out", "a retry once the share answers"] {
+        assert!(failed.message.contains(part), "{part}: {}", failed.message);
+    }
+    h.shares().set_reach(&library, Reach::Reachable);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert_eq!(h.record(&id).titles[0].filed.as_ref().unwrap().size, 16);
+    assert_eq!(fs::read(h.library().join(FINAL)).unwrap().len(), 16);
+}
+
 #[test]
 fn retry_of_a_file_phase_failure_waits_for_the_slot() {
     let mut script = main_line();
@@ -1120,10 +1249,11 @@ fn the_selftest_java_check_reports_the_last_scans_java_use() {
 
 /// Ruling R26.c1 (design part 3.7): the MakeMKV check holds the disc-phase token while its listing runs, so a disc
 /// that arrives then waits in the token's queue, and its job's RunScan lists the drives only after the check's
-/// listing ended. The other tools are unset, so the self-test runs no stand-in beside the job's.
+/// listing ended. mkvmerge stays set because RunScan needs it (spec 10.2; review round 1, V8), so the self-test's one
+/// stand-in beside the job's is `mkvmerge --version`; the other tools are unset.
 #[test]
 fn a_makemkv_check_holds_the_disc_phase_token_until_its_listing_ends() {
-    let unset = json!({"mkvmerge": null, "ffprobe": null, "ffmpeg": null, "java": null});
+    let unset = json!({"ffprobe": null, "ffmpeg": null, "java": null});
     let h = stand_in(&["movie-direct"], json!({"keep_tuning_evidence": false, "drive_settle_s": 0,
                                               "drive_ready_timeout_s": 1, "tool_paths": unset}));
     let mut c = Client::open(&h);

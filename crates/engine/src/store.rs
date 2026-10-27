@@ -379,7 +379,7 @@ mod tests {
         let tmp = Temp::new("order");
         let store = store_in(&tmp.0);
         let title = |key: &str| TitleRecord {
-            key: key.to_string(), scan_title: 0, rip_index: None, attempts: 0, verified: false,
+            key: key.to_string(), scan_title: 0, rip_index: None, attempts: 0, verified: false, verify_failures: 0,
             read_errors: Vec::new(), rip_reviews: Vec::new(), decision: None, filed: None,
         };
         let noted = |note: Note| Noted { note, stream: None, detail: "d".to_string() };

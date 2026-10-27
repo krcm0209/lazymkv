@@ -3,9 +3,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lazymkv_core::job::{Action, Event, FailureClass, Held, State};
+use lazymkv_core::job::{
+    job_lookup, Action, Event, Failure, FailureClass, Held, JobLookup, NotifyEvent, OutputCause, State, WaitReason,
+};
 use lazymkv_core::record::{JobRecord, Transition};
+use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness};
+use lazymkv_platform::Reach;
 use serde_json::json;
 
 /// The disc of the base scenario, as Task 22's Harness::insert names it.
@@ -43,6 +47,16 @@ fn state_json(dir: &Path) -> JobRecord {
 }
 
 fn final_path(h: &Harness) -> PathBuf { h.library().join(FINAL) }
+
+fn root(path: &Path) -> String {
+    path.to_str().unwrap().to_string()
+}
+
+/// Waits until the job's state.json is in Failed or Filed, the two ends File can reach.
+fn wait_for_file_end(h: &Harness, id: &str) -> JobRecord {
+    h.wait("File's end", |h| matches!(h.state_of(id).as_str(), "Failed" | "Filed"));
+    state_json(&h.job_dir(id))
+}
 
 #[test]
 fn a_restart_in_each_state_of_the_path_still_reaches_filed() {
@@ -264,6 +278,207 @@ fn a_restart_after_a_rename_stopped_between_link_and_remove_finishes_it() {
     let record = state_json(&h.job_dir(&id));
     assert!(record.collisions.is_empty(), "{:?}", record.collisions);
     assert_eq!(record.titles[0].filed.as_ref().unwrap().size, 16);
+}
+
+/// Review round 1, V5 (spec 7, 10.1, 10.2; RR1-8): a restart in Ripping while the staging share is gone fails the
+/// emptying of the title's folder as Output { ShareUnreachable }, so the job waits in AwaitingShare to return to
+/// Ripping and a reinserted disc resumes it instead of starting a new job.
+#[test]
+fn a_restart_in_ripping_with_the_staging_share_gone_waits_in_awaiting_share() {
+    let h = harness(&["movie-direct"], settings());
+    h.insert("tok0", DISC);
+    h.run_until("Ripping");
+    let id = only_job(&h);
+    fs::write(h.staging().join(&id), b"").unwrap();
+    h.shares().set_reach(&root(h.staging()), Reach::Unreachable("gone".into()));
+    h.restart();
+    // Not `run_until`: it stops before the transition's actions, the waiting notification among them.
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    h.settle();
+    let lines = transitions(&h.job_dir(&id));
+    let at = lines.iter().position(|t| matches!(t.event, Some(Event::EngineRestart { .. }))).expect("a restart line");
+    assert_eq!(lines[at].actions, vec![Action::EmptyTitleDirectory, Action::RipTitle]);
+    let unreachable = Failure { class: FailureClass::Output, output: Some(OutputCause::ShareUnreachable) };
+    assert_eq!(lines[at + 1].event, Some(Event::TitleRipFailed { failure: unreachable }));
+    assert_eq!(lines[at + 1].new, State::AwaitingShare { return_to: Box::new(State::Ripping) });
+    let sent: Vec<NotifyEvent> = h.notifications().into_iter().map(|n| n.event).collect();
+    assert!(sent.contains(&NotifyEvent::Waiting { reason: WaitReason::Share }), "{sent:?}");
+    assert!(!sent.iter().any(|e| matches!(e, NotifyEvent::Failed { .. })), "{sent:?}");
+    let state = state_json(&h.job_dir(&id)).state;
+    assert_eq!(job_lookup(&[(id.clone(), state, false)]), JobLookup::Resume(id));
+}
+
+/// Review round 1, V7 (design part 6.1; RR1-9): File asks `reach` of the library root before it touches any path, so a
+/// library share that does not answer at a restart in Verified fails File naming the share, the title and the way out,
+/// renames nothing and records no collision. The retry that files it is `engine_ipc.rs`'s
+/// `file_with_the_library_share_unreachable_fails_naming_the_share_and_a_retry_files_it`.
+#[test]
+fn file_asks_the_library_share_before_touching_the_partial() {
+    let h = harness(&["movie-direct"], settings());
+    h.insert("tok0", DISC);
+    h.run_until("Verified");
+    let id = only_job(&h);
+    let partial = fs::read_dir(h.library().join(".lazymkv-partial")).unwrap().next().unwrap().unwrap().path();
+    h.shares().set_reach(&root(h.library()), Reach::Unreachable("cable out".into()));
+    h.restart();
+    let record = wait_for_file_end(&h, &id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    assert!(partial.is_file());
+    assert!(!final_path(&h).exists());
+    let message = record.message.unwrap_or_default();
+    for part in ["cable out", "t00-00800", "a retry once the share answers"] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+    assert!(!message.contains("is gone"), "{message}");
+    assert!(record.collisions.is_empty(), "{:?}", record.collisions);
+}
+
+/// Restores a folder's mode when the test ends, so the harness can remove its scratch folder.
+#[cfg(unix)]
+struct RestoreMode(PathBuf);
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Review round 1, V7: a partial file whose metadata cannot be read is not "gone": File fails naming it and the error.
+/// Unix only (mode 0o000 on the partial folder); skipped as root, which the mode does not stop.
+#[cfg(unix)]
+#[test]
+fn a_partial_that_cannot_be_read_fails_file_naming_the_error_not_gone() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness(&["movie-direct"], settings());
+    h.insert("tok0", DISC);
+    h.run_until("Verified");
+    let id = only_job(&h);
+    let folder = h.library().join(".lazymkv-partial");
+    let partial = fs::read_dir(&folder).unwrap().next().unwrap().unwrap().path();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(folder.clone());
+    if fs::metadata(&partial).is_ok() {
+        return; // root reads through mode 0o000
+    }
+    h.restart();
+    let record = wait_for_file_end(&h, &id);
+    assert!(matches!(record.state, State::Failed { .. }), "{:?}", record.state);
+    let message = record.message.unwrap_or_default();
+    assert!(message.contains(&partial.display().to_string()), "{message}");
+    assert!(message.contains("was not checked") && !message.contains("is gone"), "{message}");
+}
+
+/// Review round 1, V7: a final path whose folder cannot be read does not "hold no file": with the partial file gone,
+/// File fails naming the final path and records no collision. Unix only, as above.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_final_folder_fails_file_naming_the_final_path_not_holds_no_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness(&["movie-direct"], settings());
+    h.insert("tok0", DISC);
+    h.run_until("Verified");
+    let id = only_job(&h);
+    let partial = fs::read_dir(h.library().join(".lazymkv-partial")).unwrap().next().unwrap().unwrap().path();
+    fs::remove_file(partial).unwrap();
+    let film = final_path(&h).parent().unwrap().to_path_buf();
+    fs::create_dir_all(&film).unwrap();
+    fs::set_permissions(&film, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(film.clone());
+    if fs::read_dir(&film).is_ok() {
+        return; // root reads through mode 0o000
+    }
+    h.restart();
+    let record = wait_for_file_end(&h, &id);
+    assert!(matches!(record.state, State::Failed { .. }), "{:?}", record.state);
+    let message = record.message.unwrap_or_default();
+    assert!(message.contains(&final_path(&h).display().to_string()), "{message}");
+    assert!(message.contains("was not checked") && !message.contains("holds no file"), "{message}");
+    assert!(record.collisions.is_empty(), "{:?}", record.collisions);
+}
+
+/// Review round 1, V12 (spec 6.2 step 7, design part 7.3; RR1-13): a title's failed verifications are counted in
+/// state.json, so a restart between the first and the second failure rips the title only once more, not twice.
+#[test]
+fn a_restart_after_a_first_verify_failure_rips_the_title_only_once_more() {
+    let h = harness(&["movie-direct", "movie-direct-verify-twice"], settings());
+    h.insert("tok0", DISC);
+    h.run_until_event("the first TitleVerifyFailed", |event| {
+        matches!(event, Event::TitleVerifyFailed { second: false, .. })
+    });
+    let dir = h.job_dir(&only_job(&h));
+    let title = state_json(&dir).titles[0].clone();
+    assert_eq!((title.attempts, title.verify_failures), (1, 1));
+    h.restart();
+    h.run_until("Ejected");
+    let lines = transitions(&dir);
+    assert!(lines.iter().any(|t| matches!(t.event, Some(Event::EngineRestart { .. }))));
+    let failed: Vec<Event> =
+        lines.into_iter().filter_map(|t| t.event).filter(|e| matches!(e, Event::TitleVerifyFailed { .. })).collect();
+    let expected = vec![
+        Event::TitleVerifyFailed { second: false, last: true },
+        Event::TitleVerifyFailed { second: true, last: true },
+    ];
+    assert_eq!(failed, expected);
+    let title = state_json(&dir).titles[0].clone();
+    assert_eq!((title.attempts, title.verify_failures), (2, 2));
+    assert_eq!(title.rip_reviews, vec![ReviewReason::VerifyFailed]);
+    assert!(dir.join("t00-00800/attempt-1").is_dir());
+    assert!(!dir.join("t00-00800/attempt-2").exists());
+}
+
+/// Sets or clears the read-only attribute of every file under `root` (on Unix, every write bit).
+#[allow(clippy::permissions_set_readonly_false)]
+fn set_read_only(root: &Path, read_only: bool) -> std::io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            set_read_only(&path, read_only)?;
+        } else {
+            let mut permissions = fs::metadata(&path)?.permissions();
+            permissions.set_readonly(read_only);
+            fs::set_permissions(&path, permissions)?;
+        }
+    }
+    Ok(())
+}
+
+/// Makes a volume's files writable again when the test ends, so the harness can remove its scratch folder.
+struct Writable(PathBuf);
+
+impl Drop for Writable {
+    fn drop(&mut self) {
+        let _ = set_read_only(&self.0, false);
+    }
+}
+
+/// Review round 1, V10 end to end (S29): a stop during the recording leaves the job in Detected with its first line
+/// only, after the recording wrote its nav copies. The restart records the disc again into the same folder, and a
+/// disc whose files are read-only no longer makes that second snapshot fail.
+#[test]
+fn a_restart_in_detected_after_a_finished_recording_fingerprints_again() {
+    let h = harness(&["movie-direct"], settings());
+    let volume = h.volume_root(DISC);
+    let _writable = Writable(volume.clone());
+    set_read_only(&volume, true).unwrap();
+    h.insert("tok0", DISC);
+    h.run_until("Fingerprinted");
+    let dir = h.job_dir(&only_job(&h));
+    assert!(dir.join("nav/BDMV/index.bdmv").is_file());
+    let mut record = state_json(&dir);
+    record.state = State::Detected;
+    fs::write(dir.join("state.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+    let text = fs::read_to_string(dir.join("transitions.jsonl")).unwrap();
+    fs::write(dir.join("transitions.jsonl"), format!("{}\n", text.lines().next().unwrap())).unwrap();
+    h.restart();
+    h.run_until("Filed");
+    let lines = transitions(&dir);
+    let at = lines.iter().position(|t| t.event == Some(Event::EngineRestart { disc_present: true })).expect("a restart");
+    assert_eq!(lines[at].old, Some(State::Detected));
+    assert_eq!(lines[at + 1].event, Some(Event::FingerprintDone));
+    let log = fs::read_to_string(dir.join("job.log")).unwrap_or_default();
+    assert!(!log.contains("could not be written"), "{log}");
 }
 
 #[test]

@@ -26,7 +26,7 @@ use lazymkv_clients::{search_url, RecordedTransport};
 use lazymkv_core::disc::bdmt_name;
 use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
-use lazymkv_core::job::{Action, Tool};
+use lazymkv_core::job::{Action, Event, Tool};
 use lazymkv_core::lookup::name::disc_name;
 use lazymkv_core::record::{JobRecord, Transition};
 use lazymkv_core::snapshot::{disc_meta, unit_key_file};
@@ -286,6 +286,13 @@ impl DriveWatcher for SharedDrives {
     }
 }
 
+/// What the stop hook stops after: the first transition into a state (`run_until`), or the first whose event a test's
+/// predicate accepts (`run_until_event`).
+enum StopAt {
+    State(String),
+    Event(Box<dyn Fn(&Event) -> bool + Send + Sync>),
+}
+
 /// A drive event a test asked for, held until the next Harness call (R22.1).
 enum Queued {
     Arrive(String, PathBuf),
@@ -332,8 +339,8 @@ pub struct Harness {
     timers: Arc<ManualTimers>,
     steps: Arc<ScriptedSteps>,
     sent: Arc<Mutex<Vec<Notification>>>,
-    /// The stop hook's target state and the states it saw since the last `restart` or `run_until`.
-    hook: Arc<Mutex<(Option<String>, Vec<String>)>>,
+    /// The stop hook's target and the states it saw since the last `restart`, `run_until` or `run_until_event`.
+    hook: Arc<Mutex<(Option<StopAt>, Vec<String>)>>,
     engine: Mutex<Option<EngineHandle>>,
 }
 
@@ -449,7 +456,11 @@ impl Harness {
             let mut hook = lock(&hook);
             let state = transition.new.as_str();
             hook.1.push(state.to_string());
-            let stop = hook.0.as_deref() == Some(state);
+            let stop = match &hook.0 {
+                Some(StopAt::State(target)) => target == state,
+                Some(StopAt::Event(accepts)) => transition.event.as_ref().is_some_and(accepts),
+                None => false,
+            };
             if stop {
                 hook.0 = None;
             }
@@ -515,6 +526,13 @@ impl Harness {
         root
     }
 
+    /// `<root>/volumes/<disc>`, built and labelled as `insert` builds it, so a test can change the disc's files before
+    /// it is inserted (review round 1, V10: read-only files, as a disc's are). Def: PR #6 review (V10). Use:
+    /// engine_restart.rs.
+    pub fn volume_root(&self, disc: &str) -> PathBuf {
+        self.volume(disc)
+    }
+
     /// Queues the arrival of the synthetic disc `disc` in `drive`, building `<root>/volumes/<disc>/` and its label on
     /// first use (R22.1). Def: T22. Use: T22 to T29.
     pub fn insert(&self, drive: &str, disc: &str) {
@@ -543,31 +561,54 @@ impl Harness {
             let mut hook = lock(&self.hook);
             let passed = hook.1.iter().any(|seen| seen == state);
             if !passed {
-                hook.0 = Some(state.to_string());
+                hook.0 = Some(StopAt::State(state.to_string()));
             }
             hook.1.clear();
             passed
         };
         if !passed {
             self.deliver();
-            let cap = RUN_UNTIL_CAP * ci_factor();
-            let deadline = Instant::now() + cap;
-            loop {
-                let (armed, seen) = {
-                    let hook = lock(&self.hook);
-                    (hook.0.is_some(), hook.1.clone())
-                };
-                if !armed {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    lock(&self.hook).0 = None;
-                    panic!("run_until({state}): no transition into {state} within {cap:?}; persisted: {seen:?}");
-                }
-                thread::sleep(POLL);
-            }
+            self.wait_for_stop(&format!("run_until({state})"), &format!("into {state}"));
         }
         self.stop();
+    }
+
+    /// Arms the stop hook for the first persisted transition whose event `stop` accepts, hands the queued drive events
+    /// to the engine, waits as `run_until` does (60 s cap, 240 s under CI, then panics naming `what` and the states
+    /// persisted so far) until the owner stopped after persisting that transition and before running any of its
+    /// actions, and joins the engine's threads. It has no shortcut for an event seen before it was armed, so a test arms
+    /// it before the event can happen. A transition that keeps its state, as a TitleVerifyFailed in Ripping does, can be
+    /// stopped at only this way (review round 1, V12). Def: PR #6 review (V12). Use: engine_restart.rs.
+    pub fn run_until_event(&self, what: &str, stop: impl Fn(&Event) -> bool + Send + Sync + 'static) {
+        {
+            let mut hook = lock(&self.hook);
+            hook.0 = Some(StopAt::Event(Box::new(stop)));
+            hook.1.clear();
+        }
+        self.deliver();
+        self.wait_for_stop(&format!("run_until_event({what})"), &format!("with {what}"));
+        self.stop();
+    }
+
+    /// Waits until the armed stop hook has fired (60 s cap, 240 s under CI), then returns; past the cap it disarms the
+    /// hook and panics with `<call>: no transition <which> within <cap>; persisted: <states>`.
+    fn wait_for_stop(&self, call: &str, which: &str) {
+        let cap = RUN_UNTIL_CAP * ci_factor();
+        let deadline = Instant::now() + cap;
+        loop {
+            let (armed, seen) = {
+                let hook = lock(&self.hook);
+                (hook.0.is_some(), hook.1.clone())
+            };
+            if !armed {
+                return;
+            }
+            if Instant::now() >= deadline {
+                lock(&self.hook).0 = None;
+                panic!("{call}: no transition {which} within {cap:?}; persisted: {seen:?}");
+            }
+            thread::sleep(POLL);
+        }
     }
 
     /// Stops a running engine (`EngineHandle::stop`), drops every pending ManualTimers timer, as a real restart loses

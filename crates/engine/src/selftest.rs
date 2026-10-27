@@ -25,8 +25,8 @@ use lazymkv_tools::{
 use serde_json::{json, Value};
 
 use crate::file_phase::PARTIAL_FOLDER;
-use crate::space::{planned_remux_promise, remux_check, remux_promise, rip_check, rip_promise, Promises};
-use crate::steps::{mkv_files, version_of};
+use crate::space::{planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises};
+use crate::steps::version_of;
 
 /// The folder of the data folder the self-test records into (design part 7.2, S79).
 const SELFTEST_DIR: &str = "selftest";
@@ -513,18 +513,26 @@ fn library_root<'a>(record: &JobRecord, settings: &'a Settings) -> Option<&'a st
     }
 }
 
-/// AwaitingShare's re-check (Ruling S81): the roots the return state uses all reachable give ShareBack; a disc-phase
-/// return uses staging, any other return staging and the plan kind's library root.
+/// AwaitingShare's re-check (Ruling S81): the roots the return state uses all reachable give ShareBack. A Planned
+/// return's CheckSpace reads staging and the plan kind's library root, so it waits on both (review round 1, V15: a
+/// library that does not answer no longer sends the job back to a CheckSpace that feeds ShareLost again); any other
+/// disc-phase return, a rip, uses staging alone (the final review's Minor 5); a file-phase return uses staging and the
+/// plan kind's library root.
 fn share_back(record: &JobRecord, settings: &Settings, shares: &dyn ShareConnector) -> Option<Event> {
     let staging = settings.staging_root.as_deref()?;
-    let disc = matches!(&record.state, State::AwaitingShare { return_to } if return_to.is_disc_phase());
-    let library = if disc { None } else { library_root(record, settings) };
+    let staging_only = matches!(
+        &record.state,
+        State::AwaitingShare { return_to } if return_to.is_disc_phase() && !matches!(**return_to, State::Planned { .. })
+    );
+    let library = if staging_only { None } else { library_root(record, settings) };
     let mut roots = std::iter::once(staging).chain(library);
     roots.all(|root| shares.reach(root) == Reach::Reachable).then_some(Event::ShareBack)
 }
 
 /// AwaitingSpace's re-check (Ruling S81): the CheckSpace computation of the return, `rip_check` before a rip and
-/// `remux_check` of the staged files before a remux, giving SpaceFreed where it gives SpaceOk. Its event is not fed.
+/// `staged_remux_check` of the staged files' sizes before a remux (the plan's estimate when they cannot be read; review
+/// round 1, V3), giving SpaceFreed where it gives SpaceOk. Its event is not fed, so a condition not cleared feeds
+/// nothing, ShareLost included. The job folder and staging are read before the `Promises` lock is taken.
 fn space_freed(
     job: &RecheckJob,
     return_to: &State,
@@ -535,19 +543,18 @@ fn space_freed(
     let plan = record.plan.as_ref()?;
     let staging = settings.staging_root.as_deref()?;
     let library = library_root(record, settings);
-    let mut promises = lock(promises);
-    let event = if return_to.is_disc_phase() {
+    let (event, _) = if return_to.is_disc_phase() {
         let meta = fs::read(job.job_dir.join("meta.json")).ok();
         let meta = meta.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         let disc_size = meta.and_then(|meta| meta["total_bytes"].as_u64()).unwrap_or(0);
         let (rip, remux) = (rip_promise(plan, disc_size), planned_remux_promise(plan));
+        let mut promises = lock(promises);
         rip_check(rip, remux, staging, library, shares, &mut promises, &record.id)
     } else {
-        let rip = Path::new(staging).join(&record.id).join("rip");
-        let files = plan.titles.iter().flat_map(|planned| mkv_files(&rip.join(&planned.key)));
-        let sizes = files.filter_map(|file| fs::metadata(file).ok()).map(|meta| meta.len());
-        let staged = sizes.fold(0, u64::saturating_add);
-        remux_check(remux_promise(staged), library?, shares, &mut promises, &record.id)
+        let library = library?;
+        let staged = staged_bytes(staging, &record.id, plan);
+        let mut promises = lock(promises);
+        staged_remux_check(staged, plan, staging, library, shares, &mut promises, &record.id)
     };
     (event == Event::SpaceOk).then_some(Event::SpaceFreed)
 }
@@ -644,8 +651,12 @@ mod tests {
         };
         assert_eq!(share_back(&waiting(State::Ripping), &settings, &shares), Some(Event::ShareBack));
         assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), None);
+        // Review round 1, V15: a Planned return's CheckSpace reads the library root too.
+        let planned = || waiting(State::Planned { mode: lazymkv_core::plan::Mode::Direct });
+        assert_eq!(share_back(&planned(), &settings, &shares), None);
         shares.set_reach("/movies", Reach::Reachable);
         assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), Some(Event::ShareBack));
+        assert_eq!(share_back(&planned(), &settings, &shares), Some(Event::ShareBack));
     }
 
     /// A listing that printed no version says nothing about MakeMKV's version (a makemkvcon that started and died),

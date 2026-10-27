@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lazymkv_core::job::{Event, FailureClass, NotifyEvent, State, Tool, WaitReason};
+use lazymkv_core::job::{Event, Failure, FailureClass, NotifyEvent, OutputCause, State, Tool, WaitReason};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::plan::Mode;
 use lazymkv_core::review::{Note, ReviewReason};
@@ -149,6 +149,7 @@ fn a_first_verify_failure_moves_the_attempt_aside_and_rips_again() {
     let record = h.record(&id);
     assert_eq!((record.titles[0].attempts, record.titles[0].verified), (2, true));
     assert!(record.titles[0].rip_reviews.is_empty());
+    assert_eq!(record.titles[0].verify_failures, 1);
     assert!(events(&h, &id).contains(&Event::TitleVerifyFailed { second: false, last: true }));
 }
 
@@ -156,9 +157,65 @@ fn a_first_verify_failure_moves_the_attempt_aside_and_rips_again() {
 fn a_second_verify_failure_goes_on_and_records_verify_failed() {
     let h = harness(&["movie-direct-verify-twice"], json!({}));
     let id = run_to(&h, "Ejected");
-    assert_eq!(h.record(&id).titles[0].rip_reviews, vec![ReviewReason::VerifyFailed]);
+    let title = h.record(&id).titles[0].clone();
+    assert_eq!(title.rip_reviews, vec![ReviewReason::VerifyFailed]);
+    assert_eq!((title.attempts, title.verify_failures), (2, 2));
     let found: Vec<Event> = events(&h, &id).into_iter().filter(|e| matches!(e, Event::TitleVerifyFailed { .. })).collect();
     assert_eq!(found, vec![Event::TitleVerifyFailed { second: false, last: true }, Event::TitleVerifyFailed { second: true, last: true }]);
+}
+
+/// Review round 1, V9 (design part 5.3, spec 6.2 step 7): a header read that fails in Ripping is the rip's failure,
+/// classed Unknown with its sentence, never a verification failure: no silent re-rip and no eject.
+#[test]
+fn an_ident_exit_2_in_ripping_fails_the_rip_as_unknown_without_a_rerip() {
+    let h = harness(&["movie-direct-ident-error"], json!({}));
+    let id = run_to(&h, "Failed");
+    h.settle();
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    assert_eq!(record.message.as_deref(), Some("mkvmerge -J exited with code 2"));
+    let found = events(&h, &id);
+    let unknown = Failure { class: FailureClass::Unknown, output: None };
+    assert!(found.contains(&Event::TitleRipFailed { failure: unknown }), "{found:?}");
+    assert!(!found.iter().any(|e| matches!(e, Event::TitleVerifyFailed { .. })), "{found:?}");
+    assert_eq!(runs(&h, "makemkvcon64", "2"), 1, "one rip");
+    assert!(!h.job_dir(&id).join(KEY).join("attempt-1").exists());
+    let title = &record.titles[0];
+    assert!(!title.verified && title.rip_reviews.is_empty() && title.verify_failures == 0, "{title:?}");
+    assert!(h.ejector().calls().is_empty());
+    let last = h.notifications().into_iter().last().unwrap();
+    assert_eq!(last.event, NotifyEvent::Failed { class: FailureClass::Unknown });
+    assert!(last.message.contains("exited with code 2"), "{}", last.message);
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("verification failed"), "{log}");
+}
+
+/// Review round 1, V9: a header read past its time limit is the rip's failure too. The harness's header limit is 10 s,
+/// so this test takes more than 10 s.
+#[test]
+fn an_ident_past_the_header_limit_in_ripping_fails_the_rip_as_unknown() {
+    let h = harness(&[], json!({}));
+    let scenario = r#"{"responses":[
+ {"args_contain":["-J","title_t00.mkv"],"stdout":"ident-raw.json","hang_after_line":0},
+ {"args_contain":["--gui-mode","-o"],"stdout":"remux-mkvmerge.txt","creates":[{"arg_after":"-o","copy_from":"placeholder.mkv"}]},
+ {"args_contain":["-J",".partial"],"stdout":"partial-ident.json"},
+ {"args_contain":["--version"],"stdout":"mkvmerge-version.txt"}]}"#;
+    fs::write(h.tools().join("mkvmerge.json"), scenario).unwrap();
+    h.insert("tok0", "movie-direct");
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    let (started, cap) = (Instant::now(), Duration::from_secs(40) * ci_factor());
+    let ended = |h: &Harness| h.transitions(&id).iter().any(|line| matches!(line.new.as_str(), "Failed" | "Ejected"));
+    while !ended(&h) {
+        assert!(started.elapsed() < cap, "no Failed or Ejected within {cap:?}: {:?}", h.transitions(&id));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.starts_with("mkvmerge -J did not finish within 10 s and was killed"), "{message}");
+    assert!(!events(&h, &id).iter().any(|e| matches!(e, Event::TitleVerifyFailed { .. })));
+    assert_eq!(runs(&h, "makemkvcon64", "2"), 1, "one rip");
+    assert!(h.ejector().calls().is_empty());
 }
 
 #[test]
@@ -200,6 +257,51 @@ fn an_unreachable_root_at_check_space_feeds_share_lost() {
     let id = run_to(&h, "AwaitingShare");
     assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
     assert!(events(&h, &id).contains(&Event::ShareLost));
+    h.settle();
+    assert_eq!(h.record(&id).message, Some(format!("{} is unreachable: gone", root(h.staging()))));
+}
+
+/// Review round 1, V15 (design part 6.1, "the error says which"): CheckSpace's ShareLost names the root that does not
+/// answer and why, in the record, the waiting notification and job.log.
+#[test]
+fn an_unreachable_library_at_check_space_names_it_in_the_waiting_message() {
+    let h = harness(&[], json!({}));
+    let movies = root(h.library());
+    h.shares().set_reach(&movies, Reach::Unreachable("cable out".into()));
+    let id = run_to(&h, "AwaitingShare");
+    h.settle();
+    let record = h.record(&id);
+    assert_eq!(record.state, State::AwaitingShare { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
+    let why = format!("{movies} is unreachable: cable out");
+    assert_eq!(record.message.as_deref(), Some(why.as_str()));
+    let waiting = h.notifications().into_iter().find(|n| n.event == NotifyEvent::Waiting { reason: WaitReason::Share });
+    assert_eq!(waiting.expect("a waiting notification").message, format!("waiting: share: {why}"));
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(&format!("check space: {why}")), "{log}");
+}
+
+/// Review round 1, V5 (spec 7, 10.1, 10.2; RR1-8): a title staging folder that cannot be emptied or made is a write
+/// error on staging, classed by the share check, so the job waits in AwaitingShare to return to Ripping instead of
+/// failing; makemkvcon never runs.
+#[test]
+fn a_title_folder_that_cannot_be_made_waits_in_awaiting_share() {
+    let h = harness(&[], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    // A regular file where the job's staging folder goes, so emptying `<staging>/<id>/rip/<key>` fails on every OS.
+    fs::write(h.staging().join(&id), b"").unwrap();
+    run_to(&h, "AwaitingShare");
+    h.settle();
+    let record = h.record(&id);
+    assert_eq!(record.state, State::AwaitingShare { return_to: Box::new(State::Ripping) });
+    let write_error = Failure { class: FailureClass::Output, output: Some(OutputCause::WriteError) };
+    assert!(events(&h, &id).contains(&Event::TitleRipFailed { failure: write_error }));
+    let rip_dir = h.staging().join(&id).join("rip").join(KEY);
+    let message = record.message.unwrap_or_default();
+    assert!(message.starts_with(&format!("{}: ", rip_dir.display())), "{message}");
+    let sent: Vec<NotifyEvent> = h.notifications().into_iter().map(|n| n.event).collect();
+    assert!(sent.contains(&NotifyEvent::Waiting { reason: WaitReason::Share }), "{sent:?}");
+    assert!(!sent.iter().any(|e| matches!(e, NotifyEvent::Failed { .. })), "{sent:?}");
+    assert!(!h.job_dir(&id).join(KEY).join("rip.txt").exists());
 }
 
 #[test]
@@ -262,6 +364,42 @@ fn no_makemkvcon_waits_in_awaiting_tool() {
     assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Fingerprinted) });
     assert!(h.notifications().iter().any(|n| n.event == NotifyEvent::Waiting { reason: WaitReason::Tool }));
     assert!(!h.job_dir(&id).join("scan.txt").exists());
+}
+
+/// Review round 1, V8 (spec 10.2: "Without mkvmerge no disc is started"): RunScan waits for mkvmerge before it lists
+/// the drives, so nothing is listed, profiled, scanned or ripped.
+#[test]
+fn no_mkvmerge_waits_in_awaiting_tool_before_the_scan() {
+    let h = harness(&[], json!({"tool_paths": {"mkvmerge": null}}));
+    let id = run_to(&h, "AwaitingTool");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Fingerprinted) });
+    assert!(events(&h, &id).contains(&Event::ToolMissing { tool: Tool::Mkvmerge }));
+    assert!(h.notifications().iter().any(|n| n.event == NotifyEvent::Waiting { reason: WaitReason::Tool }));
+    let dir = h.job_dir(&id);
+    for file in ["drive-list.txt", "scan.txt", "job.mmcp.xml"] {
+        assert!(!dir.join(file).exists(), "{file}");
+    }
+    assert!(!h.staging().join(&id).join("rip").exists());
+}
+
+/// Review round 1, V8: mkvmerge lost after the scan stops the job before RipTitle runs makemkvcon, so no rip is made
+/// that VerifyFile could not check and a return would delete.
+#[test]
+fn mkvmerge_lost_before_the_rip_waits_without_ripping() {
+    let h = harness(&[], json!({}));
+    let stored = json_of(&h.data().join("settings.json"));
+    let tool = std::path::PathBuf::from(stored["tool_paths"]["mkvmerge"].as_str().unwrap());
+    let aside = tool.with_extension("aside");
+    // `--profile=` leaves out the drive listings: the hook runs at the scan, after RunScan found mkvmerge.
+    h.on_spawn(&["--profile=", "info"], move || {
+        let _ = fs::rename(&tool, &aside);
+    });
+    let id = run_to(&h, "AwaitingTool");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Ripping) });
+    assert!(!h.job_dir(&id).join(KEY).join("rip.txt").exists());
+    assert!(!h.staging().join(&id).join("rip").join(KEY).join("title_t00.mkv").exists());
 }
 
 #[test]
@@ -339,6 +477,23 @@ fn a_remembered_decision_is_applied_and_copied_as_remembered_json() {
     let plan = h.record(&id).plan.unwrap();
     assert_eq!((plan.identity.step, plan.identity.confidence), (IdentityStep::Remembered, 1.0));
     assert_eq!(fs::read(h.job_dir(&id).join("remembered.json")).unwrap(), text.as_bytes());
+}
+
+/// Review round 1 (the prerequisite of V14): a Plan whose data folder holds no remembered decision removes a job copy
+/// an earlier Plan left, so the job folder never holds a remembered file its plan did not use.
+#[test]
+fn plan_removes_a_remembered_copy_the_data_folder_no_longer_holds() {
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    h.insert("tok0", "movie-direct");
+    h.run_until("Scanned");
+    let id = format!("{}-1", fp.to_ascii_lowercase());
+    let copy = h.job_dir(&id).join("remembered.json");
+    fs::write(&copy, format!(r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","titles":[]}}"#)).unwrap();
+    h.restart();
+    h.run_until("Planned");
+    assert!(!copy.exists());
+    assert_ne!(h.record(&id).plan.unwrap().identity.step, IdentityStep::Remembered);
 }
 
 #[test]

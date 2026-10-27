@@ -309,6 +309,65 @@ fn a_remux_exit_2_fails_remux_failed_unknown_and_keeps_the_raw() {
     assert!(!final_path(&h).exists());
 }
 
+/// Stops the engine at the first transition into `state` (before its actions), puts a regular file in place of the
+/// title's staging folder `<staging>/<id>/rip/<KEY>`, whose own files are moved aside, and restarts the engine, so
+/// listing the folder fails on every OS with an error other than NotFound (review round 1, V3). Returns the job and the
+/// folder.
+fn restart_with_the_title_folder_blocked(h: &Harness, state: &str) -> (String, PathBuf) {
+    h.insert("tok0", "movie-direct");
+    h.run_until(state);
+    let id = h.job_ids().pop().unwrap();
+    let dir = h.staging().join(&id).join("rip").join(KEY);
+    fs::rename(&dir, dir.with_extension("aside")).unwrap();
+    fs::write(&dir, b"").unwrap();
+    h.restart();
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    h.settle();
+    (id, dir)
+}
+
+/// Review round 1, V3 (design part 5.2, K9; RR1-6(a)): a title folder that cannot be listed fails Probe as Unknown
+/// naming the folder and the error, not as a folder holding 0 `.mkv` files.
+#[test]
+fn an_unreadable_title_folder_fails_the_probe_with_its_error() {
+    let h = harness(&[], json!({}));
+    let (id, dir) = restart_with_the_title_folder_blocked(&h, "Inspecting");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.starts_with(&format!("{}: ", dir.display())) && !message.contains("holds 0"), "{message}");
+    let failed = h.notifications().into_iter().last().unwrap();
+    assert_eq!((failed.event, failed.message), (NotifyEvent::Failed { class: FailureClass::Unknown }, message));
+}
+
+/// Review round 1, V3: the same for Remux, after a restart in Remuxing, whose promise rebuild falls back to the plan's
+/// estimate (RR1-6(c)); nothing reaches the final path.
+#[test]
+fn an_unreadable_title_folder_fails_the_remux_with_its_error() {
+    let h = harness(&[], json!({}));
+    let (id, dir) = restart_with_the_title_folder_blocked(&h, "Remuxing");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.starts_with(&format!("{}: ", dir.display())) && !message.contains("holds 0"), "{message}");
+    assert!(!final_path(&h).exists());
+}
+
+/// Review round 1, V3 (S54, RR1-6(b)): with staging answering, the remux check that cannot read the staged sizes
+/// promises the plan's estimate and says so in job.log; Remux then fails naming the folder.
+#[test]
+fn an_unreadable_title_folder_at_the_remux_check_uses_the_planned_promise() {
+    let h = harness(&[], json!({}));
+    let (id, dir) = restart_with_the_title_folder_blocked(&h, "Decided");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.starts_with(&format!("{}: ", dir.display())), "{message}");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    let line = format!("check space: the staged files could not be read: {}: ", dir.display());
+    assert!(log.contains(&line), "{log}");
+}
+
 #[test]
 fn a_partial_whose_duration_differs_fails_file_verify_failed() {
     let h = harness(&["movie-direct-partial-long"], json!({}));

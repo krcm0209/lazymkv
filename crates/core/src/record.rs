@@ -112,6 +112,12 @@ pub struct TitleRecord {
     pub attempts: u32,
     /// Whether the ripped file passed verification.
     pub verified: bool,
+    /// How many times the rip's verification failed (spec 6.2 step 7): a first failure re-rips the title, a second goes
+    /// on with verify_failed. Kept in state.json so that a restart or a Retry keeps the count (design part 7.3; review
+    /// round 1, V12 and RR1-13). A record written before the key existed reads as 0. Def: PR #6 review (V12). Use:
+    /// phase 2.
+    #[serde(default)]
+    pub verify_failures: u32,
     /// The rip log's read errors.
     pub read_errors: Vec<ReadError>,
     /// The review reasons the rip's verification added.
@@ -232,6 +238,7 @@ mod tests {
             rip_index: None,
             attempts: 1,
             verified: true,
+            verify_failures: 0,
             read_errors: vec![],
             rip_reviews: vec![],
             decision: None,
@@ -248,14 +255,25 @@ mod tests {
         let mut record = job();
         record.titles = vec![title("t00-00800")];
         record.titles[0].filed = Some(FiledFile { path: "/lib/a.mkv".to_string(), size: 16, mtime_unix: 8 });
+        record.titles[0].verify_failures = 2;
         record.filed_unix = Some(9);
         let text = serde_json::to_string(&record).unwrap();
         assert!(text.starts_with(r#"{"format":"lazymkv job v1","id":"abc-1","#), "{text}");
+        assert!(text.contains(r#""verify_failures":2"#), "{text}");
         assert!(text.contains(r#""filed":{"path":"/lib/a.mkv","size":16,"mtime_unix":8}"#), "{text}");
         assert!(text.contains(r#""filed_unix":9"#), "{text}");
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(check_format(&value, JOB_FORMAT), Ok(()));
         assert_eq!(serde_json::from_value::<JobRecord>(value).unwrap(), record);
+    }
+
+    /// Review round 1, V12 (RR1-13): a title written before `verify_failures` existed reads as no failure, so the
+    /// format stays `lazymkv job v1`.
+    #[test]
+    fn a_title_record_without_verify_failures_reads_as_zero() {
+        let mut value = serde_json::to_value(title("t00-00800")).unwrap();
+        value.as_object_mut().unwrap().remove("verify_failures");
+        assert_eq!(serde_json::from_value::<TitleRecord>(value).unwrap(), title("t00-00800"));
     }
 
     #[test]
