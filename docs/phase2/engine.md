@@ -49,8 +49,9 @@ Every cargo command runs on the mini PC through `scripts/box.sh`, one at a time 
 | `lazymkv-dev` (bin `lazymkv-dev`), changed | `lazymkv-core`, `serde`, `serde_json` (unchanged) | `decide` split into `read_decide_inputs`, which reads a recording folder into a `DecideInputs` value, and the pure `decide_doc` (K5), with decide's three replay flags (S27); `Args::rest`, which `lazymkvctl` uses beside dev's existing `dispatch` (S85) |
 
 The disc snapshot's pure part is `core::snapshot`, and its file input and output is `tools::snapshot`; `capture disc`
-prints and writes the same bytes as before, which `crates/capture/tests/disc_snapshot.rs` pins. The goldens are
-byte-identical; `crates/dev/src/cmd/decide/characterisation/` pinned `decide`'s output across the split.
+prints and writes the same bytes as before, which `crates/capture/tests/disc_snapshot.rs` pins. Amended at review
+round 1 (V10, RR1-11): its `nav/` copies are no longer read-only, as the disc's files may be; their bytes are unchanged.
+The goldens are byte-identical; `crates/dev/src/cmd/decide/characterisation/` pinned `decide`'s output across the split.
 
 ## The interfaces fixed in core
 
@@ -523,6 +524,16 @@ The controller of the plan's execution made these while the tasks ran, mostly on
 
 The owner may overturn any of them.
 
+### Review round 1 (the review of pull request #6)
+
+The fifteen findings of the first review of pull request #6 (V1 to V15), each verified against the code; the rulings
+below are the controller's of 2026-10-27, labelled RR1-1 to RR1-15 beside the finding each decides. Every amendment is
+recorded in this file only; the spec and the design text stay untouched, as the plan and the final review left them
+(RR1-15).
+
+- V6 (design part 5.6 step 6, spec 10.2; I6 kept). A title folder that cannot be listed after a rip MakeMKV ended by itself is a failed title, classed like any other: `rip_outcome` reads the staging check and calls `classify_title_failure` (Output with the share down, out of space or a write error, MediaReadError with `2003`, else Unknown), and appends the listing error, naming the folder, to MakeMKV's verdict, which is "the title folder could not be listed (exit code N)" when MakeMKV reported the title saved. A folder that cannot be listed never gives `Ripped`. `rip` returns `Err` only for a run that could not be started or recorded, so the engine's "the rip could not run" now means exactly that; I6's messages are unchanged when the folder lists, and the exit-wait and cancel verdicts still come first (PIPE-3). Why: the listing error made `rip` return `Err`, so the engine fed `TitleRipFailed { Unknown }` with "the rip could not run", skipping the share check, the job.log `ended` line and the debug log. Cost if wrong: none. Tests: `a_rip_whose_title_folder_cannot_be_listed_is_classed_with_the_staging_share` (`makemkv_driver.rs`) and `a_title_folder_that_cannot_be_listed_reads_the_staging_health_once` (`crates/tools/src/makemkv.rs`).
+- V10 (S29; beside R-B2). Nav copies are always writable by their owner: `tools::snapshot` makes an existing copy writable before it copies over it and makes each copy writable after, adding only the owner's write bit on Unix and clearing only the read-only attribute on Windows, so S29's second snapshot into a job folder (a restart in Detected, a Retry, a return) replaces them. RR1-11: `capture disc`'s bytes are unchanged, which is what R-B2 and design part 4.1's "unchanged output" protect, but its nav copies are no longer read-only; phase 0's scripts handle both. Why: `fs::copy` kept the disc's read-only attribute (`docs/phase0/environment.md`), so every later snapshot into the same folder failed with access denied, and the job failed Unknown from Detected on every Retry. Cost if wrong: none. Tests: `a_second_snapshot_into_the_same_folder_replaces_read_only_nav_copies`, `nav_copies_are_writable_when_the_disc_files_are_read_only` and `a_nav_copy_an_earlier_snapshot_left_read_only_is_replaced` (`crates/tools/src/snapshot.rs`), and end to end, with the steps' fixes of this round, `a_restart_in_detected_after_a_finished_recording_fingerprints_again`.
+
 ## Rulings on the open points
 
 These are the planner's rulings of 2026-10-24 on the nine points the plan left open (OPEN 1 to OPEN 9). The owner made
@@ -557,6 +568,7 @@ The plan's "Not covered" list, with the items the reviews of pull request 2 adde
 - `release_promises` locks the `Promises` mutex on every transition while CheckSpace holds it across share input and output, so a real share that stalls would block the owner thread (the review of Task 23); compute the release conditions before locking;
 - `promise_on_return`, and the restart's promise block, run `ShareConnector::volume` and read the staged files' sizes on the owner thread at every return from a wait or a Retry, so with real shares an unreachable NAS would stall the IPC replies and the drive events (design part 4.4; the final review's engine-core-8); move that work into the resumed step;
 - the self-test's MakeMKV listing holds the disc-phase token with no time limit, and only a stop or a forced shutdown reaches its cancel token, so a `makemkvcon info disc:9999` hanging on a failing drive queues every arrival, Retry and return (the final review's engine-ipc-3); bound it, for example by `limits.header`, or let a cancel reach it;
+- Fingerprint snapshots into the job folder before it compares fingerprints, so a different disc in the job's drive overwrites the job's `nav/`, `files.json` and `meta.json` before the step fails "differs", and since review round 1 no read-only nav copy stops it part way; snapshot into a temporary folder and swap it in on a match (V10);
 - the self-test's MakeMKV check does not read `run.timed_out`, so a check listing the exit wait killed still reports ok (the half of the final review's M2 it left optional).
 
 **Pull request 4** (S40, S47):

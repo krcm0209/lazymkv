@@ -49,7 +49,10 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<DiscFile>) -> io::Result<()> {
 /// Writes `files.json`, `nav/` and `meta.json` under `out` for the disc mounted at `root`, in that order, and returns
 /// the `meta.json` it wrote (R-B2; design part 5.4 step 2). `nav/` holds only the files `is_nav_file` accepts, at their
 /// relative paths; the AACS unit key is read for `disc_id` but never copied. A unit key file that is listed but cannot be
-/// read gives `disc_id: None` without an error. `captured_unix` is the caller's clock. Def: T12. Use: T22, T23.
+/// read gives `disc_id: None` without an error. `captured_unix` is the caller's clock. `out` may already hold an earlier
+/// snapshot of the same disc (S29: a restart in Detected, a Retry or a return records the disc again into the job
+/// folder), whose files are overwritten; the nav copies are always writable by their owner, whatever the disc's
+/// attributes (review round 1, V10). Def: T12. Use: T22, T23.
 pub fn snapshot(root: &Path, volume_label: &str, out: &Path, captured_unix: u64) -> io::Result<DiscMeta> {
     let files = list_files(root)?;
     fs::create_dir_all(out)?;
@@ -65,13 +68,53 @@ pub fn snapshot(root: &Path, volume_label: &str, out: &Path, captured_unix: u64)
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::copy(root.join(&file.path), destination)?;
+        copy_nav_file(&root.join(&file.path), &destination)?;
     }
 
     let unit_key = unit_key_file(&files).and_then(|file| fs::read(root.join(&file.path)).ok());
     let meta = disc_meta(&files, volume_label, unit_key.as_deref(), captured_unix);
     fs::write(out.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
     Ok(meta)
+}
+
+/// Copies one navigation file so that a later snapshot into the same `out` can replace it (S29). `fs::copy` keeps the
+/// disc's read-only attribute (phase 0 saw it, docs/phase0/environment.md), and a read-only copy cannot be overwritten,
+/// so the copy is made writable; a copy an earlier snapshot left read-only (one written before review round 1's V10, or
+/// a kill between the copy and that change) is made writable first. A metadata error other than NotFound is returned.
+fn copy_nav_file(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(to) {
+        Ok(existing) if existing.is_file() => make_writable(to)?,
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::copy(from, to)?;
+    make_writable(to)
+}
+
+/// Gives the owner write permission when it is missing, and changes no other bit: never the group's or others' write
+/// bit (RR1-11).
+#[cfg(unix)]
+fn make_writable(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)?.permissions().mode();
+    if mode & 0o200 == 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    }
+    Ok(())
+}
+
+/// Clears the read-only attribute when it is set. On Windows `set_readonly(false)` clears only
+/// FILE_ATTRIBUTE_READONLY, so the lint's concern, write access for every user, applies only to Unix modes.
+#[cfg(not(unix))]
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_writable(path: &Path) -> io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -145,6 +188,101 @@ mod tests {
         assert_eq!(fs::read(out.join("nav/BDMV/META/DL/bdmt_eng.xml")).unwrap(), b"<di:name>Synthetic Movie</di:name>");
         assert_eq!(fs::read(out.join("nav/BDMV/PLAYLIST/00800.mpls")).unwrap(), b"mpls");
         assert!(!out.join("nav/BDMV/STREAM").exists());
+    }
+
+    /// Makes a file read-only, as a disc's files are (docs/phase0/environment.md), or writable again for the clean-up:
+    /// mode 0o444 or 0o644 on Unix.
+    #[cfg(unix)]
+    fn set_read_only(path: &Path, read_only: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if read_only { 0o444 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Sets or clears the read-only attribute (Windows: only FILE_ATTRIBUTE_READONLY).
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn set_read_only(path: &Path, read_only: bool) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(read_only);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    /// Makes every file under each folder writable again and removes the folders.
+    fn restore_and_remove(dirs: &[&Path]) {
+        for dir in dirs {
+            for file in list_files(dir).unwrap() {
+                set_read_only(&dir.join(&file.path), false);
+            }
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    /// A disc whose files are all read-only: three navigation files and one stream.
+    fn read_only_disc(tag: &str) -> std::path::PathBuf {
+        let root = temp_dir(tag);
+        write(&root, "BDMV/index.bdmv", b"index");
+        write(&root, "BDMV/PLAYLIST/00001.mpls", b"mpls");
+        write(&root, "BDMV/META/DL/bdmt_eng.xml", b"<di:name>Synthetic Movie</di:name>");
+        write(&root, "BDMV/STREAM/00001.m2ts", &[0u8; 64]);
+        for file in list_files(&root).unwrap() {
+            set_read_only(&root.join(&file.path), true);
+        }
+        root
+    }
+
+    /// Review round 1, V10 (S29): a restart in Detected, a Retry or a return records the disc again into the job
+    /// folder, so a second snapshot must replace the first one's nav copies even when the disc's files are read-only.
+    #[test]
+    fn a_second_snapshot_into_the_same_folder_replaces_read_only_nav_copies() {
+        let (root, out) = (read_only_disc("disc-ro-twice"), temp_dir("out-ro-twice"));
+
+        snapshot(&root, "RO", &out, 7).unwrap();
+        let meta = snapshot(&root, "RO", &out, 8).unwrap();
+
+        assert_eq!(meta.captured_unix, 8);
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(out.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(written["captured_unix"], 8);
+        for rel in ["BDMV/index.bdmv", "BDMV/PLAYLIST/00001.mpls", "BDMV/META/DL/bdmt_eng.xml"] {
+            assert_eq!(fs::read(out.join("nav").join(rel)).unwrap(), fs::read(root.join(rel)).unwrap(), "{rel}");
+        }
+        assert!(!out.join("nav/BDMV/STREAM").exists());
+        restore_and_remove(&[&root, &out]);
+    }
+
+    /// Review round 1, V10 (RR1-11): a nav copy never keeps the disc's read-only attribute; on Unix only the owner's
+    /// write bit is added, never the group's or others'.
+    #[test]
+    fn nav_copies_are_writable_when_the_disc_files_are_read_only() {
+        let (root, out) = (read_only_disc("disc-ro-writable"), temp_dir("out-ro-writable"));
+
+        snapshot(&root, "RO", &out, 7).unwrap();
+
+        let copy = out.join("nav/BDMV/index.bdmv");
+        drop(fs::OpenOptions::new().write(true).open(&copy).expect("the nav copy opens for writing"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&copy).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "{mode:o}");
+        }
+        assert_eq!(fs::read(&copy).unwrap(), b"index");
+        restore_and_remove(&[&root, &out]);
+    }
+
+    /// Review round 1, V10: a nav copy an earlier snapshot left read-only (one written before the fix, or a kill
+    /// between the copy and making it writable) is replaced.
+    #[test]
+    fn a_nav_copy_an_earlier_snapshot_left_read_only_is_replaced() {
+        let (root, out) = (temp_dir("disc-ro-left"), temp_dir("out-ro-left"));
+        write(&root, "BDMV/index.bdmv", b"index");
+        write(&out, "nav/BDMV/index.bdmv", b"an older copy");
+        set_read_only(&out.join("nav/BDMV/index.bdmv"), true);
+
+        snapshot(&root, "RO", &out, 7).unwrap();
+
+        assert_eq!(fs::read(out.join("nav/BDMV/index.bdmv")).unwrap(), b"index");
+        restore_and_remove(&[&root, &out]);
     }
 
     #[test]

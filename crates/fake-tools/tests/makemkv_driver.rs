@@ -381,6 +381,47 @@ fn a_rip_with_the_share_unreachable_fails_as_output_share_unreachable() {
     assert_eq!(failure, Failure { class: FailureClass::Output, output: Some(OutputCause::ShareUnreachable) });
 }
 
+/// Review round 1, V6 (design part 5.6 step 6, spec 10.2): a title folder that cannot be listed after a rip MakeMKV
+/// ended by itself fails the title, classed with the staging check like any failed title, and the listing error is
+/// appended to MakeMKV's verdict; `rip` no longer returns `Err` for it. A regular file stands where the folder should
+/// be, and the scenario has no `creates`, so the stand-in never touches it. The stand-in is installed once; only its
+/// `rip.txt` changes between the two rips.
+#[test]
+fn a_rip_whose_title_folder_cannot_be_listed_is_classed_with_the_staging_share() {
+    let scratch = Scratch::new("rip-unlisted");
+    let env = Env::new();
+    let scenario = r#"{"responses":[{"args_contain":["mkv","disc:0"],"stdout":"rip.txt"}]}"#;
+    let failed = format!("{VERSION}{ADDED_0}{SAVING}{FAILED}");
+    let program = stand_in(&scratch, scenario, &[("rip.txt", failed.as_bytes())]);
+    let dir = scratch.0.join("staging/j-1/rip/t00-00800");
+    let out = scratch.0.join("job/t00-00800/rip.txt");
+    fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    fs::write(&dir, b"not a folder").unwrap();
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let unlisted = fs::read_dir(&dir).unwrap_err();
+    assert_ne!(unlisted.kind(), std::io::ErrorKind::NotFound, "the guard: a file is not a missing folder");
+    let rip_with = |staging: StagingHealth| {
+        let source = TitleSource::File { name: "00800.mpls".to_string() };
+        env.run(|ctx| rip(ctx, &program, &flags(&scratch), 0, 0, source, &dir, &out, &|| staging))
+            .expect("a folder that cannot be listed fails the title, it is not an error of the run")
+    };
+
+    let ran = rip_with(StagingHealth { share_healthy: false, out_of_space: false });
+    assert_eq!(ran.run.exit_code, Some(0));
+    let (failure, message) = rip_failure(&ran.outcome);
+    assert_eq!(failure, Failure { class: FailureClass::Output, output: Some(OutputCause::ShareUnreachable) });
+    assert!(message.starts_with("MakeMKV reported the title failed (exit code 0); "), "{message}");
+    assert!(message.contains(&dir.display().to_string()), "{message}");
+
+    scratch.write("tools/rip.txt", format!("{VERSION}{ADDED_0}{SAVING}{SAVED}"));
+    let ran = rip_with(HEALTHY);
+    assert!(ran.summary.title_saved);
+    let (failure, message) = rip_failure(&ran.outcome);
+    assert_eq!(failure, UNKNOWN);
+    assert!(message.starts_with("the title folder could not be listed (exit code 0); "), "{message}");
+    assert!(message.contains(&dir.display().to_string()), "{message}");
+}
+
 #[test]
 fn a_rip_that_does_not_exit_within_the_exit_wait_is_killed_and_fails_saying_so() {
     let scratch = Scratch::new("rip-exit-wait");

@@ -183,7 +183,9 @@ pub struct RipRun {
 
 /// Runs and records one title's rip into `out`, with the index guard (design part 5.6 step 6). `title` is the title's
 /// index in the scan and `source` how the guard recognises it; `dir` is the title's empty rip folder. A mismatch kills
-/// the rip; a licence message does not (S59). `staging` is read only when the rip has failed. Def: T13. Use: T23.
+/// the rip; a licence message does not (S59). `staging` is read only when the rip has failed. A title folder that
+/// cannot be listed fails the title, classed like any failed title (review round 1, V6); `Err` comes only from a run
+/// that could not be started or recorded, never from S55's refusal, which is `Failed`. Def: T13. Use: T23.
 #[allow(clippy::too_many_arguments)]
 pub fn rip(
     ctx: &ToolCtx,
@@ -214,50 +216,60 @@ pub fn rip(
             return Ok(RipRun { outcome, run, summary: RunSummary::default() });
         }
     };
-    let outcome = rip_outcome(&run, &summary, kill, dir, staging)?;
+    let outcome = rip_outcome(&run, &summary, kill, dir, staging);
     Ok(RipRun { outcome, run, summary })
 }
 
 /// The verdict of a rip that ran, in design part 5.6 step 6's order: the kills, the index guard, a licence message, a
-/// rejected profile, then the summary and the title folder.
+/// rejected profile, then the summary and the title folder. A title folder that cannot be listed is a failed title,
+/// classed with `staging` like any other (spec 10.2: the share is checked first), and the listing error, naming the
+/// folder, is appended to the message (review round 1, V6).
 fn rip_outcome(
     run: &RunResult,
     summary: &RunSummary,
     kill: Kill,
     dir: &Path,
     staging: &dyn Fn() -> StagingHealth,
-) -> io::Result<RipOutcome> {
+) -> RipOutcome {
     let failed = |message: String| RipOutcome::Failed { failure: UNKNOWN, message };
     match kill {
-        Kill::Cancel => return Ok(failed(CANCELLED.to_string())),
-        Kill::ExitWait => return Ok(failed(EXIT_WAIT_PASSED.to_string())),
+        Kill::Cancel => return failed(CANCELLED.to_string()),
+        Kill::ExitWait => return failed(EXIT_WAIT_PASSED.to_string()),
         Kill::None | Kill::Limit | Kill::LineKill => {}
     }
     if summary.index_guard == Some(false) {
-        return Ok(RipOutcome::IndexMismatch);
+        return RipOutcome::IndexMismatch;
     }
     if let Some(licence) = &summary.licence {
-        return Ok(RipOutcome::Licence { message: licence.text.clone() });
+        return RipOutcome::Licence { message: licence.text.clone() };
     }
     if let Some(text) = &summary.profile_rejected {
-        return Ok(failed(format!("MakeMKV rejected the profile on the rip: {text}")));
+        return failed(format!("MakeMKV rejected the profile on the rip: {text}"));
     }
-    let mut files = mkv_files(dir)?;
+    let (mut files, unlisted) = match mkv_files(dir) {
+        Ok(files) => (files, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
     if summary.title_saved && !summary.title_failed && files.len() == 1 {
-        return Ok(RipOutcome::Ripped { file: files.remove(0) });
+        return RipOutcome::Ripped { file: files.remove(0) };
     }
     let code = exit_text(run, kill);
-    let message = if summary.title_failed {
+    let mut message = if summary.title_failed {
         format!("MakeMKV reported the title failed (exit code {code})")
     } else if !summary.title_saved {
         format!("the rip ended without a success summary (exit code {code})")
+    } else if unlisted.is_some() {
+        format!("the title folder could not be listed (exit code {code})")
     } else {
         format!("the title folder holds {} .mkv files, not one", files.len())
     };
+    if let Some(error) = unlisted {
+        message.push_str(&format!("; {}: {error}", dir.display()));
+    }
     let health = staging();
     let failure =
         classify_title_failure(health.share_healthy, health.out_of_space, summary.write_error, summary.read_errors);
-    Ok(RipOutcome::Failed { failure, message })
+    RipOutcome::Failed { failure, message }
 }
 
 /// The regular files directly in `dir` whose extension is `mkv` in any ASCII case, sorted. A missing `dir` holds none.
@@ -661,5 +673,46 @@ mod tests {
         assert_eq!(save_debug_log(&none, now(), &dir.join("scan.txt")),
             Err("MakeMKV's debug log path is not known".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review round 1, V6: a title folder that cannot be listed still reads the staging health, once, and is classed
+    /// with it like any failed title (spec 10.2: the share first, then a write error).
+    #[test]
+    fn a_title_folder_that_cannot_be_listed_reads_the_staging_health_once() {
+        use lazymkv_core::job::OutputCause;
+        use std::cell::Cell;
+
+        let scratch = crate::testutil::temp_dir("rip-unlisted");
+        let dir = scratch.join("t00-00800");
+        std::fs::write(&dir, b"not a folder").unwrap();
+        let unlisted = std::fs::read_dir(&dir).unwrap_err();
+        assert_ne!(unlisted.kind(), std::io::ErrorKind::NotFound, "the guard: a file is not a missing folder");
+        let run = RunResult {
+            exit_code: Some(0),
+            lines: 0,
+            elapsed_ms: 0,
+            started_unix: 0,
+            timed_out: false,
+            cancelled: false,
+            stdout: Vec::new(),
+        };
+        let summary = RunSummary { title_failed: true, write_error: true, ..RunSummary::default() };
+        for (share_healthy, cause) in [(true, OutputCause::WriteError), (false, OutputCause::ShareUnreachable)] {
+            let calls = Cell::new(0);
+            let staging = || {
+                calls.set(calls.get() + 1);
+                StagingHealth { share_healthy, out_of_space: false }
+            };
+            match rip_outcome(&run, &summary, Kill::None, &dir, &staging) {
+                RipOutcome::Failed { failure, message } => {
+                    assert_eq!(failure, Failure { class: FailureClass::Output, output: Some(cause) });
+                    assert!(message.starts_with("MakeMKV reported the title failed (exit code 0); "), "{message}");
+                    assert!(message.contains(&dir.display().to_string()), "{message}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
+            assert_eq!(calls.get(), 1, "staging is read once");
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
