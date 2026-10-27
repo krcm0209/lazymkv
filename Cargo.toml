@@ -8,7 +8,7 @@ version = "0.0.0"
 publish = false
 
 [workspace.dependencies]
-md-5 = "0.10"
+md-5 = "0.11"
 sha1 = "0.10"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: serde_json::Map keeps insertion order, as a Python dict does (json.dumps writes it in that order).
