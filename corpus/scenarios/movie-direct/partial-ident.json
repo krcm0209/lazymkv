@@ -1,0 +1,3 @@
+{"container":{"properties":{"duration":7150000000000}},"chapters":[{"num_entries":12}],"tracks":[
+ {"id":0,"type":"video","codec":"AVC/H.264/MPEG-4p10","properties":{"default_track":true}},
+ {"id":1,"type":"audio","codec":"DTS-HD Master Audio","properties":{"language":"eng","audio_channels":6,"track_name":"DTS-HD MA 5.1","default_track":true,"flag_original":true}}]}

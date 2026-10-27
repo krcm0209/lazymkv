@@ -1150,16 +1150,20 @@ fn disc_presence(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
     }
 }
 
-/// Spec 5: `<fingerprint>-<n>`, n one more than the highest n among `earlier` ids of this fingerprint (ids of other
-/// fingerprints and malformed ids ignored), 1 for the first. Def: T14. Use: phase 2.
+/// Spec 5 and K3: `<fingerprint in lower case>-<n>`, n one more than the highest n among the `earlier` IDs that
+/// start with the lower-cased fingerprint and '-' (an upper-case ID, an ID of another fingerprint and a malformed ID
+/// are ignored), 1 for the first. Lower case keeps the ID a valid slug (`audio::labels::is_slug`), so a job folder
+/// reads as a recording (design part 7.1); the fingerprint itself stays upper case in meta.json. Def: T14 (phase 1),
+/// K3 in T2. Use: T22.
 pub fn job_id(fingerprint: &str, earlier: &[&str]) -> String {
+    let fp = fingerprint.to_ascii_lowercase();
     let highest = earlier
         .iter()
-        .filter_map(|id| id.strip_prefix(fingerprint)?.strip_prefix('-'))
+        .filter_map(|id| id.strip_prefix(fp.as_str())?.strip_prefix('-'))
         .filter_map(job_number)
         .max()
         .unwrap_or(0);
-    format!("{fingerprint}-{}", u64::from(highest) + 1)
+    format!("{fp}-{}", u64::from(highest) + 1)
 }
 
 /// The n of a job ID's last part: one or more ASCII digits, at most u32::MAX; None for anything else ("", "x", "3-2",

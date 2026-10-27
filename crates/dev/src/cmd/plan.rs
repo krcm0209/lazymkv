@@ -265,9 +265,10 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
 
 /// A recording's parsed lookup answers exactly as `plan_doc` reads them (`recording_inputs`: an answer file whose
 /// lookup-status.txt line is not 200 is left unparsed, since the recorder keeps the error body of a 404 or a failed
-/// lookup), for decide's decision section (RP14), so the plan and the decision never read the answers differently.
+/// lookup), for decide's decision section (RP14, through `DecideInputs.answers`, K5), so the plan and the decision
+/// never read the answers differently. Def: T15. Use: T15, T19, T24.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RecordedAnswers {
+pub struct RecordedAnswers {
     /// thediscdb-hash.json's record (`parse_dischash`).
     pub by_fingerprint: Option<DiscDbRecord>,
     /// thediscdb-discid.json's records, in order (`parse_discid`).
@@ -276,8 +277,8 @@ pub(crate) struct RecordedAnswers {
     pub recorded: Option<TmdbRecord>,
 }
 
-/// The three answers of `recording_inputs(rec)?`, its refusal unchanged (spec 8.1, RP14).
-pub(crate) fn recorded_answers(rec: &Recording) -> Result<RecordedAnswers, Refused> {
+/// The three answers of `recording_inputs(rec)?`, its refusal unchanged (spec 8.1, RP14). Def: T15. Use: T15, T19, T24.
+pub fn recorded_answers(rec: &Recording) -> Result<RecordedAnswers, Refused> {
     let found = recording_inputs(rec)?;
     Ok(RecordedAnswers { by_fingerprint: found.by_fingerprint, by_disc_id: found.by_disc_id, recorded: found.recorded })
 }
@@ -458,7 +459,8 @@ fn file_text(tree: &dyn Tree, key: &PathKey) -> Result<Option<(String, String)>,
 /// An option file as (shown path, text): taken against ctx.cwd, read as utf-8-sig, strict. A missing file is refused
 /// with Python's OSError text, which names the path (`[Errno 2] No such file or directory: '<path>'`); a file that is
 /// there but cannot be read or decoded with `<shown>: <error>` (choice 9: the decode error alone names no file).
-fn option_text(ctx: &Ctx, path: &Path) -> Result<(String, String), Refused> {
+/// Def: T15. Use: T15, T20.
+pub(crate) fn option_text(ctx: &Ctx, path: &Path) -> Result<(String, String), Refused> {
     let shown = shown_path(path);
     let full = ctx.abs(&path.to_string_lossy());
     let text = read_file_text(&full, &shown, Encoding::Utf8Sig, Errors::Strict)
@@ -491,8 +493,8 @@ fn read_remembered(ctx: &Ctx, path: &Path, fingerprint: Option<&str>) -> Result<
 }
 
 /// A TMDb record answer (8.1): `/movie/{id}` when the object has a non-null `title`, else `/tv/{id}`. Err is the
-/// parser's sentence, prefixed by `shown`.
-fn parse_record(text: &str, shown: &str) -> Result<TmdbRecord, String> {
+/// parser's sentence, prefixed by `shown`. Def: T15. Use: T15, T20.
+pub(crate) fn parse_record(text: &str, shown: &str) -> Result<TmdbRecord, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|error| format!("{shown}: {error}"))?;
     if value.get("title").map_or(false, |title| !title.is_null()) {
         parse_movie(text, shown)

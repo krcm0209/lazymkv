@@ -593,6 +593,56 @@ pub fn search_json(results: &[(&str, i64, &str, &str, &str)]) -> String {
     serde_json::json!({"page": 1, "results": rows, "total_pages": 1, "total_results": results.len()}).to_string()
 }
 
+/// A ustar archive of `entries` (name, data), each a regular file, ended by two zero blocks: the fixture appdata.tar
+/// of design part 5.4. Panics on a name over 100 bytes. Def: T4. Use: T4, T23.
+pub fn ustar_build(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    for (name, data) in entries {
+        assert!(name.len() <= 100, "ustar_build: the name is over 100 bytes: {name}");
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        // The checksum counts its own field as eight spaces.
+        header[148..156].copy_from_slice(b"        ");
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let sum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        archive.extend_from_slice(&header);
+        archive.extend_from_slice(data);
+        archive.resize(archive.len().next_multiple_of(512), 0);
+    }
+    archive.extend_from_slice(&[0u8; 1024]);
+    archive
+}
+
+/// A hand-made profile in the shape of MakeMKV's default profile: one <name> and two defaultSelection attributes
+/// (design part 5.4; the text is ours, D17). Def: T4. Use: T4, T23.
+pub fn default_profile_xml() -> String {
+    // Same shape as MakeMKV's default profile; the text is ours.
+    r#"<?xml version="1.0" encoding="utf-8"?>
+<profile>
+    <name lang="mogz">:5086</name>
+    <mkvSettings insertFirstChapter00IfMissing="true" />
+    <outputSettings name="copy" outputFormat="directCopy"></outputSettings>
+    <trackSettings input="default">
+        <output outputSettingsName="copy"
+                defaultSelection="$app_DefaultSelectionString">
+        </output>
+    </trackSettings>
+    <trackSettings input="LPCM-stereo">
+        <output outputSettingsName="lpcm" defaultSelection="$app_DefaultSelectionString"></output>
+    </trackSettings>
+</profile>
+"#
+    .to_string()
+}
+
 #[cfg(test)]
 mod builder_tests {
     //! The scan and TMDb fixture builders of phase 1 Task 2: the exact text each writes, and that the parser reads a

@@ -1,0 +1,1964 @@
+//! The IPC server over the in-memory transport (design parts 3.7, 3.8, 9.1 to 9.4; Ruling S12).
+
+use std::collections::VecDeque;
+use std::fs;
+use std::io::{BufRead, Write};
+use std::path::Path;
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+use lazymkv_core::decision::Disposition;
+use lazymkv_core::ipc::{read_reply, Envelope, Reply, CANCELLED, MAX_LINE_BYTES};
+use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
+use lazymkv_core::plan::Mode;
+use lazymkv_core::record::{JobRecord, JOB_FORMAT};
+use lazymkv_core::review::ReviewReason;
+use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
+use lazymkv_engine::StepResult;
+use lazymkv_platform::{IpcConnector, Reach};
+use serde_json::{json, Value};
+
+/// The tests' own waits: 20 s, times `ci_factor` wherever a test waits for something to happen (Rulings R29.c2,
+/// R29.c5).
+const WAIT: Duration = Duration::from_secs(20);
+/// Task 22's disc names: the base scenario's disc, and two discs with their own fingerprints.
+const DISC_A: &str = "movie-direct";
+const DISC_B: &str = "disc-b";
+const DISC_C: &str = "disc-c";
+const FINAL: &str = "Synthetic Movie (2001) {tmdb-900001}/Synthetic Movie (2001) {tmdb-900001} - 1080p.mkv";
+
+fn settings() -> Value { json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1}) }
+
+fn stand_in(scenarios: &[&str], settings: Value) -> Harness {
+    Harness::new(Path::new(env!("CARGO_BIN_EXE_fake-tool")), scenarios, settings)
+}
+
+fn step(event: Event) -> StepScript { StepScript::Result(StepResult { event: Some(event), message: None }) }
+fn none() -> StepScript { StepScript::Result(StepResult { event: None, message: None }) }
+fn unknown() -> Failure { Failure { class: FailureClass::Unknown, output: None } }
+
+/// The main line to Filed, in the order its actions run.
+fn main_line() -> Vec<(&'static str, StepScript)> {
+    vec![
+        ("RunScan", step(Event::ScanDone)), ("Plan", step(Event::PlanDone { mode: Mode::Direct })),
+        ("CheckSpace", step(Event::SpaceOk)), ("RipTitle", step(Event::TitleRipped)),
+        ("VerifyFile", step(Event::TitleVerified { last: true })), ("Eject", step(Event::Ejected)),
+        ("Probe", step(Event::ProbeDone)), ("ExtractSubtitleEvidence", none()),
+        ("Decide", step(Event::DecisionDone { disposition: Disposition::AutoFile, reasons: vec![], has_path: true })),
+        ("CheckSpace", step(Event::SpaceOk)), ("Remux", step(Event::RemuxDone)),
+        ("VerifyFile", step(Event::FileVerified)), ("File", step(Event::FileDone)),
+    ]
+}
+
+/// The main line up to the `nth` (from 0) entry of `tag`, which hangs; nothing after it.
+fn hanging_at(tag: &str, nth: usize) -> Vec<(&'static str, StepScript)> {
+    let mut seen = 0;
+    let mut out = Vec::new();
+    for (t, s) in main_line() {
+        if t == tag {
+            if seen == nth { out.push((t, StepScript::Hang)); return out; }
+            seen += 1;
+        }
+        out.push((t, s));
+    }
+    panic!("no {tag} #{nth} in the main line")
+}
+
+fn scripted(script: Vec<(&'static str, StepScript)>) -> Harness {
+    Harness::new_scripted(script, settings())
+}
+
+fn wait_for_call(h: &Harness, tag: &str, count: usize) {
+    let (start, wait) = (Instant::now(), WAIT * ci_factor());
+    while h.steps().calls().iter().filter(|c| c.as_str() == tag).count() < count {
+        assert!(start.elapsed() < wait, "{tag} was not called {count} times within {wait:?}: {:?}", h.steps().calls());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+struct Client { lines: Receiver<String>, writer: Box<dyn Write + Send>, next: u64, pushes: VecDeque<Envelope> }
+
+impl Client {
+    fn open(h: &Harness) -> Client {
+        let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
+        let (send, lines) = channel();
+        let mut reader = stream.reader;
+        std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => if send.send(line).is_err() { break },
+            }
+        });
+        Client { lines, writer: stream.writer, next: 1, pushes: VecDeque::new() }
+    }
+    /// The next line, or None once the engine closed the connection.
+    fn line(&mut self) -> Option<String> {
+        // 20 s, 80 s under CI (Ruling R29.c2).
+        let wait = WAIT * ci_factor();
+        match self.lines.recv_timeout(wait) {
+            Ok(line) => Some(line),
+            Err(RecvTimeoutError::Disconnected) => None,
+            Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {wait:?}"),
+        }
+    }
+    /// Writes `line` and its newline in one write: the engine answers a line over 4 MiB as soon as it has read that
+    /// much and then drops the client, so a second write could meet a closed pipe.
+    fn raw(&mut self, line: &str) {
+        self.writer.write_all(format!("{line}\n").as_bytes()).unwrap();
+        self.writer.flush().unwrap();
+    }
+    fn request(&mut self, kind: &str, payload: Value) -> Reply {
+        let id = self.next;
+        self.next += 1;
+        self.raw(&json!({"v": 1, "type": kind, "id": id, "payload": payload}).to_string());
+        loop {
+            match read_reply(self.line().expect("a reply").trim_end()).unwrap() {
+                Reply::Push(envelope) => self.pushes.push_back(envelope),
+                reply @ (Reply::Ok { id: Some(n), .. } | Reply::Error { id: Some(n), .. }) if n == id => return reply,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+    fn ok(&mut self, kind: &str, payload: Value) -> Value {
+        match self.request(kind, payload) { Reply::Ok { result, .. } => result, other => panic!("{kind}: {other:?}") }
+    }
+    fn err(&mut self, kind: &str, payload: Value) -> String {
+        match self.request(kind, payload) { Reply::Error { message, .. } => message, other => panic!("{kind}: {other:?}") }
+    }
+    fn push(&mut self) -> Envelope {
+        if let Some(envelope) = self.pushes.pop_front() { return envelope; }
+        match read_reply(self.line().expect("a push").trim_end()).unwrap() {
+            Reply::Push(envelope) => envelope,
+            other => panic!("expected a push, got {other:?}"),
+        }
+    }
+    fn snapshot(&mut self) -> Value {
+        let envelope = self.push();
+        assert_eq!(envelope.kind, "snapshot");
+        envelope.payload
+    }
+    /// job_update pushes until one whose state is `state` (for `job` when given); returns its payload.
+    fn until_state(&mut self, job: Option<&str>, state: &str) -> Value {
+        loop {
+            let envelope = self.push();
+            if envelope.kind == "job_update" && envelope.payload["state"]["state"] == json!(state)
+                && job.map_or(true, |id| envelope.payload["id"] == json!(id)) {
+                return envelope.payload;
+            }
+        }
+    }
+}
+
+// ---- Envelope (design part 9.1) ----
+
+#[test]
+fn a_wrong_v_is_answered_and_the_connection_stays_open() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.raw(r#"{"v":2,"type":"history","id":7,"payload":{}}"#);
+    assert!(matches!(read_reply(c.line().unwrap().trim_end()).unwrap(), Reply::Error { id: Some(7), .. }));
+    assert!(c.ok("history", json!({})).as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_line_over_4_mib_is_answered_then_the_client_is_dropped() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.raw(&"x".repeat(MAX_LINE_BYTES + 1));
+    assert!(matches!(read_reply(c.line().unwrap().trim_end()).unwrap(), Reply::Error { id: None, .. }));
+    assert_eq!(c.line(), None);
+}
+
+#[test]
+fn two_clients_each_get_every_push() {
+    let h = scripted(main_line());
+    let (mut a, mut b) = (Client::open(&h), Client::open(&h));
+    a.snapshot();
+    b.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let states = |c: &mut Client| {
+        let mut seen = Vec::new();
+        loop {
+            let e = c.push();
+            if e.kind == "job_update" {
+                let state = e.payload["state"]["state"].as_str().unwrap().to_string();
+                seen.push(state.clone());
+                if state == "Filed" { return seen; }
+            }
+        }
+    };
+    let (sa, sb) = (states(&mut a), states(&mut b));
+    assert_eq!(sa, sb);
+    assert_eq!(sa.first().map(String::as_str), Some("Detected"));
+}
+
+#[test]
+fn a_reconnect_gets_a_fresh_snapshot() {
+    let h = scripted(main_line());
+    let mut a = Client::open(&h);
+    assert!(a.snapshot()["jobs"].as_array().unwrap().is_empty());
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    a.until_state(None, "Filed");
+    drop(a);
+    let mut b = Client::open(&h);
+    let jobs = b.snapshot()["jobs"].as_array().unwrap().clone();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["state"], json!({"state": "Filed"}));
+}
+
+#[test]
+fn a_path_collision_job_update_carries_the_collisions() {
+    let h = stand_in(&["movie-direct"], settings());
+    let target = h.library().join(FINAL);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"owner's").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let held = c.until_state(None, "NeedsReview");
+    let collisions = held["collisions"].as_array().unwrap();
+    assert_eq!(collisions.len(), 1);
+    assert!(collisions[0].as_str().unwrap().ends_with("Synthetic Movie (2001) {tmdb-900001} - 1080p.mkv"));
+    assert!(held["review_reasons"].as_array().unwrap().contains(&json!("path_collision")));
+}
+
+// ---- Snapshot and history (design part 9.2) ----
+
+fn seed(h: &Harness, n: u64, state: State) -> String {
+    let fp = format!("{n:032X}");
+    let id = format!("{}-1", fp.to_ascii_lowercase());
+    let r = JobRecord {
+        format: JOB_FORMAT.to_string(), id: id.clone(), fingerprint: fp, disc_id: None, drive: "tok9".to_string(),
+        created_unix: n, updated_unix: n, state, message: None, rip_again: false, profile: "job.mmcp.xml".to_string(),
+        plan: None, titles: vec![], filed_unix: None, collisions: vec![], notes: vec![],
+    };
+    let dir = h.data().join("jobs").join(&id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("state.json"), serde_json::to_vec(&r).unwrap()).unwrap();
+    id
+}
+
+#[test]
+fn a_client_gets_a_snapshot_with_unfinished_and_50_recent_jobs() {
+    let h = scripted(vec![]);
+    for n in 1..=52 { seed(&h, n, State::Filed); }
+    let waiting = seed(&h, 60, State::AwaitingTool { return_to: Box::new(State::Fingerprinted) });
+    h.restart();
+    let mut c = Client::open(&h);
+    let snapshot = c.snapshot();
+    let jobs = snapshot["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 51);
+    assert_eq!(jobs[0]["id"], json!(waiting));
+    assert_eq!(jobs[1]["updated_unix"], json!(52));
+    assert_eq!(jobs[50]["updated_unix"], json!(3));
+    for key in ["jobs", "settings", "problems", "secrets", "selftest"] { assert!(snapshot.get(key).is_some(), "{key}"); }
+}
+
+#[test]
+fn secrets_show_set_and_only_the_webhook_host() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.ok("secret_set", json!({"name": "ha_webhook_url", "value": "http://ha.local:8123/api/webhook/abc123"})), Value::Null);
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("abc123"));
+    let secrets: Value = serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"].clone();
+    assert_eq!(secrets["ha_webhook_url"], json!({"set": true, "host": "ha.local"}));
+    assert_eq!(secrets["webhook_url"], json!({"set": false, "host": null}));
+}
+
+#[test]
+fn history_pages_at_most_50_before_a_job_over_ipc() {
+    let h = scripted(vec![]);
+    let ids: Vec<String> = (1..=60).map(|n| seed(&h, n, State::Filed)).collect();
+    h.restart();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let first = c.ok("history", json!({}));
+    assert_eq!(first.as_array().unwrap().len(), 50);
+    let next = c.ok("history", json!({"before": ids[10]}));
+    assert_eq!(next.as_array().unwrap().len(), 10);
+    assert_eq!(c.err("history", json!({"before": "nope-1"})), "no job nope-1");
+}
+
+// ---- Settings and secrets (design part 9.4) ----
+
+#[test]
+fn settings_set_with_a_problem_changes_nothing_and_lists_problems() {
+    let h = scripted(vec![]);
+    let before = fs::read(h.data().join("settings.json")).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    match c.request("settings_set", json!({"file_phase_concurrency": 0})) {
+        Reply::Error { message, problems, .. } => {
+            assert_eq!(message, "settings_set refused: 1 problems");
+            assert_eq!(problems.len(), 1);
+            assert_eq!(problems[0].key, "file_phase_concurrency");
+        }
+        other => panic!("{other:?}"),
+    }
+    match c.request("settings_set", json!({"nope": 1})) {
+        Reply::Error { problems, .. } => assert!(problems.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fs::read(h.data().join("settings.json")).unwrap(), before);
+}
+
+/// Design part 9.4 ("names only the keys it changes"; ruling at the final review): a settings_set naming one tool path
+/// keeps the other four, as `ToolPaths` lets a file name only the programs it overrides.
+#[test]
+fn settings_set_of_one_tool_path_keeps_the_others() {
+    let h = stand_in(&["movie-direct"], settings());
+    let stored = |h: &Harness| -> Value {
+        serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap()
+    };
+    let before = stored(&h);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let java = h.tools().join("another-java").display().to_string();
+    let result = c.ok("settings_set", json!({"tool_paths": {"java": java}}));
+    assert_eq!(result["tool_paths"]["java"], json!(java));
+    for tool in ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg"] {
+        assert_eq!(result["tool_paths"][tool], before["tool_paths"][tool], "{tool}");
+        assert!(before["tool_paths"][tool].is_string(), "{tool}");
+    }
+    assert_eq!(stored(&h)["tool_paths"], result["tool_paths"]);
+}
+
+#[test]
+fn settings_set_clearing_the_last_problem_turns_present_discs_into_arrivals() {
+    let h = Harness::new_scripted(main_line(), json!({"keep_tuning_evidence": false, "drive_settle_s": 0,
+                                                "drive_ready_timeout_s": 1, "file_phase_concurrency": 0}));
+    let mut c = Client::open(&h);
+    assert_eq!(c.snapshot()["problems"][0]["key"], json!("file_phase_concurrency"));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let result = c.ok("settings_set", json!({"file_phase_concurrency": 1}));
+    assert_eq!(result["file_phase_concurrency"], json!(1));
+    c.until_state(None, "Filed");
+    assert_eq!(h.job_ids().len(), 1);
+}
+
+#[test]
+fn settings_set_does_not_turn_a_handled_disc_into_an_arrival_again() {
+    let h = stand_in(&["movie-direct", "movie-direct-copy-plan"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    h.settle();
+    let lines = h.transitions(&id).len();
+    let path = h.data().join("settings.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    stored["file_phase_concurrency"] = json!(0);
+    fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    assert_eq!(c.ok("settings_set", json!({"file_phase_concurrency": 1}))["file_phase_concurrency"], json!(1));
+    h.settle();
+    assert_eq!(h.job_ids(), vec![id.clone()]);
+    assert_eq!(h.transitions(&id).len(), lines);
+    assert!(h.ejector().calls().is_empty());
+}
+
+#[test]
+fn a_settings_set_mid_job_leaves_the_running_jobs_flags() {
+    let h = stand_in(&["movie-direct", "movie-direct-hang"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Ripping")["id"].as_str().unwrap().to_string();
+    c.ok("settings_set", json!({"cache_mb": 512}));
+    c.ok("cancel", json!({"job": id}));
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Ripping");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains("--cache=1024"));
+    assert!(!log.contains("--cache=512"));
+    let job: Value = serde_json::from_slice(&fs::read(h.job_dir(&id).join("settings.json")).unwrap()).unwrap();
+    assert_eq!(job["cache_mb"], json!(1024));
+    let data: Value = serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap();
+    assert_eq!(data["cache_mb"], json!(512));
+    c.ok("cancel", json!({"job": id}));
+}
+
+/// Review round 1 (V13; design parts 7.4 and 9.4): a settings_set while settings.json cannot be read is refused with
+/// the store's settings.json problem and leaves the file as the owner wrote it, instead of merging the change into the
+/// stand-in defaults and replacing the owner's whole file; an arrival names the same problem.
+#[test]
+fn settings_set_while_settings_json_is_unreadable_is_refused_and_leaves_the_file() {
+    let h = scripted(vec![]);
+    let path = h.data().join("settings.json");
+    let typo = fs::read_to_string(&path).unwrap().replace("\"movies_root\"", "\"movie_root\"");
+    fs::write(&path, &typo).unwrap();
+    let mut c = Client::open(&h);
+    assert_eq!(c.snapshot()["problems"][0]["key"], json!("settings.json"));
+    let tuning = h.data().parent().unwrap().join("tuning").display().to_string();
+    for (text, payload, named) in [
+        (typo.as_str(), json!({"keep_tuning_evidence": false}), "movie_root"),
+        (typo.as_str(), json!({"tuning_root": tuning}), "movie_root"),
+        ("{", json!({"keep_tuning_evidence": false}), "EOF"),
+    ] {
+        fs::write(&path, text).unwrap();
+        match c.request("settings_set", payload.clone()) {
+            Reply::Error { message, problems, .. } => {
+                assert_eq!(message, "settings_set refused: 1 problems", "{payload}");
+                assert_eq!(problems.len(), 1, "{payload}: {problems:?}");
+                assert_eq!(problems[0].key, "settings.json", "{payload}");
+                assert!(problems[0].problem.contains(named), "{payload}: {problems:?}");
+            }
+            other => panic!("{payload}: {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), text, "{payload}");
+    }
+    // An arrival under the unreadable file would wait the default 10 s settle; a disc in a drive at a restart is
+    // routed at once (L1), and its refusal names settings.json, as the snapshot does.
+    h.insert("tok0", "disc-a");
+    h.restart();
+    let refused = "tok0: no job starts: the settings have a problem: settings.json: ";
+    assert!(h.engine_log().contains(refused), "{}", h.engine_log());
+    assert!(h.job_ids().is_empty());
+}
+
+/// Review round 1 (V13): with no settings.json at all, a settings_set still merges into the defaults and writes the
+/// file, as the store reads an absent file as the defaults.
+#[test]
+fn settings_set_with_no_settings_json_merges_into_the_defaults() {
+    let h = scripted(vec![]);
+    let path = h.data().join("settings.json");
+    fs::remove_file(&path).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let staging = h.staging().display().to_string();
+    let result = c.ok("settings_set", json!({"keep_tuning_evidence": false, "staging_root": staging}));
+    assert_eq!((result["cache_mb"].clone(), result["staging_root"].clone()), (json!(1024), json!(staging)));
+    let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(stored, result);
+}
+
+#[test]
+fn secret_set_refuses_an_unknown_name_and_never_echoes_the_value() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let message = c.err("secret_set", json!({"name": "tmdb", "value": "s3cret-value"}));
+    assert_eq!(message, "tmdb is not a secret name (design part 9.4)");
+    assert_eq!(c.ok("secret_set", json!({"name": r"share:\\nas\media", "value": "user\npw"})), Value::Null);
+    assert_eq!(c.ok("secret_set", json!({"name": "tmdb_token", "value": "s3cret-value"})), Value::Null);
+    let log = fs::read_to_string(h.data().join("engine.log")).unwrap_or_default();
+    assert!(!log.contains("s3cret-value"));
+    let mut d = Client::open(&h);
+    assert!(!d.line().unwrap().contains("s3cret-value"));
+}
+
+// ---- Retry (design part 9.4, L3) ----
+
+#[test]
+fn retry_on_failed_resumes_when_the_token_is_free() {
+    let mut script = vec![("RunScan", step(Event::ScanDone)), ("RunScan", step(Event::ScanDone)),
+                          ("Plan", step(Event::PlanDone { mode: Mode::Direct })), ("Plan", step(Event::PlanDone { mode: Mode::Direct })),
+                          ("CheckSpace", step(Event::SpaceOk)), ("CheckSpace", step(Event::SpaceOk)),
+                          ("RipTitle", step(Event::TitleRipFailed { failure: unknown() })), ("RipTitle", StepScript::Hang),
+                          ("RipTitle", step(Event::TitleRipped))];
+    script.extend(main_line().into_iter().skip(4).filter(|(t, _)| *t != "RipTitle"));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    h.insert("tok1", DISC_B);
+    wait_for_call(&h, "RipTitle", 2);
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.ok("retry", json!({"job": a}));
+    assert!(matches!(h.record(&a).state, State::Failed { .. }));
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Ripping");
+}
+
+#[test]
+fn retry_in_awaiting_space_feeds_space_freed_when_space_returns() {
+    let h = stand_in(&["movie-direct"], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_free(&staging, 1);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingSpace")["id"].as_str().unwrap().to_string();
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    assert_eq!(h.transitions(&id).len(), lines);
+    h.shares().set_free(&staging, u64::MAX);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::SpaceFreed)));
+}
+
+#[test]
+fn retry_in_each_waiting_state_rechecks_its_condition() {
+    // Share: the staging share comes back.
+    let h = stand_in(&["movie-direct"], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Reachable);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    drop((c, h));
+
+    // MakeMkv: the check after the retry reads v2.0.1 (listing 3 of the variant).
+    let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingMakeMkv")["id"].as_str().unwrap().to_string();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Fingerprinted");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::MakeMkvChanged)));
+    drop((c, h));
+
+    // Tool: makemkvcon is moved away before the insertion and back before the second retry.
+    let h = stand_in(&["movie-direct"], settings());
+    let stored: Value = serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap();
+    let tool = std::path::PathBuf::from(stored["tool_paths"]["makemkvcon"].as_str().unwrap());
+    let aside = tool.with_extension("aside");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    fs::rename(&tool, &aside).unwrap();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingTool")["id"].as_str().unwrap().to_string();
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    assert_eq!(h.transitions(&id).len(), lines);
+    fs::rename(&aside, &tool).unwrap();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Fingerprinted");
+    assert!(h.transitions(&id).iter().any(|t| matches!(t.event, Some(Event::ToolFound { .. }))));
+    drop((c, h));
+
+    // Lookup: a retry runs a round over the recorded transport; the lookup stays pending, so it feeds nothing (S81).
+    let mut script = main_line();
+    script.truncate(8);
+    script.push(("Decide", step(Event::LookupPending)));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingLookup")["id"].as_str().unwrap().to_string();
+    let asked = h.http().requests().len();
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retry's lookup round", |h| h.http().requests().len() > asked);
+    h.settle();
+    assert_eq!(h.transitions(&id).len(), lines);
+    assert_eq!(h.state_of(&id), "AwaitingLookup");
+}
+
+/// Review round 1, V15 (S81, design part 6.1): a Planned return waits on the library root its CheckSpace reads, so a
+/// retry while the library still does not answer feeds nothing and sends no `resumed`, and one after it answers files
+/// the job.
+#[test]
+fn retry_with_the_library_still_unreachable_feeds_nothing() {
+    let h = stand_in(&["movie-direct"], settings());
+    let library = h.library().to_str().unwrap().to_string();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.transitions(&id).len(), lines);
+    assert!(!h.notifications().iter().any(|n| n.event == NotifyEvent::Resumed));
+    h.shares().set_reach(&library, Reach::Reachable);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+}
+
+/// Review round 1, V8 (spec 10.2, S81): a job that waits for mkvmerge before its scan stays while a retry still finds
+/// none, and scans once a retry finds it.
+#[test]
+fn a_job_waiting_for_mkvmerge_scans_once_a_retry_finds_it() {
+    let h = stand_in(&["movie-direct"], settings());
+    let stored: Value = serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap();
+    let tool = std::path::PathBuf::from(stored["tool_paths"]["mkvmerge"].as_str().unwrap());
+    let aside = tool.with_extension("aside");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    fs::rename(&tool, &aside).unwrap();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingTool")["id"].as_str().unwrap().to_string();
+    assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Fingerprinted) });
+    let lines = h.transitions(&id).len();
+    c.ok("retry", json!({"job": id}));
+    assert_eq!(h.transitions(&id).len(), lines);
+    fs::rename(&aside, &tool).unwrap();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Scanned");
+    assert!(h.transitions(&id).iter().any(|t| matches!(t.event, Some(Event::ToolFound { .. }))));
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
+}
+
+/// Review round 1, V5 (RR1-8, S81): a rip waiting for the share because its title folder could not be made rips again
+/// after a retry once the folder can be made, counting one attempt.
+#[test]
+fn a_rip_waiting_for_the_share_rips_again_after_retry() {
+    let h = stand_in(&["movie-direct"], settings());
+    let id = format!("{}-1", h.fingerprint(DISC_A).to_ascii_lowercase());
+    let blocker = h.staging().join(&id);
+    fs::write(&blocker, b"").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    c.until_state(Some(&id), "AwaitingShare");
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Ripping) });
+    fs::remove_file(&blocker).unwrap();
+    h.shares().set_reach(h.staging().to_str().unwrap(), Reach::Reachable);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    assert_eq!(h.record(&id).titles[0].attempts, 1);
+}
+
+/// Review round 1, V3 (RR1-6(b)): at the remux check, a title folder that cannot be read while staging does not answer
+/// feeds ShareLost, so the job waits instead of failing its remux; a retry once both are back files it.
+#[test]
+fn an_unreachable_staging_at_the_remux_check_waits_for_the_share_and_retry_files_it() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Decided");
+    let id = h.job_ids().pop().unwrap();
+    let dir = h.staging().join(&id).join("rip").join("t00-00800");
+    let aside = dir.with_extension("aside");
+    fs::rename(&dir, &aside).unwrap();
+    fs::write(&dir, b"").unwrap();
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    h.restart();
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Decided { approved: None }) });
+    assert!(!h.transitions(&id).iter().any(|t| matches!(t.event, Some(Event::RemuxFailed { .. }))));
+    fs::remove_file(&dir).unwrap();
+    fs::rename(&aside, &dir).unwrap();
+    h.shares().set_reach(&staging, Reach::Reachable);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+}
+
+/// Review round 1, V7 (RR1-9): File with the library share not answering fails naming the share, the title and the way
+/// out in the failed notification, and a retry once the share answers files the verified partial.
+#[test]
+fn file_with_the_library_share_unreachable_fails_naming_the_share_and_a_retry_files_it() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Verified");
+    let id = h.job_ids().pop().unwrap();
+    let library = h.library().to_str().unwrap().to_string();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".to_string()));
+    h.restart();
+    h.wait("File's failure", |h| matches!(h.state_of(&id).as_str(), "Failed" | "Filed"));
+    h.settle();
+    assert_eq!(h.record(&id).state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let failed = h.notifications().into_iter().last().unwrap();
+    assert_eq!(failed.event, NotifyEvent::Failed { class: FailureClass::Unknown });
+    for part in ["t00-00800", "cable out", "a retry once the share answers"] {
+        assert!(failed.message.contains(part), "{part}: {}", failed.message);
+    }
+    h.shares().set_reach(&library, Reach::Reachable);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+    assert_eq!(h.record(&id).titles[0].filed.as_ref().unwrap().size, 16);
+    assert_eq!(fs::read(h.library().join(FINAL)).unwrap().len(), 16);
+}
+
+#[test]
+fn retry_of_a_file_phase_failure_waits_for_the_slot() {
+    let mut script = main_line();
+    script.truncate(6); // A's disc phase
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // A
+    script.extend([("Probe", step(Event::ProbeDone)), ("ExtractSubtitleEvidence", none()),
+                   ("Decide", step(Event::DecisionDone { disposition: Disposition::AutoFile, reasons: vec![], has_path: true })),
+                   ("CheckSpace", step(Event::SpaceOk)), ("Remux", StepScript::Hang)]); // B holds the slot
+    script.extend([("Probe", step(Event::ProbeDone))]); // A after its retry
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.insert("tok1", DISC_B);
+    wait_for_call(&h, "Remux", 1);
+    let ids = h.job_ids();
+    let a = ids.iter().find(|id| matches!(h.record(id).state, State::Failed { .. })).unwrap().clone();
+    let b = ids.iter().find(|id| **id != a).unwrap().clone();
+    c.ok("retry", json!({"job": a}));
+    assert!(matches!(h.record(&a).state, State::Failed { .. }));
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Inspecting");
+}
+
+#[test]
+fn a_retry_with_the_disc_absent_feeds_media_removed_and_frees_the_token() {
+    let mut script = main_line();
+    script[3] = ("RipTitle", step(Event::TitleRipFailed { failure: unknown() }));
+    script.extend(main_line()); // a second disc goes the whole way
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0's record emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    c.ok("retry", json!({"job": a}));
+    let lines = h.transitions(&a);
+    let n = lines.len();
+    assert_eq!(lines[n - 2].event, Some(Event::Retry));
+    assert_eq!(lines[n - 1].event, Some(Event::MediaRemoved));
+    assert_eq!(lines[n - 1].actions, vec![lazymkv_core::job::Action::WaitForDisc]);
+    assert_eq!(h.steps().calls().iter().filter(|c| c.as_str() == "RipTitle").count(), 1);
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    c.until_state(None, "Ejected");
+}
+
+#[test]
+fn a_retry_queues_behind_an_earlier_arrival() {
+    let mut script = main_line();
+    script[3] = ("RipTitle", step(Event::TitleRipFailed { failure: unknown() }));
+    script.extend(main_line().into_iter().take(3));
+    script.push(("RipTitle", StepScript::Hang)); // B holds the token
+    script.extend(main_line()); // C, then A
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    h.insert("tok1", DISC_B);
+    wait_for_call(&h, "RipTitle", 2);
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    h.insert("tok2", DISC_C);
+    h.deliver();
+    let c_fingerprint = h.fingerprint(DISC_C);
+    h.wait("disc C queued", |h| {
+        let record = &h.drives_json()["drives"]["tok2"];
+        record["fingerprint"] == json!(c_fingerprint) && record["handled"] == json!(false)
+    });
+    c.ok("retry", json!({"job": a}));
+    c.ok("cancel", json!({"job": b}));
+    let mut order = Vec::new();
+    while order.len() < 2 {
+        let e = c.push();
+        if e.kind != "job_update" { continue; }
+        let id = e.payload["id"].as_str().unwrap().to_string();
+        if id != b && !order.contains(&id) && e.payload["state"]["state"] != json!("Failed") { order.push(id); }
+    }
+    assert_ne!(order[0], a);
+    assert_eq!(order[1], a);
+}
+
+/// Ruling at the final review (spec 10.3, design part 5.5, L1a): a copy plan fails with its disc left in; after a
+/// restart the failed job has that disc noted, so a Retry plans again at once instead of feeding a MediaRemoved that
+/// never happened and waiting for a pull and a reinsertion.
+#[test]
+fn a_retry_after_a_restart_plans_again_with_the_disc_left_in() {
+    let h = stand_in(&["movie-direct", "movie-direct-copy-plan"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Failed");
+    let id = h.job_ids().pop().unwrap();
+    h.restart();
+    h.settle();
+    let before = h.transitions(&id).len();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retry and its plan", |h| h.transitions(&id).len() >= before + 2);
+    let lines = h.transitions(&id);
+    let after = &lines[before..];
+    assert!(after.iter().all(|t| t.event != Some(Event::MediaRemoved)), "{after:?}");
+    let retried = (after[0].event.clone(), after[0].actions.clone());
+    assert_eq!(retried, (Some(Event::Retry), vec![lazymkv_core::job::Action::Plan]));
+    assert!(matches!(after[1].event, Some(Event::PlanFailed { .. })), "{after:?}");
+}
+
+/// S73, widened at the final review (design part 8.4): a failed job's lookup book is rebuilt from its folder at a
+/// restart, so the Retry's Plan reads the answers saved there instead of an empty book.
+#[test]
+fn a_retry_after_a_restart_plans_with_the_saved_answers() {
+    let h = stand_in(&["movie-direct", "movie-direct-copy-plan"], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Failed");
+    let id = h.job_ids().pop().unwrap();
+    let planned = h.record(&id).plan.unwrap();
+    assert!(!planned.identity.lookup_pending, "the first plan had every answer");
+    h.restart();
+    h.settle();
+    let before = h.transitions(&id).len();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retried plan", |h| h.transitions(&id).len() >= before + 2);
+    assert!(matches!(h.transitions(&id)[before + 1].event, Some(Event::PlanFailed { .. })));
+    assert_eq!(h.record(&id).plan.unwrap().identity, planned.identity);
+}
+
+/// S73, widened at the final review (design part 8.4): a job that failed before Decide with a lookup-pending plan
+/// decides, after a restart and a Retry, from the late answer saved in its folder; an empty book would overwrite its
+/// identity with an unknown one and hold it for review.
+#[test]
+fn a_retry_after_a_restart_decides_with_the_saved_late_answer() {
+    let h = stand_in(&["movie-direct", "movie-direct-lookup-late", "movie-direct-probe-error"], settings());
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    h.run_until("Failed");
+    let id = h.job_ids().pop().unwrap();
+    assert_eq!(h.record(&id).state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    assert!(fs::read_to_string(h.job_dir(&id).join("lookup-status.txt")).unwrap().contains("dischash 404"));
+    assert!(h.record(&id).plan.unwrap().identity.lookup_pending, "the refresh before Decide has not run yet");
+    // The probe works again for the retry.
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/ffprobe.json");
+    fs::copy(base, h.tools().join("ffprobe.json")).unwrap();
+    h.restart();
+    h.settle();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": id}));
+    h.wait("the retried job filed or held", |h| matches!(h.state_of(&id).as_str(), "Filed" | "NeedsReview"));
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Filed);
+    let plan = record.plan.unwrap();
+    assert!(!plan.identity.lookup_pending);
+    assert_eq!(plan.identity.title.as_deref(), Some("Synthetic Movie"));
+    assert_eq!(Path::new(&record.titles[0].filed.as_ref().unwrap().path), h.library().join(FINAL).as_path());
+}
+
+#[test]
+fn rip_again_arms_the_job_and_the_next_insertion_starts_a_new_job() {
+    let mut script = main_line();
+    script.extend(main_line());
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Filed")["id"].as_str().unwrap().to_string();
+    assert_eq!(c.ok("rip_again", json!({"job": id})), Value::Null);
+    assert!(h.record(&id).rip_again);
+    h.remove("tok0");
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let second = c.until_state(None, "Detected")["id"].as_str().unwrap().to_string();
+    assert_eq!(second, id.replace("-1", "-2"));
+}
+
+// ---- Cancel (design part 9.4, R-A7) ----
+
+fn assert_cancelled(h: &Harness, id: &str, event_tag: &str, from: &str) {
+    let last = h.transitions(id).pop().unwrap();
+    let event = serde_json::to_value(&last.event).unwrap();
+    assert_eq!(event["event"], json!(event_tag), "{from}");
+    assert_eq!(event["failure"]["class"], json!("Unknown"), "{from}");
+    assert!(matches!(&last.new, State::Failed { class: FailureClass::Unknown, from: f } if f.as_str() == from), "{from}");
+    assert_eq!(h.record(id).message.as_deref(), Some(CANCELLED));
+    assert!(matches!(h.notifications().last().unwrap().event, NotifyEvent::Failed { class: FailureClass::Unknown }));
+}
+
+#[test]
+fn each_in_flight_action_cancels_to_its_design_part_9_4_event() {
+    for (tag, nth, from, event) in [
+        ("RunScan", 0, "Fingerprinted", "ScanFailed"), ("Plan", 0, "Scanned", "PlanFailed"),
+        ("RipTitle", 0, "Ripping", "TitleRipFailed"), ("VerifyFile", 0, "Ripping", "TitleRipFailed"),
+        ("Probe", 0, "Inspecting", "ProbeFailed"), ("Decide", 0, "Inspecting", "DecisionFailed"),
+        ("Remux", 0, "Remuxing", "RemuxFailed"), ("VerifyFile", 1, "Remuxing", "FileVerifyFailed"),
+        ("File", 0, "Verified", "FileFailed"),
+    ] {
+        let h = scripted(hanging_at(tag, nth));
+        let mut c = Client::open(&h);
+        c.snapshot();
+        h.insert("tok0", DISC_A);
+        wait_for_call(&h, tag, nth + 1);
+        let id = h.job_ids().pop().unwrap();
+        c.ok("cancel", json!({"job": id}));
+        assert_cancelled(&h, &id, event, from);
+    }
+    // Fingerprint: a restart in Detected hands Fingerprint to the runner.
+    let h = scripted(vec![("Fingerprint", StepScript::Hang)]);
+    h.insert("tok0", DISC_A);
+    h.run_until("Detected");
+    h.restart();
+    wait_for_call(&h, "Fingerprint", 1);
+    let id = h.job_ids().pop().unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("cancel", json!({"job": id}));
+    assert_cancelled(&h, &id, "FingerprintFailed", "Detected");
+    // Decide in Decided, after an approval.
+    let mut script = hanging_at("Decide", 0);
+    script.pop();
+    script.push(("Decide", step(Event::DecisionDone { disposition: Disposition::NeedsReview,
+                                                      reasons: vec![ReviewReason::IdentityUnknown], has_path: true })));
+    script.push(("Decide", StepScript::Hang));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    wait_for_call(&h, "Decide", 2);
+    c.ok("cancel", json!({"job": id}));
+    assert_cancelled(&h, &id, "DecisionFailed", "Decided");
+}
+
+#[test]
+fn cancel_during_check_space_or_eject_is_refused() {
+    for (tag, action) in [("CheckSpace", "CheckSpace"), ("Eject", "Eject")] {
+        let h = scripted(hanging_at(tag, 0));
+        let mut c = Client::open(&h);
+        c.snapshot();
+        h.insert("tok0", DISC_A);
+        wait_for_call(&h, tag, 1);
+        let id = h.job_ids().pop().unwrap();
+        assert_eq!(c.err("cancel", json!({"job": id})),
+                   format!("job {id} is running {action}, which cancel does not stop (design part 9.4)"));
+    }
+}
+
+#[test]
+fn a_cancel_with_no_running_step_is_refused_naming_the_state() {
+    let mut script = main_line();
+    script[2] = ("CheckSpace", step(Event::SpaceShort));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingSpace")["id"].as_str().unwrap().to_string();
+    assert_eq!(c.err("cancel", json!({"job": id})), format!("job {id} has no running step: it is AwaitingSpace"));
+    assert_eq!(c.err("cancel", json!({"job": "nope-1"})), "no job nope-1");
+}
+
+#[test]
+fn a_cancelled_disc_phase_job_is_not_ejected() {
+    let h = stand_in(&["movie-direct", "movie-direct-hang"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Ripping")["id"].as_str().unwrap().to_string();
+    c.ok("cancel", json!({"job": id}));
+    h.settle();
+    assert!(h.ejector().calls().is_empty());
+}
+
+#[test]
+fn cancel_during_a_rip_kills_it_and_fails_with_cancelled_by_the_owner() {
+    let h = stand_in(&["movie-direct", "movie-direct-hang"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Ripping")["id"].as_str().unwrap().to_string();
+    // Ripping is pushed before the step's drive listing; rip.txt exists once the rip itself is spawned.
+    h.wait("the rip to start", |h| h.job_dir(&id).join("t00-00800").join("rip.txt").is_file());
+    let start = Instant::now();
+    c.ok("cancel", json!({"job": id}));
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_cancelled(&h, &id, "TitleRipFailed", "Ripping");
+    let exit = fs::read_dir(h.job_dir(&id)).unwrap().map(|e| e.unwrap().path())
+        .map(|p| p.join("rip.txt.exit.json")).find(|p| p.is_file()).unwrap();
+    let exit: Value = serde_json::from_slice(&fs::read(exit).unwrap()).unwrap();
+    assert_ne!(exit["exit_code"], json!(0));
+}
+
+/// Ruling at the final review: after a removal the job's killed step is stale, not the job's running step, so a
+/// cancel names no running step instead of failing the job and dropping a later step's result.
+#[test]
+fn a_cancel_while_only_a_pulled_discs_killed_step_runs_is_refused() {
+    let mut script = main_line();
+    let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3), ripped));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let id = h.job_ids().pop().unwrap();
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&id).last().unwrap().event == Some(Event::MediaRemoved));
+    assert_eq!(c.err("cancel", json!({"job": id})), format!("job {id} has no running step: it is Ripping"));
+    h.settle();
+    let last = h.transitions(&id).pop().unwrap();
+    assert_eq!((last.event, last.new), (Some(Event::MediaRemoved), State::Ripping));
+}
+
+/// The final review's re-review (N1, design part 5.3): a disc pulled while a cancelled rip still runs passes the token
+/// to `KILLED_HOLDER`; the cancelled step's report fails the job with the cancel's failure and frees the token, so a
+/// queued disc starts instead of waiting for an engine restart.
+#[test]
+fn a_disc_pulled_during_a_cancelled_rip_frees_the_token_once_the_rip_reports() {
+    let mut script = main_line();
+    script.truncate(4); // A: RunScan, Plan, CheckSpace, then a RipTitle that cancel does not cut short
+    let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3), ripped));
+    script.push(("RunScan", StepScript::Hang)); // B
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let ripping = Instant::now();
+    let a = h.job_ids().pop().unwrap();
+    h.insert("tok1", DISC_B);
+    let b = h.fingerprint(DISC_B);
+    h.wait("disc B queued", |h| h.drives_json()["drives"]["tok1"]["fingerprint"] == json!(b));
+    // The cancel's reply waits for the step's end; the history reply after it shows the owner took the cancel.
+    c.raw(&json!({"v": 1, "type": "cancel", "id": 77, "payload": {"job": a}}).to_string());
+    c.ok("history", json!({}));
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&a).last().unwrap().event == Some(Event::MediaRemoved));
+    assert!(ripping.elapsed() < Duration::from_secs(3), "the removal came after the rip's end: {:?}", ripping.elapsed());
+    wait_for_call(&h, "RunScan", 2); // B starts once the cancelled rip has reported
+    assert!(ripping.elapsed() >= Duration::from_millis(2800), "B started after {:?}", ripping.elapsed());
+    loop {
+        match read_reply(c.line().expect("the cancel's reply").trim_end()).unwrap() {
+            Reply::Ok { id: Some(77), .. } => break,
+            Reply::Push(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let record = h.record(&a);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    assert_eq!(record.message.as_deref(), Some(CANCELLED));
+}
+
+/// Design part 5.2 (ruling at the final review): a step that panics fails its job as Unknown, so a file-phase job
+/// lets the slot go to the next job and can be retried, instead of holding the slot with no step for ever.
+#[test]
+fn a_panicking_remux_fails_the_job_frees_the_slot_and_retry_resumes_it() {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(10).collect(); // A up to Remux
+    script.push(("Remux", StepScript::Panic("scripted remux panic")));
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // B lets the slot go
+    script.extend([("Remux", step(Event::RemuxDone)), ("VerifyFile", step(Event::FileVerified)),
+                   ("File", step(Event::FileDone))]); // A after its retry
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert_eq!(failed.message.as_deref(), Some("the step panicked: scripted remux panic"));
+    h.wait("A's failed notification", |h| h.notifications().iter().any(|n| {
+        n.job_id.as_deref() == Some(a.as_str()) && n.event == NotifyEvent::Failed { class: FailureClass::Unknown }
+    }));
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A let go
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V11, RR1-12): a CheckSpace that panics in Decided feeds its state's own failure row, DecisionFailed,
+/// so the job fails as Unknown and lets the slot go, instead of waiting in AwaitingShare for a share that never left;
+/// its Retry decides again.
+#[test]
+fn a_panicking_remux_space_check_fails_the_job_frees_the_slot_and_retry_resumes_it() {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(9).collect(); // A up to Decide
+    script.push(("CheckSpace", StepScript::Panic("scripted space check panic")));
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // B lets the slot go
+    script.extend([
+        ("Decide", step(Event::DecisionDone { disposition: Disposition::AutoFile, reasons: vec![], has_path: true })),
+        ("CheckSpace", step(Event::SpaceOk)), ("Remux", step(Event::RemuxDone)),
+        ("VerifyFile", step(Event::FileVerified)), ("File", step(Event::FileDone)),
+    ]); // A after its retry
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    let decided = State::Decided { approved: None };
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(decided) });
+    assert_eq!(failed.message.as_deref(), Some("the step panicked: scripted space check panic"));
+    assert!(matches!(h.transitions(&a).pop().unwrap().event, Some(Event::DecisionFailed { .. })));
+    let of_a = |h: &Harness| -> Vec<NotifyEvent> {
+        h.notifications().into_iter().filter(|n| n.job_id.as_deref() == Some(a.as_str())).map(|n| n.event).collect()
+    };
+    h.wait("A's failed notification", |h| of_a(h).contains(&NotifyEvent::Failed { class: FailureClass::Unknown }));
+    assert!(!of_a(&h).iter().any(|event| matches!(event, NotifyEvent::Waiting { .. })), "{:?}", of_a(&h));
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A let go
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+// ---- Persists that fail (review round 1, V1) ----
+
+/// A's disc phase and file phase to its RemuxDone, B's disc phase, B's Probe failing so it lets the slot go, then A's
+/// Remux, VerifyFile and File after its retry.
+fn remux_then_b() -> Vec<(&'static str, StepScript)> {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(11).collect();
+    script.extend(main_line().into_iter().take(6));
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() })));
+    script.extend([("Remux", step(Event::RemuxDone)), ("VerifyFile", step(Event::FileVerified)),
+                   ("File", step(Event::FileDone))]);
+    script
+}
+
+/// The job of `disc` in a scripted harness: its fingerprint in lower case, then `-1` (K3).
+fn id_of(h: &Harness, disc: &str) -> String {
+    format!("{}-1", h.fingerprint(disc).to_ascii_lowercase())
+}
+
+/// Whether a `failed` notification was sent for `id`.
+fn failed_notified(h: &Harness, id: &str) -> bool {
+    h.notifications().iter().any(|n| n.job_id.as_deref() == Some(id) && matches!(n.event, NotifyEvent::Failed { .. }))
+}
+
+/// Review round 1 (V1): a remux result whose transition cannot be persisted feeds the state's failure row, persisted
+/// as usual, so the job fails as Unknown, lets the file-phase slot go and is notified, and its Retry files it.
+#[test]
+fn a_remux_result_whose_failure_persists_fails_the_job_and_frees_the_slot() {
+    let h = scripted(remux_then_b());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::RemuxDone));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let refused = format!("{a}: the transition into Remuxing could not be persisted, so none of its actions ran");
+    assert!(h.engine_log().contains(&refused), "{}", h.engine_log());
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let message = "the RemuxDone transition into Remuxing could not be persisted: refused by the test";
+    assert_eq!(failed.message.as_deref(), Some(message));
+    let lines = h.transitions(&a);
+    let unknown_remux = |event: &Option<Event>| {
+        matches!(event, Some(Event::RemuxFailed { failure }) if failure.class == FailureClass::Unknown)
+    };
+    assert!(unknown_remux(&lines.last().unwrap().event), "{lines:?}");
+    assert!(lines.iter().all(|line| line.event != Some(Event::RemuxDone)));
+    h.wait("A's failed notification", |h| failed_notified(h, &a));
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A let go
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    h.allow_persists();
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V1, RR1-1): when the failure of a transition that could not be persisted cannot be persisted either,
+/// the job keeps its persisted state with no step and nothing is published, but it leaves its file-phase place, so the
+/// next job gets the slot; it cannot be retried, and the next restart resumes it.
+#[test]
+fn a_remux_result_and_its_failure_that_cannot_be_persisted_free_the_slot_until_a_restart() {
+    let h = scripted(remux_then_b());
+    let a = id_of(&h, DISC_A);
+    let refused = a.clone();
+    h.refuse_persists(move |record, transition| {
+        record.id == refused
+            && (transition.event == Some(Event::RemuxDone) || matches!(transition.new, State::Failed { .. }))
+    });
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let kept = format!("{a}: keeps its persisted state Remuxing until a restart resumes it");
+    h.wait("A kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.record(&a).state, State::Remuxing);
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot A left
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.until_state(Some(&b), "Failed");
+    assert!(!failed_notified(&h, &a), "{:?}", h.notifications());
+    assert_eq!(h.record(&a).state, State::Remuxing);
+    let refusal =
+        format!("job {a} is Remuxing; retry takes a failed or waiting job that can run again (design part 9.4)");
+    assert_eq!(c.err("retry", json!({"job": a})), refusal);
+    h.allow_persists();
+    h.restart();
+    h.wait("A filed", |h| h.state_of(&a) == "Filed");
+    let restarted = h.transitions(&a).into_iter().find(|line| matches!(line.event, Some(Event::EngineRestart { .. })));
+    assert_eq!(restarted.unwrap().actions, vec![Action::DeletePartialFile, Action::Remux]);
+}
+
+/// Review round 1 (V1): a FilePhaseSlot whose transition cannot be persisted is undone: the job stays in Ejected and
+/// holds no place, the owner does not loop on it, the next job gets the slot, and the job is granted it later.
+#[test]
+fn a_file_phase_slot_grant_that_cannot_be_persisted_lets_the_next_job_have_the_slot() {
+    let mut script = main_line();
+    script.truncate(6); // A's disc phase
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", StepScript::Hang)); // B holds the slot
+    script.extend(main_line().into_iter().skip(6)); // A's file phase, after B
+    let h = scripted(script);
+    let a = id_of(&h, DISC_A);
+    let refused = a.clone();
+    h.refuse_persists(move |record, transition| record.id == refused && transition.event == Some(Event::FilePhaseSlot));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let grant = format!("{a}: the transition into Inspecting could not be persisted");
+    h.wait("A's refused grant", |h| h.engine_log().contains(&grant));
+    h.settle();
+    assert_eq!(h.state_of(&a), "Ejected");
+    assert_eq!(h.awake().holders(), 0, "A holds a place");
+    Client::open(&h).snapshot(); // the owner still answers: no loop over the refused grant
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 1); // B is granted the slot
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    assert_eq!(h.state_of(&a), "Ejected");
+    h.allow_persists();
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V1): a Retry delivered with the file-phase slot whose transition cannot be persisted is undone:
+/// the job stays Failed, holds no place and says so in job.log, and a second retry resumes it.
+#[test]
+fn a_retry_whose_slot_delivery_cannot_be_persisted_leaves_the_slot_free() {
+    let mut script = main_line();
+    script.truncate(6); // A's disc phase
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // A fails in its file phase
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", StepScript::Hang)); // B holds the slot
+    let h = scripted(script);
+    h.refuse_persists(|_, transition| transition.event == Some(Event::Retry));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    c.ok("retry", json!({"job": a}));
+    assert_eq!(h.state_of(&a), "Failed");
+    let job_log = fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap();
+    assert!(job_log.contains("Retry was not delivered: its transition could not be persisted"), "{job_log}");
+    h.allow_persists();
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    wait_for_call(&h, "Probe", 2); // B is granted the slot: A holds none
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.ok("retry", json!({"job": a})); // A waits for the slot B holds
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Inspecting");
+}
+
+/// Review round 1 (V1, RR1-5): a restart whose EngineRestart line cannot be persisted for a job holding the slot fails
+/// that job through its failure row, and the restart seeds no place for it, so the queued job is granted the slot and
+/// the failed job's Retry files it. (In this file rather than engine_restart.rs, for its IPC client.)
+#[test]
+fn a_restart_whose_engine_restart_cannot_be_persisted_holds_no_slot() {
+    let mut script = hanging_at("Remux", 0); // A holds the slot in Remuxing
+    script.extend(main_line().into_iter().take(6)); // B's disc phase: B queues in Ejected
+    script.push(("Probe", step(Event::ProbeFailed { failure: unknown() }))); // B, after the restart
+    script.extend([("Remux", step(Event::RemuxDone)), ("VerifyFile", step(Event::FileVerified)),
+                   ("File", step(Event::FileDone))]); // A after its retry
+    let h = scripted(script);
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "Remux", 1);
+    let a = h.job_ids().pop().unwrap();
+    h.insert("tok1", DISC_B);
+    let b = id_of(&h, DISC_B);
+    h.wait("B queued in Ejected", |h| h.state_of(&b) == "Ejected");
+    let refused = a.clone();
+    h.refuse_persists(move |record, transition| {
+        record.id == refused && matches!(transition.event, Some(Event::EngineRestart { .. }))
+    });
+    h.restart();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let message = "the EngineRestart transition into Remuxing could not be persisted: refused by the test";
+    assert_eq!(failed.message.as_deref(), Some(message));
+    wait_for_call(&h, "Probe", 2); // B is granted the slot after the restart
+    h.wait("B failed", |h| h.state_of(&b) == "Failed");
+    h.allow_persists();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+}
+
+/// Review round 1 (V1, RR1-4; S78 amended): a cancel whose failure transition cannot be persisted is answered with
+/// the error naming it, not `ok`; the job keeps its persisted state until a restart resumes it.
+#[test]
+fn a_cancel_whose_failure_cannot_be_persisted_is_answered_with_the_error() {
+    let h = scripted(hanging_at("RipTitle", 0));
+    h.refuse_persists(|_, transition| matches!(transition.new, State::Failed { .. }));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let id = h.job_ids().pop().unwrap();
+    let answer =
+        format!("the step of {id} was cancelled, but its failure could not be persisted; a restart resumes it");
+    assert_eq!(c.err("cancel", json!({"job": id})), answer);
+    assert_eq!(h.record(&id).state, State::Ripping);
+    let kept = format!("{id}: keeps its persisted state Ripping until a restart resumes it");
+    assert!(h.engine_log().contains(&kept), "{}", h.engine_log());
+    assert!(!failed_notified(&h, &id), "{:?}", h.notifications());
+}
+
+/// The final review of review round 1 (S1, RR1-16): a VerifyFile whose `TitleVerified { last: true }` cannot be
+/// persisted takes its posted edit with it, so the failure fed in its place is written over the persisted record, where
+/// the title is not verified; the Retry then rips the title again and the job goes on. Before the fix the failure
+/// carried `verified: true`, and the Retry's RipTitle found no title left and stalled the job in Ripping for good.
+#[test]
+fn a_lost_last_verification_is_not_persisted_with_its_failure_and_retry_rips_again() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::TitleVerified { last: true }));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    let message = "the TitleVerified transition into RipVerified could not be persisted: refused by the test";
+    assert_eq!(failed.message.as_deref(), Some(message));
+    let title = &failed.titles[0];
+    assert!(!title.verified && title.rip_reviews.is_empty(), "{title:?}");
+    assert_eq!(title.attempts, 1);
+    h.allow_persists();
+    c.ok("retry", json!({"job": a}));
+    c.until_state(Some(&a), "Filed");
+    let title = h.record(&a).titles[0].clone();
+    assert!(title.verified, "{title:?}");
+    assert_eq!(title.attempts, 2);
+}
+
+/// The final review of review round 1 (S1, RR1-16): the same for a second failed verification of the last title,
+/// whose posted edit counts it and marks it `verify_failed`: the lost transition takes both with it, so the persisted
+/// count stays 1 (the count follows the persisted record, V12) and the Retry rips the title again; its third
+/// verification fails as the second, and the title goes on with `verify_failed`.
+#[test]
+fn a_lost_second_verify_failure_is_not_counted_and_retry_rips_again() {
+    let h = stand_in(&["movie-direct", "movie-direct-verify-twice"], settings());
+    let second = Event::TitleVerifyFailed { second: true, last: true };
+    h.refuse_persists(move |_, transition| transition.event.as_ref() == Some(&second));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "Failed")["id"].as_str().unwrap().to_string();
+    let failed = h.record(&a);
+    assert_eq!(failed.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Ripping) });
+    let title = &failed.titles[0];
+    assert!(!title.verified && title.rip_reviews.is_empty(), "{title:?}");
+    assert_eq!((title.attempts, title.verify_failures), (2, 1));
+    h.allow_persists();
+    c.ok("retry", json!({"job": a}));
+    h.wait("Ejected", |h| h.transitions(&a).iter().any(|line| line.new.as_str() == "Ejected"));
+    let title = h.record(&a).titles[0].clone();
+    assert_eq!(title.rip_reviews, vec![ReviewReason::VerifyFailed]);
+    assert_eq!((title.attempts, title.verify_failures), (3, 2));
+}
+
+// ---- Review actions (design part 9.4, P25, R-A8) ----
+
+fn held_script() -> Vec<(&'static str, StepScript)> {
+    let mut script = hanging_at("Decide", 0);
+    script.pop();
+    script.push(("Decide", step(Event::DecisionDone { disposition: Disposition::NeedsReview,
+                                                      reasons: vec![ReviewReason::IdentityUnknown], has_path: true })));
+    script
+}
+
+#[test]
+fn approve_delivers_review_approved_when_the_slot_is_free() {
+    let mut script = held_script();
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.extend([("Probe", step(Event::ProbeDone)), ("ExtractSubtitleEvidence", none()),
+                   ("Decide", step(Event::DecisionDone { disposition: Disposition::AutoFile, reasons: vec![], has_path: true })),
+                   ("CheckSpace", step(Event::SpaceOk)), ("Remux", StepScript::Hang)]);
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let held = c.until_state(None, "NeedsReview");
+    let a = held["id"].as_str().unwrap().to_string();
+    let reasons = held["review_reasons"].clone();
+    h.insert("tok1", DISC_B);
+    wait_for_call(&h, "Remux", 1);
+    let b = h.job_ids().into_iter().find(|id| *id != a).unwrap();
+    c.ok("review_action", json!({"job": a, "action": "approve", "overrides": {}}));
+    assert!(matches!(h.record(&a).state, State::NeedsReview { .. }));
+    c.ok("cancel", json!({"job": b}));
+    c.until_state(Some(&a), "Decided");
+    let approved = h.transitions(&a).into_iter().find(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))).unwrap();
+    let event = serde_json::to_value(&approved.event).unwrap();
+    assert_eq!(event["approved_reasons"], reasons);
+}
+
+#[test]
+fn an_approved_job_decides_again_from_its_kept_inputs_and_files() {
+    let h = stand_in(&["movie-direct"], settings());
+    let target = h.library().join(FINAL);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"owner's").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    c.until_state(Some(&id), "NeedsReview"); // path_collision holds it again (blocks_filing)
+    fs::remove_file(&target).unwrap();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    c.until_state(Some(&id), "Filed");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("read back from the job folder"));
+    assert_eq!(fs::read(&target).unwrap().len(), 16);
+}
+
+#[test]
+fn approve_is_refused_outside_the_disposition_gate_naming_the_state() {
+    let h = scripted(main_line());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Filed")["id"].as_str().unwrap().to_string();
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve"})),
+               format!("job {id} is Filed, not held at the disposition gate"));
+}
+
+#[test]
+fn approve_with_overrides_is_refused_naming_phase_3() {
+    let h = scripted(held_script());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": {"season": 2}})),
+               "approve waits for phase 3's review commands (R-A8)");
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "set_identity"})),
+               "set_identity waits for phase 3's review commands (R-A8)");
+}
+
+#[test]
+fn discard_is_refused_naming_phase_3() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.err("discard", json!({"job": "abc-1"})), "discard waits for phase 3's review commands (P2, R-A1)");
+}
+
+#[test]
+fn ui_quit_is_refused_naming_phase_5() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.err("ui_quit", Value::Null), "ui_quit waits for phase 5's user interface (R-A8)");
+}
+
+// ---- Self-test (design parts 3.7, 9.4) ----
+
+fn check<'a>(selftest: &'a Value, name: &str) -> &'a Value {
+    selftest["checks"].as_array().unwrap().iter().find(|c| c["name"] == json!(name)).unwrap()
+}
+
+#[test]
+fn the_engine_runs_the_makemkv_check_at_start_into_the_snapshot() {
+    let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
+    let mut c = Client::open(&h);
+    let snapshot = c.snapshot();
+    let makemkv = check(&snapshot["selftest"], "makemkvcon");
+    assert_eq!(makemkv["ok"], json!(true));
+    assert_eq!(makemkv["version"], json!("2.0.0"));
+    assert_eq!(makemkv["found"], json!("settings"));
+    assert_eq!(makemkv["busy"], json!(false));
+    let names: Vec<&str> = snapshot["selftest"]["checks"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root", "movies_root", "tmdb_token"]);
+}
+
+#[test]
+fn run_selftest_pushes_results_then_delivers_tool_found() {
+    let h = stand_in(&["movie-direct"], settings());
+    let stored: Value = serde_json::from_slice(&fs::read(h.data().join("settings.json")).unwrap()).unwrap();
+    let tool = std::path::PathBuf::from(stored["tool_paths"]["makemkvcon"].as_str().unwrap());
+    let aside = tool.with_extension("aside");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    fs::rename(&tool, &aside).unwrap();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingTool")["id"].as_str().unwrap().to_string();
+    fs::rename(&aside, &tool).unwrap();
+    let result = c.ok("run_selftest", Value::Null);
+    let pushed = c.pushes.iter().find(|e| e.kind == "selftest_result").expect("selftest_result before the reply");
+    assert_eq!(pushed.payload, result);
+    c.until_state(Some(&id), "Fingerprinted");
+}
+
+#[test]
+fn another_discs_listing_with_a_changed_version_returns_a_job_from_awaiting_makemkv_when_the_token_is_free() {
+    let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingMakeMkv")["id"].as_str().unwrap().to_string();
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    let mut b_ejected = false;
+    loop {
+        let e = c.push();
+        if e.kind != "job_update" { continue; }
+        if e.payload["id"] != json!(a) && e.payload["state"]["state"] == json!("Ejected") { b_ejected = true; }
+        if e.payload["id"] == json!(a) && e.payload["state"]["state"] != json!("AwaitingMakeMkv") {
+            assert!(b_ejected, "the job left AwaitingMakeMkv while the other disc held the token");
+            break;
+        }
+    }
+    assert!(h.transitions(&a).iter().any(|t| t.event == Some(Event::MakeMkvChanged)));
+}
+
+/// Review round 1 (V2): a disc moved to the other drive while its job waits is listed, scanned, ripped and ejected in
+/// that drive once the job returns, because the drive listing and the Eject read the record's drive, which now follows
+/// the disc.
+#[test]
+fn a_waiting_jobs_disc_moved_to_the_other_drive_is_scanned_ripped_and_ejected_there() {
+    let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingMakeMkv")["id"].as_str().unwrap().to_string();
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    h.insert("tok1", DISC_A);
+    h.deliver();
+    h.wait("tok1 noted", |h| h.drives_json()["drives"]["tok1"]["handled"] == json!(true));
+    c.ok("run_selftest", Value::Null); // its listing is the third, which prints the new version
+    c.until_state(Some(&a), "Ejected");
+    let log = fs::read_to_string(h.job_dir(&a).join("job.log")).unwrap();
+    assert!(log.contains("drive listing 2: tok1 is index 1"), "{log}");
+    let calls: Value = serde_json::from_slice(&fs::read(h.tools().join("makemkvcon64.calls.json")).unwrap()).unwrap();
+    assert_eq!(calls["5"], json!(1), "info disc:1 ran once: {calls}");
+    assert_eq!(h.ejector().calls(), vec!["tok1".to_string()]);
+    assert_eq!(h.record(&a).drive, "tok1");
+}
+
+#[test]
+fn a_selftest_while_makemkvcon_runs_reports_the_last_check_marked_busy() {
+    let h = stand_in(&["movie-direct", "movie-direct-hang"], settings());
+    let mut c = Client::open(&h);
+    let at_start = check(&c.snapshot()["selftest"], "makemkvcon").clone();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "Ripping")["id"].as_str().unwrap().to_string();
+    let result = c.ok("run_selftest", Value::Null);
+    let busy = check(&result, "makemkvcon");
+    assert_eq!(busy["busy"], json!(true));
+    assert_eq!((busy["ok"].clone(), busy["version"].clone()), (at_start["ok"].clone(), at_start["version"].clone()));
+    c.ok("cancel", json!({"job": id}));
+}
+
+#[test]
+fn each_tool_check_reports_the_version_its_stand_in_prints() {
+    let h = stand_in(&["movie-direct"], settings());
+    let mut c = Client::open(&h);
+    let at_start = c.snapshot();
+    assert_eq!(check(&at_start["selftest"], "mkvmerge")["detail"], json!("not checked since the engine started"));
+    let result = c.ok("run_selftest", Value::Null);
+    for (tool, version) in [("mkvmerge", "88.0"), ("ffprobe", "7.1"), ("ffmpeg", "7.1"), ("java", "21.0.2")] {
+        let found = check(&result, tool);
+        assert_eq!((&found["ok"], &found["version"], &found["found"]), (&json!(true), &json!(version), &json!("settings")), "{tool}");
+        assert!(found["path"].as_str().unwrap().contains(tool), "{tool}");
+        for suffix in ["", ".stderr", ".timing.jsonl", ".exit.json"] {
+            assert!(h.data().join(format!("selftest/{tool}-version.txt{suffix}")).is_file(), "{tool}{suffix}");
+        }
+    }
+}
+
+#[test]
+fn the_selftest_java_check_reports_the_last_scans_java_use() {
+    let h = stand_in(&["movie-direct", "movie-direct-java"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let before = c.ok("run_selftest", Value::Null);
+    assert!(check(&before, "java")["detail"].as_str().unwrap().contains("no scan yet"));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    // Filed: no stand-in of the job runs beside the self-test's version calls (the stand-ins' counter files).
+    c.until_state(None, "Filed");
+    let after = c.ok("run_selftest", Value::Null);
+    assert!(check(&after, "java")["detail"].as_str().unwrap().contains("java in use at the last scan: true"));
+}
+
+/// Ruling R26.c1 (design part 3.7): the MakeMKV check holds the disc-phase token while its listing runs, so a disc
+/// that arrives then waits in the token's queue, and its job's RunScan lists the drives only after the check's
+/// listing ended. mkvmerge stays set because RunScan needs it (spec 10.2; review round 1, V8), so the self-test's one
+/// stand-in beside the job's is `mkvmerge --version`; the other tools are unset.
+#[test]
+fn a_makemkv_check_holds_the_disc_phase_token_until_its_listing_ends() {
+    let unset = json!({"ffprobe": null, "ffmpeg": null, "java": null});
+    let h = stand_in(&["movie-direct"], json!({"keep_tuning_evidence": false, "drive_settle_s": 0,
+                                              "drive_ready_timeout_s": 1, "tool_paths": unset}));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let (entered, in_listing) = channel::<()>();
+    let (release, gate) = channel::<()>();
+    let gate = std::sync::Mutex::new(gate);
+    h.on_spawn(&["info", "disc:9999"], move || {
+        let _ = entered.send(());
+        let _ = gate.lock().unwrap().recv_timeout(WAIT * ci_factor());
+    });
+    c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
+    in_listing.recv_timeout(WAIT * ci_factor()).expect("the self-test's listing starts");
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    h.wait("the arrival to be walked", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_string());
+    h.settle();
+    assert!(h.job_ids().is_empty(), "a job started while the check's listing ran: {:?}", h.job_ids());
+    assert_eq!(h.drives_json()["drives"]["tok0"]["handled"], json!(false));
+    release.send(()).unwrap();
+    let selftest = loop {
+        match read_reply(c.line().expect("a line").trim_end()).unwrap() {
+            Reply::Ok { id: Some(99), result } => break result,
+            Reply::Push(envelope) => c.pushes.push_back(envelope),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!((&check(&selftest, "makemkvcon")["ok"], &check(&selftest, "makemkvcon")["busy"]), (&json!(true), &json!(false)));
+    let id = c.until_state(None, "Scanned")["id"].as_str().unwrap().to_string();
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
+}
+
+/// The running check's CancelToken is raised at stop (design part 5.3): a listing that hangs ends with it.
+#[test]
+fn stop_cancels_a_makemkv_check_whose_listing_hangs() {
+    let h = stand_in(&["movie-direct", "movie-direct-listing-hang"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let out = h.data().join("selftest").join("drive-list.txt");
+    let at_start = fs::read(&out).unwrap();
+    c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
+    h.wait("the self-test's listing to hang", |_| fs::read(&out).is_ok_and(|now| !now.is_empty() && now != at_start));
+    let (stopped, done) = channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        drop(h);
+        let _ = stopped.send(());
+    });
+    assert!(done.recv_timeout(WAIT).is_ok(), "stop waited for the hanging listing");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
+fn a_restart_with_a_changed_makemkv_version_returns_awaiting_makemkv_jobs() {
+    let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
+    let recorded = |h: &Harness| -> Value {
+        serde_json::from_slice(&fs::read(h.data().join("selftest/makemkv-check.json")).unwrap()).unwrap()
+    };
+    h.insert("tok0", DISC_A);
+    h.run_until("AwaitingMakeMkv");
+    let id = h.job_ids().pop().unwrap();
+    assert_eq!(recorded(&h), json!({"version": "2.0.0", "licence": null}));
+    h.restart();
+    h.wait("MakeMkvChanged", |h| h.transitions(&id).iter().any(|t| t.event == Some(Event::MakeMkvChanged)));
+    let events: Vec<Event> = h.transitions(&id).into_iter().filter_map(|t| t.event).collect();
+    let at = events.iter().position(|e| *e == Event::MakeMkvChanged).unwrap();
+    assert!(matches!(events[at - 1], Event::EngineRestart { .. }), "{events:?}");
+    assert_eq!(recorded(&h), json!({"version": "2.0.1", "licence": null}));
+}
+
+#[test]
+fn a_selftest_probes_each_library_root_inside_lazymkv_partial() {
+    let h = stand_in(&["movie-direct"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    for name in ["staging_root", "tuning_root", "movies_root"] { assert_eq!(check(&result, name)["ok"], json!(true), "{name}"); }
+    assert!(h.library().join(".lazymkv-partial").is_dir());
+    let left: Vec<_> = fs::read_dir(h.library()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, vec![std::ffi::OsString::from(".lazymkv-partial")]);
+}
+
+#[test]
+fn the_token_check_runs_over_the_engines_transport() {
+    let h = stand_in(&["movie-direct"], settings());
+    h.http().answer(&lazymkv_clients::authentication_url(), 200, b"{\"success\":true}");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("secret_set", json!({"name": "tmdb_token", "value": "test-token"}));
+    let result = c.ok("run_selftest", Value::Null);
+    assert_eq!(check(&result, "tmdb_token")["ok"], json!(true));
+    assert!(h.http().requests().iter().any(|(url, _)| url == "https://api.themoviedb.org/3/authentication"));
+}
+
+// ---- Shutdown, progress, command and notifications ----
+
+#[test]
+fn shutdown_is_refused_while_a_step_runs_and_force_cancels_and_deletes_partials() {
+    let h = scripted(hanging_at("Remux", 0));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "Remux", 1);
+    let id = h.job_ids().pop().unwrap();
+    let partial = h.library().join(".lazymkv-partial");
+    fs::create_dir_all(&partial).unwrap();
+    fs::write(partial.join(format!("{id}-t00-00800.mkv.partial")), b"x").unwrap();
+    fs::write(partial.join("other-1-t00-00800.mkv.partial"), b"y").unwrap();
+    let staged = h.staging().join(&id).join("rip").join("t00-00800");
+    fs::create_dir_all(&staged).unwrap();
+    fs::write(staged.join("title_t00.mkv"), b"raw").unwrap();
+    assert_eq!(c.err("shutdown", json!({"force": false})),
+               format!("a step is running for {id}; stop --force cancels it (design part 3.8)"));
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    assert!(!partial.join(format!("{id}-t00-00800.mkv.partial")).exists());
+    assert!(partial.join("other-1-t00-00800.mkv.partial").exists());
+    assert_eq!(fs::read(staged.join("title_t00.mkv")).unwrap(), b"raw");
+    let stopped = h.record(&id);
+    assert_eq!(stopped.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert_eq!(stopped.message.as_deref(), Some(CANCELLED));
+}
+
+/// S83, narrowed at the final review (design part 3.8: what stays is for Retry): a forced shutdown during File keeps
+/// the job's partial file, the verified remux its Retry renames.
+#[test]
+fn a_forced_shutdown_during_file_keeps_the_verified_partial() {
+    let h = scripted(hanging_at("File", 0));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "File", 1);
+    let id = h.job_ids().pop().unwrap();
+    let partial = h.library().join(".lazymkv-partial");
+    fs::create_dir_all(&partial).unwrap();
+    let verified = partial.join(format!("{id}-t00-00800.mkv.partial"));
+    fs::write(&verified, b"verified").unwrap();
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    assert_eq!(fs::read(&verified).unwrap(), b"verified");
+    let stopped = h.record(&id);
+    assert_eq!(stopped.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    assert_eq!(stopped.message.as_deref(), Some(CANCELLED));
+}
+
+#[test]
+fn shutdown_without_force_succeeds_when_only_waiting_held_failed_or_filed_jobs_exist() {
+    // DISC_A is filed, DISC_B fails at its scan, DISC_C waits for space, and disc-d is held for review.
+    let mut script = main_line();
+    script.push(("RunScan", step(Event::ScanFailed { failure: unknown() })));
+    script.extend([("RunScan", step(Event::ScanDone)), ("Plan", step(Event::PlanDone { mode: Mode::Direct })),
+                   ("CheckSpace", step(Event::SpaceShort))]);
+    let mut held = hanging_at("Decide", 0);
+    held.pop();
+    held.push(("Decide", step(Event::DecisionDone { disposition: Disposition::NeedsReview,
+                                                    reasons: vec![ReviewReason::IdentityUnknown], has_path: true })));
+    script.extend(held);
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    c.until_state(None, "Filed");
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    c.until_state(None, "Failed");
+    h.insert("tok2", DISC_C);
+    h.deliver();
+    c.until_state(None, "AwaitingSpace");
+    h.insert("tok3", "disc-d");
+    h.deliver();
+    c.until_state(None, "NeedsReview");
+    assert_eq!(c.ok("shutdown", json!({"force": false})), Value::Null);
+    assert_eq!(c.line(), None);
+    let mut states: Vec<String> = h.job_ids().iter().map(|id| h.state_of(id)).collect();
+    states.sort();
+    assert_eq!(states, ["AwaitingSpace", "Failed", "Filed", "NeedsReview"]);
+}
+
+#[test]
+fn a_forced_shutdown_lets_an_in_flight_eject_finish_then_persists_it() {
+    let mut script = hanging_at("Eject", 0);
+    script.pop();
+    script.push(("Eject", StepScript::After(Duration::from_millis(500), StepResult { event: Some(Event::Ejected), message: None })));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "Eject", 1);
+    let id = h.job_ids().pop().unwrap();
+    assert_eq!(c.err("shutdown", json!({"force": false})),
+               format!("a step is running for {id}; stop --force cancels it (design part 3.8)"));
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    let last = h.transitions(&id).pop().unwrap();
+    assert_eq!((last.event, last.new), (Some(Event::Ejected), State::Ejected { after_copy: false }));
+}
+
+/// Disc A pulled mid-rip: its rip is killed and stale, still listed for the 3 s it takes to report (M3), and the job
+/// waits for its disc in Ripping. The 3 s and the 2 s bound on the removal scale by `ci_factor` (R29.c2, R29.c5; the
+/// final review of review round 1, C5), so the removal still comes before the report on a slow runner.
+fn pulled_mid_rip() -> (Harness, Client, String) {
+    let mut script = main_line();
+    let ripped = StepResult { event: Some(Event::TitleRipped), message: None };
+    script[3] = ("RipTitle", StepScript::After(Duration::from_secs(3) * ci_factor(), ripped));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let ripping = Instant::now();
+    let id = h.job_ids().pop().unwrap();
+    h.remove("tok0");
+    h.wait("MediaRemoved", |h| h.transitions(&id).last().unwrap().event == Some(Event::MediaRemoved));
+    let late = Duration::from_secs(2) * ci_factor();
+    assert!(ripping.elapsed() < late, "the removal came late: {:?}", ripping.elapsed());
+    (h, c, id)
+}
+
+/// The job of a pulled disc still waits for its disc: no rip result or failure was fed, and no `failed` was sent.
+fn assert_waits_for_its_disc(h: &Harness, id: &str) {
+    let lines = h.transitions(id);
+    let rip = |event: &Option<Event>| matches!(event, Some(Event::TitleRipFailed { .. } | Event::TitleRipped));
+    assert!(!lines.iter().any(|line| rip(&line.event)), "{lines:?}");
+    let last = lines.iter().rev().find(|line| !matches!(line.event, Some(Event::EngineRestart { .. }))).unwrap();
+    assert_eq!((last.event.clone(), last.new.clone()), (Some(Event::MediaRemoved), State::Ripping));
+    assert_ne!(h.record(id).message.as_deref(), Some(CANCELLED));
+    let failed = |n: &lazymkv_core::ipc::Notification| matches!(n.event, NotifyEvent::Failed { .. });
+    assert!(!h.notifications().iter().any(failed), "{:?}", h.notifications());
+}
+
+/// Review round 1 (V4): a forced shutdown cancels only the steps `cancel` would pick (M3), so a pulled disc's killed
+/// rip, which is stale, is neither cancelled nor fed, and its job keeps waiting for its disc.
+#[test]
+fn a_forced_shutdown_leaves_a_pulled_discs_job_waiting_for_its_disc() {
+    let (h, mut c, id) = pulled_mid_rip();
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    assert_waits_for_its_disc(&h, &id);
+}
+
+/// Review round 1 (V4, RR1-10): a plain shutdown does not count a pulled disc's killed step as a running step (design
+/// part 3.8, "waiting jobs do not count"), so it is accepted; the engine still waits for that step and drops its
+/// result.
+#[test]
+fn a_shutdown_without_force_is_accepted_while_only_a_pulled_discs_killed_step_runs() {
+    let (h, mut c, id) = pulled_mid_rip();
+    assert_eq!(c.ok("shutdown", json!({"force": false})), Value::Null);
+    assert_eq!(c.line(), None);
+    h.restart(); // the old engine has waited for the killed rip and dropped its result
+    assert_waits_for_its_disc(&h, &id);
+}
+
+/// Review round 1 (V4): after a forced shutdown beside a pulled disc's killed step, the disc inserted again resumes its
+/// own job with MediaArrived instead of starting a new job.
+#[test]
+fn a_pulled_disc_reinserted_after_a_forced_shutdown_resumes_its_job() {
+    let (h, mut c, id) = pulled_mid_rip();
+    assert_eq!(c.ok("shutdown", json!({"force": true})), Value::Null);
+    assert_eq!(c.line(), None);
+    h.restart();
+    h.insert("tok0", DISC_A);
+    h.wait("MediaArrived", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::MediaArrived)));
+    assert_eq!(h.job_ids(), vec![id]);
+}
+
+#[test]
+fn progress_pushes_name_the_action_and_the_title() {
+    let h = stand_in(&["movie-direct"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let progress = loop {
+        let e = c.push();
+        if e.kind == "progress" { break e; }
+    };
+    assert_eq!(progress.id, None);
+    let fraction = progress.payload["fraction"].as_f64().unwrap();
+    assert!((0.0..=1.0).contains(&fraction));
+    assert!(["RipTitle", "Remux"].contains(&progress.payload["step"].as_str().unwrap()));
+    assert_eq!(progress.payload["title"], json!("t00-00800"));
+    assert_eq!(progress.payload["job"], json!(h.job_ids().pop().unwrap()));
+}
+
+#[test]
+fn command_is_refused_until_the_run_folder_exists() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.err("command", json!({"words": ["plan", "--job", "abc-1"]})),
+               "command needs the engine's run folder, which arrives in pull request 3 (S35)");
+}
+
+#[test]
+fn notifications_reach_the_sink_in_order() {
+    let mut script = main_line();
+    script[6] = ("Probe", step(Event::ProbeFailed { failure: unknown() }));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    c.until_state(None, "Failed");
+    let events: Vec<&str> = h.notifications().iter().map(|n| n.event.as_str()).collect();
+    assert_eq!(events, ["disc_done", "failed"]);
+}
+
+#[test]
+fn a_media_read_error_failure_message_says_try_the_other_drive() {
+    let mut script = main_line();
+    script[3] = ("RipTitle", step(Event::TitleRipFailed { failure: Failure { class: FailureClass::MediaReadError, output: None } }));
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    c.until_state(None, "Failed");
+    let failed = h.notifications().pop().unwrap();
+    assert_eq!(failed.event, NotifyEvent::Failed { class: FailureClass::MediaReadError });
+    assert!(failed.message.ends_with("; try the other drive"), "{}", failed.message);
+}

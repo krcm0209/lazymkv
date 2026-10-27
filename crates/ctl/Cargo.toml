@@ -1,0 +1,24 @@
+[package]
+name = "lazymkv-ctl"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lazymkv_ctl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lazymkvctl"
+path = "src/main.rs"
+
+[dependencies]
+lazymkv-core = { path = "../core" }
+lazymkv-platform = { path = "../platform" }
+# plan, decide and retune through lazymkv_dev::dispatch (design part 9.5, P23).
+lazymkv-dev = { path = "../dev" }
+serde_json.workspace = true
+
+[dev-dependencies]
+lazymkv-core = { path = "../core", features = ["testsupport"] }
+lazymkv-platform = { path = "../platform", features = ["fakes"] }

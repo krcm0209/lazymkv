@@ -1,0 +1,4 @@
+{"answers":[
+ {"url":"https://thediscdb.com/api/dischash/{fingerprint}","status":404,"body":""},
+ {"url":"https://thediscdb.com/api/discid/{disc_id}","status":404,"body":""},
+ {"url":"{search}","status":401,"body":"{\"success\":false}"}]}

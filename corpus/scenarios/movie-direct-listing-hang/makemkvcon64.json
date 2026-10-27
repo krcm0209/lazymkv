@@ -1,0 +1,3 @@
+{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":1}]}

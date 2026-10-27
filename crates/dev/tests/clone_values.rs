@@ -3,9 +3,12 @@
 //! final review found copied into tests: every quoted CINFO 2 or 32 value (the disc's name and its volume label) and
 //! every TINFO 11 size of `corpus/owner/<slug>/scan.txt`, and every TheDiscDB item title of
 //! `corpus/owner/<slug>/thediscdb-hash.json`. A value the public tree already publishes may stay (the design and port
-//! specs, `docs/phase0`, the pinned fixtures under `corpus/thediscdb`, `corpus/thediscdb-api` and `corpus/scenarios`, and
-//! the READMEs): RP21 allows what the spec or the pinned fixtures publish. The clone is read when the test runs, so the
-//! values stay out of this file too. Skips without the evidence clone (`lazymkv_dev::evidence::skip`).
+//! specs, `docs/phase0`, the pinned fixtures under `corpus/thediscdb`, `corpus/thediscdb-api` and
+//! `corpus/scenarios/disc-a-scan`, and the READMEs): RP21 allows what the spec or the pinned fixtures publish. The
+//! `.rs` and `.json` files under `crates/` are checked, and so is every other scenario under `corpus/scenarios/`, whose
+//! values must be synthetic or come from `corpus/thediscdb-api` and `core::testsupport` (Task 23). The clone is read
+//! when the test runs, so the values stay out of this file too. Skips without the evidence clone
+//! (`lazymkv_dev::evidence::skip`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,8 +23,13 @@ fn repository() -> PathBuf {
 }
 
 /// The public sources a reader has besides the code: the files under these folders of the repository, and these files.
-const PUBLIC_FOLDERS: [&str; 5] =
-    ["docs/phase0", "docs/superpowers/specs", "corpus/thediscdb", "corpus/thediscdb-api", "corpus/scenarios"];
+const PUBLIC_FOLDERS: [&str; 5] = [
+    "docs/phase0",
+    "docs/superpowers/specs",
+    "corpus/thediscdb",
+    "corpus/thediscdb-api",
+    "corpus/scenarios/disc-a-scan",
+];
 const PUBLIC_FILES: [&str; 2] = ["README.md", "corpus/README.md"];
 
 /// Every file under `dir`, recursively, in no particular order.
@@ -118,6 +126,44 @@ fn clone_values(evidence: &Path) -> BTreeMap<String, (String, CloneValue)> {
     values
 }
 
+/// Where the clone's `values` are held among `texts` (path, text, `plain_digits` of the text), one line per holder
+/// naming the file and where the value was read, never the value itself; a value `public` already publishes is skipped.
+fn holders(
+    root: &Path,
+    public: &str,
+    values: &BTreeMap<String, (String, CloneValue)>,
+    texts: &[(PathBuf, String, String)],
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for (whence, value) in values.values() {
+        let (published, held): (bool, Box<dyn Fn(&str, &str) -> bool>) = match value {
+            CloneValue::Quoted(text) => {
+                let quoted = format!("\"{text}\"");
+                (public.contains(text.as_str()), Box::new(move |source: &str, _: &str| source.contains(&quoted)))
+            }
+            CloneValue::Text(text) => {
+                let text = text.clone();
+                (public.contains(text.as_str()), Box::new(move |source: &str, _: &str| source.contains(&text)))
+            }
+            CloneValue::Number(digits) => {
+                let digits = digits.clone();
+                (holds_number(public, &digits), Box::new(move |_: &str, plain: &str| holds_number(plain, &digits)))
+            }
+        };
+        if published {
+            continue;
+        }
+        for (path, source, plain) in texts {
+            if held(source, plain) {
+                let shown = path.strip_prefix(root).unwrap_or(path).display().to_string();
+                // The value itself is not printed (it is the clone's): where it was read and where it was found.
+                found.push(format!("{shown}: holds the value of {whence}"));
+            }
+        }
+    }
+    found
+}
+
 #[test]
 fn no_file_in_crates_holds_a_value_only_the_evidence_clone_holds() {
     let mut ctx = Ctx::for_test(&std::env::current_dir().expect("a current directory"));
@@ -136,7 +182,7 @@ fn no_file_in_crates_holds_a_value_only_the_evidence_clone_holds() {
     let public: String = public_files.iter().filter(|path| path.is_file()).map(|path| plain_digits(&text_of(path))).collect();
     let mut sources = Vec::new();
     files_under(&root.join("crates"), &mut sources);
-    sources.retain(|path| path.extension().is_some_and(|extension| extension == "rs"));
+    sources.retain(|path| path.extension().is_some_and(|extension| extension == "rs" || extension == "json"));
     sources.sort();
     assert!(!sources.is_empty(), "no source under {}", root.join("crates").display());
     let texts: Vec<(PathBuf, String, String)> =
@@ -144,39 +190,39 @@ fn no_file_in_crates_holds_a_value_only_the_evidence_clone_holds() {
 
     let values = clone_values(&evidence);
     assert!(!values.is_empty(), "the clone at {} gave no value to look for", evidence.display());
-    let mut found = Vec::new();
-    for (whence, value) in values.values() {
-        let (published, held): (bool, Box<dyn Fn(&str, &str) -> bool>) = match value {
-            CloneValue::Quoted(text) => {
-                let quoted = format!("\"{text}\"");
-                (public.contains(text.as_str()), Box::new(move |source: &str, _: &str| source.contains(&quoted)))
-            }
-            CloneValue::Text(text) => {
-                let text = text.clone();
-                (public.contains(text.as_str()), Box::new(move |source: &str, _: &str| source.contains(&text)))
-            }
-            CloneValue::Number(digits) => {
-                let digits = digits.clone();
-                (holds_number(&public, &digits), Box::new(move |_: &str, plain: &str| holds_number(plain, &digits)))
-            }
-        };
-        if published {
-            continue;
-        }
-        for (path, source, plain) in &texts {
-            if held(source, plain) {
-                let shown = path.strip_prefix(&root).unwrap_or(path).display().to_string();
-                // The value itself is not printed (it is the clone's): where it was read and where it was found.
-                found.push(format!("{shown}: holds the value of {whence}"));
-            }
-        }
-    }
+    let found = holders(&root, &public, &values, &texts);
     assert!(
         found.is_empty(),
         "ruling RP21: values of the private evidence clone are written in crates/ (read them from the clone when the \
          test runs, or use made-up values of the same shape):\n{}",
         found.join("\n")
     );
+}
+
+#[test]
+fn no_scenario_holds_a_clone_value() {
+    let mut ctx = Ctx::for_test(&std::env::current_dir().expect("a current directory"));
+    if let Ok(value) = std::env::var("LAZYMKV_EVIDENCE") {
+        ctx.env.insert("LAZYMKV_EVIDENCE".to_string(), value);
+    }
+    let evidence = match resolve_evidence(&ctx, None) {
+        Ok(dir) => dir,
+        Err(refused) => return skip(&refused.line),
+    };
+    let root = repository();
+    let mut public_files: Vec<PathBuf> = PUBLIC_FILES.iter().map(|file| root.join(file)).collect();
+    for folder in PUBLIC_FOLDERS {
+        files_under(&root.join(folder), &mut public_files);
+    }
+    let public: String = public_files.iter().filter(|p| p.is_file()).map(|p| plain_digits(&text_of(p))).collect();
+    let mut sources = Vec::new();
+    files_under(&root.join("corpus/scenarios"), &mut sources);
+    sources.retain(|path| !path.starts_with(root.join("corpus/scenarios/disc-a-scan")));
+    sources.sort();
+    assert!(!sources.is_empty(), "no scenario under corpus/scenarios besides disc-a-scan");
+    let texts: Vec<(PathBuf, String, String)> = sources.into_iter().map(|p| (p.clone(), text_of(&p), plain_digits(&text_of(&p)))).collect();
+    let found = holders(&root, &public, &clone_values(&evidence), &texts);
+    assert!(found.is_empty(), "ruling RP21: a scenario holds values of the private evidence clone:\n{}", found.join("\n"));
 }
 
 #[test]

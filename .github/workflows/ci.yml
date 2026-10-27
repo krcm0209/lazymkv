@@ -2,8 +2,10 @@ name: CI
 
 # Every push to main and every pull request builds and tests the workspace on Linux, macOS and Windows with the
 # toolchain rust-toolchain.toml pins. The private evidence repository is not cloned here, so the tests that need it
-# print their "skipped: ..." reason and the rest run (about 560 of them). ffmpeg is installed for the one test that
-# builds its own proxy with lavfi; without it that test skips too.
+# print their "skipped: ..." reason and the rest run; docs/phase2/engine.md has the count. Among them, the stand-in
+# tools of crates/fake-tools run a whole engine job, from a disc's arrival to a filed placeholder file, with no disc,
+# no network and no Windows API (design part 12.6, item 2). ffmpeg is installed for the one test that builds its own
+# proxy with lavfi; without it that test skips too.
 
 on:
   push:

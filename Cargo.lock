@@ -80,6 +80,13 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 name = "fake-tools"
 version = "0.0.0"
 dependencies = [
+ "lazymkv-clients",
+ "lazymkv-core",
+ "lazymkv-ctl",
+ "lazymkv-dev",
+ "lazymkv-engine",
+ "lazymkv-platform",
+ "lazymkv-tools",
  "serde",
  "serde_json",
 ]
@@ -132,6 +139,16 @@ name = "lazymkv-capture"
 version = "0.0.0"
 dependencies = [
  "lazymkv-core",
+ "lazymkv-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lazymkv-clients"
+version = "0.0.0"
+dependencies = [
+ "lazymkv-core",
  "serde",
  "serde_json",
 ]
@@ -150,6 +167,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazymkv-ctl"
+version = "0.0.0"
+dependencies = [
+ "lazymkv-core",
+ "lazymkv-dev",
+ "lazymkv-platform",
+ "serde_json",
+]
+
+[[package]]
 name = "lazymkv-dev"
 version = "0.0.0"
 dependencies = [
@@ -157,6 +184,36 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+]
+
+[[package]]
+name = "lazymkv-engine"
+version = "0.0.0"
+dependencies = [
+ "lazymkv-clients",
+ "lazymkv-core",
+ "lazymkv-dev",
+ "lazymkv-platform",
+ "lazymkv-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lazymkv-platform"
+version = "0.0.0"
+dependencies = [
+ "lazymkv-core",
+]
+
+[[package]]
+name = "lazymkv-tools"
+version = "0.0.0"
+dependencies = [
+ "lazymkv-core",
+ "lazymkv-platform",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

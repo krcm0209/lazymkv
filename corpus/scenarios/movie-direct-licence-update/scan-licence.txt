@@ -1,0 +1,2 @@
+MSG:1005,0,1,"MakeMKV v2.0.0 win(x64-release) started","%1 started","MakeMKV v2.0.0 win(x64-release)"
+MSG:5050,0,0,"Synthetic licence message.","Synthetic licence message."

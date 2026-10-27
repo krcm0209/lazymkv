@@ -1,0 +1,13 @@
+[package]
+name = "lazymkv-platform"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+# The in-memory fakes of design part 4.2 (platform::fakes), for the tests of the crates above this one. Enabled only
+# as a dev-dependency or through lazymkv-engine's testkit feature.
+fakes = []
+
+[dependencies]
+lazymkv-core = { path = "../core" }

@@ -2268,51 +2268,73 @@ fn the_disc_leaving_or_arriving_is_rejected_after_the_disc_phase() {
     }
 }
 
-// Spec 5's job ID (`job_id`) and spec 6.1 step 2's job lookup (`job_lookup`).
+// Spec 5's job ID (`job_id`, lower case under K3) and spec 6.1 step 2's job lookup (`job_lookup`).
 
 /// A made-up fingerprint in the form `fingerprint::content_hash` returns: 32 upper-case hexadecimal digits (spec 5).
 const FP: &str = "0123456789ABCDEF0123456789ABCDEF";
 
-/// An earlier job of FP numbered `n`.
+/// FP in lower case, the form a job ID carries (K3).
+const FP_LOWER: &str = "0123456789abcdef0123456789abcdef";
+
+/// An earlier job of FP numbered `n`, its ID in lower case as `job_id` writes it.
 fn earlier(n: u32, state: State, armed: bool) -> (String, State, bool) {
-    (format!("{FP}-{n}"), state, armed)
+    (format!("{FP_LOWER}-{n}"), state, armed)
+}
+
+#[test]
+fn fp_lower_is_fp_in_lower_case() {
+    assert_eq!(FP_LOWER, FP.to_ascii_lowercase());
 }
 
 #[test]
 fn the_first_job_of_a_fingerprint_is_numbered_1() {
-    assert_eq!(job_id(FP, &[]), format!("{FP}-1"));
+    assert_eq!(job_id(FP, &[]), format!("{FP_LOWER}-1"));
 }
 
 #[test]
 fn the_next_job_is_one_more_than_the_highest_earlier_number_in_any_order() {
-    let ids = [format!("{FP}-1"), format!("{FP}-3"), format!("{FP}-2")];
+    let ids = [format!("{FP_LOWER}-1"), format!("{FP_LOWER}-3"), format!("{FP_LOWER}-2")];
     let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-    assert_eq!(job_id(FP, &ids), format!("{FP}-4"));
+    assert_eq!(job_id(FP, &ids), format!("{FP_LOWER}-4"));
 }
 
 #[test]
 fn the_highest_number_is_compared_as_a_number_not_as_text() {
-    let ids = [format!("{FP}-9"), format!("{FP}-10")];
+    let ids = [format!("{FP_LOWER}-9"), format!("{FP_LOWER}-10")];
     let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-    assert_eq!(job_id(FP, &ids), format!("{FP}-11"));
+    assert_eq!(job_id(FP, &ids), format!("{FP_LOWER}-11"));
 }
 
 #[test]
 fn ids_of_other_fingerprints_are_ignored() {
-    assert_eq!(job_id("ABC", &["DEF-7", "ABCD-9", "XABC-4"]), "ABC-1");
-    assert_eq!(job_id("ABC", &["DEF-7", "ABC-2"]), "ABC-3");
+    assert_eq!(job_id("ABC", &["def-7", "abcd-9", "xabc-4"]), "abc-1");
+    assert_eq!(job_id("ABC", &["def-7", "abc-2"]), "abc-3");
 }
 
 #[test]
 fn malformed_ids_are_ignored() {
-    let malformed = ["ABC", "ABC-", "ABC-x", "ABC-3-2", "ABC3", "ABC-+4", "ABC- 4", "ABC-4 ", "ABC-4294967296"];
-    assert_eq!(job_id("ABC", &malformed), "ABC-1");
-    assert_eq!(job_id("ABC", &["ABC-3-2", "ABC-5"]), "ABC-6");
+    let malformed = ["abc", "abc-", "abc-x", "abc-3-2", "abc3", "abc-+4", "abc- 4", "abc-4 ", "abc-4294967296"];
+    assert_eq!(job_id("ABC", &malformed), "abc-1");
+    assert_eq!(job_id("ABC", &["abc-3-2", "abc-5"]), "abc-6");
 }
 
 #[test]
 fn a_job_number_may_be_as_high_as_u32_max() {
-    assert_eq!(job_id("ABC", &["ABC-4294967295"]), "ABC-4294967296");
+    assert_eq!(job_id("ABC", &["abc-4294967295"]), "abc-4294967296");
+}
+
+#[test]
+fn a_job_id_is_a_valid_slug_and_keeps_the_fingerprints_digits() {
+    let id = job_id("76E63EBB5B66F73B0C37BFAB59B8ABA5", &[]);
+    assert_eq!(id, "76e63ebb5b66f73b0c37bfab59b8aba5-1");
+    assert!(crate::audio::labels::is_slug(&id));
+    assert!(!crate::audio::labels::is_slug("76E63EBB5B66F73B0C37BFAB59B8ABA5-1"), "the upper-case form K3 replaces");
+}
+
+#[test]
+fn an_upper_case_earlier_id_does_not_count() {
+    assert_eq!(job_id("ABC", &["ABC-4"]), "abc-1");
+    assert_eq!(job_id("abc", &["abc-4"]), "abc-5", "a lower-case fingerprint is taken as it is");
 }
 
 #[test]
@@ -2326,7 +2348,7 @@ fn a_job_that_has_not_finished_its_disc_phase_resumes() {
         for armed in [false, true] {
             assert_eq!(
                 job_lookup(&[earlier(1, state.clone(), armed)]),
-                JobLookup::Resume(format!("{FP}-1")),
+                JobLookup::Resume(format!("{FP_LOWER}-1")),
                 "{state:?} armed {armed}"
             );
         }
@@ -2336,7 +2358,7 @@ fn a_job_that_has_not_finished_its_disc_phase_resumes() {
 #[test]
 fn a_job_waiting_to_return_to_its_disc_phase_resumes() {
     for state in waiting_states(State::Copying) {
-        assert_eq!(job_lookup(&[earlier(2, state.clone(), false)]), JobLookup::Resume(format!("{FP}-2")), "{state:?}");
+        assert_eq!(job_lookup(&[earlier(2, state.clone(), false)]), JobLookup::Resume(format!("{FP_LOWER}-2")), "{state:?}");
     }
 }
 
@@ -2344,7 +2366,7 @@ fn a_job_waiting_to_return_to_its_disc_phase_resumes() {
 fn a_job_failed_with_a_media_read_error_resumes() {
     for from in [State::Ripping, State::Copying] {
         let failed = State::Failed { class: FailureClass::MediaReadError, from: boxed(from) };
-        assert_eq!(job_lookup(&[earlier(1, failed, false)]), JobLookup::Resume(format!("{FP}-1")));
+        assert_eq!(job_lookup(&[earlier(1, failed, false)]), JobLookup::Resume(format!("{FP_LOWER}-1")));
     }
 }
 
@@ -2362,7 +2384,7 @@ fn a_job_failed_in_its_disc_phase_with_another_class_starts_a_new_one() {
 #[test]
 fn a_job_failed_in_its_file_phase_is_already_ripped() {
     let failed = State::Failed { class: FailureClass::Unknown, from: boxed(State::Remuxing) };
-    assert_eq!(job_lookup(&[earlier(1, failed.clone(), false)]), JobLookup::AlreadyRipped(format!("{FP}-1")));
+    assert_eq!(job_lookup(&[earlier(1, failed.clone(), false)]), JobLookup::AlreadyRipped(format!("{FP_LOWER}-1")));
     assert_eq!(job_lookup(&[earlier(1, failed, true)]), JobLookup::NewJob);
 }
 
@@ -2374,7 +2396,7 @@ fn a_media_read_error_in_the_file_phase_is_already_ripped_and_rip_again_starts_a
         let failed = State::Failed { class: FailureClass::MediaReadError, from: boxed(from.clone()) };
         assert_eq!(step(&failed, &Event::RipAgain), (failed.clone(), vec![Action::ArmRipAgain]), "{from:?}");
         assert_eq!(job_lookup(&[earlier(1, failed.clone(), true)]), JobLookup::NewJob, "{from:?}");
-        assert_eq!(job_lookup(&[earlier(1, failed, false)]), JobLookup::AlreadyRipped(format!("{FP}-1")), "{from:?}");
+        assert_eq!(job_lookup(&[earlier(1, failed, false)]), JobLookup::AlreadyRipped(format!("{FP_LOWER}-1")), "{from:?}");
     }
 }
 
@@ -2390,7 +2412,7 @@ fn a_job_past_its_disc_phase_is_already_ripped() {
     for state in states {
         assert_eq!(
             job_lookup(&[earlier(3, state.clone(), false)]),
-            JobLookup::AlreadyRipped(format!("{FP}-3")),
+            JobLookup::AlreadyRipped(format!("{FP_LOWER}-3")),
             "{state:?}"
         );
     }
@@ -2406,7 +2428,7 @@ fn a_job_past_its_disc_phase_armed_for_rip_again_starts_a_new_one() {
 #[test]
 fn a_discarded_job_starts_a_new_one() {
     assert_eq!(job_lookup(&[earlier(1, State::Discarded, false)]), JobLookup::NewJob);
-    assert_eq!(job_id(FP, &[format!("{FP}-1").as_str()]), format!("{FP}-2"));
+    assert_eq!(job_id(FP, &[format!("{FP_LOWER}-1").as_str()]), format!("{FP_LOWER}-2"));
 }
 
 #[test]
@@ -2416,16 +2438,16 @@ fn the_job_with_the_highest_number_decides_wherever_it_is_listed() {
         earlier(9, State::Filed, false),
         earlier(2, State::Discarded, false),
     ];
-    assert_eq!(job_lookup(&jobs), JobLookup::Resume(format!("{FP}-10")));
+    assert_eq!(job_lookup(&jobs), JobLookup::Resume(format!("{FP_LOWER}-10")));
     let jobs = [earlier(1, State::Ripping, false), earlier(2, State::Filed, false)];
-    assert_eq!(job_lookup(&jobs), JobLookup::AlreadyRipped(format!("{FP}-2")));
+    assert_eq!(job_lookup(&jobs), JobLookup::AlreadyRipped(format!("{FP_LOWER}-2")));
     let jobs = [earlier(2, State::Discarded, false), earlier(1, State::Filed, false)];
     assert_eq!(job_lookup(&jobs), JobLookup::NewJob);
 }
 
 #[test]
 fn a_job_lookup_skips_an_id_that_is_not_numbered() {
-    let jobs = [(format!("{FP}-x"), State::Ripping, false), earlier(1, State::Filed, false)];
-    assert_eq!(job_lookup(&jobs), JobLookup::AlreadyRipped(format!("{FP}-1")));
-    assert_eq!(job_lookup(&[(FP.to_string(), State::Ripping, false)]), JobLookup::NewJob);
+    let jobs = [(format!("{FP_LOWER}-x"), State::Ripping, false), earlier(1, State::Filed, false)];
+    assert_eq!(job_lookup(&jobs), JobLookup::AlreadyRipped(format!("{FP_LOWER}-1")));
+    assert_eq!(job_lookup(&[(FP_LOWER.to_string(), State::Ripping, false)]), JobLookup::NewJob);
 }

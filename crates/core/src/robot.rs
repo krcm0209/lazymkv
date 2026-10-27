@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 use crate::recording::{py_int, py_repr_str, strip_cr_lines, text_mode, Ordered};
 
+pub mod lines;
+
 /// A title's or stream's attributes: attribute number -> value (the last line wins). Py: the inner dicts of Scan.
 pub type Attrs = BTreeMap<u32, String>;
 
@@ -120,7 +122,7 @@ fn number(fields: &[String], i: usize) -> Result<u32, String> {
 }
 
 /// `scan.messages.append((int(f[0]), f[3], f[5:]))`: the tuple is built left to right.
-fn message(scan: &mut Scan, fields: &[String]) -> Result<(), String> {
+pub(crate) fn message(scan: &mut Scan, fields: &[String]) -> Result<(), String> {
     let code = number(fields, 0)?;
     let text = field(fields, 3)?.to_string();
     let params = fields.get(5..).unwrap_or_default().to_vec();

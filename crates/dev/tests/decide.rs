@@ -33,9 +33,10 @@ use lazymkv_core::tracks::audio::AudioDrop;
 use lazymkv_core::tracks::subtitle::SubtitleDrop;
 use lazymkv_core::tracks::SubtitleRole;
 use lazymkv_dev::cmd::decide::{
-    audio_reviews, decide_doc, decision_doc, subtitle_reviews, AudioEntry, DecideDoc, DecisionEntry, PlanEntry,
-    SubtitleEntry,
+    audio_reviews, decide_doc, read_decide_inputs, subtitle_reviews, AudioEntry, DecideDoc, DecideInputs, DecisionEntry,
+    PlanEntry, SubtitleEntry,
 };
+use lazymkv_dev::cmd::plan::PlanOptions;
 use lazymkv_dev::evidence::{ocr_text_dir, resolve_evidence, resolve_recording, skip, Ctx, Recording};
 use lazymkv_dev::pyjson::{structural_diff, Tolerance};
 use serde_json::Value;
@@ -176,13 +177,14 @@ fn check_label(
         }
         (None, root) => root.map(Path::to_path_buf),
     };
-    let doc = match decide_doc(ctx, rec, label, text.as_deref(), None, None) {
-        Ok(doc) => doc,
+    let inputs = match read_decide_inputs(ctx, rec, label, text.as_deref(), None, &PlanOptions::default()) {
+        Ok(inputs) => inputs,
         Err(refused) => {
             failures.push(format!("{}/{}: decide exited {}: {}", rec.slug, label, refused.code, refused.line));
             return;
         }
     };
+    let doc = decide_doc(&inputs);
     let mut reviews: BTreeSet<&'static str> = BTreeSet::new();
     let mut comparable = true;
 
@@ -295,7 +297,7 @@ fn check_label(
 
     check_plan(&rec.slug, label, &doc, &expected.plan, failures);
     match expected.labels.iter().find(|(name, _)| *name == label) {
-        Some((_, expectation)) => check_decision(ctx, rec, label, &doc, expectation, failures),
+        Some((_, expectation)) => check_decision(&inputs, rec, label, &doc, expectation, failures),
         None => skip(&format!(
             "not covered: {}/{}: no plan and decision expectation in crates/dev/tests/decide.rs",
             rec.slug, label
@@ -680,11 +682,11 @@ fn check_plan(slug: &str, label: &str, doc: &DecideDoc, expected: &PlanExpectati
     same(failures, &format!("{at}: reviews"), plan.reviews.clone(), expected.reviews.clone());
 }
 
-/// The decision section of one label's document against its expectation, then a second decision from the same plan
-/// with the owner's library roots for the final path and the disposition (decide's own document plans without a
-/// settings file, so its decision has no path).
+/// The decision section of one label's document against its expectation, then a second rendering of the label's inputs
+/// with the owner's library roots in the plan's settings for the final path and the disposition (decide's own document
+/// plans without a settings file, so its decision has no path).
 fn check_decision(
-    ctx: &Ctx,
+    inputs: &DecideInputs,
     rec: &Recording,
     label: &str,
     doc: &DecideDoc,
@@ -775,21 +777,23 @@ fn check_decision(
         same(failures, &format!("{at}: track confidence"), decision.confidences.track, want.confidences.2);
         same(failures, &format!("{at}: reviews"), judged(&decision.reviews), judged(&want.reviews));
     }
-    let PlanEntry::Results(plan) = &doc.plan else {
+    let PlanEntry::Results(_) = &doc.plan else {
         return;
     };
-    let mut rooted = plan.clone();
-    rooted.settings.movies_root = Some(MOVIES_ROOT.to_string());
-    rooted.settings.tv_root = Some(SHOWS_ROOT.to_string());
-    match decision_doc(ctx, rec, label, &rooted, doc) {
-        Ok(found) => {
+    let mut rooted = inputs.clone();
+    if let PlanEntry::Results(plan) = &mut rooted.plan {
+        plan.settings.movies_root = Some(MOVIES_ROOT.to_string());
+        plan.settings.tv_root = Some(SHOWS_ROOT.to_string());
+    }
+    match decide_doc(&rooted).decision {
+        DecisionEntry::Results(found) => {
             let path = found.decision.path.as_ref().map(|named| named.path.clone());
             same(failures, &format!("{at}: final path"), path, want.path.clone());
             if measured && !text_used {
                 same(failures, &format!("{at}: disposition"), found.decision.disposition, want.disposition);
             }
         }
-        Err(why) => failures.push(format!("{at}: with library roots: {why}")),
+        DecisionEntry::Skipped { skipped } => failures.push(format!("{at}: with library roots: {skipped}")),
     }
 }
 

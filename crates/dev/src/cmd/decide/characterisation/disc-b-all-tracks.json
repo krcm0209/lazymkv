@@ -1,0 +1,585 @@
+{
+ "slug": "disc-b",
+ "label": "all-tracks",
+ "reconcile": {
+  "title": 0,
+  "selection": "all",
+  "rip_log": "recs/disc-b/all-tracks/rip.txt",
+  "want": [
+   {
+    "stream": 0,
+    "type": "video",
+    "lang": "und",
+    "lang_raw": "und",
+    "codec": "Mpeg4",
+    "out": "",
+    "ch": "",
+    "flags": 0
+   },
+   {
+    "stream": 1,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS-HD MA",
+    "out": "",
+    "ch": "6",
+    "flags": 1024
+   },
+   {
+    "stream": 2,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS",
+    "out": "",
+    "ch": "6",
+    "flags": 2304
+   },
+   {
+    "stream": 3,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS-HD MA",
+    "out": "",
+    "ch": "6",
+    "flags": 1024
+   },
+   {
+    "stream": 4,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS",
+    "out": "",
+    "ch": "6",
+    "flags": 2304
+   },
+   {
+    "stream": 5,
+    "type": "subtitles",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "PGS",
+    "out": "",
+    "ch": "",
+    "flags": 0
+   }
+  ],
+  "dropped": [
+   {
+    "stream": 6,
+    "type": "subtitles",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "PGS",
+    "out": "",
+    "ch": "",
+    "flags": 6144
+   }
+  ],
+  "unknown_removed": [],
+  "got": [
+   {
+    "id": 0,
+    "type": "video",
+    "lang": "und",
+    "lang_raw": "und",
+    "codec": "AVC/H.264/MPEG-4p10",
+    "ch": "",
+    "tags": []
+   },
+   {
+    "id": 1,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS-HD Master Audio",
+    "ch": 6,
+    "tags": []
+   },
+   {
+    "id": 2,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS",
+    "ch": 6,
+    "tags": []
+   },
+   {
+    "id": 3,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS-HD Master Audio",
+    "ch": 6,
+    "tags": []
+   },
+   {
+    "id": 4,
+    "type": "audio",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "DTS",
+    "ch": 6,
+    "tags": []
+   },
+   {
+    "id": 5,
+    "type": "subtitles",
+    "lang": "eng",
+    "lang_raw": "eng",
+    "codec": "HDMV PGS",
+    "ch": "",
+    "tags": []
+   }
+  ],
+  "verdicts": {
+   "count": true,
+   "order": true,
+   "video": true,
+   "chapters": true,
+   "duration": true
+  },
+  "numbers": {
+   "scan_chapters": 5,
+   "file_chapters": 5,
+   "scan_seconds": 3000,
+   "file_seconds": 3000.5
+  },
+  "video_tracks": 1,
+  "statistics_tags": false,
+  "exit_code": 0
+ },
+ "audio": [
+  {
+   "folder": "audio-levels-20ms-1-2-3-4",
+   "skipped": "recs/disc-b/all-tracks/audio-levels-20ms-1-2-3-4: main-mix.txt is missing; this folder cannot be analysed: measure the title again with the new audio-levels.ps1, which writes audio-levels-20ms-<main>-<candidates>"
+  }
+ ],
+ "subtitles": {
+  "skipped": "no OCR text (give --text DIR or LAZYMKV_OCR_TEXT)"
+ },
+ "reviews": [],
+ "plan": {
+  "slug": "disc-b",
+  "inputs": {
+   "scan": "recs/disc-b/scan.txt",
+   "fingerprint": null,
+   "disc_id": null,
+   "bdmt": null,
+   "meta": false,
+   "discdb_hash": {
+    "path": null,
+    "answer": "n/a"
+   },
+   "discdb_discid": {
+    "path": null,
+    "answer": "n/a"
+   },
+   "tmdb": {
+    "path": null,
+    "answer": "n/a"
+   },
+   "tmdb_search": null,
+   "tmdb_record": null,
+   "lookup_status": {},
+   "remembered": null
+  },
+  "settings": {
+   "staging_root": null,
+   "movies_root": null,
+   "tv_root": null,
+   "minlength_s": 120,
+   "cache_mb": 1024,
+   "auto_threshold": 0.85,
+   "feature_min_minutes": 45,
+   "tmdb_only_autofile": true,
+   "prefer_most_channels": true,
+   "original_language_first": true,
+   "subs_tolerance_ms": 300,
+   "subs_same_min": 0.7,
+   "subs_diff_max": 0.3,
+   "sub_clear_max_bytes": 64,
+   "edition_style": "jellyfin",
+   "jellyfin10_compat": false,
+   "retention_days": 7,
+   "keep_tuning_evidence": true,
+   "tuning_root": null,
+   "file_phase_concurrency": 1,
+   "drive_settle_s": 10,
+   "drive_ready_timeout_s": 120,
+   "scan_timeout_min": 30,
+   "stall_timeout_s": 300,
+   "read_error_rate": 20,
+   "exit_wait_min": 30,
+   "makemkv_min_version": "2.0.0",
+   "tool_paths": {
+    "makemkvcon": null,
+    "mkvmerge": null,
+    "ffprobe": null,
+    "ffmpeg": null,
+    "java": null
+   }
+  },
+  "settings_problems": [
+   {
+    "key": "tuning_root",
+    "problem": "tuning_root is not set: it is required while keep_tuning_evidence is on (spec 7, 14)"
+   }
+  ],
+  "plan": {
+   "identity": {
+    "step": "nothing",
+    "confidence": 0.0,
+    "tmdb": null,
+    "title": null,
+    "year": null,
+    "original_language": null,
+    "review": "identity_unknown",
+    "plausible": [],
+    "runtime_check": null,
+    "lookup_pending": false,
+    "evidence": [
+     "name 'MADE_UP_FILM' cleaned to 'MADE UP FILM'",
+     "no TMDb search answer is in hand"
+    ]
+   },
+   "kind": "movie",
+   "kind_source": "default",
+   "titles": [
+    {
+     "key": "t00-00800",
+     "title": 0,
+     "role": {
+      "role": "feature",
+      "edition": null,
+      "theatrical": true
+     },
+     "seconds": 3000,
+     "size": 6000000000,
+     "source_file": "00800.mpls",
+     "suggested": false,
+     "remembered": false
+    }
+   ],
+   "mode": "direct",
+   "identity_confidence": 0.0,
+   "title_confidence": 0.85,
+   "reviews": [
+    "identity_unknown"
+   ],
+   "notes": [
+    {
+     "note": "label_rule_unavailable",
+     "stream": null,
+     "detail": "MakeMKV did not report a Java runtime in use (no MSG:3344), so label rule 8.3.2 does not apply"
+    }
+   ],
+   "wanted": {
+    "original_two_letter": null,
+    "original": [],
+    "english": [
+     "eng"
+    ],
+    "original_is_english": true
+   },
+   "session": null,
+   "evidence": {
+    "name": {
+     "raw": "MADE_UP_FILM",
+     "source": "volume_label",
+     "season": null,
+     "disc": null,
+     "cleaned": "MADE UP FILM",
+     "tagged": "MADE UP FILM",
+     "generic": false,
+     "season_marker": false
+    },
+    "candidates": [
+     0,
+     1
+    ],
+    "groups": [
+     {
+      "key": "1",
+      "segment_map": "1",
+      "segments": [
+       1
+      ],
+      "titles": [
+       0
+      ],
+      "seconds": 3000,
+      "truncated": false
+     },
+     {
+      "key": "2",
+      "segment_map": "2",
+      "segments": [
+       2
+      ],
+      "titles": [
+       1
+      ],
+      "seconds": 180,
+      "truncated": false
+     }
+    ],
+    "rivals": [
+     "1"
+    ],
+    "title_rule": "structure",
+    "labels": [],
+    "discdb_matches": [],
+    "runtime": {
+     "feature_seconds": [
+      3000
+     ],
+     "longest_rival_seconds": 3000,
+     "episode_group_seconds": [
+      3000
+     ]
+    },
+    "sentences": [
+     "TheDiscDB gave no record: the titles are planned from the scan",
+     "2 of 2 titles pass the candidate filter, in 2 groups",
+     "the disc is a movie: no TV evidence",
+     "groups at least 45 minutes long: 1 of 2",
+     "rival group 1: title 0 (its only title)",
+     "title confidence 0.85: Direct mode (6.2)"
+    ]
+   }
+  }
+ },
+ "decision": {
+  "title_key": "t00-00800",
+  "verify": {
+   "duration_ok": true,
+   "expected_seconds": 3000.0,
+   "file_seconds": 3000.5,
+   "chapters_ok": true,
+   "scan_chapters": 5,
+   "file_chapters": 5,
+   "tracks_ok": true,
+   "pairs": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     2
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     4
+    ],
+    [
+     5,
+     5
+    ]
+   ],
+   "extra_tracks": [],
+   "unknown_removed": [],
+   "mismatches": [],
+   "unchecked": [],
+   "read_errors": [],
+   "ok": true
+  },
+  "facts": {
+   "md5_streams": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "profile_streams": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "event_streams": [
+    5
+   ],
+   "verdict_streams": [],
+   "verdict_reference": null,
+   "text_streams": [],
+   "removed": [
+    6
+   ]
+  },
+  "decision": {
+   "title_key": "t00-00800",
+   "audio": {
+    "kept": [
+     {
+      "stream": 1,
+      "language": "eng",
+      "group": "english",
+      "codec": {
+       "family": "dts-hd-ma",
+       "display": "DTS-HD MA",
+       "object": null,
+       "lossless": true
+      },
+      "file_codec": {
+       "family": "dts-hd-ma",
+       "display": "DTS-HD MA",
+       "object": null,
+       "lossless": true
+      },
+      "channels": 6,
+      "tier": "lossless",
+      "object": null,
+      "sample_size": 24,
+      "sample_rate": 48000,
+      "bitrate_kbps": null,
+      "first_of_language": true,
+      "name": "DTS-HD MA 5.1",
+      "default": true,
+      "original": false
+     }
+    ],
+    "dropped": [
+     [
+      2,
+      {
+       "why": "derived"
+      }
+     ],
+     [
+      3,
+      {
+       "why": "duplicate",
+       "of": 1
+      }
+     ],
+     [
+      4,
+      {
+       "why": "derived"
+      }
+     ]
+    ],
+    "reference": 1,
+    "verdict_reference": null,
+    "notes": [],
+    "reviews": [],
+    "confidence": 0.95,
+    "description_alignment": null
+   },
+   "subtitles": {
+    "kept": [
+     {
+      "stream": 5,
+      "role": "regular",
+      "name": "English",
+      "forced": false,
+      "hearing_impaired": false,
+      "default": false,
+      "events": 40,
+      "closed_captions": false,
+      "parent": null,
+      "decided_by": "count"
+     }
+    ],
+    "dropped": [
+     [
+      6,
+      {
+       "why": "derived_forced_only_empty"
+      }
+     ]
+    ],
+    "set_aside": [
+     [
+      6,
+      "derived forced-only stream of stream 5 (flags 4096 and 2048; 8.7 \"Set aside first\")"
+     ]
+    ],
+    "full": [
+     5
+    ],
+    "groups": [
+     [
+      5
+     ]
+    ],
+    "dialogue_group": 0,
+    "dialogue_pick": "one_full",
+    "pairs": [],
+    "case": "one_full",
+    "confidence": 0.9,
+    "notes": [],
+    "reviews": []
+   },
+   "layout": {
+    "tracks": [
+     {
+      "stream": 0,
+      "kind": "video",
+      "language": null,
+      "name": null,
+      "default": true,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     },
+     {
+      "stream": 1,
+      "kind": "audio",
+      "language": "eng",
+      "name": "DTS-HD MA 5.1",
+      "default": true,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     },
+     {
+      "stream": 5,
+      "kind": "subtitles",
+      "language": "eng",
+      "name": "English",
+      "default": false,
+      "forced": false,
+      "hearing_impaired": false,
+      "original": false
+     }
+    ],
+    "chapters_kept": true
+   },
+   "resolution": "1080p",
+   "edition": null,
+   "path": null,
+   "confidences": {
+    "identity": 0.0,
+    "title": 0.85,
+    "track": 0.9
+   },
+   "reviews": [
+    "identity_unknown"
+   ],
+   "notes": [
+    {
+     "note": "label_rule_unavailable",
+     "stream": null,
+     "detail": "MakeMKV did not report a Java runtime in use (no MSG:3344), so label rule 8.3.2 does not apply"
+    }
+   ],
+   "read_errors": [],
+   "disposition": "needs_review"
+  }
+ }
+}

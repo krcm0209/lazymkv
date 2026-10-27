@@ -1,4 +1,3 @@
-mod disc;
 mod eject;
 mod record;
 
@@ -24,10 +23,15 @@ fn run(args: &[String]) -> Result<i32, String> {
     let io_error = |error: std::io::Error| error.to_string();
     match args.first().map(String::as_str) {
         Some("disc") => {
-            let meta = disc::snapshot(
+            let captured_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            let meta = lazymkv_tools::snapshot(
                 Path::new(flag(args, "--root")?),
                 flag(args, "--label")?,
                 Path::new(flag(args, "--out")?),
+                captured_unix,
             )
             .map_err(io_error)?;
             println!("{}", serde_json::to_string_pretty(&meta).map_err(|error| error.to_string())?);
