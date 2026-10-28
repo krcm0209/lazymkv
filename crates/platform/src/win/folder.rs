@@ -1,6 +1,6 @@
-//! The engine's data folder (design part 3.5, MISS-ARCH-18; Rulings W6, T3-3-a to T3-3-c): created owned by
-//! Administrators with the protected access list from its first moment, or, when it exists, refused if it is a link,
-//! a junction, a file or a folder of another owner, and otherwise given the protected access list again.
+//! The engine's data folder (design part 3.5, MISS-ARCH-18; Rulings W6, T3-3-a to T3-3-c): created, when absent,
+//! owned by Administrators with the protected access list from its first moment; then, created or found, refused if it
+//! is a link, a junction, a file or a folder of another owner, and otherwise given the protected access list.
 
 use std::fs;
 use std::io;
@@ -28,15 +28,17 @@ pub fn protect_data_folder(path: &Path, reader_sid: &str) -> Result<(), String> 
     let unreadable = |error: io::Error| format!("{} could not be read: {error}", path.display());
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => match create(path, reader_sid) {
-            // Ruling T3-3-a: the folder was made with its owner and its protected list, and nothing is below it yet.
-            Ok(()) => return Ok(()),
-            // Another process made it meanwhile: it is read again and goes on as an existing folder.
-            Err(error) if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) => {
-                fs::symlink_metadata(path).map_err(unreadable)?
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Ruling T3-3-a. The path is read again whether it was made here or, error 183, by another process
+            // meanwhile, and goes on as an existing folder: a volume that keeps no access lists ignores the creation's
+            // descriptor without an error, so only the owner check and the list set below confirm the protection.
+            if let Err(error) = create(path, reader_sid) {
+                if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
+                    return Err(format!("{} could not be created: {error}", path.display()));
+                }
             }
-            Err(error) => return Err(format!("{} could not be created: {error}", path.display())),
-        },
+            fs::symlink_metadata(path).map_err(unreadable)?
+        }
         Err(error) => return Err(unreadable(error)),
     };
     // Ruling T3-3-b: SetNamedSecurityInfoW follows a link, so a link, a junction or a file is refused before any
@@ -66,8 +68,8 @@ pub fn program_data() -> Option<PathBuf> {
     folder.is_absolute().then_some(folder)
 }
 
-/// Creates the last component of `path`, owned by Administrators and with the protected list from its first moment
-/// (Ruling T3-3-a); a missing parent is not created (Ruling W15).
+/// Creates the last component of `path` with a descriptor that makes it owned by Administrators and protected from its
+/// first moment on a volume that keeps access lists (Ruling T3-3-a); a missing parent is not created (Ruling W15).
 fn create(path: &Path, reader_sid: &str) -> io::Result<()> {
     let descriptor = Descriptor::from_sddl(&format!("O:BA{}", folder_sddl(reader_sid)))?;
     let attributes = descriptor.attributes();
