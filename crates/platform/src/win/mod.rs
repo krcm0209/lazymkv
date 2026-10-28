@@ -7,9 +7,11 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
+mod folder;
 mod mutex;
 mod token;
 
+pub use folder::{program_data, protect_data_folder};
 pub use mutex::{EngineMutex, MutexRefusal};
 pub use token::own_token;
 pub(crate) use token::{sid_string, token_facts, token_of_process, Descriptor};
