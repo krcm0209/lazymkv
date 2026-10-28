@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -354,7 +355,12 @@ fn stream_end(incoming: Receiver<Vec<u8>>, outgoing: Sender<Vec<u8>>) -> IpcStre
 /// each connection a `MemoryConnector` makes. Def: T8. Use: T22 to T29.
 pub struct MemoryIpc {
     incoming: Mutex<Receiver<IpcStream>>,
+    /// Set by `close` (Ruling W10).
+    closed: AtomicBool,
 }
+
+/// How often a waiting `MemoryIpc::accept` looks at `closed`.
+const MEMORY_ACCEPT_POLL: Duration = Duration::from_millis(10);
 
 /// The client's end of an in-memory pipe, or a connector that always fails (spec 4.3, design part 4.2, Ruling T8-e).
 /// Clones connect to the same `MemoryIpc`. Def: T8. Use: T22 to T29.
@@ -371,16 +377,34 @@ impl MemoryIpc {
     pub fn new() -> (MemoryIpc, MemoryConnector) {
         let (to_server, incoming) = channel();
         let connector = MemoryConnector { to_server: Some(to_server), error: ConnectError::NotRunning };
-        (MemoryIpc { incoming: Mutex::new(incoming) }, connector)
+        (MemoryIpc { incoming: Mutex::new(incoming), closed: AtomicBool::new(false) }, connector)
     }
 }
 
 impl IpcTransport for MemoryIpc {
-    /// Waits for a client. Fails with BrokenPipe once every connector is dropped (Ruling T8-e).
+    /// Waits for a client. Fails with BrokenPipe after `close`, which wakes a waiting accept within
+    /// `MEMORY_ACCEPT_POLL`, and once every connector is dropped, which leaves no way in (Ruling T8-e; ctl's scripted
+    /// peer relies on it, `crates/ctl/src/engine_cmds.rs:428-432`).
     fn accept(&self) -> io::Result<IpcStream> {
-        lock(&self.incoming)
-            .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "every connector to the pipe is gone"))
+        let incoming = lock(&self.incoming);
+        loop {
+            // Read before each wait, so a stream queued after `close` is never handed out.
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the transport is closed"));
+            }
+            match incoming.recv_timeout(MEMORY_ACCEPT_POLL) {
+                Ok(stream) => return Ok(stream),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "every connector to the pipe is gone"));
+                }
+            }
+        }
+    }
+
+    /// Sets `closed` (Ruling W10).
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -630,6 +654,22 @@ mod tests {
         assert_eq!(server.writer.write_all(b"late\n").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         drop(connector);
         assert_eq!(ipc.accept().err().map(|e| e.kind()), Some(io::ErrorKind::BrokenPipe));
+    }
+
+    #[test]
+    fn a_closed_memory_ipc_wakes_a_waiting_accept_with_broken_pipe() {
+        let (ipc, _connector) = MemoryIpc::new();
+        let ipc = Arc::new(ipc);
+        let waiting = Arc::clone(&ipc);
+        let (done, result) = channel();
+        std::thread::spawn(move || {
+            let _ = done.send(waiting.accept().err().map(|error| error.kind()));
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(result.try_recv().is_err(), "accept returned while a connector lived and nothing closed the fake");
+        ipc.close();
+        assert_eq!(result.recv_timeout(Duration::from_secs(5)).unwrap(), Some(io::ErrorKind::BrokenPipe));
+        assert_eq!(ipc.accept().err().map(|error| error.kind()), Some(io::ErrorKind::BrokenPipe));
     }
 
     #[test]

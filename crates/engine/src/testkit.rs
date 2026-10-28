@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -35,15 +35,13 @@ use lazymkv_platform::fakes::{
     CountingKeepAwake, DriveScript, FakeHost, FakeShares, MemoryConnector, MemoryIpc, MemorySecrets, RecordingEjector,
     ScriptedDrives,
 };
-use lazymkv_platform::{
-    native_guard, DriveEvent, DriveWatcher, GuardedChild, IpcConnector, Platform, ProcessGuard, Spawn,
-};
+use lazymkv_platform::{native_guard, DriveEvent, DriveWatcher, GuardedChild, Platform, ProcessGuard, Spawn};
 use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
 
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
-use crate::{EngineConfig, JobContext, NotifySink, Services, StepResult, StepRunner, Timers};
+use crate::{EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers};
 
 /// How often the harness looks again while it waits.
 const POLL: Duration = Duration::from_millis(20);
@@ -133,6 +131,21 @@ impl MemorySink {
 impl NotifySink for MemorySink {
     fn deliver(&mut self, notification: &Notification) {
         lock(&self.list).push(notification.clone());
+    }
+}
+
+/// The console writer every engine of a harness gets (`EngineConfig.console`, design part 3.5): it keeps what it is
+/// given in the harness's buffer.
+struct ConsoleBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl Write for ConsoleBuffer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        lock(&self.0).extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -337,10 +350,12 @@ pub struct Harness {
     awake: Arc<CountingKeepAwake>,
     shares: Arc<FakeShares>,
     secrets: Arc<MemorySecrets>,
-    ipc: Arc<MemoryIpc>,
-    /// The client end of `ipc`, kept so the engine's end never sees every connector gone; `client` hands out clones,
-    /// and the engine's stop connects through one to wake its serve thread (Task 26).
-    connector: MemoryConnector,
+    /// The running engine's in-memory pipe and its client end, kept so the engine's end never sees every connector
+    /// gone; `client` hands out clones (Task 26). `start` makes a fresh pair, because the engine's stop closes its
+    /// transport (Ruling W10).
+    ipc: Mutex<(Arc<MemoryIpc>, MemoryConnector)>,
+    /// Everything every engine of this harness wrote to its console writer (`EngineConfig.console`).
+    console: Arc<Mutex<Vec<u8>>>,
     host: Arc<FakeHost>,
     http: Arc<RecordedTransport>,
     timers: Arc<ManualTimers>,
@@ -431,8 +446,12 @@ impl Harness {
         harness
     }
 
-    /// Starts an engine with `start_until` and the stop hook over the harness's data folder and fakes.
+    /// Starts an engine with `start_until` and the stop hook over the harness's data folder and fakes, on a fresh
+    /// `MemoryIpc`, so a restarted engine never meets the transport its predecessor's stop closed.
     fn start(&self) {
+        let (ipc, connector) = MemoryIpc::new();
+        let ipc = Arc::new(ipc);
+        *lock(&self.ipc) = (Arc::clone(&ipc), connector);
         let platform = Platform {
             drives: Box::new(SharedDrives { drives: Arc::clone(&self.drives), script: self.script.clone() }),
             ejector: Arc::clone(&self.ejector) as _,
@@ -440,7 +459,7 @@ impl Harness {
             awake: Arc::clone(&self.awake) as _,
             shares: Arc::clone(&self.shares) as _,
             secrets: Arc::clone(&self.secrets) as _,
-            ipc: Arc::clone(&self.ipc) as _,
+            ipc: ipc as _,
             host: Arc::clone(&self.host) as _,
         };
         let services = Services {
@@ -460,6 +479,8 @@ impl Harness {
                 after_kill: Duration::from_millis(50),
             }),
             path_var: Some(OsString::new()),
+            ctl: None,
+            console: Some(Box::new(ConsoleBuffer(Arc::clone(&self.console)))),
         };
         let hook = Arc::clone(&self.hook);
         let stop_after: StopAfter = Arc::new(move |transition: &Transition| {
@@ -483,12 +504,6 @@ impl Harness {
         });
         let hooks = TestHooks { stop_after: Some(stop_after), persist_faults: Some(persist_faults) };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
-        // MemoryIpc::accept holds its lock while it waits, so the engine's stop wakes its serve thread with a
-        // connection of its own before it joins it, and the next engine's accept is not queued behind the old one.
-        let connector = self.connector.clone();
-        engine.set_ipc_waker(Box::new(move || {
-            let _ = connector.connect();
-        }));
         *lock(&self.engine) = Some(engine);
     }
 
@@ -653,9 +668,9 @@ impl Harness {
 
     /// Stops a running engine (`EngineHandle::stop`), drops every pending ManualTimers timer, as a real restart loses
     /// its sleeping threads, and starts a new engine (`start_until`) over the same data folder with the same drive
-    /// script, ejector, keep-awake, shares, secrets, MemoryIpc, host, RecordedTransport, ScriptedSteps (used entries
-    /// stay used) and MemorySink list. The queued drive events are handed over once the old engine has stopped, so
-    /// the new engine reads them (R22.9). Def: T22. Use: T22 to T29.
+    /// script, ejector, keep-awake, shares, secrets, a new MemoryIpc, host, RecordedTransport, ScriptedSteps (used
+    /// entries stay used) and MemorySink list. The queued drive events are handed over once the old engine has stopped,
+    /// so the new engine reads them (R22.9). Def: T22. Use: T22 to T29.
     pub fn restart(&self) {
         self.stop();
         self.timers.drop_pending();
@@ -903,7 +918,27 @@ impl Harness {
     /// 9.1). Def: T26. Use: T26, T28.
     pub fn client(&self) -> MemoryConnector {
         self.deliver();
-        self.connector.clone()
+        lock(&self.ipc).1.clone()
+    }
+
+    /// Everything the engines of this harness wrote to their console writer (`EngineConfig.console`), as text (design
+    /// part 3.5). Def: T3-10. Use: T3-10, T3-23.
+    pub fn console_text(&self) -> String {
+        self.deliver();
+        String::from_utf8_lossy(&lock(&self.console)).into_owned()
+    }
+
+    /// The running engine's `EngineHandle::shutdown_handle`. Def: T3-10. Use: T3-10.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        self.deliver();
+        lock(&self.engine).as_ref().expect("an engine runs").shutdown_handle()
+    }
+
+    /// The running engine's `EngineHandle::wait_for_exit(Some(timeout))`; true when no engine runs. Def: T3-10.
+    /// Use: T3-10.
+    pub fn wait_for_exit(&self, timeout: Duration) -> bool {
+        self.deliver();
+        lock(&self.engine).as_ref().is_none_or(|engine| engine.wait_for_exit(Some(timeout)))
     }
 
     /// Registers `action` to run once, before the first spawn whose arguments hold every one of `needles`, each as a
@@ -999,8 +1034,8 @@ impl Folders {
             awake: Arc::new(CountingKeepAwake::new()),
             shares: Arc::new(FakeShares::new()),
             secrets: Arc::new(MemorySecrets::new().with("tmdb_token", "test-token")),
-            ipc: Arc::new(ipc),
-            connector,
+            ipc: Mutex::new((Arc::new(ipc), connector)),
+            console: Arc::default(),
             host: Arc::new(FakeHost::new("2026-10-23", 1_792_800_000)),
             http: Arc::new(runner.http),
             timers: Arc::new(ManualTimers::new()),

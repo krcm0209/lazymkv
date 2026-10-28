@@ -32,7 +32,7 @@ use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::{Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_platform::{
-    DriveEvent, DriveWatcher, Ejector, Host, IpcStream, KeepAwake, Platform, SecretStore, ShareConnector,
+    DriveEvent, DriveWatcher, Ejector, Host, IpcStream, IpcTransport, KeepAwake, Platform, SecretStore, ShareConnector,
 };
 use lazymkv_tools::CancelToken;
 use serde_json::{Map, Value};
@@ -42,8 +42,8 @@ use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLD
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
     no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
-    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, COMMAND_REFUSED,
-    DISCARD_REFUSED, STOPPING, UI_QUIT_REFUSED,
+    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
+    COMMAND_REFUSED, DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink};
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
@@ -58,7 +58,7 @@ use crate::EngineConfig;
 
 /// How long the drive thread waits for each drive event before it looks at its stop flag again.
 const DRIVE_POLL: Duration = Duration::from_millis(50);
-/// How often `EngineHandle::wait_until` looks at the jobs.
+/// How often `EngineHandle::wait_until` looks at the jobs, and `EngineHandle::wait_for_exit` at the owner thread.
 const WAIT_POLL: Duration = Duration::from_millis(20);
 
 /// The actions whose step returns no event, so their result writes no `returned no event` line (design part 5.2, PF-6:
@@ -183,6 +183,9 @@ pub(crate) enum Msg {
     CheckListed,
     /// `EngineHandle::stop`.
     Stop,
+    /// A line for engine.log from a thread that holds no store: the serve thread's refusals and failed accepts (design
+    /// part 3.5; Ruling W10).
+    Log(String),
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -207,10 +210,11 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
 /// lines are persisted by then (design part 3.5); the IPC server's serve thread starts last (Task 26). With
 /// `services.steps` None it runs the real runner, `RealSteps` (Task 23), over the owner's Outbox, the space promises,
 /// the last scan's Java use and the MakeMKV state, which the owner keeps for the self-test. Def: T22. Use: T22.
-pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
+pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
     let Services { platform, http, notify, timers, steps } = services;
     let clock = Arc::clone(&platform.host);
-    let store = Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), None);
+    let console = config.console.take();
+    let store = Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), console);
     #[cfg(any(test, feature = "testkit"))]
     let store = match hooks.persist_faults {
         Some(faults) => store.with_faults(faults),
@@ -250,6 +254,7 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
     let shown = Arc::new(Mutex::new(BTreeMap::new()));
     let busy = Arc::new(AtomicBool::new(false));
     let drive_stop = Arc::new(AtomicBool::new(false));
+    let clients = Arc::new(Clients::new());
     let parts = Parts {
         host,
         ejector,
@@ -263,7 +268,7 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
         shares,
         busy: Arc::clone(&busy),
         env,
-        clients: Arc::new(Clients::new()),
+        clients: Arc::clone(&clients),
     };
     // L1: the discs already in a drive, read before the drive thread drains any event (design part 4.2).
     let present = drives.present();
@@ -281,6 +286,7 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
     let owner = thread::spawn(move || owner.run(inbox));
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
     let serve_stop = Arc::new(AtomicBool::new(false));
+    let transport = Arc::clone(&ipc);
     let serve = spawn_serve(ipc, Arc::clone(&serve_stop), sender.clone());
     Ok(EngineHandle {
         sender,
@@ -293,7 +299,8 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
         jobs: shown,
         serve,
         serve_stop,
-        waker: Mutex::new(None),
+        ipc: transport,
+        clients,
     })
 }
 
@@ -319,9 +326,10 @@ pub struct EngineHandle {
     serve: JoinHandle<()>,
     /// Raised to end the serve thread.
     serve_stop: Arc<AtomicBool>,
-    /// How `stop` wakes the serve thread from the transport's waiting `accept`; None leaves the thread to end with
-    /// its transport.
-    waker: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The transport the serve thread accepts from; `stop` closes it.
+    ipc: Arc<dyn IpcTransport>,
+    /// The owner's clients; `stop` drains their writers.
+    clients: Arc<Clients>,
 }
 
 impl EngineHandle {
@@ -352,44 +360,75 @@ impl EngineHandle {
         }
     }
 
-    /// Sets how `stop` wakes the IPC serve thread, which waits in the transport's `accept` (design part 4.4): the
-    /// testkit connects once through its `MemoryConnector`, because `MemoryIpc::accept` holds its lock while it waits.
-    /// Without a waker, `stop` leaves the serve thread to end with its transport. Def: T26. Use: T26.
-    pub(crate) fn set_ipc_waker(&self, wake: Box<dyn FnOnce() + Send>) {
-        *lock(&self.waker) = Some(wake);
+    /// A handle that asks this engine's owner for a shutdown from any thread (design part 3.8; engine.md:581 (a)).
+    /// Def: T3-10. Use: T3-10, T3-23.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle { sender: self.sender.clone() }
+    }
+
+    /// True once the owner thread has left its loop, after a `shutdown` request or a stop; false when `timeout` passed
+    /// first; None waits without a limit. It polls `JoinHandle::is_finished` every `WAIT_POLL` (engine.md:581 (b)).
+    /// Def: T3-10. Use: T3-10, T3-23.
+    pub fn wait_for_exit(&self, timeout: Option<Duration>) -> bool {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        loop {
+            if self.owner.is_finished() {
+                return true;
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return false;
+            }
+            thread::sleep(WAIT_POLL);
+        }
     }
 
     /// Cancels every running step's CancelToken (CheckSpace and Eject included), drops their results, writes the
     /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk and a client's reader
-    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first, woken by the IPC
-    /// waker, so no client connects while the engine stops; then the drive thread, so every drive event it handed over
-    /// is handled before the owner stops; the owner then waits for every step, recording, eject and check it started,
-    /// closes every client, and the notifier delivers what was raised. An arrival still waiting for its volume is not
-    /// waited for: it only reads, and its late result goes nowhere. A step, recording or eject that panics still
-    /// reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked. Def: T22.
-    /// Use: T22 to T29.
+    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first: `stop` closes the
+    /// transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client connects while the
+    /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops; the
+    /// owner then waits for every step, recording, eject and check it started, closes every client, and the notifier
+    /// delivers what was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
+    /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4). An arrival still waiting for its volume is
+    /// not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that panics still
+    /// reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked. Def: T22,
+    /// T3-10. Use: T22 to T29, T3-23.
     pub fn stop(self) -> io::Result<()> {
-        let EngineHandle { sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, waker, .. } =
-            self;
+        let EngineHandle {
+            sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, ipc, clients, ..
+        } = self;
         serve_stop.store(true, Ordering::SeqCst);
-        let served = match waker.into_inner().unwrap_or_else(PoisonError::into_inner) {
-            Some(wake) => {
-                wake();
-                serve.join().is_ok()
-            }
-            None => true,
-        };
+        ipc.close();
+        let served = serve.join();
         drive_stop.store(true, Ordering::SeqCst);
         let drive = drive.join();
         let _ = sender.send(Msg::Stop);
         drop(sender);
         let owner = owner.join();
         let _ = notifier_done.recv();
+        clients.drain(CLIENT_DRAIN);
         store.log("engine stopped");
-        if drive.is_err() || owner.is_err() || !served {
+        if served.is_err() || drive.is_err() || owner.is_err() {
             return Err(io::Error::other("lazymkv-engine: an engine thread panicked"));
         }
         Ok(())
+    }
+}
+
+/// Asks the owner for a shutdown as a `shutdown` request with no client does (design part 3.8: Ctrl+C in a console
+/// run is a forced shutdown). It sends `Msg::Request` with `client: NO_CLIENT`, `id: None` and
+/// `request: Request::Shutdown { force }`, so the reply goes nowhere; a send to an owner that has stopped does nothing.
+/// Def: T3-10. Use: T3-10, T3-23.
+#[derive(Clone)]
+pub struct ShutdownHandle {
+    /// The owner thread's channel.
+    sender: Sender<Msg>,
+}
+
+impl ShutdownHandle {
+    /// See the struct. Def: T3-10. Use: T3-10, T3-23.
+    pub fn shutdown(&self, force: bool) {
+        let _ = self.sender.send(Msg::Request { client: NO_CLIENT, id: None, request: Request::Shutdown { force } });
     }
 }
 
@@ -1076,6 +1115,7 @@ impl Owner {
             Msg::Request { client, id, request } => self.on_request(client, id, request),
             Msg::Checked { client, id, outcome } => self.on_checked(client, id, outcome),
             Msg::CheckListed => self.release_check_token(),
+            Msg::Log(line) => self.store.log(&line),
         }
     }
 
@@ -1100,6 +1140,7 @@ impl Owner {
             }
             Msg::CheckListed => self.release_check_token(),
             Msg::Connect(stream) => drop(stream),
+            Msg::Log(line) => self.store.log(&line),
             Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Stop => {}
         }
     }

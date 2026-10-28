@@ -1907,6 +1907,41 @@ fn a_pulled_disc_reinserted_after_a_forced_shutdown_resumes_its_job() {
 }
 
 #[test]
+fn wait_for_exit_returns_after_a_shutdown_request() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert!(!h.wait_for_exit(Duration::from_millis(300)), "the owner left its loop before any shutdown");
+    assert_eq!(c.ok("shutdown", json!({"force": false})), Value::Null);
+    assert!(h.wait_for_exit(WAIT * ci_factor()));
+    assert_eq!(c.line(), None);
+}
+
+#[test]
+fn a_forced_shutdown_from_the_handle_needs_no_client() {
+    let h = scripted(hanging_at("Remux", 0));
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "Remux", 1);
+    let id = h.job_ids().pop().unwrap();
+    h.shutdown_handle().shutdown(false);
+    assert!(!h.wait_for_exit(Duration::from_millis(300)), "a shutdown without force stopped a running step");
+    h.shutdown_handle().shutdown(true);
+    assert!(h.wait_for_exit(WAIT * ci_factor()));
+    let stopped = h.record(&id);
+    assert_eq!(stopped.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert_eq!(stopped.message.as_deref(), Some(CANCELLED));
+}
+
+#[test]
+fn a_console_engine_mirrors_its_log_lines_to_its_console_writer() {
+    let h = scripted(vec![]);
+    h.restart();
+    h.wait("the console writer to hold every engine.log line", |h| h.console_text() == h.engine_log());
+    let log = h.engine_log();
+    assert!(log.contains(" engine started (lazymkv ") && log.contains(" engine stopped\n"), "{log}");
+}
+
+#[test]
 fn progress_pushes_name_the_action_and_the_title() {
     let h = stand_in(&["movie-direct"], settings());
     let mut c = Client::open(&h);

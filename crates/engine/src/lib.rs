@@ -22,12 +22,12 @@ use lazymkv_dev::Args;
 use lazymkv_tools::Limits;
 
 pub use notify::NotifySink;
-pub use owner::{start, EngineHandle, JobContext, Services, StepResult, StepRunner};
+pub use owner::{start, EngineHandle, JobContext, Services, ShutdownHandle, StepResult, StepRunner};
 pub use timers::{StdTimers, Timers};
 
-/// The engine's start-up configuration (design parts 3.5, 3.6; S44): the data folder, the resources folder the tool
-/// lookup reads second, limits that replace `Limits::from_settings` (tests only), and the `PATH` the tool lookup reads
-/// last. Def: T21. Use: T22 to T29.
+/// The engine's start-up configuration (design parts 3.5, 3.6, 9.5; S44): the data folder, the resources folder the
+/// tool lookup reads second, limits that replace `Limits::from_settings` (tests only), the `PATH` the tool lookup reads
+/// last, the `lazymkvctl` the `command` relay runs, and the console writer. Def: T21. Use: T22 to T29.
 pub struct EngineConfig {
     /// The data folder (`--data DIR`, design part 3.5).
     pub data: PathBuf,
@@ -37,6 +37,12 @@ pub struct EngineConfig {
     pub limits_override: Option<Limits>,
     /// The `PATH` the tool lookup reads last (design part 3.6).
     pub path_var: Option<OsString>,
+    /// The `lazymkvctl` the `command` relay runs as its child (design part 9.5); None refuses `command` with
+    /// `COMMAND_NO_CTL`. Def: T3-10. Use: T3-22, T3-23.
+    pub ctl: Option<PathBuf>,
+    /// Where every engine.log line is also written: standard error in a console run (design part 3.5), the harness's
+    /// buffer in tests; None writes engine.log only. Def: T3-10. Use: T3-10, T3-23.
+    pub console: Option<Box<dyn Write + Send>>,
 }
 
 /// The binary's usage line.

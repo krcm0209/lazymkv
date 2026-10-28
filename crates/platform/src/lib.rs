@@ -168,11 +168,20 @@ pub struct IpcStream {
     pub writer: Box<dyn Write + Send>,
 }
 
-/// The engine's end of the pipe: hands out one stream per client that connects (spec 4.3, design part 4.2).
-/// Def: T8. Use: T26.
+/// The engine's end of the pipe: hands out one stream per client that connects (spec 4.3, design parts 4.2, 4.4;
+/// Ruling W10). Def: T8, T3-10. Use: T26, T3-10, T3-11, T3-23.
 pub trait IpcTransport: Send + Sync {
-    /// Waits for the next client. Err when the transport is closed.
+    /// Waits for the next client (engine.md:581 (d); Ruling W10). Err by kind: `BrokenPipe` only once `close` ran, or
+    /// once no client can ever connect again (`MemoryIpc` with every connector dropped, Ruling T8-e), and it ends the
+    /// serve thread; `PermissionDenied` a refused client, its text `process <pid>: <verdict>`; `ConnectionAborted` a
+    /// client gone before its check; any other kind one failed accept, which the serve thread logs and retries after
+    /// `ACCEPT_PAUSE`. Only the transport's own client check returns `PermissionDenied` or `ConnectionAborted`: an
+    /// operating-system error of kind BrokenPipe, PermissionDenied or ConnectionAborted is returned as Other, with its
+    /// text kept, so it never reads as closed, refused or gone (Ruling PF3-S10-12-2).
     fn accept(&self) -> io::Result<IpcStream>;
+    /// Closes the transport: an `accept` waiting now and every later one return `BrokenPipe` (design part 3.8: on exit
+    /// the engine closes the pipe). Streams already handed out are not touched.
+    fn close(&self);
 }
 
 /// Why a client could not reach the engine (spec 4.3, design part 4.2). Def: T8. Use: T28.
