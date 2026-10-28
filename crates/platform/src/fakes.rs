@@ -2,7 +2,7 @@
 //! recording ejector, a counting keep-awake, fake shares, in-memory secrets, an in-memory pipe and a fake host. Every
 //! engine and client test builds its `Platform` from these (Tasks 22 to 29).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use lazymkv_core::job::Tool;
 
+use crate::localtime::format_local_time;
 use crate::{ConnectError, DriveEvent, DriveWatcher, Ejector, Host, IpcConnector, IpcStream, IpcTransport, KeepAwake,
     Reach, SecretStore, ShareConnector};
 
@@ -408,10 +409,12 @@ struct HostState {
     running: Vec<String>,
     app_key: Option<String>,
     debug_log: Option<PathBuf>,
+    writable: BTreeSet<PathBuf>,
 }
 
 /// A host with a fixed date and time, no registration key, no debug log, no running programs and no volume label until
-/// a test sets one (spec 4.3, design part 4.2). It knows no default install path.
+/// a test sets one (spec 4.3, design part 4.2). It knows no default install path. Its clock in milliseconds is
+/// `now_unix` times 1000, its local time is that clock read as UTC, and no path is user-writable until a test sets one.
 /// Def: T8. Use: T11, T13, T14, T22 to T29.
 pub struct FakeHost {
     local_date: String,
@@ -445,6 +448,11 @@ impl FakeHost {
     pub fn set_debug_log(&self, path: &Path) {
         lock(&self.state).debug_log = Some(path.to_path_buf());
     }
+
+    /// Makes `user_writable` answer true for exactly `path` (design part 3.6). Def: T3-7. Use: T3-22.
+    pub fn set_writable(&self, path: &Path) {
+        lock(&self.state).writable.insert(path.to_path_buf());
+    }
 }
 
 impl Host for FakeHost {
@@ -452,8 +460,16 @@ impl Host for FakeHost {
         self.now_unix
     }
 
+    fn now_ms(&self) -> u64 {
+        self.now_unix * 1000
+    }
+
     fn local_date(&self) -> String {
         self.local_date.clone()
+    }
+
+    fn local_time(&self, unix_ms: u64) -> String {
+        format_local_time(unix_ms, 0)
     }
 
     fn makemkv_app_key(&self) -> Option<String> {
@@ -474,6 +490,10 @@ impl Host for FakeHost {
 
     fn default_install_path(&self, _tool: Tool) -> Option<PathBuf> {
         None
+    }
+
+    fn user_writable(&self, path: &Path) -> bool {
+        lock(&self.state).writable.contains(path)
     }
 }
 
@@ -643,6 +663,26 @@ mod tests {
         let host = FakeHost::new("2026-10-23", 1_800_000_000);
         assert_eq!(host.local_date(), "2026-10-23");
         assert_eq!(host.local_date(), "2026-10-23");
+    }
+
+    #[test]
+    fn the_fake_hosts_local_time_is_utc_of_its_clock() {
+        let host = FakeHost::new("2026-10-23", 1_792_800_000);
+        assert_eq!(host.now_ms(), 1_792_800_000_000);
+        assert_eq!(host.local_time(host.now_ms()), "2026-10-24 00:00:00.000");
+        assert_eq!(host.local_time(1_792_800_000_123), "2026-10-24 00:00:00.123");
+        // The date is a setting of the fake, so it differs from its clock's UTC date on purpose.
+        assert_eq!(host.local_date(), "2026-10-23");
+    }
+
+    #[test]
+    fn a_path_is_writable_only_when_set() {
+        let host = FakeHost::new("2026-10-23", 1_800_000_000);
+        assert!(!host.user_writable(Path::new("/tools")));
+        host.set_writable(Path::new("/tools"));
+        assert!(host.user_writable(Path::new("/tools")));
+        assert!(!host.user_writable(Path::new("/tools/mkvmerge")));
+        assert!(!host.user_writable(Path::new("/other")));
     }
 
     struct NoProcesses;

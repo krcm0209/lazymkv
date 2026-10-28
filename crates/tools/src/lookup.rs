@@ -99,12 +99,15 @@ mod tests {
 
     impl Host for TestHost {
         fn now_unix(&self) -> u64 { 0 }
+        fn now_ms(&self) -> u64 { 0 }
         fn local_date(&self) -> String { String::new() }
+        fn local_time(&self, _: u64) -> String { String::new() }
         fn makemkv_app_key(&self) -> Option<String> { None }
         fn makemkv_debug_log(&self) -> Option<PathBuf> { None }
         fn running_processes(&self) -> Vec<String> { Vec::new() }
         fn volume_label(&self, _: &Path) -> Option<String> { None }
         fn default_install_path(&self, _: Tool) -> Option<PathBuf> { self.0.clone() }
+        fn user_writable(&self, _: &Path) -> bool { false }
     }
 
     fn named(path: &str) -> Settings {

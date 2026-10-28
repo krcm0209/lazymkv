@@ -17,6 +17,10 @@ pub mod fakes;
 #[cfg(windows)]
 pub mod win;
 
+/// Phase 0's local-time text, from Unix milliseconds and an offset from Coordinated Universal Time (UTC), with no
+/// date-time crate (design part 4.6, R23.7). Compiled and tested on every system. Def: T3-7. Use: T3-7.
+pub mod localtime;
+
 mod process;
 pub use process::StdProcessGuard;
 
@@ -199,14 +203,20 @@ pub trait Autostart {
     fn remove(&self) -> Result<(), String>;
 }
 
-/// What the engine asks of the machine it runs on (spec 4.3, design part 4.2): the clock, the calendar date, MakeMKV's
-/// registration key and debug log, the running programs, a disc's label and where each tool is installed by default.
-/// Def: T8. Use: T11, T22.
+/// What the engine asks of the machine it runs on (spec 4.3, design part 4.2): the clock, the calendar date and the
+/// local time, MakeMKV's registration key and debug log, the running programs, a disc's label, where each tool is
+/// installed by default, and whether a non-elevated process of the user could write a path.
+/// Def: T8; T3-7 adds now_ms, local_time and user_writable. Use: T11, T22, T3-8, T3-9, T3-22, T3-23.
 pub trait Host: Send + Sync {
     /// The current time, in seconds since the Unix epoch.
     fn now_unix(&self) -> u64;
+    /// The current time in milliseconds since the Unix epoch (R23.7, Ruling W16).
+    fn now_ms(&self) -> u64;
     /// Today's local date as `yyyy-MM-dd`, the form phase 0's files keep (design part 4.6).
     fn local_date(&self) -> String;
+    /// The instant `unix_ms` as local time, `yyyy-MM-dd HH:mm:ss.fff`, under that instant's daylight-saving rule: the
+    /// form phase 0 wrote `started` in (design part 4.6, R23.7; scripts/phase0/rip-title.ps1:103).
+    fn local_time(&self, unix_ms: u64) -> String;
     /// MakeMKV's registration key, or None when none is set.
     fn makemkv_app_key(&self) -> Option<String>;
     /// MakeMKV's debug log, or None when the machine has none.
@@ -217,6 +227,10 @@ pub trait Host: Send + Sync {
     fn volume_label(&self, root: &Path) -> Option<String>;
     /// Where `tool` is installed by default on this machine, or None when it has no such place.
     fn default_install_path(&self, tool: Tool) -> Option<PathBuf>;
+    /// Whether a non-elevated process of the user could write `path` (design part 3.6, Ruling W17): for a folder, add a
+    /// file or a folder, delete a child, delete it, or change its access list or owner; for a file, write, append,
+    /// delete it, or change its access list or owner. True when it cannot be told.
+    fn user_writable(&self, path: &Path) -> bool;
 }
 
 /// Everything the engine takes from the operating system, in one bundle (spec 4.3, design part 4.2). Windows fills it
