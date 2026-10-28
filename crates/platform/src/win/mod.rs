@@ -7,12 +7,14 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
+mod awake;
 mod files;
 mod folder;
 mod job;
 mod mutex;
 mod token;
 
+pub use awake::WinKeepAwake;
 pub(crate) use files::{move_no_replace, move_replacing};
 pub use folder::{program_data, protect_data_folder};
 pub use job::JobProcessGuard;
