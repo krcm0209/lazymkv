@@ -26,6 +26,11 @@ pub mod localtime;
 /// connector's order of attempts (P7; Ruling W14). Def: T3-13; T3-14 adds the share connector. Use: T3-13, T3-14.
 pub mod shares;
 
+/// The parts of the `Ejector` that need no Windows call, compiled and tested on every system (design parts 4.2, 5.6
+/// step 8): the letter of a drive id and phase 0's eject report. `win::eject` makes the Windows calls.
+/// Def: T3-15. Use: T3-15.
+pub mod eject;
+
 mod process;
 pub use process::StdProcessGuard;
 
