@@ -3,9 +3,12 @@
 
 use std::io;
 use std::path::Path;
+use std::ptr::null_mut;
 use std::time::Duration;
 
-use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFullPathNameW, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
 
 use super::wide;
 
@@ -14,15 +17,72 @@ use super::wide;
 const HELD_TRIES: u32 = 10;
 const HELD_PAUSE: Duration = Duration::from_millis(10);
 
+/// The wide length, NUL included, from which `wide_path` makes a path verbatim: std's `LEGACY_MAX_PATH`, the limit
+/// `CreateDirectoryW` keeps below MAX_PATH (Ruling T3-4-c).
+const LEGACY_MAX_PATH: usize = 248;
+const SEP: u16 = b'\\' as u16;
+const QUERY: u16 = b'?' as u16;
+/// `\\?\`, the verbatim prefix.
+const VERBATIM_PREFIX: &[u16] = &[SEP, SEP, QUERY, SEP];
+/// `\??\`, the prefix of a path already in the object manager's form.
+const NT_PREFIX: &[u16] = &[SEP, QUERY, QUERY, SEP];
+/// `\\?\UNC\`, the verbatim prefix of a `\\server\share` path.
+const UNC_PREFIX: &[u16] = &[SEP, SEP, QUERY, SEP, b'U' as u16, b'N' as u16, b'C' as u16, SEP];
+
 /// `path` as the NUL-terminated wide (UTF-16, 16-bit Unicode) string Windows takes. Err `InvalidInput` with the text
-/// `the path holds a NUL character` when the path holds one, since Windows would read the name only up to it. Named
-/// apart from `win::wide` (T3-2), which takes any text and checks nothing.
+/// `the path holds a NUL character` when the path holds one, since Windows would read the name only up to it. A path
+/// whose wide form, NUL included, reaches 248 units and does not already start with `\\?\` or `\??\` is made absolute
+/// with `GetFullPathNameW` and given the verbatim prefix, as std's `get_long_path` does, so a name past MAX_PATH (260
+/// units) reaches `MoveFileExW` whatever the machine's LongPathsEnabled setting (Ruling T3-4-c); a shorter path is
+/// passed as given. Named apart from `win::wide` (T3-2), which takes any text and checks nothing.
 fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
     let name = wide(path);
     if name[..name.len() - 1].contains(&0) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "the path holds a NUL character"));
     }
-    Ok(name)
+    if name.len() < LEGACY_MAX_PATH || name.starts_with(VERBATIM_PREFIX) || name.starts_with(NT_PREFIX) {
+        return Ok(name);
+    }
+    Ok(verbatim(&full_path(&name)?))
+}
+
+/// `name`, a NUL-terminated wide path, made absolute and normalized by `GetFullPathNameW`, without its NUL. The first
+/// call asks the length, NUL included, and the next fills a buffer of that length; a length that no longer fits, when
+/// the current folder changed between the two, is asked for again.
+fn full_path(name: &[u16]) -> io::Result<Vec<u16>> {
+    // SAFETY: `name` is NUL-terminated and outlives the call; a null buffer of length 0 asks only for the length, and
+    // the file-part pointer may be null.
+    let mut needed = unsafe { GetFullPathNameW(name.as_ptr(), 0, null_mut(), null_mut()) };
+    loop {
+        if needed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buffer = vec![0u16; needed as usize];
+        // SAFETY: `buffer` holds `needed` units, the length passed with it, and outlives the call; `name` is
+        // NUL-terminated and outlives it; the file-part pointer may be null.
+        let written = unsafe { GetFullPathNameW(name.as_ptr(), needed, buffer.as_mut_ptr(), null_mut()) };
+        if written != 0 && written < needed {
+            buffer.truncate(written as usize);
+            return Ok(buffer);
+        }
+        needed = written;
+    }
+}
+
+/// `full`, an absolute path from `GetFullPathNameW`, with the prefix std's `get_long_path` gives it, and a NUL: `\\?\`
+/// before a drive path, `\\?\UNC\` in place of the leading `\\` of a `\\server\share` path, `\\?\` in place of a
+/// `\\.\` device prefix, and nothing before a path already verbatim or of another form (Ruling T3-4-c).
+fn verbatim(full: &[u16]) -> Vec<u16> {
+    const COLON: u16 = b':' as u16;
+    const DOT: u16 = b'.' as u16;
+    let (prefix, rest): (&[u16], &[u16]) = match full {
+        [_, COLON, SEP, ..] => (VERBATIM_PREFIX, full),
+        [SEP, SEP, DOT, SEP, rest @ ..] => (VERBATIM_PREFIX, rest),
+        [SEP, SEP, QUERY, SEP, ..] | [SEP, QUERY, QUERY, SEP, ..] => (&[], full),
+        [SEP, SEP, rest @ ..] => (UNC_PREFIX, rest),
+        _ => (&[], full),
+    };
+    prefix.iter().chain(rest).copied().chain(std::iter::once(0)).collect()
 }
 
 /// Puts `from` in place of `to` with `MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
@@ -65,6 +125,7 @@ pub(crate) fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 mod tests {
     use std::fs;
     use std::io;
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::{Component, Path, PathBuf, Prefix};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -208,5 +269,32 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         poller.join().unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "200");
+    }
+
+    /// Ruling T3-4-c: names past MAX_PATH (260 units), as a long title under a deep library folder gives, reach both
+    /// moves through the verbatim prefix, whatever the machine's LongPathsEnabled setting.
+    #[test]
+    fn a_path_longer_than_max_path_is_moved_through_the_verbatim_prefix() {
+        let dir = temp_dir("files-long");
+        let _cleanup = Cleanup(dir.clone());
+        let folder = (1..=5).fold(dir.clone(), |path, n| path.join(format!("{n} Synthetic Folder Of A Deep Library")));
+        fs::create_dir_all(&folder).unwrap();
+        let movie = "Synthetic Movie With A Long Title (2001) {tmdb-900001} - 1080p";
+        let (partial, filed, other) = (
+            folder.join(format!("{movie}.mkv.partial")),
+            folder.join(format!("{movie}.mkv")),
+            folder.join(format!("{movie} {{edition-Extended}}.mkv")),
+        );
+        for path in [&partial, &filed, &other] {
+            let units = path.as_os_str().encode_wide().count();
+            assert!(units > 260, "{units} units: {}", path.display());
+        }
+        fs::write(&partial, "placeholder").unwrap();
+        move_no_replace(&partial, &filed).unwrap();
+        assert!(filed.exists() && !partial.exists());
+        fs::write(&other, "old").unwrap();
+        move_replacing(&filed, &other).unwrap();
+        assert_eq!(fs::read(&other).unwrap(), b"placeholder");
+        assert!(!filed.exists());
     }
 }
