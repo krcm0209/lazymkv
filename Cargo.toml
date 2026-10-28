@@ -17,3 +17,5 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 regex = "1"
 fancy-regex = "0.14"
 unicode-normalization = "0.1"
+# The Windows API declarations, used by lazymkv-platform only and pinned exactly (design parts 4.3, 4.5, 4.7; P33).
+windows-sys = "=0.61.2"

@@ -12,6 +12,11 @@ use lazymkv_core::job::Tool;
 #[cfg(feature = "fakes")]
 pub mod fakes;
 
+/// The Windows implementations of the platform traits and helpers; every `windows-sys` call of the workspace sits
+/// here (design parts 4.2, 4.3). Compiled only on Windows. Def: T3-1. Use: T3-2 to T3-16, T3-23.
+#[cfg(windows)]
+pub mod win;
+
 mod process;
 pub use process::StdProcessGuard;
 
