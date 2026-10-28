@@ -16,6 +16,7 @@ mod host;
 mod job;
 mod mutex;
 mod pipe;
+mod shares;
 mod token;
 
 pub use awake::WinKeepAwake;
@@ -27,6 +28,7 @@ pub use host::WinHost;
 pub use job::JobProcessGuard;
 pub use mutex::{EngineMutex, MutexRefusal};
 pub use pipe::PipeServer;
+pub use shares::share_connector;
 pub use token::own_token;
 pub(crate) use token::{sid_string, token_facts, token_of_process, Descriptor};
 #[cfg(test)]

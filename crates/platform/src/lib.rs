@@ -22,7 +22,8 @@ pub mod win;
 pub mod localtime;
 
 /// The parts of design part 6.1 that need no Windows call, compiled and tested on every system (design part 4.2):
-/// the Credential Manager target of a secret (Ruling W13). Def: T3-13. Use: T3-13, T3-14.
+/// the Credential Manager target of a secret (Ruling W13), the share and the volume of a root (S11), and the share
+/// connector's order of attempts (P7; Ruling W14). Def: T3-13; T3-14 adds the share connector. Use: T3-13, T3-14.
 pub mod shares;
 
 mod process;
@@ -153,6 +154,12 @@ pub trait ShareConnector: Send + Sync {
     fn free_bytes(&self, root: &str) -> io::Result<u64>;
     /// An identifier of the volume holding `root`, equal for two roots on one volume (S11), or None when unknown.
     fn volume(&self, root: &str) -> Option<String>;
+    /// How the last successful `reach` of the share holding `root` got in: "local folder", "the session's access" or
+    /// "lazymkv's stored credential"; None before any, after a failed one, and for a connector that does not say.
+    /// For job.log's share access line (design parts 6.1, 7.1). Def: T3-14. Use: T3-17.
+    fn access(&self, _root: &str) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Holds the owner's secrets outside the settings files (spec 4.3, design part 4.2). Def: T8. Use: T26.
