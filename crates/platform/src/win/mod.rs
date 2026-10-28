@@ -13,6 +13,7 @@ mod folder;
 mod host;
 mod job;
 mod mutex;
+mod pipe;
 mod token;
 
 pub use awake::WinKeepAwake;
@@ -21,6 +22,7 @@ pub use folder::{program_data, protect_data_folder};
 pub use host::WinHost;
 pub use job::JobProcessGuard;
 pub use mutex::{EngineMutex, MutexRefusal};
+pub use pipe::PipeServer;
 pub use token::own_token;
 pub(crate) use token::{sid_string, token_facts, token_of_process, Descriptor};
 #[cfg(test)]

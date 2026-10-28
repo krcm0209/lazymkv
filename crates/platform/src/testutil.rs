@@ -1,11 +1,14 @@
 //! The test helpers of the plan's Global Constraints, compiled under `cfg(test)` only: a fresh temporary folder, the
 //! continuous integration (CI) factor for waits, the `skipped:` and `CUE:` lines written past the test harness's
-//! capture, and an in-memory secret store for this crate's own tests.
+//! capture, an in-memory secret store for this crate's own tests, and the pipe tests' bounded wait (`within`) and line
+//! read (`line`).
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 /// A fresh, empty directory under the system temporary folder.
 pub(crate) fn temp_dir(tag: &str) -> PathBuf {
@@ -50,6 +53,30 @@ pub(crate) fn cue(text: &str) {
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(cue_line(text).as_bytes());
     let _ = stderr.flush();
+}
+
+/// `work` on a thread of its own; the test fails when it has not ended within `bound`.
+pub(crate) fn within<T: Send + 'static>(bound: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, result) = channel();
+    let worker = std::thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    match result.recv_timeout(bound) {
+        Ok(value) => value,
+        Err(RecvTimeoutError::Timeout) => panic!("the work had not ended within {bound:?}"),
+        // The worker dropped its sender without sending: it panicked, and its panic is the test's.
+        Err(RecvTimeoutError::Disconnected) => match worker.join() {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(()) => unreachable!("the worker ended without sending its result"),
+        },
+    }
+}
+
+/// One line from `reader` with its newline, "" at the end of the stream.
+pub(crate) fn line(reader: &mut dyn BufRead) -> String {
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("a line");
+    line
 }
 
 /// Locks `mutex`, ignoring a poison left by a panicked test thread, so one failed test does not cascade into others.
