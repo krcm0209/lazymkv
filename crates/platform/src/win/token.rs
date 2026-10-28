@@ -276,11 +276,18 @@ pub(crate) fn read_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> ReadBack {
         let mut ace = null_mut();
         // SAFETY: `index` is below the list's AceCount; the call writes the entry's address to `ace`.
         assert_ne!(unsafe { GetAce(dacl, index, &mut ace) }, 0, "GetAce: {}", io::Error::last_os_error());
-        // SAFETY: every entry starts with an ACE_HEADER.
-        let header = unsafe { *ace.cast::<ACE_HEADER>() };
-        assert!(matches!(header.AceType, ALLOWED | DENIED), "entry type {} is neither allow nor deny", header.AceType);
-        // SAFETY: an allow or deny entry is an ACCESS_ALLOWED_ACE, whose SID starts at SidStart, inside the list.
-        let mask = unsafe { (*ace.cast::<ACCESS_ALLOWED_ACE>()).Mask };
+        // Both reads sit in the branch where `ace` is not null, a check the code scanner sees.
+        let (header, mask) = if ace.is_null() {
+            panic!("GetAce wrote no entry")
+        } else {
+            // SAFETY: a non-null `ace` points at the entry GetAce found, and every entry starts with an ACE_HEADER.
+            let header = unsafe { *ace.cast::<ACE_HEADER>() };
+            let kind = header.AceType;
+            assert!(matches!(kind, ALLOWED | DENIED), "entry type {kind} is neither allow nor deny");
+            // SAFETY: as above, and an allow or deny entry is an ACCESS_ALLOWED_ACE.
+            (header, unsafe { (*ace.cast::<ACCESS_ALLOWED_ACE>()).Mask })
+        };
+        // An ACCESS_ALLOWED_ACE's SID starts at SidStart, inside the list.
         let sid = ace.cast::<u8>().wrapping_add(std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart)).cast();
         let sid = sid_string(sid).expect("the entry's SID");
         entries.push(AclEntry { kind: header.AceType, flags: header.AceFlags, mask, sid });
