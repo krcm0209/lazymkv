@@ -2028,3 +2028,173 @@ fn a_media_read_error_failure_message_says_try_the_other_drive() {
     assert_eq!(failed.event, NotifyEvent::Failed { class: FailureClass::MediaReadError });
     assert!(failed.message.ends_with("; try the other drive"), "{}", failed.message);
 }
+
+// ---- Share work off the owner thread and the share checks (engine.md:584 to :590; Rulings W15, W21) ----
+
+/// A new client's snapshot, or None when none came within `limit`. The limit proves "does not block" and is not
+/// scaled (Global Constraints).
+fn snapshot_within(h: &Harness, limit: Duration) -> Option<Value> {
+    let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
+    let (send, lines) = channel();
+    let mut reader = stream.reader;
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_ok() {
+            let _ = send.send(line);
+        }
+    });
+    let line = lines.recv_timeout(limit).ok();
+    drop(stream.writer);
+    match read_reply(line?.trim_end()).unwrap() {
+        Reply::Push(envelope) if envelope.kind == "snapshot" => Some(envelope.payload),
+        other => panic!("expected the snapshot, got {other:?}"),
+    }
+}
+
+/// Whether a `job_update` of `job` reaches `c` within `limit` (unscaled, as `snapshot_within`); other pushes are kept.
+fn job_update_within(c: &mut Client, job: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(line) = c.lines.recv_timeout(left) else {
+            return false;
+        };
+        if let Reply::Push(envelope) = read_reply(line.trim_end()).unwrap() {
+            if envelope.kind == "job_update" && envelope.payload["id"] == json!(job) {
+                return true;
+            }
+            c.pushes.push_back(envelope);
+        }
+    }
+    false
+}
+
+/// engine.md:584 (design part 4.4): CheckSpace reads the shares before it locks the promises, so while the staging
+/// share stalls inside CheckSpace the owner still persists the removal's MediaRemoved and answers a new client.
+#[test]
+fn a_stalled_staging_share_does_not_stop_the_engine_answering_status() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "CheckSpace never reached the staging share");
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    let snapshot = snapshot_within(&h, Duration::from_secs(5)).expect("a snapshot within 5 s while the share stalls");
+    assert_eq!(snapshot["jobs"].as_array().unwrap().len(), 1);
+    gate.release();
+}
+
+/// engine.md:584, :585: a `retry` of an AwaitingSpace job re-checks space on its own thread and reads the shares
+/// before it locks the promises, so while that read stalls another disc's arrival is fed and its job_update arrives.
+#[test]
+fn a_return_from_a_wait_with_a_stalled_share_leaves_drive_events_flowing() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_free(&staging, 1);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingSpace")["id"].as_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    c.raw(&json!({"v": 1, "type": "retry", "id": 99, "payload": {"job": a}}).to_string());
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "the re-check never reached the staging share");
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    let b = format!("{}-1", h.fingerprint(DISC_B).to_ascii_lowercase());
+    assert!(job_update_within(&mut c, &b, Duration::from_secs(5)), "no job_update of {b} while the share stalls");
+    gate.release();
+}
+
+/// engine.md:585: the restart rebuilds the promises with no share read, and the resumed CheckSpace reads the shares
+/// before it locks them, so a client is answered while the staging share stalls.
+#[test]
+fn a_restart_with_a_stalled_share_answers_a_client_before_the_share_does() {
+    let h = stand_in(&[DISC_A], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Planned");
+    let staging = h.staging().to_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    h.restart();
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "the resumed CheckSpace never reached the staging share");
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    assert!(snapshot_within(&h, Duration::from_secs(5)).is_some(), "no snapshot within 5 s while the share stalls");
+    gate.release();
+}
+
+/// Ruling W21 (S81 amended): AwaitingShare's re-check asks `reach` and then `free_bytes`, so a share that answers but
+/// whose free space cannot be read keeps the job waiting, with no ShareBack to cycle on.
+#[test]
+fn awaiting_share_stays_while_the_free_space_cannot_be_read() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Reachable);
+    h.shares().set_free_error(&staging, "access is denied");
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.state_of(&id), "AwaitingShare");
+    assert!(!h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    h.shares().set_free(&staging, u64::MAX);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+}
+
+/// engine.md:589 with Ruling W15: a staging root whose parent is missing sends the job to AwaitingShare, and a retry
+/// feeds nothing until the parent exists, so it never cycles through ShareBack.
+#[test]
+fn a_retry_while_the_staging_parent_is_missing_feeds_nothing() {
+    let h = stand_in(&[DISC_A], settings());
+    let parent = h.staging().join("absent");
+    let engine = parent.join("engine");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("settings_set", json!({"staging_root": engine.to_str().unwrap()}));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.state_of(&id), "AwaitingShare");
+    assert!(!h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    std::fs::create_dir(&parent).unwrap();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+}
+
+/// Spec 13 ("each root reachable"), Ruling W15: the self-test asks `reach` of each root before its probe.
+#[test]
+fn the_self_test_reports_an_unreachable_root_from_reach_before_its_probe() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    let found = check(&result, "staging_root");
+    assert_eq!(found["ok"], json!(false));
+    assert_eq!(found["detail"], json!(format!("{staging} is unreachable: cable out")));
+    assert_eq!(check(&result, "movies_root")["ok"], json!(true));
+}
+
+/// Design part 6.2, Ruling W15: the self-test creates a missing tuning_root whose parent is a folder.
+#[test]
+fn the_self_test_creates_a_missing_tuning_root_under_an_existing_parent() {
+    let h = stand_in(&[DISC_A], settings());
+    let tuning = h.data().parent().unwrap().join("tuning").join("engine");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("settings_set", json!({"tuning_root": tuning.to_str().unwrap()}));
+    let result = c.ok("run_selftest", Value::Null);
+    assert_eq!(check(&result, "tuning_root")["ok"], json!(true), "{result}");
+    assert!(tuning.is_dir());
+}

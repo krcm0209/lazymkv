@@ -339,6 +339,58 @@ fn a_title_folder_that_cannot_be_made_waits_in_awaiting_share() {
     assert!(!h.job_dir(&id).join(KEY).join("rip.txt").exists());
 }
 
+/// Writes `root` as `key` into data/settings.json and restarts, so the next job starts with it (design part 6.2).
+fn with_root(h: &Harness, key: &str, root: &Path) {
+    let path = h.data().join("settings.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    stored[key] = json!(root.to_str().unwrap());
+    fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    h.restart();
+}
+
+/// Design part 6.2, Ruling W15: CheckSpace creates a missing staging_root whose parent is a folder before the rip
+/// writes into it.
+#[test]
+fn a_missing_staging_root_under_an_existing_parent_is_created_at_check_space() {
+    let h = harness(&[], json!({}));
+    let engine = h.staging().join("engine");
+    with_root(&h, "staging_root", &engine);
+    let id = run_to(&h, "Ejected");
+    assert!(engine.join(&id).join("rip").join(KEY).join("title_t00.mkv").is_file());
+}
+
+/// Ruling W15: only the last folder is ever created; a staging root whose parent is missing is ShareLost naming both.
+#[test]
+fn a_missing_parent_is_not_created() {
+    let h = harness(&[], json!({}));
+    let parent = h.staging().join("absent");
+    let engine = parent.join("engine");
+    with_root(&h, "staging_root", &engine);
+    let id = run_to(&h, "AwaitingShare");
+    h.settle();
+    let why = format!("{} does not exist and could not be created: {} is not a folder", engine.display(), parent.display());
+    assert_eq!(h.record(&id).message.as_deref(), Some(why.as_str()));
+    assert!(!parent.exists());
+}
+
+/// Design part 7.1: job.log names the share access CheckSpace used, for each root the connector reports one for, and
+/// nothing with the default fake, so `whole_job`'s job.log is unchanged.
+#[test]
+fn the_share_access_line_is_written_when_the_connector_reports_one() {
+    let h = harness(&[], json!({}));
+    let (staging, library) = (root(h.staging()), root(h.library()));
+    h.shares().set_access(&staging, "the session's access");
+    h.shares().set_access(&library, "lazymkv's stored credential");
+    let id = run_to(&h, "Ripping");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(&format!("share access for {staging}: the session's access")), "{log}");
+    assert!(log.contains(&format!("share access for {library}: lazymkv's stored credential")), "{log}");
+    let plain = harness(&[], json!({}));
+    let id = run_to(&plain, "Ripping");
+    let log = fs::read_to_string(plain.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("share access for"), "{log}");
+}
+
 #[test]
 fn no_java_records_label_rule_unavailable() {
     let h = harness(&[], json!({"tool_paths": {"java": null}}));

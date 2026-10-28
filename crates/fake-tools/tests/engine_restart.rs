@@ -187,8 +187,9 @@ fn a_restart_after_a_late_answer_decides_with_the_refreshed_identity() {
 
 #[test]
 fn a_rebuilt_remux_promise_counts_against_another_jobs_rip_check() {
-    // One volume for staging and the library. A's rip check needs 4301 + 4301 (S54) and passes; after the restart in
-    // Remuxing, A's rebuilt Remux promise is write_bytes_needed(16) = 17, so B's identical check needs 8619 > 8610.
+    // One volume for staging and the library. A's rip check needs 4301 + 4301 (S54) and passes; A's Remux step,
+    // resumed at the restart, replaces the rebuilt estimate with write_bytes_needed(16) = 17 (`refine_remux_promise`,
+    // engine.md:585); B's identical check needs more than 8610 with either figure, 8619 with 17.
     let h = harness(&["movie-direct", "movie-direct-remux-hang"], settings());
     let (staging, movies) = (h.staging().to_str().unwrap().to_string(), h.library().to_str().unwrap().to_string());
     h.shares().same_volume(&staging, &movies);
@@ -202,6 +203,38 @@ fn a_rebuilt_remux_promise_counts_against_another_jobs_rip_check() {
     h.insert("tok0", "disc-b");
     h.wait("B waits for space", |h| h.job_ids().iter().any(|id| *id != a && h.state_of(id) == "AwaitingSpace"));
     assert_eq!(h.state_of(&a), "Remuxing");
+}
+
+/// engine.md:590 (V7): a restart into Remuxing runs DeletePartialFile and Remux, and each asks `reach` of the title's
+/// library root before it touches the share, so with the share not answering nothing there is deleted or written and
+/// Remux fails naming the share and the way out.
+#[test]
+fn a_restart_into_remuxing_with_the_library_share_unreachable_fails_remux_without_writing() {
+    let h = harness(&["movie-direct"], settings());
+    h.insert("tok0", DISC);
+    h.run_until("Remuxing");
+    let id = only_job(&h);
+    let library = root(h.library());
+    let partial = h.library().join(".lazymkv-partial").join(format!("{id}-t00-00800.mkv.partial"));
+    fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    fs::write(&partial, b"sentinel").unwrap();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".into()));
+    h.restart();
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    let record = state_json(&h.job_dir(&id));
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let why = format!(
+        "t00-00800: the library share holding {library} does not answer (cable out); the remux was not started, and a \
+         retry once the share answers runs it"
+    );
+    assert_eq!(record.message.as_deref(), Some(why.as_str()));
+    assert_eq!(fs::read(&partial).unwrap(), b"sentinel");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    let kept = format!(
+        "t00-00800: the library share holding {library} does not answer (cable out); the partial file {} was not deleted",
+        partial.display()
+    );
+    assert!(log.contains(&kept), "{log}");
 }
 
 #[test]

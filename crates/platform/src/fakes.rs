@@ -194,17 +194,32 @@ impl KeepAwake for CountingKeepAwake {
     }
 }
 
-/// What a `FakeShares` has been told, keyed by the exact root string (Ruling T8-a).
+/// What a `FakeShares` has been told, keyed by the exact root string (Ruling T8-a): the free bytes, the reach, the
+/// volumes, each stalled root's gate (the same `Arc` its `StallGate` holds), the access `access` reports and the free
+/// space errors.
 #[derive(Default)]
 struct SharesState {
     free: BTreeMap<String, u64>,
     reach: BTreeMap<String, Reach>,
     volumes: BTreeMap<String, String>,
+    stalls: BTreeMap<String, Gate>,
+    access: BTreeMap<String, &'static str>,
+    free_errors: BTreeMap<String, String>,
 }
 
-/// Fake shares (spec 4.3, design part 4.2, Ruling T8-a): every root is reachable, has `u64::MAX` free bytes and is its
-/// own volume until a test says otherwise. Roots are matched by their exact string, so no path rule runs.
-/// Def: T8. Use: T22 to T29.
+/// One stall's state: whether it was released, and how many calls wait on it (engine.md:584).
+#[derive(Default)]
+struct GateState {
+    open: bool,
+    waiting: usize,
+}
+
+/// A stall's state and the condition its callers and `StallGate::wait_for_caller` wait on.
+type Gate = Arc<(Mutex<GateState>, Condvar)>;
+
+/// Fake shares (spec 4.3, design part 4.2, Ruling T8-a): every root is reachable, has `u64::MAX` free bytes, is its
+/// own volume, reports no access and answers at once until a test says otherwise. Roots are matched by their exact
+/// string, so no path rule runs. Def: T8, T3-17. Use: T22 to T29, T3-17.
 pub struct FakeShares {
     state: Mutex<SharesState>,
 }
@@ -216,9 +231,12 @@ impl FakeShares {
         FakeShares { state: Mutex::default() }
     }
 
-    /// Sets the free bytes `free_bytes(root)` reports (Ruling T8-a). Def: T8. Use: T22 to T29.
+    /// Sets the free bytes `free_bytes(root)` reports (Ruling T8-a), and clears a free space error `set_free_error`
+    /// gave `root` (Ruling W21). Def: T8, T3-17. Use: T22 to T29, T3-17.
     pub fn set_free(&self, root: &str, bytes: u64) {
-        lock(&self.state).free.insert(root.to_string(), bytes);
+        let mut state = lock(&self.state);
+        state.free.insert(root.to_string(), bytes);
+        state.free_errors.remove(root);
     }
 
     /// Sets what `reach(root)` reports. While it is `Unreachable`, `free_bytes(root)` fails with the same text (Ruling
@@ -236,6 +254,72 @@ impl FakeShares {
         let volume = state.volumes.get(a).cloned().unwrap_or_else(|| a.to_string());
         state.volumes.insert(b.to_string(), volume);
     }
+
+    /// Makes `reach` and `free_bytes` of `root` block until the returned gate is released or dropped (engine.md:584).
+    /// No lock of the fake is held while a call waits, so other roots answer. A later `stall` of the same root puts a
+    /// new gate in place. Def: T3-17. Use: T3-17.
+    pub fn stall(&self, root: &str) -> StallGate {
+        let gate = Gate::default();
+        lock(&self.state).stalls.insert(root.to_string(), Arc::clone(&gate));
+        StallGate { gate }
+    }
+
+    /// Sets what `access(root)` reports (design part 7.1's job.log line). Def: T3-17. Use: T3-17.
+    pub fn set_access(&self, root: &str, access: &'static str) {
+        lock(&self.state).access.insert(root.to_string(), access);
+    }
+
+    /// Makes `free_bytes(root)` Err(io::Error::other(message)) while `reach` still answers (Ruling W21); a later
+    /// `set_free(root, ..)` clears it. Def: T3-17. Use: T3-17.
+    pub fn set_free_error(&self, root: &str, message: &str) {
+        lock(&self.state).free_errors.insert(root.to_string(), message.to_string());
+    }
+
+    /// Waits while `root`'s stall is closed, with no lock of the fake held, so other roots answer (engine.md:584).
+    fn pass(&self, root: &str) {
+        let Some(gate) = lock(&self.state).stalls.get(root).cloned() else {
+            return;
+        };
+        let (state, opened) = &*gate;
+        let mut state = lock(state);
+        if state.open {
+            return;
+        }
+        state.waiting += 1;
+        opened.notify_all();
+        let mut state = opened.wait_while(state, |state| !state.open).unwrap_or_else(PoisonError::into_inner);
+        state.waiting -= 1;
+    }
+}
+
+/// A stall `FakeShares::stall` made (engine.md:584). Dropping it releases it. Def: T3-17. Use: T3-17.
+pub struct StallGate {
+    gate: Gate,
+}
+
+impl StallGate {
+    /// Lets every waiting and later call through. Def: T3-17. Use: T3-17.
+    pub fn release(&self) {
+        let (state, opened) = &*self.gate;
+        lock(state).open = true;
+        opened.notify_all();
+    }
+
+    /// Whether a call waits on the gate within `timeout`, so a test knows the step has reached the share.
+    /// Def: T3-17. Use: T3-17.
+    pub fn wait_for_caller(&self, timeout: Duration) -> bool {
+        let (state, called) = &*self.gate;
+        let state = lock(state);
+        let waited = called.wait_timeout_while(state, timeout, |state| state.waiting == 0);
+        let (state, _) = waited.unwrap_or_else(PoisonError::into_inner);
+        state.waiting > 0
+    }
+}
+
+impl Drop for StallGate {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl Default for FakeShares {
@@ -246,12 +330,17 @@ impl Default for FakeShares {
 
 impl ShareConnector for FakeShares {
     fn reach(&self, root: &str) -> Reach {
+        self.pass(root);
         lock(&self.state).reach.get(root).cloned().unwrap_or(Reach::Reachable)
     }
 
     fn free_bytes(&self, root: &str) -> io::Result<u64> {
+        self.pass(root);
         let state = lock(&self.state);
         if let Some(Reach::Unreachable(message)) = state.reach.get(root) {
+            return Err(io::Error::other(message.clone()));
+        }
+        if let Some(message) = state.free_errors.get(root) {
             return Err(io::Error::other(message.clone()));
         }
         Ok(state.free.get(root).copied().unwrap_or(u64::MAX))
@@ -259,6 +348,10 @@ impl ShareConnector for FakeShares {
 
     fn volume(&self, root: &str) -> Option<String> {
         Some(lock(&self.state).volumes.get(root).cloned().unwrap_or_else(|| root.to_string()))
+    }
+
+    fn access(&self, root: &str) -> Option<&'static str> {
+        lock(&self.state).access.get(root).copied()
     }
 }
 
@@ -613,6 +706,41 @@ mod tests {
         assert_eq!(shares.free_bytes("/staging").unwrap_err().to_string(), "cable out");
         shares.set_reach("/staging", Reach::Reachable);
         assert_eq!(shares.free_bytes("/staging").unwrap(), 1_000);
+    }
+
+    #[test]
+    fn a_stalled_root_blocks_reach_and_free_bytes_until_released() {
+        let shares = Arc::new(FakeShares::new());
+        let gate = shares.stall("/s");
+        let (sent, got) = std::sync::mpsc::channel();
+        let caller = Arc::clone(&shares);
+        std::thread::spawn(move || sent.send((caller.reach("/s"), caller.free_bytes("/s").ok())).unwrap());
+        assert!(gate.wait_for_caller(Duration::from_secs(5) * crate::testutil::ci_factor()));
+        assert!(got.recv_timeout(Duration::from_millis(100)).is_err(), "reach went through a closed gate");
+        assert_eq!(shares.reach("/m"), Reach::Reachable);
+        gate.release();
+        let answered = got.recv_timeout(Duration::from_secs(5) * crate::testutil::ci_factor()).unwrap();
+        assert_eq!(answered, (Reach::Reachable, Some(u64::MAX)));
+        drop(shares.stall("/s"));
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+    }
+
+    #[test]
+    fn a_free_space_error_leaves_reach_and_set_free_clears_it() {
+        let shares = FakeShares::new();
+        shares.set_free_error("/s", "access is denied");
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.free_bytes("/s").unwrap_err().to_string(), "access is denied");
+        shares.set_free("/s", 7);
+        assert_eq!(shares.free_bytes("/s").unwrap(), 7);
+    }
+
+    #[test]
+    fn the_fake_reports_the_access_it_was_given() {
+        let shares = FakeShares::new();
+        assert_eq!(shares.access("/s"), None);
+        shares.set_access("/s", "the session's access");
+        assert_eq!(shares.access("/s"), Some("the session's access"));
     }
 
     #[test]

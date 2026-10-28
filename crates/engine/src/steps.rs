@@ -60,7 +60,10 @@ use crate::file_phase::{
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
 use crate::selftest::MakeMkv;
-use crate::space::{planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises};
+use crate::space::{
+    make_root, planned_remux_promise, refine_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check,
+    Promises,
+};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -873,7 +876,11 @@ impl Step<'_> {
 
     /// CheckSpace in Planned (design part 5.8): `rip_check` of the plan's rip and remux promises, staging against the
     /// library root of the plan's kind, its result through `space_result`. An unset `staging_root` gives ShareLost
-    /// saying so.
+    /// saying so. A staging root that answers `reach` is made first when only its last folder is missing (`make_root`,
+    /// design part 6.2, Ruling W15), and one that cannot be made gives ShareLost with `make_root`'s sentence; one that
+    /// does not answer is named by `rip_check`'s own `reach`. Every share read runs here, on the step's thread, before
+    /// `rip_check` locks the promises (engine.md:584). Then job.log gets `share access for <root>: <access>` for
+    /// staging and the library root whose `access` reports one (design parts 6.1, 7.1).
     fn check_space(&self) -> Outcome {
         let record = &self.job.record;
         let Some(plan) = &record.plan else {
@@ -892,10 +899,17 @@ impl Step<'_> {
         self.check_cancel()?;
         let (rip_bytes, remux_bytes) = (rip_promise(plan, disc_size), planned_remux_promise(plan));
         let shares = self.steps.shares.as_ref();
-        let checked = {
-            let mut promises = lock(&self.steps.promises);
-            rip_check(rip_bytes, remux_bytes, staging, library, shares, &mut promises, self.id)
-        };
+        if shares.reach(staging) == Reach::Reachable {
+            if let Err(sentence) = make_root(staging) {
+                return Ok(self.space_result((Event::ShareLost, Some(sentence))));
+            }
+        }
+        let checked = rip_check(rip_bytes, remux_bytes, staging, library, shares, &self.steps.promises, self.id);
+        for root in std::iter::once(staging).chain(library) {
+            if let Some(access) = shares.access(root) {
+                self.log(&format!("share access for {root}: {access}"));
+            }
+        }
         Ok(self.space_result(checked))
     }
 
@@ -1444,7 +1458,8 @@ impl Step<'_> {
     /// CheckSpace in Decided (design part 5.8, S54): `staged_remux_check` of the staged files' sizes, read before the
     /// `Promises` lock, against the library root of the plan's kind, its result through `space_result`. Sizes that
     /// cannot be read give ShareLost only when staging does not answer, and otherwise the plan's estimate (review round
-    /// 1, V3 and RR1-6(b)). An unset library root or `staging_root` gives ShareLost saying so.
+    /// 1, V3 and RR1-6(b)). An unset library root or `staging_root` gives ShareLost saying so. Its share reads all come
+    /// before the check locks the promises (engine.md:584).
     fn remux_space(&self) -> Outcome {
         let Some(plan) = &self.job.record.plan else {
             return Ok(none("the job has no plan"));
@@ -1463,10 +1478,7 @@ impl Step<'_> {
         let staged = staged_bytes(staging, self.id, plan);
         self.check_cancel()?;
         let shares = self.steps.shares.as_ref();
-        let checked = {
-            let mut promises = lock(&self.steps.promises);
-            staged_remux_check(staged, plan, staging, library, shares, &mut promises, self.id)
-        };
+        let checked = staged_remux_check(staged, plan, staging, library, shares, &self.steps.promises, self.id);
         Ok(self.space_result(checked))
     }
 
@@ -1475,16 +1487,44 @@ impl Step<'_> {
     /// decision's layout, recorded as `<key>/remux-mkvmerge.txt`, its progress forwarded with the title key. No
     /// mkvmerge gives ToolMissing { Mkvmerge }; a remux that cannot be built or fails gives RemuxFailed { Unknown }
     /// with its sentence, and the staged file stays.
+    ///
+    /// Once mkvmerge is found, the job's Remux promise becomes `remux_promise` of the staged sizes, read here on the
+    /// step's thread (`refine_remux_promise`; engine.md:585, Ruling T3-17-a), when `staging_root` and the plan kind's
+    /// library root are set. Each title asks `reach` of its library root before it touches the share, the call that
+    /// connects with the stored credential (design part 6.1); a root that does not answer gives RemuxFailed
+    /// { Unknown } with `<key>: the library share holding <root> does not answer (<why>); the remux was not started,
+    /// and a retry once the share answers runs it`, so a restart into Remuxing writes nothing to a share it has not
+    /// reached (engine.md:590, as File does since review round 1's V7).
     fn remux(&self) -> Outcome {
         let failed = |failure| Event::RemuxFailed { failure };
         let plan = self.job_plan(failed)?;
         let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
             return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
         };
+        let settings = &self.job.settings;
+        let library = match plan.kind {
+            Kind::Movie => settings.movies_root.as_deref(),
+            Kind::Tv => settings.tv_root.as_deref(),
+        };
+        if let (Some(staging), Some(library)) = (settings.staging_root.as_deref(), library) {
+            let staged = staged_bytes(staging, self.id, plan);
+            let (shares, promises) = (self.steps.shares.as_ref(), &self.steps.promises);
+            refine_remux_promise(staged, library, shares, promises, self.id, &self.cancel);
+        }
         let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         for planned in &plan.titles {
             let key = planned.key.as_str();
             let (decision, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
+            if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
+                let root = &path.root;
+                return Ok(unknown(
+                    failed,
+                    format!(
+                        "{key}: the library share holding {root} does not answer ({why}); the remux was not started, \
+                         and a retry once the share answers runs it"
+                    ),
+                ));
+            }
             let partial = partial_path(&path.root, self.id, key);
             if let Some(folder) = partial.parent() {
                 let made = fs::create_dir_all(folder);
@@ -1715,7 +1755,10 @@ impl Step<'_> {
     }
 
     /// DeletePartialFile (design part 5.2; 10.1 "Resuming after a restart"): each decided title's partial file removed
-    /// before the remux runs again, a missing one ignored and any other error logged; no event.
+    /// before the remux runs again, a missing one ignored and any other error logged; no event. Each title first asks
+    /// `reach` of its library root (engine.md:590, design part 6.1); one that does not answer is skipped with the
+    /// job.log line `<key>: the library share holding <root> does not answer (<why>); the partial file <partial> was
+    /// not deleted`, and the Remux after it fails naming the share.
     fn delete_partial_file(&self) -> Outcome {
         let keys = self.job.record.plan.iter().flat_map(|plan| plan.titles.iter().map(|planned| planned.key.as_str()));
         for key in keys {
@@ -1723,6 +1766,14 @@ impl Step<'_> {
                 continue;
             };
             let partial = partial_path(&path.root, self.id, key);
+            if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
+                let (root, kept) = (&path.root, partial.display());
+                self.log(&format!(
+                    "{key}: the library share holding {root} does not answer ({why}); the partial file {kept} was not \
+                     deleted"
+                ));
+                continue;
+            }
             match fs::remove_file(&partial) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
                     self.log(&format!("{}: {error}", partial.display()));

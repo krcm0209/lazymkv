@@ -48,7 +48,7 @@ use crate::ipc_server::{
 use crate::notify::{self, spawn_notifier, NotifySink};
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
-use crate::space::{rebuild_promises, Promises, PromisedStep};
+use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
 #[cfg(any(test, feature = "testkit"))]
 use crate::store::PersistFaults;
@@ -239,6 +239,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         java_in_use: Arc::clone(&java_in_use),
         makemkv: Arc::clone(&makemkv),
         cancel: CancelToken::default(),
+        shares: Arc::clone(&platform.shares),
     };
     // PF-28: the MakeMKV check at start runs to its end before any step runs or any client is accepted (S79).
     let selftest = first_selftest(env.makemkv_check(&store.settings().0, false));
@@ -928,7 +929,8 @@ impl Owner {
     ///    that cannot be persisted feeds the state's failure row (`unpersisted`, V1); then, in each noted drive no fed
     ///    job holds, the disc of the latest job of its fingerprint is noted when that job failed in its disc phase, and
     ///    the drive becomes its record's drive, so a Retry uses the disc (spec 10.3);
-    /// 4. the space promises of the resumed jobs (`rebuild_promises`), the token and the slot are rebuilt, the slot
+    /// 4. the space promises of the resumed jobs (`rebuild_promises`, which reads no share and no staged file, so a
+    ///    share that stalls never holds the restart up; engine.md:585), the token and the slot are rebuilt, the slot
     ///    seeded only with the planned holders whose state still holds a place and that `unpersisted` did not leave
     ///    with their persisted state (RR1-1, RR1-5), and the noted drives are recorded handled;
     /// 5. the resume actions are performed, the slot is granted, then the arrivals are routed as fresh insertions.
@@ -999,6 +1001,7 @@ impl Owner {
             resumed.push((id.clone(), transition.actions));
         }
         self.note_failed_discs(&plan.noted, &discs);
+        // engine.md:585: `rebuild_promises` reads no share, so this lock is never held across share input and output.
         {
             let mut promises = lock(&self.parts.promises);
             for (id, _) in &resumed {
@@ -1770,24 +1773,25 @@ impl Owner {
     }
 
     /// Design part 5.8's promises released as steps finish: leaving Ripping releases the job's Rip promise, leaving
-    /// Remuxing its Remux promise, and a new Failed or waiting state releases both of its promises.
+    /// Remuxing its Remux promise, and a new Failed or waiting state releases both of its promises. The releases are
+    /// computed from the transition first (`released_steps`), and the promises are locked only when there is one, a
+    /// lock no check holds across share input and output (engine.md:584).
     fn release_promises(&self, id: &str, transition: &Transition) {
+        let released = released_steps(transition);
+        if released.is_empty() {
+            return;
+        }
         let mut promises = lock(&self.parts.promises);
-        if transition.old == Some(State::Ripping) && transition.new != State::Ripping {
-            promises.release(id, PromisedStep::Rip);
-        }
-        if transition.old == Some(State::Remuxing) && transition.new != State::Remuxing {
-            promises.release(id, PromisedStep::Remux);
-        }
-        if transition.new.is_waiting() || matches!(transition.new, State::Failed { .. }) {
-            promises.release(id, PromisedStep::Rip);
-            promises.release(id, PromisedStep::Remux);
+        for step in released {
+            promises.release(id, step);
         }
     }
 
     /// A return from a wait, or a Retry, runs no space check, so the promises of the state it returns to are rebuilt
     /// as at a restart (design parts 5.8, 5.10, Rulings S75, R25.c2: `rebuild_promises`), after `release_promises`
-    /// released what the job held when it started to wait or failed.
+    /// released what the job held when it started to wait or failed. `rebuild_promises` reads no share and no staged
+    /// file, so a stalled share never holds the owner thread here; a Remuxing job's Remux step replaces the estimate it
+    /// gives (engine.md:585, Ruling T3-17-a).
     fn promise_on_return(&self, id: &str, transition: &Transition) {
         let back = transition.old.as_ref().is_some_and(|old| old.is_waiting() || matches!(old, State::Failed { .. }));
         let (true, Some(job)) = (back, self.jobs.get(id)) else {

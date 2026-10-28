@@ -169,7 +169,9 @@ pub trait ShareConnector: Send + Sync {
     fn reach(&self, root: &str) -> Reach;
     /// The free bytes on the volume holding `root`.
     fn free_bytes(&self, root: &str) -> io::Result<u64>;
-    /// An identifier of the volume holding `root`, equal for two roots on one volume (S11), or None when unknown.
+    /// An identifier of the volume holding `root`, equal for two roots on one volume (S11), or None when unknown. It answers
+    /// from the text of `root` alone, with no input or output, so the owner thread may call it (design part 6.1's rule,
+    /// engine.md:585).
     fn volume(&self, root: &str) -> Option<String>;
     /// How the last successful `reach` of the share holding `root` got in: "local folder", "the session's access" or
     /// "lazymkv's stored credential"; None before any, after a failed one, and for a connector that does not say.
