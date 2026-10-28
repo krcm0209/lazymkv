@@ -20,6 +20,19 @@ pub mod win;
 mod process;
 pub use process::StdProcessGuard;
 
+/// The process runner the engine uses on this system (spec 4.3, design part 4.2; Ruling W7): `win::JobProcessGuard`
+/// on Windows, `StdProcessGuard` elsewhere. Def: T3-5. Use: T3-5 (testkit), T3-23.
+pub fn native_guard() -> Arc<dyn ProcessGuard> {
+    #[cfg(windows)]
+    {
+        Arc::new(win::JobProcessGuard)
+    }
+    #[cfg(not(windows))]
+    {
+        Arc::new(StdProcessGuard)
+    }
+}
+
 /// The pure security rules of design parts 3.2 to 3.5: the descriptor strings, the token verdict and the names.
 /// Def: T3-2. Use: T3-2, T3-3, T3-4, T3-11 to T3-14, T3-23, T3-24.
 pub mod security;

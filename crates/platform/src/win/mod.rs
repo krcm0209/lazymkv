@@ -9,11 +9,13 @@ use std::os::windows::ffi::OsStrExt;
 
 mod files;
 mod folder;
+mod job;
 mod mutex;
 mod token;
 
 pub(crate) use files::{move_no_replace, move_replacing};
 pub use folder::{program_data, protect_data_folder};
+pub use job::JobProcessGuard;
 pub use mutex::{EngineMutex, MutexRefusal};
 pub use token::own_token;
 pub(crate) use token::{sid_string, token_facts, token_of_process, Descriptor};

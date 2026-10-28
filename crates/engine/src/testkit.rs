@@ -36,7 +36,7 @@ use lazymkv_platform::fakes::{
     ScriptedDrives,
 };
 use lazymkv_platform::{
-    DriveEvent, DriveWatcher, GuardedChild, IpcConnector, Platform, ProcessGuard, Spawn, StdProcessGuard,
+    native_guard, DriveEvent, DriveWatcher, GuardedChild, IpcConnector, Platform, ProcessGuard, Spawn,
 };
 use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
@@ -414,7 +414,8 @@ impl Harness {
         defaults["tool_paths"] = Value::Object(tool_paths);
         let lookups_wait = Arc::new(AtomicBool::new(true));
         let spawn_hooks = SpawnHooks::default();
-        let guard = TestGuard { wait: Arc::clone(&lookups_wait), urls, hooks: Arc::clone(&spawn_hooks) };
+        let guard =
+            TestGuard { wait: Arc::clone(&lookups_wait), urls, hooks: Arc::clone(&spawn_hooks), inner: native_guard() };
         let runner = Runner {
             steps: ScriptedSteps::new(Vec::new()),
             scripted: false,
@@ -1025,12 +1026,12 @@ struct Runner {
 }
 
 impl Runner {
-    /// `new_scripted`'s: the script, the std process guard, a transport with no answers and no scenario.
+    /// `new_scripted`'s: the script, `native_guard()`, a transport with no answers and no scenario.
     fn scripted(steps: ScriptedSteps, tools: PathBuf) -> Runner {
         Runner {
             steps,
             scripted: true,
-            processes: Arc::new(StdProcessGuard),
+            processes: native_guard(),
             http: RecordedTransport::new(),
             tools,
             disc: None,
@@ -1045,8 +1046,9 @@ impl Runner {
 /// folder>/lookup-status.txt` has one line per distinct URL of the merged `http.json` and no line ends in `000`. The
 /// engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
 /// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
-/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `StdProcessGuard` through `BusyRetry`
-/// (Ruling R29.c4).
+/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `native_guard()` through `retry_busy`
+/// (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake job runs it (Ruling W7), and
+/// `StdProcessGuard` elsewhere.
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,
@@ -1054,6 +1056,8 @@ struct TestGuard {
     urls: usize,
     /// `Harness::on_spawn`'s actions.
     hooks: SpawnHooks,
+    /// `native_guard()`, which starts every spawn.
+    inner: Arc<dyn ProcessGuard>,
 }
 
 impl ProcessGuard for TestGuard {
@@ -1077,7 +1081,7 @@ impl ProcessGuard for TestGuard {
                 thread::sleep(POLL);
             }
         }
-        BusyRetry(StdProcessGuard).spawn(spawn)
+        retry_busy(|| self.inner.spawn(spawn))
     }
 }
 
