@@ -15,5 +15,5 @@ serde = { version = "1", features = ["derive"] }
 # float_roundtrip: every float parses to the exact f64 Python's repr wrote.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 regex = "1"
-fancy-regex = "0.14"
+fancy-regex = "0.20"
 unicode-normalization = "0.1"
