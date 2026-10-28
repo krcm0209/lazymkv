@@ -31,6 +31,11 @@ pub mod shares;
 /// Def: T3-15. Use: T3-15.
 pub mod eject;
 
+/// The pure half of design part 4.2's drive watcher, compiled and tested on every system (Ruling W8): the drive id,
+/// the scan's filter, whether a volume answers, and the queue of arrivals and removals. `win::drives` makes the
+/// Windows calls. Def: T3-16. Use: T3-16.
+pub mod drives;
+
 mod process;
 pub use process::StdProcessGuard;
 
@@ -71,13 +76,20 @@ pub enum DriveEvent {
     },
 }
 
-/// Delivers disc arrivals and removals to the engine's drive thread (spec 4.3, design part 4.2).
-/// Def: T8. Use: T22, T25.
+/// Delivers disc arrivals and removals to the engine's drive thread (spec 4.3, design parts 4.2, 5.4). Drive ids are
+/// MakeMKV's `D:` form, the letter in upper case and a colon (engine.md:575). A disc counts as present once its volume
+/// answers: a disc whose volume does not answer is not listed and arrives through `next` once it answers, so it gets
+/// `drive_settle_s` and the readiness wait like any arrival, while a disc `present` lists is read at once (Ruling W8,
+/// engine.md:582). `ScriptedDrives` replays what a test scripts (Rulings T8-b, T8-f): an event a test queued before
+/// the engine started is reported although `present` lists its outcome. Def: T8, its promises T3-16. Use: T22, T25,
+/// T3-23.
 pub trait DriveWatcher: Send {
-    /// Waits up to `timeout` for the next event and returns it, or None when none came in that time.
+    /// Waits up to `timeout` for the next event and returns it, or None when none came in that time. It never reports
+    /// as `Arrived` a disc the last `present` listed until that drive's `Removed` (L1a).
     fn next(&mut self, timeout: Duration) -> Option<DriveEvent>;
-    /// The drives holding a disc right now, as (drive, root). The engine reads this at start (design part 4.2, L1),
-    /// before it drains any event, and does not rely on the order.
+    /// The drives holding a disc at the moment of the call, as (drive, root). Every event queued before the call is
+    /// dropped, since the list holds its outcome (L1a). The engine reads this at start (design part 4.2, L1), before it
+    /// drains any event, and does not rely on the order.
     fn present(&self) -> Vec<(String, PathBuf)>;
 }
 
