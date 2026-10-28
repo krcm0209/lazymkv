@@ -276,12 +276,14 @@ pub(crate) fn read_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> ReadBack {
         let mut ace = null_mut();
         // SAFETY: `index` is below the list's AceCount; the call writes the entry's address to `ace`.
         assert_ne!(unsafe { GetAce(dacl, index, &mut ace) }, 0, "GetAce: {}", io::Error::last_os_error());
-        // Both reads sit in the branch where `ace` is not null, a check the code scanner sees.
+        // The entry as its header, in a binding whose address is never taken, so that the code scanner sees the
+        // null check below cover both reads in its branch.
+        let ace = ace.cast::<ACE_HEADER>();
         let (header, mask) = if ace.is_null() {
             panic!("GetAce wrote no entry")
         } else {
             // SAFETY: a non-null `ace` points at the entry GetAce found, and every entry starts with an ACE_HEADER.
-            let header = unsafe { *ace.cast::<ACE_HEADER>() };
+            let header = unsafe { *ace };
             let kind = header.AceType;
             assert!(matches!(kind, ALLOWED | DENIED), "entry type {kind} is neither allow nor deny");
             // SAFETY: as above, and an allow or deny entry is an ACCESS_ALLOWED_ACE.
