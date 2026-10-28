@@ -189,7 +189,8 @@ pub trait IpcTransport: Send + Sync {
 pub enum ConnectError {
     /// Nothing listens on the pipe.
     NotRunning,
-    /// Something listens and turned the client away.
+    /// Something listens and turned the client away, or it is not an elevated process of the client's user and the
+    /// client turned it away (design part 3.3; Ruling W11).
     Refused,
     /// The pipe exists but only an elevated client may open it.
     NotElevated,

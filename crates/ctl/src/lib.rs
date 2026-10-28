@@ -8,12 +8,13 @@ use std::path::PathBuf;
 
 mod engine_cmds;
 
-/// What lazymkvctl reads and writes: the dev context, the engine connector (None in PR 2's binary, S38), and the
-/// three streams (design parts 9.5, 9.6). Def: T27. Use: T27, T28.
+/// What lazymkvctl reads and writes: the dev context, the engine connector (the named pipe's client on Windows, design
+/// part 3.3; None on Linux and macOS, S38), and the three streams (design parts 9.5, 9.6). Def: T27, T3-12.
+/// Use: T27, T28, T3-12.
 pub struct Env<'a> {
     /// The working folder, environment and runner that the local commands run over.
     pub ctx: &'a Ctx,
-    /// The way to the engine; None when the build has no transport, which is every build in PR 2.
+    /// The way to the engine; None when the build has no transport, as on Linux and macOS (S38).
     pub connector: Option<&'a dyn IpcConnector>,
     /// Standard input, which `secret set` reads its value from.
     pub stdin: &'a mut dyn Read,

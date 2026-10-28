@@ -654,4 +654,38 @@ mod tests {
         assert_eq!(request["payload"]["words"], json!(["retune", "--jobs", "--spec", "spec.md", "--spec", absolute]));
         assert_eq!((code, err.as_str()), (0, ""));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctl_status_over_a_test_pipe_prints_the_engines_reply() {
+        use lazymkv_platform::security::test_name;
+        use lazymkv_platform::win::{PipeConnector, PipeServer};
+        use std::io::Read;
+        let scratch = Scratch::new("ctl-pipe");
+        let name = format!(r"\\.\pipe\{}", test_name("ctl"));
+        let server = PipeServer::bind(&name).unwrap();
+        let peer = thread::spawn(move || {
+            let mut stream = server.accept().unwrap();
+            writeln!(stream.writer, "{SNAPSHOT}").unwrap();
+            let mut sent = Vec::new();
+            stream.reader.read_to_end(&mut sent).unwrap();
+            sent
+        });
+        let connector = PipeConnector::new(&name);
+        let (code, out, err) = call(&["status"], Some(&connector), b"", &scratch.0);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "{\n \"jobs\": []\n}\n", ""));
+        // status sends nothing (T28-c): the peer reads the end at once.
+        assert_eq!(peer.join().unwrap(), Vec::<u8>::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctl_status_with_no_engine_on_a_test_pipe_exits_4_saying_none_is_running() {
+        use lazymkv_platform::security::test_name;
+        use lazymkv_platform::win::PipeConnector;
+        let scratch = Scratch::new("ctl-pipe-none");
+        let connector = PipeConnector::new(&format!(r"\\.\pipe\{}", test_name("ctl-none")));
+        let (code, out, err) = call(&["status"], Some(&connector), b"", &scratch.0);
+        assert_eq!((code, out.as_str(), err), (4, "", format!("{NOT_RUNNING}\n")));
+    }
 }

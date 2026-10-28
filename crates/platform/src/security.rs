@@ -4,6 +4,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::ConnectError;
+
 /// The SID (security identifier) of the LocalSystem account (design part 3.5). Def: T3-2. Use: T3-2, T3-11.
 pub const SYSTEM_SID: &str = "S-1-5-18";
 /// The SID of the built-in Administrators group (design parts 3.3, 3.5). Def: T3-2. Use: T3-2, T3-3.
@@ -72,6 +74,19 @@ pub fn token_verdict(peer: &TokenFacts, own_user_sid: &str) -> Result<(), &'stat
         Err("its token is not elevated")
     } else {
         Ok(())
+    }
+}
+
+/// The `ConnectError` of the pipe client's failed open with OS code `raw_os_error` (design part 9.6; Ruling W11):
+/// `ERROR_FILE_NOT_FOUND` (2) is NotRunning; `ERROR_ACCESS_DENIED` (5) is NotElevated when this process is not
+/// elevated, else Refused; any other code, `ERROR_PIPE_BUSY` (231) after the one wait among them, is Refused.
+/// Def: T3-12. Use: T3-12.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn connect_error(raw_os_error: i32, own_elevated: bool) -> ConnectError {
+    match raw_os_error {
+        2 => ConnectError::NotRunning,
+        5 if !own_elevated => ConnectError::NotElevated,
+        _ => ConnectError::Refused,
     }
 }
 
@@ -150,6 +165,22 @@ mod tests {
         assert_eq!(token_verdict(&peer(OWN, true, ElevationType::Full), OWN), Ok(()));
         // An SSH session's elevated token has no linked token.
         assert_eq!(token_verdict(&peer(OWN, true, ElevationType::Default), OWN), Ok(()));
+    }
+
+    #[test]
+    fn access_denied_is_not_elevated_only_when_this_process_is_not() {
+        assert_eq!(connect_error(5, false), ConnectError::NotElevated);
+        assert_eq!(connect_error(5, true), ConnectError::Refused);
+    }
+
+    #[test]
+    fn file_not_found_is_not_running_and_any_other_error_is_refused() {
+        assert_eq!(connect_error(2, true), ConnectError::NotRunning);
+        assert_eq!(connect_error(2, false), ConnectError::NotRunning);
+        for code in [231, 109, 87, 1326] {
+            assert_eq!(connect_error(code, true), ConnectError::Refused, "{code}");
+            assert_eq!(connect_error(code, false), ConnectError::Refused, "{code}");
+        }
     }
 
     #[test]

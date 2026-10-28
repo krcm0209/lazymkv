@@ -8,6 +8,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
 mod awake;
+mod client;
 mod files;
 mod folder;
 mod host;
@@ -17,6 +18,7 @@ mod pipe;
 mod token;
 
 pub use awake::WinKeepAwake;
+pub use client::PipeConnector;
 pub(crate) use files::{move_no_replace, move_replacing};
 pub use folder::{program_data, protect_data_folder};
 pub use host::WinHost;
