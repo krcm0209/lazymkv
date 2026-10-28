@@ -20,6 +20,11 @@ pub mod win;
 mod process;
 pub use process::StdProcessGuard;
 
+/// The pure security rules of design parts 3.2 to 3.5: the descriptor strings, the token verdict and the names.
+/// Def: T3-2. Use: T3-2, T3-3, T3-4, T3-11 to T3-14, T3-23, T3-24.
+pub mod security;
+pub use security::{MUTEX_NAME, PIPE_NAME};
+
 /// A change in the set of optical drives the machine holds (spec 4.3, design part 4.2): a disc arrived in `drive`,
 /// whose contents are readable under `root`, or the drive's disc went away. Def: T8. Use: T22, T25.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,20 +265,8 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-pub(crate) mod testutil {
-    use std::path::PathBuf;
-
-    /// A fresh, empty directory under the system temporary folder.
-    pub fn temp_dir(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("lazymkv-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-}
+#[allow(dead_code)] // ci_factor, skip and cue serve the Windows tests, so the other systems never call them
+mod testutil;
 
 #[cfg(test)]
 mod tests {
