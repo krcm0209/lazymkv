@@ -78,6 +78,41 @@ fn a_movie_disc_reaches_ejected_with_its_recording() {
     assert!(title.rip_reviews.is_empty());
 }
 
+/// R23.7 with Ruling W16 (design parts 4.6, 7.1): `started` is the rip's recorded start in phase 0's local-time form,
+/// between `bytes` and `elapsed_s`. FakeHost's clock, 1_792_800_000 s, read as UTC is 2026-10-24 00:00:00.000; the
+/// harness's `local_date` stays 2026-10-23, since the fake's date is a setting and `started` is its clock read as UTC.
+#[test]
+fn the_rip_summary_has_started_from_the_rip_start_between_bytes_and_elapsed_s() {
+    let h = harness(&[], json!({}));
+    let id = run_to(&h, "Ejected");
+    let summary = json_of(&h.job_dir(&id).join(KEY).join("rip-summary.json"));
+    let keys: Vec<&str> = summary.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["ok", "result", "slug", "label", "title", "profile", "bytes", "started", "elapsed_s", "exit_code",
+        "files", "dest", "cache_mb"]);
+    assert_eq!(summary["started"], json!("2026-10-24 00:00:00.000"));
+    assert_eq!(h.record(&id).titles[0].rip_started_ms, Some(1_792_800_000_000));
+}
+
+/// R23.4 with Ruling W16: the rip's start is persisted with TitleRipped, before VerifyFile writes rip-summary.json, so
+/// a restart there finds it in state.json. A restart in Ripping rips the title again (`resume`, core/src/job.rs:742),
+/// and the summary takes the start that rip posted; the first rip, moved aside, never got a summary.
+#[test]
+fn a_restart_between_rip_and_verify_keeps_started() {
+    let h = harness(&[], json!({}));
+    h.insert("tok0", "movie-direct");
+    h.run_until_event("TitleRipped", |event| matches!(event, Event::TitleRipped));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    let key_dir = h.job_dir(&id).join(KEY);
+    assert!(!key_dir.join("rip-summary.json").exists());
+    assert_eq!(h.record(&id).titles[0].rip_started_ms, Some(1_792_800_000_000));
+    h.restart();
+    h.run_until("Ejected");
+    assert_eq!(json_of(&key_dir.join("rip-summary.json"))["started"], json!("2026-10-24 00:00:00.000"));
+    assert!(!key_dir.join("attempt-1").join("rip-summary.json").exists());
+    let record = h.record(&id);
+    assert_eq!((record.titles[0].attempts, record.titles[0].rip_started_ms), (2, Some(1_792_800_000_000)));
+}
+
 #[test]
 fn job_mmcp_xml_carries_the_all_tracks_selection_and_a_job_unique_name() {
     let h = harness(&[], json!({}));

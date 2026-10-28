@@ -283,6 +283,12 @@ pub(crate) fn next_attempt_dir(title_dir: &Path) -> PathBuf {
     title_dir.join(format!("attempt-{}", highest + 1))
 }
 
+/// rip-summary.json's `started`: `host.local_time` of the title record's `rip_started_ms`, None when the record has
+/// none (R23.7; Ruling W16). Def: T3-9. Use: T3-9 (`write_rip_summary`).
+pub(crate) fn rip_started_text(title: &TitleRecord, host: &dyn Host) -> Option<String> {
+    title.rip_started_ms.map(|unix_ms| host.local_time(unix_ms))
+}
+
 /// One lookup round on its own thread (design part 8.2): run_round over the locked book, each SavedFile written with
 /// write_atomic into the job folder (a write that fails is logged in engine.log); `done` gets `book.pending()` or
 /// chain_inputs' Err. The round holds the book for the whole round (R23.1). Each lookup the round leaves
@@ -820,6 +826,7 @@ impl Step<'_> {
                 rip_reviews: Vec::new(),
                 decision: None,
                 filed: None,
+                rip_started_ms: None,
             })
             .collect();
         if !self.post_edit(move |record| {
@@ -950,6 +957,10 @@ impl Step<'_> {
                 return Ok(with(failed(failure), format!("{}: {error}", rip_dir.display())));
             }
             let (drive, _) = self.listing(&makemkvcon, failed)?;
+            let started_ms = self.steps.host.now_ms();
+            if !self.post_title(key, move |title| title.rip_started_ms = Some(started_ms)) {
+                return Err(cancelled());
+            }
             self.started(&name, &makemkvcon, &rip_args(&flags, drive, index, &rip_dir));
             let ripped = self.ctx(&on_progress, |ctx| {
                 rip(ctx, &makemkvcon, &flags, drive, index, planned.source(), &rip_dir, &out, &health)
@@ -1033,7 +1044,8 @@ impl Step<'_> {
     }
 
     /// `<key>/rip-summary.json` (design part 7.1, R23.4, R23.7): written before the verification, from the run's
-    /// exit file and the title record RipTitle edited.
+    /// exit file and the title record RipTitle edited. `started` is `rip_started_text`, after `bytes`; a record without
+    /// a start writes no `started` (R23.7, Ruling W16).
     fn write_rip_summary(&self, title: &TitleRecord, rip_dir: &Path, files: &[PathBuf]) {
         let key_dir = self.job.job_dir.join(&title.key);
         let exit = read_json(&key_dir.join("rip.txt.exit.json")).unwrap_or(Value::Null);
@@ -1048,12 +1060,15 @@ impl Step<'_> {
             "title": title.scan_title,
             "profile": self.job.record.profile,
             "bytes": bytes,
-            "elapsed_s": exit["elapsed_ms"].as_u64().map(|ms| ms as f64 / 1000.0),
-            "exit_code": exit["exit_code"],
-            "files": names,
-            "dest": rip_dir.display().to_string(),
-            "cache_mb": self.job.settings.cache_mb,
         });
+        if let Some(started) = rip_started_text(title, self.steps.host.as_ref()) {
+            summary["started"] = json!(started);
+        }
+        summary["elapsed_s"] = json!(exit["elapsed_ms"].as_u64().map(|ms| ms as f64 / 1000.0));
+        summary["exit_code"] = exit["exit_code"].clone();
+        summary["files"] = json!(names);
+        summary["dest"] = json!(rip_dir.display().to_string());
+        summary["cache_mb"] = json!(self.job.settings.cache_mb);
         if let Some(index) = title.rip_index.filter(|index| *index != title.scan_title) {
             summary["rip_index"] = json!(index);
         }
@@ -1812,5 +1827,19 @@ mod tests {
         assert_eq!(classed(false, false), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
+    }
+
+    /// Ruling W16: `started` is the record's start, not the clock at VerifyFile.
+    #[test]
+    fn started_is_the_records_rip_start_not_the_clock() {
+        let host = lazymkv_platform::fakes::FakeHost::new("2026-10-23", 1_792_800_000);
+        let mut title = TitleRecord {
+            key: "t00-00800".to_string(), scan_title: 0, rip_index: None, attempts: 1, verified: false,
+            verify_failures: 0, read_errors: Vec::new(), rip_reviews: Vec::new(), decision: None, filed: None,
+            rip_started_ms: Some(1_700_000_000_123),
+        };
+        assert_eq!(rip_started_text(&title, &host).as_deref(), Some("2023-11-14 22:13:20.123"));
+        title.rip_started_ms = None;
+        assert_eq!(rip_started_text(&title, &host), None);
     }
 }

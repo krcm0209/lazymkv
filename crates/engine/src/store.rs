@@ -539,7 +539,7 @@ mod tests {
         let store = store_in(&tmp.0);
         let title = |key: &str| TitleRecord {
             key: key.to_string(), scan_title: 0, rip_index: None, attempts: 0, verified: false, verify_failures: 0,
-            read_errors: Vec::new(), rip_reviews: Vec::new(), decision: None, filed: None,
+            read_errors: Vec::new(), rip_reviews: Vec::new(), decision: None, filed: None, rip_started_ms: None,
         };
         let noted = |note: Note| Noted { note, stream: None, detail: "d".to_string() };
         let mut sorted = record(State::Detected, 7);
