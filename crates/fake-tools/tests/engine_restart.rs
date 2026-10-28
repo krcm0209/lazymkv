@@ -260,8 +260,11 @@ fn a_restart_in_verified_with_another_size_at_the_final_path_fails_as_unknown() 
     assert_eq!(fs::read(final_path(&h)).unwrap(), b"abc");
 }
 
+/// Off Windows only (S13): there `rename_no_replace` is a hard link then a remove, and on Windows one `MoveFileExW`,
+/// so the half state cannot arise there and a hard link at the final path is a collision (Ruling T3-4-b).
 /// Design part 6.5 with `rename_no_replace`'s two steps (hard link, then remove): a stop between them leaves both names
 /// on one file, and File after the restart removes the partial name and records the filed file, with no collision.
+#[cfg(not(windows))]
 #[test]
 fn a_restart_after_a_rename_stopped_between_link_and_remove_finishes_it() {
     let h = harness(&["movie-direct"], settings());

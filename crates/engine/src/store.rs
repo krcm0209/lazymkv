@@ -288,8 +288,9 @@ impl Store {
 /// 32 and 33), starts again up to `REPLACE_TRIES` tries in all, `REPLACE_PAUSE` apart, as an indexer or virus scanner
 /// holding state.json for a moment would otherwise fail the transition. The decision reads the raw OS error, so the
 /// path is added only after it. Every other error, and every error outside Windows, where `REPLACE_TRIES` is 1, is
-/// returned at once. The retry stays when pull request 3 swaps in `MoveFileExW`. It is the engine's first production
-/// retry loop (R29.c3 and R29.c4 keep theirs in test code).
+/// returned at once. The retry stays now that `write_atomic` replaces with `MoveFileExW`, whose own tries cover only a
+/// reader's brief open (10 tries 10 ms apart, Ruling T3-4-a), so a state.json held for good costs the owner thread up
+/// to about 0.85 s. It is the engine's first production retry loop (R29.c3 and R29.c4 keep theirs in test code).
 fn replace_state(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tries = 1;
     loop {

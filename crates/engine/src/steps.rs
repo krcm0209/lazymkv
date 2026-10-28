@@ -163,6 +163,7 @@ fn add_collision(record: &mut JobRecord, path: String) {
 
 /// Whether `a` and `b` name one file, as both names of a rename stopped between its hard link and its remove do: both
 /// are files of equal size and modification time (design part 6.5).
+#[cfg(not(windows))]
 fn one_file(a: &Path, b: &Path) -> bool {
     match (fs::metadata(a), fs::metadata(b)) {
         (Ok(a), Ok(b)) => {
@@ -174,6 +175,7 @@ fn one_file(a: &Path, b: &Path) -> bool {
 }
 
 /// The message of a rename whose hard link was made and whose remove of the partial name failed (design part 6.5).
+#[cfg(not(windows))]
 fn half_done(partial: &Path, target: &str, error: &io::Error) -> String {
     format!("{target} holds the filed file, but the partial file {} could not be removed: {error}", partial.display())
 }
@@ -1558,10 +1560,12 @@ impl Step<'_> {
     /// modification time recorded. A file already at the final path gives FileFailed { Unknown } with `<final> already
     /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22]. An earlier
     /// rename is taken as done, as design part 6.5 says after a restart in Verified, when the partial file is gone and
-    /// the final path holds a file of the verified size (the title's `filed` size, RP-7), and when a rename stopped
-    /// between its hard link and its remove left both names on one file (`one_file`), whose partial name is then
-    /// removed. A partial file that is gone otherwise gives FileFailed { Unknown }, as does a remove that fails after
-    /// the link, with a message saying the final path holds the file.
+    /// the final path holds a file of the verified size (the title's `filed` size, RP-7); a partial file that is gone
+    /// otherwise gives FileFailed { Unknown }. Off Windows, where `rename_no_replace` is a hard link then a remove
+    /// (S13), a rename stopped between the two leaves both names on one file (`one_file`): its partial name is then
+    /// removed and the rename taken as done, and a remove that fails after the link gives FileFailed { Unknown } with a
+    /// message saying the final path holds the file. On Windows `MoveFileExW` renames in one step, so that half state
+    /// cannot arise and those branches are not compiled (Ruling T3-4-b).
     ///
     /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
     /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
@@ -1649,6 +1653,7 @@ impl Step<'_> {
             self.check_cancel()?;
             match rename_no_replace(&partial, target) {
                 Ok(()) => {}
+                #[cfg(not(windows))]
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists && one_file(&partial, target) => {
                     // Design part 6.5: an earlier rename stopped between its hard link and its remove.
                     if let Err(error) = fs::remove_file(&partial) {
@@ -1665,6 +1670,7 @@ impl Step<'_> {
                     let (shown, stays) = (&path.path, partial.display());
                     return Ok(unknown(failed, format!("{shown} already exists; the partial file stays at {stays}")));
                 }
+                #[cfg(not(windows))]
                 Err(error) if one_file(&partial, target) => {
                     // The hard link was made and only the remove of the partial name failed.
                     return Ok(unknown(failed, half_done(&partial, &path.path, &error)));

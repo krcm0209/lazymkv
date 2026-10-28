@@ -232,11 +232,13 @@ pub struct Platform {
 pub const TEMP_SUFFIX: &str = ".lazymkv-tmp";
 
 /// Writes `bytes` to `path` so that a reader sees the old file or the new one whole, never a part (design part 7.4,
-/// S13). It writes `<file name>.lazymkv-tmp` beside `path`, after removing one a crash left there, flushes it to disk
-/// with `sync_all`, and renames it over `path`. It creates no folders: a missing parent gives
-/// `ErrorKind::NotFound`, because each caller owns its folder layout (Ruling T9-c). A path with no file name gives
-/// `ErrorKind::InvalidInput`. Pull request 3 swaps in `FlushFileBuffers` with
-/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`. Def: T9. Use: T21 to T26.
+/// S13). It writes `<file name>.lazymkv-tmp` beside `path`, after removing one a crash left there, flushes it with
+/// `sync_all` (`FlushFileBuffers` on Windows), and puts it in place of `path`. On Windows that is
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, tried again while the target is held open
+/// (os errors 5, 32 and 33; 10 tries, 10 ms apart, Ruling T3-4-a), and the last error comes back with its raw code,
+/// which the store's state.json retry reads (RR1-2); elsewhere it is `std::fs::rename`. It creates no folders: a
+/// missing parent gives `ErrorKind::NotFound`, because each caller owns its folder layout (Ruling T9-c). A path with no
+/// file name gives `ErrorKind::InvalidInput`. Def: T9; T3-4 swaps in `MoveFileExW` on Windows. Use: T21 to T26.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
@@ -252,16 +254,33 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(&temp, path)
+    #[cfg(windows)]
+    {
+        win::move_replacing(&temp, path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&temp, path)
+    }
 }
 
 /// Moves `from` to `to` and fails with `ErrorKind::AlreadyExists` when `to` is there, so a finished file is never
-/// overwritten (design part 6.5, S13). It is `hard_link` then `remove_file`: `hard_link` refuses an existing `to` and
-/// that error comes back unchanged. Pull request 3 swaps in `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` or
-/// `MOVEFILE_COPY_ALLOWED`. Def: T9. Use: T24.
+/// overwritten (design part 6.5, LIB-8, S13). On Windows it is one `MoveFileExW(from, to, 0)`: without
+/// `MOVEFILE_REPLACE_EXISTING` an existing `to` fails with os error 80 or 183, and without `MOVEFILE_COPY_ALLOWED` a
+/// move to another volume fails with os error 17 instead of copying, so within a share it is the server's rename.
+/// Elsewhere, where only the Linux and macOS CI runs use it, it is `hard_link` then `remove_file`, which is not atomic:
+/// a stop between the two leaves both names on one file, which File then finishes (design part 6.5).
+/// Def: T9; T3-4 swaps in `MoveFileExW` on Windows. Use: T24, T26, T3-14.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-    std::fs::hard_link(from, to)?;
-    std::fs::remove_file(from)
+    #[cfg(windows)]
+    {
+        win::move_no_replace(from, to)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::hard_link(from, to)?;
+        std::fs::remove_file(from)
+    }
 }
 
 #[cfg(test)]
