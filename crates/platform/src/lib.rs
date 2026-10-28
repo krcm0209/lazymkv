@@ -21,6 +21,10 @@ pub mod win;
 /// date-time crate (design part 4.6, R23.7). Compiled and tested on every system. Def: T3-7. Use: T3-7.
 pub mod localtime;
 
+/// The parts of design part 6.1 that need no Windows call, compiled and tested on every system (design part 4.2):
+/// the Credential Manager target of a secret (Ruling W13). Def: T3-13. Use: T3-13, T3-14.
+pub mod shares;
+
 mod process;
 pub use process::StdProcessGuard;
 

@@ -458,6 +458,37 @@ fn secret_set_refuses_an_unknown_name_and_never_echoes_the_value() {
     assert!(!d.line().unwrap().contains("s3cret-value"));
 }
 
+#[test]
+fn a_share_value_of_three_lines_is_refused_without_echoing_it() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let name = r"share:\\nas\media";
+    let value = "user-sentinel-7c1e\r\npass-sentinel-4b9d\r\nthird";
+    let message = c.err("secret_set", json!({"name": name, "value": value}));
+    assert_eq!(message, format!("{name} could not be stored: the value must be a user name and a password on two lines"));
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"].get(name), None);
+    assert!(!h.engine_log().contains("sentinel"));
+}
+
+#[test]
+fn a_two_line_share_value_is_stored() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let name = r"share:\\nas\media";
+    let value = "user-sentinel-7c1e\r\npass-sentinel-4b9d";
+    assert_eq!(c.ok("secret_set", json!({"name": name, "value": value})), Value::Null);
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"][name], json!({"set": true, "host": null}));
+    assert!(!h.engine_log().contains("sentinel"));
+}
+
 // ---- Retry (design part 9.4, L3) ----
 
 #[test]

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use lazymkv_clients::{HttpTransport, LookupBook};
 use lazymkv_core::ipc::{
-    is_secret_name, job_summary, push_line, reply_error, reply_ok, JobSummary, JobUpdate, Notification, Progress, Push,
-    Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+    is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
+    Notification, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
 };
 use lazymkv_core::job::{
     job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
@@ -2336,11 +2336,15 @@ impl Owner {
         }
     }
 
-    /// `secret_set` (design part 9.4, S77): a name `is_secret_name` takes is stored through `SecretStore`, and a share
-    /// name joins the names the snapshot lists; the value is never echoed or logged.
+    /// `secret_set` (design part 9.4, S77; Ruling W12): a name `is_secret_name` takes is stored through `SecretStore`,
+    /// a share name's value only when `share_credential` reads it as a user name and a password on two lines, and a
+    /// share name joins the names the snapshot lists; the value is never echoed or logged.
     fn secret_set(&mut self, name: &str, value: &str) -> Result<Value, String> {
         if !is_secret_name(name) {
             return Err(not_a_secret(name));
+        }
+        if !SECRET_NAMES.contains(&name) {
+            share_credential(value).map_err(|shape| format!("{name} could not be stored: {shape}"))?;
         }
         self.parts.secrets.set(name, value).map_err(|error| format!("{name} could not be stored: {error}"))?;
         if !SECRET_NAMES.contains(&name) {
