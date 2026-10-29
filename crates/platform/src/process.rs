@@ -104,6 +104,10 @@ pub(crate) mod tests {
         }
     }
 
+    /// The exception code the `raise` mode raises: the customer bit set, and "LMK" in the low three bytes.
+    #[cfg(windows)]
+    pub(crate) const RAISED: u32 = 0xE04C_4D4B;
+
     /// Writes `line` on a line of its own to standard output and flushes it (Ruling T3-5-c).
     fn say(line: &str) {
         let mut out = std::io::stdout();
@@ -114,7 +118,8 @@ pub(crate) mod tests {
     /// The child the runner tests start: this test binary running only this test, in the mode LAZYMKV_TEST_HELPER
     /// names. `sleep` sleeps until killed; `echo` prints one line to each stream; `spawn-grandchild` starts this test
     /// binary again as `print-pid-sleep`, with this child's standard output and error, then writes `child <pid>` and
-    /// sleeps 60 s; `print-pid-sleep` writes `grandchild <pid>` and sleeps 60 s. Any other mode returns at once.
+    /// sleeps 60 s; `print-pid-sleep` writes `grandchild <pid>` and sleeps 60 s; `raise`, on Windows only, raises the
+    /// exception `RAISED`, which nothing handles. Any other mode returns at once.
     #[test]
     #[ignore]
     fn helper_child() {
@@ -140,6 +145,12 @@ pub(crate) mod tests {
             Ok("print-pid-sleep") => {
                 say(&format!("grandchild {}", std::process::id()));
                 std::thread::sleep(Duration::from_secs(60));
+            }
+            #[cfg(windows)]
+            Ok("raise") => {
+                use windows_sys::Win32::System::Diagnostics::Debug::RaiseException;
+                // SAFETY: with no arguments, RaiseException reads no pointer.
+                unsafe { RaiseException(RAISED, 0, 0, std::ptr::null()) };
             }
             _ => {}
         }

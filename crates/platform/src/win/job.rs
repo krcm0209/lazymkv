@@ -1,6 +1,8 @@
 //! The Job Object runner (design part 4.2; Rulings W7, T3-5-a, T3-5-b): every child of the engine in a Job Object of
 //! its own, created suspended and assigned to the job before its first instruction, so a kill, or the engine's end,
-//! takes the child's whole tree with it, the grandchildren it starts at once included.
+//! takes the child's whole tree with it, the grandchildren it starts at once included. An exception that nothing
+//! handles ends a process of the job at once, with the exception's code, so no fault dialog holds a step (review
+//! round 1 of pull request 3 (R1)).
 
 use std::io::{self, Read};
 use std::mem::size_of;
@@ -16,7 +18,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-    TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     OpenThread, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
@@ -26,10 +29,13 @@ use crate::process::handed_over;
 use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 
 /// The Windows `ProcessGuard` (spec 4.3, design part 4.2; Ruling W7): each child in a Job Object of its own with
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, started suspended and assigned before its first instruction, at
-/// `BELOW_NORMAL_PRIORITY_CLASS` when `Spawn::below_normal`. A kill is `TerminateJobObject(job, 1)` and ends the
-/// child's whole tree; so does the engine's end, since closing a job's last handle kills what it holds (design part
-/// 3.8). Standard input null, output and error piped, `Spawn::env` added (Rulings T9-a to T9-e hold).
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`, started suspended and
+/// assigned before its first instruction, at `BELOW_NORMAL_PRIORITY_CLASS` when `Spawn::below_normal`. A kill is
+/// `TerminateJobObject(job, 1)` and ends the child's whole tree; so does the engine's end, since closing a job's last
+/// handle kills what it holds (design part 3.8). A process of the tree that crashes ends at once with its exception
+/// code, which the drivers report as any failure, instead of waiting on a fault dialog that nobody may answer (review
+/// round 1 of pull request 3 (R1)). Standard input null, output and error piped, `Spawn::env` added (Rulings T9-a to
+/// T9-e hold).
 /// Def: T3-5. Use: T3-23.
 pub struct JobProcessGuard;
 
@@ -73,7 +79,13 @@ impl ProcessGuard for JobProcessGuard {
 struct Job(OwnedHandle);
 
 impl Job {
-    /// A new, unnamed job whose handle no child inherits, with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and no other limit.
+    /// A new, unnamed job whose handle no child inherits, with two limits: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so
+    /// closing its last handle kills what it holds, and `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`, which gives
+    /// every process of the job, grandchildren included, `SEM_NOGPFAULTERRORBOX`, so an exception nothing handles ends
+    /// the process with its code instead of holding it on a fault dialog. The rip, a job's drive listing, the remux
+    /// and the relay's command have no time limit, so such a dialog held the step until someone answered it. Set on
+    /// the job, not on the engine, the error mode covers only the tool trees, and a grandchild started with
+    /// `CREATE_DEFAULT_ERROR_MODE` cannot escape it (review round 1 of pull request 3 (R1)).
     fn new() -> io::Result<Job> {
         // SAFETY: both pointers may be null: default security, so the handle is not inherited, and no name.
         let raw = unsafe { CreateJobObjectW(null(), null()) };
@@ -83,7 +95,8 @@ impl Job {
         // SAFETY: raw is an open job handle that nothing else owns.
         let job = Job(unsafe { OwnedHandle::from_raw_handle(raw) });
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
         let length = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
         // SAFETY: the job handle is open; `info` is the structure JobObjectExtendedLimitInformation reads, it outlives
         // the call, and `length` is its size.
@@ -199,19 +212,25 @@ impl GuardedChild for JobChild {
 #[cfg(test)]
 mod tests {
     use std::io::{self, BufRead, BufReader, Read};
+    use std::mem::size_of;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::ptr::null_mut;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetPriorityClass, OpenProcess, WaitForSingleObject, BELOW_NORMAL_PRIORITY_CLASS,
         IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
 
     use super::JobProcessGuard;
-    use crate::process::tests::{check_kills_its_child, check_pipes_both_streams_and_adds_env, helper};
+    use crate::process::tests::{check_kills_its_child, check_pipes_both_streams_and_adds_env, helper, RAISED};
     use crate::testutil::ci_factor;
     use crate::{GuardedChild, ProcessGuard, Spawn};
 
@@ -403,6 +422,47 @@ mod tests {
         drop(child);
         assert!(tree.iter().all(|process| ended_within(process, ENDS_WITHIN)), "kill-on-close did not end the tree");
         assert!(end_of_file_within(&lines, ENDS_WITHIN));
+    }
+
+    /// Review round 1 of pull request 3 (R1): a job kills what it holds when its last handle closes, and lets no fault
+    /// dialog hold a process of it: an exception nothing handles ends the process at once, with the exception's code.
+    #[test]
+    fn a_job_kills_on_close_and_lets_no_fault_dialog_hold_its_processes() {
+        let job = super::Job::new().unwrap();
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        let length = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        // SAFETY: the job handle is open; `info` is the structure JobObjectExtendedLimitInformation fills, it outlives
+        // the call, and `length` is its size; the length written is not asked for.
+        let read = unsafe {
+            QueryInformationJobObject(
+                job.0.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&mut info as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                length,
+                null_mut(),
+            )
+        };
+        assert_ne!(read, 0, "the job's limits could not be read: {}", io::Error::last_os_error());
+        assert_eq!(
+            info.BasicLimitInformation.LimitFlags,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+        );
+    }
+
+    /// Review round 1 of pull request 3 (R1): a guarded child that raises an exception nothing handles ends with the
+    /// exception's code. A session that shows no fault dialog, as CI's, ends it so without the job's limit too, so the
+    /// limit itself is pinned by `a_job_kills_on_close_and_lets_no_fault_dialog_hold_its_processes`.
+    #[test]
+    fn a_guarded_child_that_raises_an_unhandled_exception_ends_with_its_code() {
+        let mut child = JobProcessGuard.spawn(&helper("raise")).unwrap();
+        let killer = child.killer();
+        let (tx, rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || tx.send(child.wait().map_err(|error| error.kind())).unwrap());
+        let status = rx.recv_timeout(ENDS_WITHIN);
+        // A child still held after the bound is ended, so the waiter returns.
+        killer.kill().unwrap();
+        waiter.join().unwrap();
+        assert_eq!(status.expect("the child that raised did not end within 10 s"), Ok(Some(RAISED as i32)));
     }
 
     #[test]
