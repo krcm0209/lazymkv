@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use lazymkv_clients::OFFLINE;
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Envelope, Reply, CANCELLED, MAX_LINE_BYTES};
 use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
@@ -15,6 +16,7 @@ use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
+use lazymkv_engine::NO_DELIVERY;
 use lazymkv_platform::{IpcConnector, Reach};
 use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
@@ -1868,6 +1870,48 @@ fn the_token_check_runs_over_the_engines_transport() {
     let result = c.ok("run_selftest", Value::Null);
     assert_eq!(check(&result, "tmdb_token")["ok"], json!(true));
     assert!(h.http().requests().iter().any(|(url, _)| url == "https://api.themoviedb.org/3/authentication"));
+}
+
+// ---- The binary's transport and sink (spec 12; design part 3.5; Ruling W26) ----
+
+/// Spec 12 and design part 3.5: a notification the sink cannot deliver is logged in engine.log with its event, its job
+/// and the sink's reason, and never blocks the job. Under pull request 3's binary sink, `NoDelivery`, every
+/// notification is one (Ruling W26).
+#[test]
+fn an_undelivered_notification_is_logged_with_its_reason() {
+    let h = stand_in(&[DISC_A], settings());
+    h.use_binary_services();
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    let line = format!("notification disc_done for {id} was not delivered: {NO_DELIVERY}");
+    h.wait("the undelivered disc_done", |h| h.engine_log().contains(&line));
+    assert_eq!(NO_DELIVERY, "no notification delivery in this build; it arrives in pull request 4");
+    assert!(h.notifications().is_empty(), "{:?}", h.notifications());
+}
+
+/// Ruling W26: with pull request 3's binary transport, `OfflineTransport`, every lookup is unreachable, so a disc goes
+/// through its disc phase and then waits in AwaitingLookup with its hourly timer, its waiting message naming the
+/// transport's reason; the recorded transport is never asked.
+#[test]
+fn with_the_offline_transport_a_disc_waits_for_its_lookups() {
+    let h = stand_in(&[DISC_A], settings());
+    h.use_binary_services();
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.settle();
+    let record = h.record(&id);
+    assert_eq!(record.state, State::AwaitingLookup { return_to: Box::new(State::Ejected { after_copy: false }) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.contains(&format!("dischash: {OFFLINE}")), "{message}");
+    assert_eq!(h.timers().pending(), vec![60]);
+    assert!(h.http().requests().is_empty(), "{:?}", h.http().requests());
+    let waiting = format!("notification waiting for {id} was not delivered: {NO_DELIVERY}");
+    assert!(h.engine_log().contains(&waiting), "{}", h.engine_log());
 }
 
 // ---- Shutdown, progress, command and notifications ----

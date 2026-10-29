@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::{search_url, RecordedTransport};
+use lazymkv_clients::{search_url, HttpTransport, OfflineTransport, RecordedTransport};
 use lazymkv_core::disc::bdmt_name;
 use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
@@ -41,7 +41,9 @@ use serde_json::{json, Value};
 
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
-use crate::{EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers};
+use crate::{
+    EngineConfig, JobContext, NoDelivery, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers,
+};
 
 /// How often the harness looks again while it waits.
 const POLL: Duration = Duration::from_millis(20);
@@ -115,7 +117,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A notification sink that keeps every notification in a shared list (design part 8.6). Def: T22. Use: T22 to T29.
+/// A notification sink that keeps every notification in a shared list (design part 8.6). Def: T22; T3-21 returns Ok.
+/// Use: T22 to T29, T3-21.
 pub struct MemorySink {
     list: Arc<Mutex<Vec<Notification>>>,
 }
@@ -129,8 +132,9 @@ impl MemorySink {
 }
 
 impl NotifySink for MemorySink {
-    fn deliver(&mut self, notification: &Notification) {
+    fn deliver(&mut self, notification: &Notification) -> Result<(), String> {
         lock(&self.list).push(notification.clone());
+        Ok(())
     }
 }
 
@@ -381,6 +385,8 @@ pub struct Harness {
     /// The persist fault a test armed, shared with every engine the harness starts (review round 1, V1).
     faults: Arc<Mutex<ArmedFault>>,
     engine: Mutex<Option<EngineHandle>>,
+    /// Whether `start` passes pull request 3's binary transport and sink, `use_binary_services`.
+    binary_services: AtomicBool,
 }
 
 impl Harness {
@@ -477,10 +483,16 @@ impl Harness {
             ipc: ipc as _,
             host: Arc::clone(&self.host) as _,
         };
+        let (http, notify): (Arc<dyn HttpTransport>, Box<dyn NotifySink>) =
+            if self.binary_services.load(Ordering::SeqCst) {
+                (Arc::new(OfflineTransport), Box::new(NoDelivery))
+            } else {
+                (Arc::clone(&self.http) as _, Box::new(MemorySink { list: Arc::clone(&self.sent) }))
+            };
         let services = Services {
             platform,
-            http: Arc::clone(&self.http) as _,
-            notify: Box::new(MemorySink { list: Arc::clone(&self.sent) }),
+            http,
+            notify,
             timers: Arc::clone(&self.timers) as _,
             steps: self.scripted.then(|| Arc::clone(&self.steps) as _),
         };
@@ -929,6 +941,14 @@ impl Harness {
         self.lookups_wait.store(wait, Ordering::SeqCst);
     }
 
+    /// From the next `start`, that is the next `restart`, the engine gets pull request 3's binary transport and sink
+    /// (Ruling W26): `OfflineTransport` as `Services.http` and `NoDelivery` as `Services.notify`, so `http()` records
+    /// no request and `notifications()` stays empty. Def: T3-21. Use: T3-21.
+    pub fn use_binary_services(&self) {
+        self.deliver();
+        self.binary_services.store(true, Ordering::SeqCst);
+    }
+
     /// A clone of the harness's `MemoryConnector`, which connects an IPC client to the running engine (design part
     /// 9.1). Def: T26. Use: T26, T28.
     pub fn client(&self) -> MemoryConnector {
@@ -1059,6 +1079,7 @@ impl Folders {
             hook: Arc::default(),
             faults: Arc::default(),
             engine: Mutex::default(),
+            binary_services: AtomicBool::new(false),
         }
     }
 }

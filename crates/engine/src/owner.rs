@@ -254,7 +254,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     });
     let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
     let (delivered, notifier_done) = channel::<()>();
-    let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }));
+    let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }), Arc::clone(&store));
     let (sender, inbox) = channel::<Msg>();
     let shown = Arc::new(Mutex::new(BTreeMap::new()));
     let busy = Arc::new(AtomicBool::new(false));
@@ -666,8 +666,8 @@ struct Delivered {
 }
 
 impl NotifySink for Delivered {
-    fn deliver(&mut self, notification: &Notification) {
-        self.sink.deliver(notification);
+    fn deliver(&mut self, notification: &Notification) -> Result<(), String> {
+        self.sink.deliver(notification)
     }
 }
 

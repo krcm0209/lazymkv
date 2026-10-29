@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use lazymkv_dev::Args;
 use lazymkv_tools::Limits;
 
-pub use notify::NotifySink;
+pub use notify::{NoDelivery, NotifySink, NO_DELIVERY};
 pub use owner::{start, EngineHandle, JobContext, Services, ShutdownHandle, StepResult, StepRunner};
 pub use timers::{StdTimers, Timers};
 
