@@ -3,6 +3,7 @@
 //! also reads an object's owner and access list back as strings.
 
 use std::io;
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
 #[cfg(test)]
 use std::path::Path;
 use std::ptr::null_mut;
@@ -42,35 +43,51 @@ pub fn own_token() -> io::Result<TokenFacts> {
     facts_of_process(unsafe { GetCurrentProcess() })
 }
 
-/// The facts of `token`, opened with `TOKEN_QUERY` (design parts 3.2, 3.4). Def: T3-2. Use: T3-2, T3-7.
+/// The facts of `token`, opened with `TOKEN_QUERY` (design parts 3.2, 3.4). Def: T3-2. Use: T3-2.
 pub(crate) fn token_facts(token: HANDLE) -> io::Result<TokenFacts> {
     let user = variable(token, TokenUser)?;
     // SAFETY: a TokenUser read starts with a TOKEN_USER, whose SID points into the same buffer, alive here.
     let user_sid = sid_string(unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid })?;
     let elevation: TOKEN_ELEVATION = fixed(token, TokenElevation)?;
-    // 1, 2 and 3 are TokenElevationTypeDefault, TokenElevationTypeFull and TokenElevationTypeLimited.
-    let elevation_type = match fixed::<TOKEN_ELEVATION_TYPE>(token, TokenElevationType)? {
-        1 => ElevationType::Default,
-        2 => ElevationType::Full,
-        3 => ElevationType::Limited,
-        other => {
-            let text = format!("the token's elevation type is {other}, not 1, 2 or 3");
-            return Err(io::Error::new(io::ErrorKind::InvalidData, text));
-        }
-    };
+    let elevation_type = elevation_type(token)?;
     let label = variable(token, TokenIntegrityLevel)?;
     // SAFETY: a TokenIntegrityLevel read starts with a TOKEN_MANDATORY_LABEL, whose SID points into the same buffer.
     let integrity_sid = sid_string(unsafe { (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid })?;
-    // Ruling T3-2-c: linked when the call returns a token, which is closed at once.
-    let linked = match fixed::<TOKEN_LINKED_TOKEN>(token, TokenLinkedToken) {
-        Ok(link) if !link.LinkedToken.is_null() => {
-            // SAFETY: the call opened the linked token for this process; it is closed once, here.
-            unsafe { CloseHandle(link.LinkedToken) };
-            true
-        }
-        _ => false,
-    };
+    // Ruling T3-2-c: linked when the call returns a token, which closes at once as the handle drops.
+    let linked = linked_token(token).is_ok();
     Ok(TokenFacts { user_sid, elevated: elevation.TokenIsElevated != 0, elevation_type, integrity_sid, linked })
+}
+
+/// The elevation type of `token`, opened with `TOKEN_QUERY` (design parts 3.2, 3.6): Default for a token that is not
+/// split, Full or Limited for the elevated or filtered half of a split token. Def: PR #14 review round 1 (R48).
+/// Use: T3-2, T3-7.
+pub(crate) fn elevation_type(token: HANDLE) -> io::Result<ElevationType> {
+    // 1, 2 and 3 are TokenElevationTypeDefault, TokenElevationTypeFull and TokenElevationTypeLimited.
+    match fixed::<TOKEN_ELEVATION_TYPE>(token, TokenElevationType)? {
+        1 => Ok(ElevationType::Default),
+        2 => Ok(ElevationType::Full),
+        3 => Ok(ElevationType::Limited),
+        other => {
+            let text = format!("the token's elevation type is {other}, not 1, 2 or 3");
+            Err(io::Error::new(io::ErrorKind::InvalidData, text))
+        }
+    }
+}
+
+/// The linked token of `token`, opened with `TOKEN_QUERY`: the other half of a split token, owned so that it closes on
+/// drop (design parts 3.2, 3.6; Ruling T3-2-c). For the elevated half, Windows returns the filtered half as an
+/// identification-level impersonation token at medium integrity. Err when the token has none; a Default token has
+/// none. Def: PR #14 review round 1 (R48). Use: T3-2, T3-7.
+pub(crate) fn linked_token(token: HANDLE) -> io::Result<OwnedHandle> {
+    let link: TOKEN_LINKED_TOKEN = fixed(token, TokenLinkedToken)?;
+    // The handle in a binding whose address is never taken, so that the code scanner sees the null check cover its
+    // use.
+    let linked = link.LinkedToken;
+    if linked.is_null() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Windows returned no linked token"));
+    }
+    // SAFETY: the call opened the linked token for this process, and nothing else owns it.
+    Ok(unsafe { OwnedHandle::from_raw_handle(linked) })
 }
 
 /// The facts of process `pid`'s token: the pipe's client (T3-11) and its server (T3-12) (design parts 3.3, 3.4).
@@ -355,6 +372,7 @@ fn read_back(status: WIN32_ERROR, descriptor: PSECURITY_DESCRIPTOR) -> io::Resul
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::os::windows::io::AsRawHandle;
 
     use super::*;
 
@@ -376,5 +394,23 @@ mod tests {
     #[test]
     fn the_token_of_this_process_read_by_its_id_equals_the_process_token() {
         assert!(token_of_process(std::process::id()).unwrap() == own_token().unwrap());
+    }
+
+    /// Review round 1 of pull request 3 (R48): `linked_token` opens a token exactly when the token is one half of a
+    /// split token, Full or Limited, and never for a Default token (Ruling T3-2-c).
+    #[test]
+    fn a_linked_token_exists_exactly_when_the_token_is_split() {
+        let mut raw: HANDLE = null_mut();
+        // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing; the call writes the token's handle
+        // to `raw`.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) };
+        assert_ne!(opened, 0, "OpenProcessToken: {}", io::Error::last_os_error());
+        // The handle in a binding whose address is never taken, checked before it is owned.
+        let raw = raw;
+        assert!(!raw.is_null(), "OpenProcessToken wrote no handle");
+        // SAFETY: `raw` is the token OpenProcessToken just opened, and nothing else owns it.
+        let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let split = elevation_type(token.as_raw_handle()).unwrap() != ElevationType::Default;
+        assert_eq!(linked_token(token.as_raw_handle()).is_ok(), split);
     }
 }

@@ -15,11 +15,10 @@ use lazymkv_core::job::Tool;
 use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS, FILETIME, HANDLE, INVALID_HANDLE_VALUE, SYSTEMTIME};
 use windows_sys::Win32::Security::Authorization::{ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
-    AccessCheck, CreateRestrictedToken, DuplicateTokenEx, GetTokenInformation, SecurityIdentification,
-    SetTokenInformation, TokenImpersonation, TokenIntegrityLevel, TokenLinkedToken, DACL_SECURITY_INFORMATION,
-    GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, LUA_TOKEN, OWNER_SECURITY_INFORMATION,
-    PRIVILEGE_SET, PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE,
-    TOKEN_IMPERSONATE, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    AccessCheck, CreateRestrictedToken, DuplicateTokenEx, SecurityIdentification, SetTokenInformation,
+    TokenImpersonation, TokenIntegrityLevel, DACL_SECURITY_INFORMATION, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION,
+    LABEL_SECURITY_INFORMATION, LUA_TOKEN, OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, PSID,
+    SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     GetVolumeInformationW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
@@ -33,7 +32,7 @@ use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime};
 
-use super::{registry_text, token_facts, until_nul, wide, MAXIMUM_ALLOWED, SE_GROUP_INTEGRITY};
+use super::{elevation_type, linked_token, registry_text, until_nul, wide, MAXIMUM_ALLOWED, SE_GROUP_INTEGRITY};
 use crate::localtime::format_local_time;
 use crate::security::ElevationType;
 use crate::Host;
@@ -293,33 +292,11 @@ fn filtered_token() -> io::Result<OwnedHandle> {
         return Err(io::Error::last_os_error());
     }
     let own = owned(raw)?;
-    if token_facts(own.as_raw_handle())?.elevation_type == ElevationType::Full {
-        linked_token(&own)
+    if elevation_type(own.as_raw_handle())? == ElevationType::Full {
+        linked_token(own.as_raw_handle())
     } else {
         limited_token(&own)
     }
-}
-
-/// The linked token of `token`, the elevated half of a split token: the filtered half, which Windows returns as an
-/// identification-level impersonation token at medium integrity.
-fn linked_token(token: &OwnedHandle) -> io::Result<OwnedHandle> {
-    let mut link = TOKEN_LINKED_TOKEN::default();
-    let (length, mut written) = (size_of::<TOKEN_LINKED_TOKEN>() as u32, 0u32);
-    // SAFETY: the token is open with TOKEN_QUERY; `link` is the TOKEN_LINKED_TOKEN that TokenLinkedToken writes, and
-    // `length` is its size; the call opens the linked token for this process and writes its handle into `link`.
-    let read = unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenLinkedToken,
-            (&mut link as *mut TOKEN_LINKED_TOKEN).cast(),
-            length,
-            &mut written,
-        )
-    };
-    if read == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    owned(link.LinkedToken)
 }
 
 /// A limited copy of `token`, open with `TOKEN_DUPLICATE`: `CreateRestrictedToken(LUA_TOKEN)` (LUA: limited user
