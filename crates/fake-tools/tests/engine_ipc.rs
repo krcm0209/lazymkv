@@ -16,6 +16,7 @@ use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
 use lazymkv_platform::{IpcConnector, Reach};
+use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
 
 /// The tests' own waits: 20 s, times `ci_factor` wherever a test waits for something to happen (Rulings R29.c2,
@@ -1721,6 +1722,110 @@ fn stop_cancels_a_makemkv_check_whose_listing_hangs() {
     });
     assert!(done.recv_timeout(WAIT).is_ok(), "stop waited for the hanging listing");
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+// ---- Bounded MakeMKV checks (Ruling W20; engine.md:581 (c), :586, :594) ----
+
+/// A MakeMKV version line newer than the scenario's 2.0.0, so a listing that was observed would change
+/// `makemkv-check.json`.
+const NEWER_VERSION: &str =
+    "MSG:1005,0,1,\"MakeMKV v2.0.1 win(x64-release) started\",\"%1 started\",\"MakeMKV v2.0.1 win(x64-release)\"\n";
+
+/// The check at start lists normally, the self-test's listing hangs after its first line (no `MSG:5010`), and the
+/// job's listing, scan and rip are movie-direct's. The stand-in's counter already holds the check at start's run.
+const SELF_TEST_LISTING_HANGS: &str = r#"{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":1},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:0"],"stdout":"scan.txt","timing":"scan.txt.timing.jsonl"},
+ {"args_contain":["mkv","disc:0","t00-00800"],"stdout":"rip.txt","creates":[{"dir_arg_from_end":1,"name":"title_t00.mkv","copy_from":"placeholder.mkv"}]}]}"#;
+
+/// The check at start lists normally; the self-test's listing prints all four lines, its `MSG:5010` among them, and
+/// then does not exit.
+const SELF_TEST_LISTING_DOES_NOT_EXIT: &str = r#"{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":100}]}"#;
+
+/// Ruling W20 (engine.md:581 (c)): the MakeMKV check at engine start passes `limits.header`, the harness's 10 s, so a
+/// `makemkvcon` that hangs at service start ends there and the engine then serves its clients. A listing the limit
+/// killed is partial, so its version is neither reported nor observed. This test takes more than 10 s.
+#[test]
+fn a_hanging_start_check_ends_at_the_header_limit_and_the_engine_serves() {
+    let h = stand_in(&[DISC_A], settings());
+    let recorded = |h: &Harness| -> Value {
+        serde_json::from_slice(&fs::read(h.data().join("selftest/makemkv-check.json")).unwrap()).unwrap()
+    };
+    assert_eq!(recorded(&h), json!({"version": "2.0.0", "licence": null}));
+    fs::write(h.tools().join("drive-list-newer.txt"), NEWER_VERSION).unwrap();
+    fs::write(h.tools().join("makemkvcon64.json"),
+        r#"{"responses":[{"args_contain":["info","disc:9999"],"stdout":"drive-list-newer.txt","hang_after_line":1}]}"#)
+        .unwrap();
+    let started = Instant::now();
+    h.restart();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(10), "the check at start ended before the header limit: {took:?}");
+    assert!(took < Duration::from_secs(10) + WAIT * ci_factor(), "{took:?}");
+    let mut c = Client::open(&h);
+    let makemkv = check(&c.snapshot()["selftest"], "makemkvcon").clone();
+    assert_eq!((&makemkv["ok"], &makemkv["busy"], &makemkv["version"]), (&json!(false), &json!(false), &Value::Null));
+    assert_eq!(makemkv["detail"], json!(LISTING_PAST_LIMIT));
+    assert_eq!(LISTING_PAST_LIMIT, "makemkvcon did not finish the drive listing within the header limit and was killed");
+    assert_eq!(recorded(&h), json!({"version": "2.0.0", "licence": null}), "a listing the limit killed is not observed");
+    assert!(c.ok("history", json!({})).as_array().unwrap().is_empty());
+}
+
+/// Ruling W20 (engine.md:586): the self-test's listing holds the disc-phase token (R26.c1) only until the header limit,
+/// so a disc that arrived while it hung gets the token once the limit kills it. The tools beside the job's are unset
+/// as in `a_makemkv_check_holds_the_disc_phase_token_until_its_listing_ends`. This test takes more than 10 s.
+#[test]
+fn a_hanging_self_test_listing_frees_the_disc_phase_token_at_the_limit() {
+    let unset = json!({"ffprobe": null, "ffmpeg": null, "java": null});
+    let h = stand_in(&[DISC_A], json!({"keep_tuning_evidence": false, "drive_settle_s": 0,
+                                       "drive_ready_timeout_s": 1, "tool_paths": unset}));
+    fs::write(h.tools().join("makemkvcon64.json"), SELF_TEST_LISTING_HANGS).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let out = h.data().join("selftest").join("drive-list.txt");
+    let at_start = fs::read(&out).unwrap();
+    let started = Instant::now();
+    c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
+    h.wait("the self-test's listing to hang", |_| fs::read(&out).is_ok_and(|now| !now.is_empty() && now != at_start));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    h.wait("the arrival to be walked", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_string());
+    h.settle();
+    assert!(h.job_ids().is_empty(), "a job started while the check's listing hung: {:?}", h.job_ids());
+    let selftest = loop {
+        match read_reply(c.line().expect("a line").trim_end()).unwrap() {
+            Reply::Ok { id: Some(99), result } => break result,
+            Reply::Push(envelope) => c.pushes.push_back(envelope),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert!(started.elapsed() >= Duration::from_secs(10), "{:?}", started.elapsed());
+    let makemkv = check(&selftest, "makemkvcon");
+    assert_eq!((&makemkv["ok"], &makemkv["busy"], &makemkv["detail"]),
+               (&json!(false), &json!(false), &json!(LISTING_PAST_LIMIT)));
+    let id = c.until_state(None, "Scanned")["id"].as_str().unwrap().to_string();
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
+}
+
+/// M2's half that pull request 2 left optional (engine.md:594; Ruling W20): a check's listing that printed its final
+/// `MSG:5010` and then did not exit is killed by the exit wait, the harness's 10 s, and the check is not ok and says so.
+/// Its listing was whole, so its version is reported. This test takes more than 10 s.
+#[test]
+fn a_check_killed_by_the_exit_wait_is_not_ok() {
+    let h = stand_in(&[DISC_A], settings());
+    fs::write(h.tools().join("makemkvcon64.json"), SELF_TEST_LISTING_DOES_NOT_EXIT).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let started = Instant::now();
+    let result = c.ok("run_selftest", Value::Null);
+    assert!(started.elapsed() >= Duration::from_secs(10), "{:?}", started.elapsed());
+    let makemkv = check(&result, "makemkvcon");
+    assert_eq!((&makemkv["ok"], &makemkv["busy"], &makemkv["detail"]),
+               (&json!(false), &json!(false), &json!(EXIT_WAIT_PASSED)));
+    assert_eq!(makemkv["version"], json!("2.0.0"));
 }
 
 #[test]

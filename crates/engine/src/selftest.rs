@@ -18,6 +18,7 @@ use lazymkv_core::plan::Kind;
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::{version_triple, Settings};
 use lazymkv_platform::{rename_no_replace, write_atomic, Host, ProcessGuard, Reach, SecretStore, ShareConnector};
+use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use lazymkv_tools::{
     find_tool, list_drives, run_recorded, save_debug_log, with_suffix, CancelToken, Found, LineAction, Limits, ToolCtx,
     ToolLocation,
@@ -315,7 +316,7 @@ pub(crate) struct CheckEnv {
     /// The shared MakeMKV state (S79).
     pub(crate) makemkv: Arc<MakeMkv>,
     /// Stops the check's tool runs: the owner gives each check a token of its own and raises it at a stop or a forced
-    /// shutdown, because a drive listing has no time limit (design parts 3.8, 5.3; S57).
+    /// shutdown (design parts 3.8, 5.3). The drive listing is also bounded by `limits.header` (Ruling W20).
     pub(crate) cancel: CancelToken,
     /// The shares, whose `reach` each root check asks before its probe (spec 13, Ruling W15).
     pub(crate) shares: Arc<dyn ShareConnector>,
@@ -356,7 +357,10 @@ impl CheckEnv {
     /// listing finds running) the last check marked busy, with no run; otherwise the drive listing recorded at
     /// `<data>/selftest/drive-list.txt`, its (version, licence code) observed. It is ok when `makemkvcon` is found,
     /// prints a version of at least `makemkv_min_version` and no licence message. The check becomes the last one. A
-    /// listing the check's cancel token ended is not observed and does not become the last check. Def: T26. Use: T26.
+    /// listing the check's cancel token ended is not observed and does not become the last check. The listing runs
+    /// under `limits.header` (Ruling W20): one that limit killed is not ok with `LISTING_PAST_LIMIT`, reports no
+    /// version and is not observed; one the exit wait killed is not ok with `EXIT_WAIT_PASSED` (M2), with its version
+    /// reported and observed (S79). Def: T26. Use: T26.
     pub(crate) fn makemkv_check(&self, settings: &Settings, busy: bool) -> SelfTestCheck {
         let name = Tool::Makemkvcon.as_str();
         if busy {
@@ -369,7 +373,9 @@ impl CheckEnv {
         };
         let debug = settings.keep_tuning_evidence;
         let listed = self.record_path(DRIVE_LIST_FILE).and_then(|out| {
-            let listing = self.with_ctx(settings, |ctx| list_drives(ctx, &location.path, debug, "", &out))?;
+            let listing = self.with_ctx(settings, |ctx| {
+                list_drives(ctx, &location.path, debug, "", &out, Some(ctx.limits.header))
+            })?;
             if debug {
                 let _ = save_debug_log(self.host.as_ref(), listing.run.started_unix, &out);
             }
@@ -382,11 +388,15 @@ impl CheckEnv {
                 let cancelled = check(name, false, "the drive listing was cancelled".to_string());
                 return SelfTestCheck { path: Some(location.path.display().to_string()), ..cancelled };
             }
+            // A listing the header limit killed is partial and may have stopped before a licence message (Ruling W20).
+            Ok(listing) if listing.past_limit => (false, LISTING_PAST_LIMIT.to_string(), None),
             Ok(listing) => {
                 let summary = listing.summary;
                 self.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
                 let minimum = &settings.makemkv_min_version;
                 let (ok, detail) = match (&summary.version, &summary.licence) {
+                    // The listing printed its final message, so its summary is whole (M2; as steps.rs reads a job's).
+                    _ if listing.run.timed_out => (false, EXIT_WAIT_PASSED.to_string()),
                     (_, Some(message)) => {
                         (false, format!("MakeMKV printed licence message {}: {}", message.code, message.text))
                     }

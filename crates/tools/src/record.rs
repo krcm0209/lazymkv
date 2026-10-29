@@ -93,7 +93,8 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// How long a tool may run before the engine kills it (design part 5.3). Def: T11. Use: T13, T14, T23.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// The longest a header call, such as `mkvmerge -J` or `ffprobe`, may take.
+    /// The longest a header call, such as `mkvmerge -J` or `ffprobe`, may take, and the longest the drive listing of a
+    /// MakeMKV check outside a job may run before its final message (Ruling W20).
     pub header: Duration,
     /// The longest a MakeMKV scan may take (`scan_timeout_min`).
     pub scan: Duration,

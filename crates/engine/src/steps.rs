@@ -637,7 +637,8 @@ impl Step<'_> {
     /// index <index>`. Its (version, licence code) is observed into the engine's MakeMKV state (S79), unless the step
     /// was cancelled. A listing the exit wait killed after its final message gives `failed(Unknown)` with
     /// `EXIT_WAIT_PASSED`, the process not having exited (design part 5.3, spec 10.4). A listing with no DRV line for
-    /// the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>` (RP-2).
+    /// the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>` (RP-2). A job's
+    /// listing has no time limit (S57; Ruling W20 bounds only the checks).
     fn listing(&self, program: &Path, failed: fn(Failure) -> Event) -> Result<(u32, RunSummary), StepResult> {
         let drive = self.job.record.drive.as_str();
         if drive.is_empty() {
@@ -649,7 +650,7 @@ impl Step<'_> {
         let name = if n == 1 { "drive-list.txt".to_string() } else { format!("drive-list-{n}.txt") };
         let out = dir.join(&name);
         self.started(&name, program, &drive_list_args(self.debug()));
-        let listed = self.ctx(&no_progress, |ctx| list_drives(ctx, program, self.debug(), drive, &out));
+        let listed = self.ctx(&no_progress, |ctx| list_drives(ctx, program, self.debug(), drive, &out, None));
         let listing = match listed {
             Ok(listing) => listing,
             Err(error) => {
