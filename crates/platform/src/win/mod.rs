@@ -34,6 +34,7 @@ pub use drives::WinDrives;
 pub use eject::WinEjector;
 pub(crate) use files::{move_no_replace, move_replacing};
 pub use folder::{program_data, protect_data_folder};
+pub(crate) use folder::profile_folder;
 pub use host::WinHost;
 pub use job::JobProcessGuard;
 pub use mutex::{EngineMutex, MutexRefusal};

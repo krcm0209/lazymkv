@@ -1,7 +1,7 @@
 //! The engine's `Host` on Windows (design part 4.2's helpers outside the traits; parts 3.6, 4.6, 7.2; Rulings W17,
-//! W18): the clock and the local time, MakeMKV's registration key and debug log, a Toolhelp process snapshot, the
-//! volume label, the Program Files install paths from the registry, and the writable test with the user's filtered
-//! token.
+//! W18): the clock and the local time, MakeMKV's registration key, MakeMKV's debug log in the profile folder the
+//! registry names for this process's account, a Toolhelp process snapshot, the volume label, the Program Files install
+//! paths from the registry, and the writable test with the user's filtered token.
 
 use std::ffi::{c_void, OsString};
 use std::io;
@@ -32,7 +32,10 @@ use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime};
 
-use super::{elevation_type, linked_token, registry_text, until_nul, wide, MAXIMUM_ALLOWED, SE_GROUP_INTEGRITY};
+use super::{
+    elevation_type, linked_token, own_token, profile_folder, registry_text, until_nul, wide, MAXIMUM_ALLOWED,
+    SE_GROUP_INTEGRITY,
+};
 use crate::localtime::format_local_time;
 use crate::security::ElevationType;
 use crate::Host;
@@ -61,9 +64,10 @@ const LABEL_UNITS: usize = 261;
 const CURRENT_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
 
 /// The engine's `Host` on Windows (design part 4.2's helpers outside the traits; parts 3.6, 4.6, 7.2; Rulings W17,
-/// W18): the system clock, the local time from the time-zone rules, MakeMKV's key from the registry, a Toolhelp
-/// process snapshot, the volume label, the Program Files install paths from the registry, never from the environment,
-/// and the writable test with the user's filtered token. It holds no handle between calls. Def: T3-7. Use: T3-23.
+/// W18): the system clock, the local time from the time-zone rules, MakeMKV's key from the registry, MakeMKV's debug
+/// log in the registry's profile folder of this process's account, a Toolhelp process snapshot, the volume label, the
+/// Program Files install paths from the registry, the folders never from the environment, and the writable test with
+/// the user's filtered token. It holds no handle between calls. Def: T3-7. Use: T3-23.
 pub struct WinHost;
 
 impl WinHost {
@@ -98,9 +102,14 @@ impl Host for WinHost {
         app_key()
     }
 
-    /// `%USERPROFILE%\MakeMKV_log.txt`, where MakeMKV 2.0.0 writes its debug log (design part 7.2).
+    /// `MakeMKV_log.txt` in the profile folder, where MakeMKV 2.0.0 writes its debug log (design part 7.2; review
+    /// round 1 of pull request 3 (V14)): the registry's profile of this process's account (`profile_folder` of its
+    /// token's SID), never `%USERPROFILE%`, which a non-elevated process of the user can set. None when the token or
+    /// the value cannot be read, and `save_debug_log` then logs "MakeMKV's debug log path is not known"; the job never
+    /// fails on it.
     fn makemkv_debug_log(&self) -> Option<PathBuf> {
-        std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join("MakeMKV_log.txt"))
+        let facts = own_token().ok()?;
+        profile_folder(&facts.user_sid).map(|profile| profile.join("MakeMKV_log.txt"))
     }
 
     /// An empty list when the snapshot fails, since the trait has no error (S55's check then finds no MakeMKV
@@ -408,7 +417,7 @@ fn granted_access(descriptor: &LocalMemory, token: &OwnedHandle) -> io::Result<u
 mod tests {
     use std::fs;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use lazymkv_core::job::Tool;
@@ -420,12 +429,14 @@ mod tests {
 
     use super::WinHost;
     use crate::testutil::reg_query;
-    use crate::win::wide;
+    use crate::win::{own_token, wide};
     use crate::Host;
 
     /// The key `reg query` reads the Program Files folders from.
     const CURRENT_VERSION: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion";
-    /// The LAZYMKV_TEST_HELPER value that makes `install_paths_child` write its install paths.
+    /// The key `reg query` reads an account's profile folder from, below it under the account's SID.
+    const PROFILE_LIST: &str = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+    /// The LAZYMKV_TEST_HELPER value that makes `install_paths_child` write its install paths and its debug log.
     const INSTALL_PATHS_CHILD: &str = "print-install-paths";
 
     /// `local_time`'s text back into its fields.
@@ -507,14 +518,22 @@ mod tests {
         assert_eq!(host.volume_label(&Scratch::new("host-label").0.join("absent")), None);
     }
 
+    /// Review round 1 of pull request 3 (V14): the debug log is MakeMKV_log.txt in the folder that `ProfileImagePath`
+    /// under HKLM's ProfileList names for this process's SID, read here by `reg query` in a child process, with its
+    /// `%SystemDrive%` replaced by the system drive as `program_data_is_derived_from_the_registry` does. In this
+    /// process, whose USERPROFILE nothing planted, it is also where MakeMKV writes its log.
     #[test]
-    fn the_debug_log_is_makemkv_log_txt_in_the_profile() {
-        let profile = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+    fn the_debug_log_is_makemkv_log_txt_in_the_registrys_profile() {
+        let sid = own_token().unwrap().user_sid;
+        let value = reg_query(&format!(r"{PROFILE_LIST}\{sid}"), "ProfileImagePath");
+        assert!(value.is_some(), "the registry names no profile folder for this process's account");
+        let drive = std::env::var("SystemDrive").expect("Windows sets SystemDrive");
+        let expected = PathBuf::from(value.unwrap().replacen("%SystemDrive%", &drive, 1)).join("MakeMKV_log.txt");
+        let log = WinHost::new().makemkv_debug_log();
         // assert!, not assert_eq!: a failure would print the profile path, which holds the account name.
-        assert!(
-            WinHost::new().makemkv_debug_log() == Some(profile.join("MakeMKV_log.txt")),
-            "the debug log is not MakeMKV_log.txt in the profile"
-        );
+        assert!(log.as_ref() == Some(&expected), "the debug log is not MakeMKV_log.txt in the registry's profile");
+        let profile = PathBuf::from(std::env::var_os("USERPROFILE").expect("Windows sets USERPROFILE"));
+        assert!(log == Some(profile.join("MakeMKV_log.txt")), "the registry's profile is not USERPROFILE here");
     }
 
     #[test]
@@ -545,15 +564,7 @@ mod tests {
     #[test]
     fn the_program_files_variables_do_not_move_the_install_paths() {
         let planted = Scratch::new("host-program-files");
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "win::host::tests::install_paths_child", "--ignored", "--nocapture"])
-            .env("LAZYMKV_TEST_HELPER", INSTALL_PATHS_CHILD)
-            .env("ProgramFiles", &planted.0)
-            .env("ProgramFiles(x86)", &planted.0)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "the child failed: {}", String::from_utf8_lossy(&output.stderr));
-        let text = String::from_utf8_lossy(&output.stdout);
+        let text = child_lines(&[("ProgramFiles", planted.0.as_path()), ("ProgramFiles(x86)", planted.0.as_path())]);
         let host = WinHost::new();
         for (tool, name) in [(Tool::Makemkvcon, "makemkvcon"), (Tool::Mkvmerge, "mkvmerge")] {
             let ours = host.default_install_path(tool);
@@ -569,14 +580,52 @@ mod tests {
         }
     }
 
+    /// Review round 1 of pull request 3 (V14): a child whose USERPROFILE names a temporary folder, as a user variable
+    /// a non-elevated process set would, finds the same debug log as this process. A child process, as above.
+    #[test]
+    fn the_profile_variable_does_not_move_the_debug_log() {
+        let planted = Scratch::new("host-profile");
+        let text = child_lines(&[("USERPROFILE", planted.0.as_path())]);
+        let ours = WinHost::new().makemkv_debug_log();
+        assert!(ours.is_some(), "this process has no debug log path");
+        let expected = debug_log_line(ours.as_deref());
+        let theirs = text.lines().find(|line| line.starts_with("debug-log "));
+        // Only booleans reach the message: a moved path names the temporary folder, which holds the account name.
+        assert!(
+            theirs == Some(expected.as_str()),
+            "the child's debug log differs from this process's; it lies under the planted folder: {}",
+            theirs.is_some_and(|line| line.contains(&*planted.0.to_string_lossy()))
+        );
+    }
+
+    /// The standard output of `install_paths_child`, run with each of `variables` set as a user variable a
+    /// non-elevated process set would be; the calling test fails when the child does.
+    fn child_lines(variables: &[(&str, &Path)]) -> String {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "win::host::tests::install_paths_child", "--ignored", "--nocapture"]);
+        child.env("LAZYMKV_TEST_HELPER", INSTALL_PATHS_CHILD);
+        for (name, value) in variables {
+            child.env(name, value);
+        }
+        let output = child.output().unwrap();
+        assert!(output.status.success(), "the child failed: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
     /// The line `install_paths_child` writes for one tool's install path.
-    fn install_path_line(name: &str, path: Option<&std::path::Path>) -> String {
+    fn install_path_line(name: &str, path: Option<&Path>) -> String {
         format!("install-path {name} {}", path.map_or("none".to_string(), |path| path.display().to_string()))
     }
 
-    /// The child `the_program_files_variables_do_not_move_the_install_paths` starts: this test binary running only this
-    /// test, which writes one `install_path_line` per tool when LAZYMKV_TEST_HELPER names `INSTALL_PATHS_CHILD`, and
-    /// does nothing otherwise.
+    /// The line `install_paths_child` writes for the debug log's path.
+    fn debug_log_line(path: Option<&Path>) -> String {
+        format!("debug-log {}", path.map_or("none".to_string(), |path| path.display().to_string()))
+    }
+
+    /// The child `the_program_files_variables_do_not_move_the_install_paths` and
+    /// `the_profile_variable_does_not_move_the_debug_log` start: this test binary running only this test, which writes
+    /// one `install_path_line` per tool and the `debug_log_line` when LAZYMKV_TEST_HELPER names `INSTALL_PATHS_CHILD`,
+    /// and does nothing otherwise.
     #[test]
     #[ignore]
     fn install_paths_child() {
@@ -585,9 +634,13 @@ mod tests {
         }
         let host = WinHost::new();
         let mut out = std::io::stdout();
-        for (tool, name) in [(Tool::Makemkvcon, "makemkvcon"), (Tool::Mkvmerge, "mkvmerge")] {
+        let mut lines: Vec<String> = [(Tool::Makemkvcon, "makemkvcon"), (Tool::Mkvmerge, "mkvmerge")]
+            .into_iter()
+            .map(|(tool, name)| install_path_line(name, host.default_install_path(tool).as_deref()))
+            .collect();
+        lines.push(debug_log_line(host.makemkv_debug_log().as_deref()));
+        for line in lines {
             // A line of its own, apart from the test harness's progress text.
-            let line = install_path_line(name, host.default_install_path(tool).as_deref());
             out.write_all(format!("\n{line}\n").as_bytes()).unwrap();
         }
         out.flush().unwrap();

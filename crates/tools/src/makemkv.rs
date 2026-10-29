@@ -5,6 +5,7 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -310,28 +311,51 @@ const KEY_REMOVED: &[u8] = b"[app_Key removed]";
 /// Saves MakeMKV's debug log as `<out>.makemkv-debug.txt` with every occurrence of the registration key replaced by
 /// `[app_Key removed]` (design part 7.2, PIPE-9). The log is copied as bytes, because it need not be UTF-8 (S61), and
 /// it is copied unchanged when the host has no key. `started_unix` is the call's start: a log last modified before it
-/// belongs to an earlier call and is not saved. The `Err` text says why nothing was saved and never holds the key.
-/// Def: T14. Use: T23.
+/// belongs to an earlier call and is not saved. The log is opened once (review round 1 of pull request 3 (V14)): a log
+/// that is a link is not saved, and the age check and the read use that one open, so no link swapped in between can
+/// redirect the read. The `Err` text says why nothing was saved and never holds the key. Def: T14. Use: T23.
 pub fn save_debug_log(host: &dyn Host, started_unix: u64, out: &Path) -> Result<(), String> {
     let log = host.makemkv_debug_log().ok_or_else(|| "MakeMKV's debug log path is not known".to_string())?;
     let failed = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
-    let metadata = match fs::metadata(&log) {
-        Ok(metadata) => metadata,
+    let mut file = match open_log(&log) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(format!("{}: no debug log was written", log.display()));
         }
         Err(error) => return Err(failed(&log, error)),
     };
+    let metadata = file.metadata().map_err(|error| failed(&log, error))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!("{}: the debug log is a link, not a file", log.display()));
+    }
     let modified = metadata.modified().map_err(|error| failed(&log, error))?;
     if modified.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()) < started_unix {
         return Err(format!("{}: the debug log is older than the call", log.display()));
     }
-    let mut bytes = fs::read(&log).map_err(|error| failed(&log, error))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| failed(&log, error))?;
     if let Some(key) = host.makemkv_app_key().filter(|key| !key.is_empty()) {
         bytes = replace_bytes(&bytes, key.as_bytes(), KEY_REMOVED);
     }
     let target = with_suffix(out, ".makemkv-debug.txt");
     fs::write(&target, bytes).map_err(|error| failed(&target, error))
+}
+
+/// `log` opened for reading, once, for `save_debug_log` (review round 1 of pull request 3 (V14)). On Windows the open
+/// passes `FILE_FLAG_OPEN_REPARSE_POINT`, so a link is opened itself rather than followed, and the handle's metadata
+/// says it is a link; elsewhere it is a plain open.
+fn open_log(log: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // winbase.h's FILE_FLAG_OPEN_REPARSE_POINT.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(log)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::File::open(log)
+    }
 }
 
 /// `data` with each non-overlapping occurrence of the non-empty `key`, found from the left, replaced by `with`.
@@ -693,6 +717,33 @@ mod tests {
         let none = KeyHost { log: None, key: None };
         assert_eq!(save_debug_log(&none, now(), &dir.join("scan.txt")),
             Err("MakeMKV's debug log path is not known".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review round 1 of pull request 3 (V14): a debug log that is a link is refused, not followed, so a link planted
+    /// where MakeMKV writes its log makes the elevated engine copy no other file into the data folder (S61, design part
+    /// 7.2).
+    #[cfg(windows)]
+    #[test]
+    fn a_debug_log_that_is_a_link_is_not_saved() {
+        use std::io::Write;
+
+        let dir = crate::testutil::temp_dir("debug-link");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"not a debug log").unwrap();
+        let log = dir.join("MakeMKV_log.txt");
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &log) {
+            let line = format!("skipped: a file symlink could not be created: {error}\n");
+            let _ = std::io::stderr().write_all(line.as_bytes());
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let host = KeyHost { log: Some(log.clone()), key: None };
+        let saved = save_debug_log(&host, now() - 60, &dir.join("scan.txt"));
+        // assert!, not assert_eq!: a failure would print the temporary folder's path, which holds the account name.
+        assert!(saved == Err(format!("{}: the debug log is a link, not a file", log.display())),
+            "the link was not refused as a link; saved: {}", saved.is_ok());
+        assert!(!dir.join("scan.txt.makemkv-debug.txt").exists(), "a copy was written through the link");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
