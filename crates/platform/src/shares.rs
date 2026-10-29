@@ -157,10 +157,13 @@ impl<A: ShareApi> Shares<A> {
                     lock(&self.refused).remove(&target.key);
                     Ok(STORED_CREDENTIAL)
                 }
-                Err(code) => Err(format!(
+                Err(code) if REFUSED.contains(&code) => Err(format!(
                     "{share} refused access again after connecting with lazymkv's stored credential: {}",
                     os_error(code)
                 )),
+                // The connection was made but the share root did not answer: a network error, as the first probe reads it
+                // (PR #14 review round 1, R2).
+                Err(code) => Err(no_answer(share, code)),
             },
         }
     }
@@ -438,6 +441,18 @@ mod tests {
     }
 
     #[test]
+    fn a_second_probe_the_server_does_not_answer_says_so() {
+        for code in [53, 64, 1231] {
+            let (api, secrets) = (api(&[Err(5), Err(code)], Ok(())), counted(&[(NAME, CREDENTIAL)]));
+            let shares = connector(&api, &secrets);
+            let reach = shares.reach(ROOT);
+            assert_eq!(reach, Reach::Unreachable(format!(r"\\nas\media does not answer: {}", e(code))), "{code}");
+            assert_eq!((probes(&api).len(), connects(&api).len()), (2, 1), "{code}");
+            assert_eq!(shares.access(ROOT), None, "{code}");
+        }
+    }
+
+    #[test]
     fn a_malformed_stored_value_is_named_without_its_text() {
         for value in ["user-sentinel-7c1e", "user-sentinel-7c1e\npass-sentinel-4b9d\nthird", "\npass-sentinel-4b9d"] {
             let (api, secrets) = (api(&[Err(5)], Ok(())), counted(&[(NAME, value)]));
@@ -449,13 +464,14 @@ mod tests {
 
     #[test]
     fn no_text_holds_the_sentinel_user_or_password() {
-        let cases: [(&[Result<(), u32>], Result<(), u32>, &str); 8] = [
+        let cases: [(&[Result<(), u32>], Result<(), u32>, &str); 9] = [
             (&[Err(53)], Ok(()), CREDENTIAL),
             (&[Err(5)], Err(1326), CREDENTIAL),
             (&[Err(5)], Err(1272), CREDENTIAL),
             (&[Err(5)], Err(1219), CREDENTIAL),
             (&[Err(5)], Err(53), CREDENTIAL),
             (&[Err(5), Err(5)], Ok(()), CREDENTIAL),
+            (&[Err(5), Err(53)], Ok(()), CREDENTIAL),
             (&[Err(5)], Ok(()), "user-sentinel-7c1e"),
             (&[Err(5)], Ok(()), "pass-sentinel-4b9d\n"),
         ];
