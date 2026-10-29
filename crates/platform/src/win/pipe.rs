@@ -3,6 +3,7 @@
 //! out, and the overlapped stream halves the pipe's client end shares (T3-12), whose writer never waits behind a
 //! pending read.
 
+use std::cell::UnsafeCell;
 use std::io::{self, BufReader, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
@@ -124,10 +125,12 @@ impl PipeServer {
     /// before its OVERLAPPED goes, whatever ended the wait.
     fn connect(&self, instance: &OwnedHandle, event: &OwnedHandle) -> Result<Option<u32>, Closed> {
         let handle = raw(instance);
-        let mut overlapped = overlapped_on(event);
+        let overlapped = overlapped_on(event);
         // SAFETY: `instance` is an open overlapped instance; `overlapped` lives on this frame until the connect has
-        // ended, as every path below waits for that, and its event is a manual-reset event alive as long.
-        if unsafe { ConnectNamedPipe(handle, &mut overlapped) } != 0 {
+        // ended, as every path below waits for that, and its event is a manual-reset event alive as long; the
+        // OVERLAPPED is reached only through the cell's pointer, so the kernel's writes to Internal and InternalHigh
+        // meet no shared reference to plain data.
+        if unsafe { ConnectNamedPipe(handle, overlapped.get()) } != 0 {
             return Ok(None);
         }
         match last_error() {
@@ -301,11 +304,12 @@ impl Read for PipeReader {
         }
         let handle = raw(&self.shared.handle);
         let length = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let mut overlapped = overlapped_on(&self.event);
+        let overlapped = overlapped_on(&self.event);
         // SAFETY: the handle is open while `shared` lives; `buf` holds `length` bytes and, like `overlapped`, outlives
         // the read, since every path below waits for its end; the count pointer is null, as an overlapped read takes
-        // its count from GetOverlappedResult.
-        let started = unsafe { ReadFile(handle, buf.as_mut_ptr(), length, null_mut(), &mut overlapped) };
+        // its count from GetOverlappedResult; the OVERLAPPED is reached only through the cell's pointer, so the
+        // kernel's writes to Internal and InternalHigh meet no shared reference to plain data.
+        let started = unsafe { ReadFile(handle, buf.as_mut_ptr(), length, null_mut(), overlapped.get()) };
         let ended = if started != 0 {
             result_of(handle, &overlapped, false)
         } else {
@@ -352,11 +356,12 @@ impl Write for PipeWriter {
         }
         let handle = raw(&self.shared.handle);
         let length = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let mut overlapped = overlapped_on(&self.event);
+        let overlapped = overlapped_on(&self.event);
         // SAFETY: the handle is open while `shared` lives; `buf` holds `length` bytes and, like `overlapped`, outlives
         // the write, which is awaited below; the count pointer is null, as an overlapped write takes its count from
-        // GetOverlappedResult.
-        let started = unsafe { WriteFile(handle, buf.as_ptr(), length, null_mut(), &mut overlapped) };
+        // GetOverlappedResult; the OVERLAPPED is reached only through the cell's pointer, so the kernel's writes to
+        // Internal and InternalHigh meet no shared reference to plain data.
+        let started = unsafe { WriteFile(handle, buf.as_ptr(), length, null_mut(), overlapped.get()) };
         let ended = if started != 0 {
             result_of(handle, &overlapped, false)
         } else {
@@ -410,9 +415,11 @@ fn manual_event() -> io::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(event) })
 }
 
-/// An OVERLAPPED for one operation that signals `event` when it ends.
-fn overlapped_on(event: &OwnedHandle) -> OVERLAPPED {
-    OVERLAPPED { hEvent: raw(event), ..OVERLAPPED::default() }
+/// An OVERLAPPED for one operation that signals `event` when it ends, in a cell: the kernel writes its Internal fields
+/// until the operation ends, while `result_of` and `cancel` hold a shared reference to it (review round 1 of pull
+/// request 3 (R7)).
+fn overlapped_on(event: &OwnedHandle) -> UnsafeCell<OVERLAPPED> {
+    UnsafeCell::new(OVERLAPPED { hEvent: raw(event), ..OVERLAPPED::default() })
 }
 
 /// Whether the event `event` is set, without waiting.
@@ -429,18 +436,20 @@ fn wait_any(handles: &[HANDLE]) -> WAIT_EVENT {
 
 /// Cancels the operation `overlapped` describes on `handle`; it may have ended already, which the caller's
 /// `result_of(.., true)` then reports.
-fn cancel(handle: HANDLE, overlapped: &OVERLAPPED) {
-    // SAFETY: `overlapped` is the OVERLAPPED the caller started the operation on `handle` with, alive until the caller
-    // has awaited the operation's end.
-    unsafe { CancelIoEx(handle, overlapped) };
+fn cancel(handle: HANDLE, overlapped: &UnsafeCell<OVERLAPPED>) {
+    // SAFETY: `overlapped` holds the OVERLAPPED the caller started the operation on `handle` with, alive until the
+    // caller has awaited the operation's end; the OVERLAPPED is reached only through the cell's pointer, so the
+    // kernel's writes to Internal and InternalHigh meet no shared reference to plain data.
+    unsafe { CancelIoEx(handle, overlapped.get()) };
 }
 
 /// The bytes the operation `overlapped` describes transferred, or its error code; with `wait`, once it has ended.
-fn result_of(handle: HANDLE, overlapped: &OVERLAPPED, wait: bool) -> Result<u32, u32> {
+fn result_of(handle: HANDLE, overlapped: &UnsafeCell<OVERLAPPED>, wait: bool) -> Result<u32, u32> {
     let mut transferred = 0u32;
-    // SAFETY: `overlapped` is the OVERLAPPED the operation on `handle` was started with, alive for the call, and its
-    // event is open; the call writes the count to `transferred`.
-    if unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, i32::from(wait)) } == 0 {
+    // SAFETY: `overlapped` holds the OVERLAPPED the operation on `handle` was started with, alive for the call, and its
+    // event is open; the call writes the count to `transferred`; the OVERLAPPED is reached only through the cell's
+    // pointer, so the kernel's writes to Internal and InternalHigh meet no shared reference to plain data.
+    if unsafe { GetOverlappedResult(handle, overlapped.get(), &mut transferred, i32::from(wait)) } == 0 {
         return Err(last_error());
     }
     // The count in a binding whose address is never taken.
