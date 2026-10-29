@@ -169,6 +169,21 @@ impl ManualTimers {
         }
     }
 
+    /// Runs and drops every pending timer of `minutes`, oldest first, and leaves the others pending, as the minute that
+    /// runs out a refeed timer leaves an hourly StartTimer timer running (design part 5.2; Ruling T3-20-a). Def: T3-20.
+    /// Use: T3-20.
+    pub fn fire_lasting(&self, minutes: u32) {
+        let fired: Vec<_> = {
+            let mut pending = lock(&self.pending);
+            let (fired, kept) = std::mem::take(&mut *pending).into_iter().partition(|(lasting, _)| *lasting == minutes);
+            *pending = kept;
+            fired
+        };
+        for (_, fire) in fired {
+            fire();
+        }
+    }
+
     /// The minutes of each pending timer, oldest first (design part 5.2). Def: T22. Use: T22 to T29.
     pub fn pending(&self) -> Vec<u32> {
         lock(&self.pending).iter().map(|(minutes, _)| *minutes).collect()

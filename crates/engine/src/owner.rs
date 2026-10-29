@@ -169,8 +169,10 @@ pub(crate) enum Msg {
     StepDone { job: String, generation: u64, result: StepResult },
     /// A running step's progress: the running action's serde tag, the title key and the fraction (S7).
     Progress { job: String, step: String, title: Option<String>, fraction: f64 },
-    /// A StartTimer timer of the job ran out.
+    /// A StartTimer timer of the job ran out; a refeed timer sends `Refeed` instead (Ruling T3-20-a).
     Timer { job: String },
+    /// A refeed timer of the job ran out: its kept event, if it still has one, is fed again (Rulings W23, T3-20-a).
+    Refeed { job: String },
     /// A lookup round of the job ended (design part 8.3): `book.pending()`, or why the round could not run.
     RoundDone { job: String, pending: Result<(bool, bool), String> },
     /// The eject of an already-ripped disc returned.
@@ -848,10 +850,13 @@ struct Owner {
     /// persisted (review round 1, V1, RR1-1): each left its file-phase place, so the restart sequence seeds none of
     /// them as a holder. A later persisted transition of the job takes it out.
     kept: BTreeSet<String>,
-    /// The event, with its message, that each job in Planned or RipVerified, or an Ejected job's FilePhaseSlot, was fed
-    /// when its transition could not be persisted, fed again at its `REFEED_MINUTES` timer until it persists (review
-    /// round 1, V1; Ruling W23). A persisted transition of the job takes its entry out.
+    /// The event, with its message, that each job in Planned or RipVerified, or an Ejected job's FilePhaseSlot or
+    /// LookupPending, was fed when its transition could not be persisted, fed again at its `REFEED_MINUTES` timer until
+    /// it persists (review round 1, V1; Rulings W23, T3-20-b). A persisted transition of the job takes its entry out.
     refeed: BTreeMap<String, (Event, Option<String>)>,
+    /// The jobs whose refeed timer is pending (Ruling T3-20-a): a job gets a new refeed timer only when it has none, so
+    /// its kept events are fed again by one chain of timers whatever entries `refeed` gains or loses meanwhile.
+    refeed_armed: BTreeSet<String>,
 }
 
 impl Owner {
@@ -934,6 +939,7 @@ impl Owner {
             quiet: None,
             kept: BTreeSet::new(),
             refeed: BTreeMap::new(),
+            refeed_armed: BTreeSet::new(),
         };
         owner.restart(present);
         owner
@@ -1132,6 +1138,7 @@ impl Owner {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
             Msg::Progress { job, step, title, fraction } => self.on_progress(job, step, title, fraction),
             Msg::Timer { job } => self.on_timer(&job),
+            Msg::Refeed { job } => self.on_refeed(&job),
             Msg::RoundDone { job, pending } => self.on_round_done(&job, pending),
             Msg::Ejected { drive } => self.on_ejected(&drive),
             Msg::Connect(stream) => self.on_connect(stream),
@@ -1164,7 +1171,7 @@ impl Owner {
             Msg::CheckListed => self.release_check_token(),
             Msg::Connect(stream) => drop(stream),
             Msg::Log(line) => self.store.log(&line),
-            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Stop => {}
+            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Stop => {}
         }
     }
 
@@ -1591,9 +1598,11 @@ impl Owner {
     ///   be retried. The failure is written over the job's persisted record, since the lost transition's posted edits
     ///   went with it (RR1-16): a Retry resumes from what state.json held, so a title whose verification was lost is
     ///   ripped again. In a state with no failure row, Planned and RipVerified keep the event in `refeed`, and so does
-    ///   an Ejected job its FilePhaseSlot, whose grant `grant_next` also undoes; each is fed again by `on_timer` after
-    ///   `REFEED_MINUTES` until it persists (Ruling W23). A waiting, failed or held job gets nothing: it can be retried
-    ///   or approved again.
+    ///   an Ejected job its FilePhaseSlot, whose grant `grant_next` also undoes, and its LookupPending, fed after a
+    ///   lookup round's end took the job out of the slot's queue (Ruling T3-20-b); each is fed again at its refeed
+    ///   timer (`on_refeed`) after `REFEED_MINUTES` until it persists (Ruling W23), and a job whose refeed timer is
+    ///   pending (`refeed_armed`) gets no second one (Ruling T3-20-a). A waiting, failed or held job gets nothing: it
+    ///   can be retried or approved again.
     /// - A transition into Failed, the failure itself (also the guard against feeding again), follows RR1-1: no state
     ///   is changed in memory and nothing is notified or published; the job keeps its persisted state, its promises are
     ///   released, it leaves its file-phase place, which is granted again, and engine.log says `<id>: keeps its
@@ -1621,12 +1630,15 @@ impl Owner {
             let Some(event) = transition.event.clone() else {
                 return;
             };
-            let keeps = matches!(state, State::Planned { .. } | State::RipVerified { .. });
-            if keeps || event == Event::FilePhaseSlot {
+            let keeps = matches!(state, State::Planned { .. } | State::RipVerified { .. })
+                || event == Event::FilePhaseSlot
+                || (event == Event::LookupPending && state == State::Ejected { after_copy: false });
+            if keeps {
                 // Ruling W23: the timer before the line, so a test that sees the line finds the timer.
                 let tag = event_tag(&event);
-                if self.refeed.insert(id.to_string(), (event, message)).is_none() {
-                    self.start_timer(id, REFEED_MINUTES);
+                self.refeed.insert(id.to_string(), (event, message));
+                if self.refeed_armed.insert(id.to_string()) {
+                    self.start_refeed(id);
                 }
                 let state = state.as_str();
                 self.store.log(&format!("{id}: keeps its persisted state {state}; {tag} is fed again in 1 minute"));
@@ -1925,13 +1937,25 @@ impl Owner {
         let _ = self.notifications.send(notification);
     }
 
-    /// StartTimer (design part 5.2): the timer sends `Msg::Timer` for the job.
+    /// StartTimer (design part 5.2): the timer sends `Msg::Timer` for the job. A refeed timer is `start_refeed`'s.
     fn start_timer(&self, id: &str, minutes: u32) {
         let (sender, job) = (self.sender.clone(), id.to_string());
         self.parts.timers.start(
             minutes,
             Box::new(move || {
                 let _ = sender.send(Msg::Timer { job });
+            }),
+        );
+    }
+
+    /// A refeed timer (Rulings W23, T3-20-a): after `REFEED_MINUTES` it sends `Msg::Refeed` for the job, never
+    /// `Msg::Timer`, so a refeed timer and a StartTimer timer are never taken for each other.
+    fn start_refeed(&self, id: &str) {
+        let (sender, job) = (self.sender.clone(), id.to_string());
+        self.parts.timers.start(
+            REFEED_MINUTES,
+            Box::new(move || {
+                let _ = sender.send(Msg::Refeed { job });
             }),
         );
     }
@@ -2196,11 +2220,8 @@ impl Owner {
     /// A StartTimer timer ran out (design part 5.2). AwaitingLookup gets a lookup round, unless one runs (design part
     /// 8.3); a running round a `retry` started becomes the timer's, so its end starts the timer again. AwaitingNetwork
     /// gets NetworkRetry through `deliver`: a return to a disc-phase state waits for the token in its queue (design
-    /// part 5.4, way (d), L2). A job with a kept event (`refeed`) has it fed again instead (Ruling W23).
+    /// part 5.4, way (d), L2). A refeed timer sends `Msg::Refeed` instead and never comes here (Ruling T3-20-a).
     fn on_timer(&mut self, id: &str) {
-        if let Some((event, message)) = self.refeed.remove(id) {
-            return self.feed_again(id, event, message);
-        }
         let Some(job) = self.jobs.get(id) else {
             return;
         };
@@ -2214,10 +2235,21 @@ impl Owner {
         }
     }
 
+    /// A refeed timer ran out (Rulings W23, T3-20-a): the job's timer is no longer pending (`refeed_armed`), and its
+    /// kept event, if it still has one, is fed again (`feed_again`). An entry a persisted transition took out leaves
+    /// nothing to do, whatever state the job is in now.
+    fn on_refeed(&mut self, id: &str) {
+        self.refeed_armed.remove(id);
+        if let Some((event, message)) = self.refeed.remove(id) {
+            self.feed_again(id, event, message);
+        }
+    }
+
     /// A kept event's timer ran out (Ruling W23). A FilePhaseSlot asks for the slot again, so the queue's order holds;
     /// an event whose transition keeps the disc-phase token, SpaceOk into Ripping or Copying, goes through `deliver`,
     /// which waits for the token (L2) and carries no message, as SpaceOk has none; any other event is fed with its
-    /// message. A refusal again keeps it for another timer through `unpersisted`.
+    /// message, an Ejected job's LookupPending among them, a plain event and no slot grant (Ruling T3-20-b). A refusal
+    /// again keeps it for another timer through `unpersisted`.
     fn feed_again(&mut self, id: &str, event: Event, message: Option<String>) {
         if event == Event::FilePhaseSlot {
             return self.grant_next();

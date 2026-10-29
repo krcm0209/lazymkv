@@ -699,3 +699,74 @@ fn an_ejected_jobs_slot_grant_is_persisted_at_the_retry_timer() {
     let granted = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::FilePhaseSlot)).unwrap();
     assert_eq!((granted.old, granted.new), (Some(State::Ejected { after_copy: false }), State::Inspecting));
 }
+
+/// Ruling T3-20-a: a refeed timer sends its own message. A's FilePhaseSlot is refused and kept with a refeed timer,
+/// then B's Ejected grants A the slot, which takes A's entry out while that timer is still pending; A then reaches
+/// AwaitingLookup with its hourly timer. The refeed timer running out finds no entry and does nothing: no lookup round
+/// starts, so no transition follows, and only the hourly timer stays pending, one chain as spec 10.1 retries hourly.
+#[test]
+fn a_refeed_timer_whose_entry_a_later_grant_took_out_starts_no_lookup_round() {
+    use lazymkv_engine::testkit::StepScript;
+    use lazymkv_engine::StepResult;
+    fn ok(event: Event) -> StepScript {
+        StepScript::Result(StepResult { event: Some(event), message: None })
+    }
+    let disc_phase = || {
+        vec![
+            ("RunScan", ok(Event::ScanDone)),
+            ("Plan", ok(Event::PlanDone { mode: lazymkv_core::plan::Mode::Direct })),
+            ("CheckSpace", ok(Event::SpaceOk)),
+            ("RipTitle", ok(Event::TitleRipped)),
+            ("VerifyFile", ok(Event::TitleVerified { last: true })),
+            ("Eject", ok(Event::Ejected)),
+        ]
+    };
+    let mut steps = disc_phase(); // A's disc phase
+    steps.extend(disc_phase()); // B's disc phase
+    steps.extend([("Probe", ok(Event::ProbeDone)), ("Decide", ok(Event::LookupPending))]); // A's file phase
+    let h = Harness::new_scripted(steps, settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::FilePhaseSlot));
+    h.insert("tok0", DISC);
+    let a = first_job(&h);
+    let kept = format!("{a}: keeps its persisted state Ejected; FilePhaseSlot is fed again in 1 minute");
+    h.wait("A's FilePhaseSlot kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.insert("tok1", "disc-b");
+    h.wait("A in AwaitingLookup", |h| h.state_of(&a) == "AwaitingLookup");
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![1, 60], "the refeed timer outlives A's entry");
+    let before = h.transitions(&a).len();
+    h.timers().fire_lasting(1);
+    h.settle();
+    let lines = h.transitions(&a);
+    assert_eq!(lines.len(), before, "a lookup round ran: {:?}", lines.last());
+    assert_eq!(h.timers().pending(), vec![60]);
+    assert_eq!(h.state_of(&a), "AwaitingLookup");
+}
+
+/// Ruling T3-20-b: a lookup round's end takes an Ejected job with a lookup still pending out of the slot's queue and
+/// feeds LookupPending. When that transition cannot be persisted, the event is kept with its waiting message and fed
+/// again at the one-minute refeed timer, so the job reaches AwaitingLookup; its hourly timer's round answers, and the
+/// job files.
+#[test]
+fn an_ejected_jobs_refused_lookup_pending_is_kept_and_fed_again_at_the_retry_timer() {
+    let h = harness(&["movie-direct", "movie-direct-lookup-later"], settings());
+    h.scan_waits_for_lookups(false);
+    h.refuse_persists(|_, transition| transition.event == Some(Event::LookupPending));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Ejected; LookupPending is fed again in 1 minute");
+    h.wait("LookupPending kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.state_of(&id), "Ejected");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupPending)).unwrap();
+    assert_eq!(fed.old, Some(State::Ejected { after_copy: false }));
+    assert!(h.record(&id).message.is_some(), "the waiting message is fed again with the kept event");
+    h.fire_timers();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+}
