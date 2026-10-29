@@ -192,8 +192,10 @@ fn rescan() {
 
 /// The window procedure of every watcher's window (Ruling W8): a device change and the poll's timer scan the drives,
 /// `STOP`, which only the drop posts, destroys the window, WM_CLOSE is ignored (review round 1 of pull request 3, R6),
-/// and WM_DESTROY lets the device notification and the timer go and ends the message loop. Every other message gets
-/// Windows' default.
+/// and WM_DESTROY lets the device notification and the timer go and ends the message loop. Every other message,
+/// WM_QUERYENDSESSION and WM_ENDSESSION among them, gets Windows' default, which lets the session end and leaves the
+/// window be; the engine never delays a logoff, restart or shutdown, which end it without the request (design part
+/// 3.8; review round 1 of pull request 3, V4).
 ///
 /// # Safety
 ///
@@ -377,7 +379,7 @@ mod tests {
     };
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
     use windows_sys::Win32::System::IO::DeviceIoControl;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SendMessageW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SendMessageW, WM_ENDSESSION, WM_QUERYENDSESSION};
 
     use super::*;
     use crate::drives::DRIVE_POLL_EVERY;
@@ -428,6 +430,26 @@ mod tests {
         // SAFETY: IsWindow only reads whether the handle names a window.
         assert_ne!(unsafe { IsWindow(window) }, 0, "an outside WM_CLOSE destroyed the window");
         assert!(!watcher.thread.as_ref().unwrap().is_finished(), "an outside WM_CLOSE ended the window thread");
+        drop_ends_the_window_thread(watcher);
+    }
+
+    /// Review round 1 of pull request 3 (V4): the window leaves a session's end to Windows' default, TRUE to
+    /// WM_QUERYENDSESSION and 0 to WM_ENDSESSION, so a logoff or a restart goes on and the window and its thread run
+    /// until the session's end ends the engine (design part 3.8). A change that blocks or reacts to the session's end
+    /// amends V4's ruling.
+    #[test]
+    fn the_window_lets_a_logoff_or_a_restart_go_on() {
+        let watcher = WinDrives::new().expect("the watcher starts");
+        let window = watcher.window as HWND;
+        // SAFETY: `window` is the watcher's window; each call returns once its thread handled the message, which
+        // carries no pointer.
+        let query = unsafe { SendMessageW(window, WM_QUERYENDSESSION, 0, 0) };
+        // SAFETY: as above; a WPARAM of 1 says the session ends.
+        let end = unsafe { SendMessageW(window, WM_ENDSESSION, 1, 0) };
+        assert_eq!((query, end), (1, 0), "the answers to WM_QUERYENDSESSION and WM_ENDSESSION");
+        // SAFETY: IsWindow only reads whether the handle names a window.
+        assert_ne!(unsafe { IsWindow(window) }, 0, "the session's end destroyed the window");
+        assert!(!watcher.thread.as_ref().unwrap().is_finished(), "the session's end ended the window thread");
         drop_ends_the_window_thread(watcher);
     }
 

@@ -245,7 +245,10 @@ fn could_not_start(error: &dyn Display) -> String {
 
 /// The console's stop handler (design part 3.8; Ruling W19): a forced shutdown through the handle in `slot` once
 /// `start` has returned; before that, `STOPPED_STARTING` on the process's standard error and exit 1 at once, the Job
-/// Objects ending the MakeMKV check's listing.
+/// Objects ending the MakeMKV check's listing. Ctrl+C and Ctrl+Break let the forced shutdown run to its end; after the
+/// window's close Windows ends the process 5 s later, so a forced shutdown that cancelled a tool step, whose S56 pause
+/// is 10 s, is cut off, and the next start resumes what it left, as after a logoff (design part 3.8; W19 amended at
+/// review round 1 of pull request 3, V4 and V8).
 fn console_handler(slot: Arc<Mutex<Option<ShutdownHandle>>>) -> Box<dyn Fn() + Send + Sync> {
     Box::new(move || {
         let handle = lock(&slot).clone();

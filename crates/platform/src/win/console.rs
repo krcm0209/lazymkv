@@ -1,6 +1,14 @@
-//! The console's stop events (design part 3.8; Ruling W19): Ctrl+C, Ctrl+Break, and the console window's close, logoff
-//! and shutdown reach the one handler the engine installs, through a routine registered once with
-//! `SetConsoleCtrlHandler`. Windows runs the routine on a thread it creates for each event.
+//! The console's stop events (design part 3.8; Ruling W19, amended at review round 1 of pull request 3, V4 and V8):
+//! Ctrl+C and Ctrl+Break, which Windows gives no time limit, and the console window's close, after which Windows ends
+//! the process 5 s later (SPI_GETHUNGAPPTIMEOUT) whatever the routine does. They reach the one handler the engine
+//! installs, through a routine registered once with `SetConsoleCtrlHandler`. Windows runs the routine on a thread it
+//! creates for each event. A forced shutdown that cancelled a tool step, whose S56 pause is 10 s, is cut off there,
+//! and the next start resumes what it left.
+//!
+//! A logoff, restart or shutdown never reaches the routine. A process that loads user32, as the engine does for the
+//! drive watcher's window, is a windowed application to Windows, which sends WM_QUERYENDSESSION and WM_ENDSESSION to
+//! that window. The window leaves them to Windows' default, so the engine ends without the request (design part 3.8;
+//! W19 amended at review round 1 of pull request 3, V4 and V8).
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,9 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use windows_sys::core::BOOL;
-use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
-};
+use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
 
 /// The handler `routine` calls; None until `on_console_stop` sets one.
 static HANDLER: Mutex<Option<Box<dyn Fn() + Send + Sync>>> = Mutex::new(None);
@@ -25,16 +31,19 @@ const EXIT_WAIT: Duration = Duration::from_millis(100);
 enum StopKind {
     /// Ctrl+C or Ctrl+Break: the routine returns at once, and the engine stops on its own.
     Return,
-    /// The console window's close, a logoff or a shutdown: Windows ends the process when the routine returns, so the
-    /// routine waits for the process to end instead.
+    /// The console window's close (its close button, closing its Windows Terminal tab, or Task Manager's End task on
+    /// it); Windows ends the process 5 s later, and at once when the routine returns, so the routine waits for the
+    /// process to end instead.
     WaitForExit,
 }
 
-/// The kind of the console event `code`; None for a code that is not a stop event.
+/// The kind of the console event `code`; None for a code that is not a stop event, a logoff's or a shutdown's among
+/// them, which the routine declines, so Windows' default handler ends the process (design part 3.8; review round 1
+/// of pull request 3, V4).
 fn stop_kind(code: u32) -> Option<StopKind> {
     match code {
         CTRL_C_EVENT | CTRL_BREAK_EVENT => Some(StopKind::Return),
-        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => Some(StopKind::WaitForExit),
+        CTRL_CLOSE_EVENT => Some(StopKind::WaitForExit),
         _ => None,
     }
 }
@@ -72,10 +81,12 @@ extern "system" fn routine(code: u32) -> BOOL {
     1
 }
 
-/// Calls `handler` on the console's stop events through `SetConsoleCtrlHandler` (design part 3.8; Ruling W19):
-/// Ctrl+C and Ctrl+Break, after which the handler routine returns at once, and the console window's close, logoff
-/// and shutdown, after which it waits for the process to end, since Windows ends the process when the routine
-/// returns. A second call replaces the handler. Err is `SetConsoleCtrlHandler`'s. Def: T3-23. Use: T3-23.
+/// Calls `handler` on the console's stop events through `SetConsoleCtrlHandler` (design part 3.8; Ruling W19, amended
+/// at review round 1 of pull request 3, V4 and V8): Ctrl+C and Ctrl+Break, after which the handler routine returns at
+/// once, and the console window's close, after which it waits for the process to end, since Windows ends the process
+/// when the routine returns and 5 s after the close in any case. A logoff, restart or shutdown never reaches the
+/// routine in the engine, whose drive watcher's window makes it a windowed application to Windows (the module's doc).
+/// A second call replaces the handler. Err is `SetConsoleCtrlHandler`'s. Def: T3-23. Use: T3-23.
 pub fn on_console_stop(handler: Box<dyn Fn() + Send + Sync>) -> io::Result<()> {
     set_handler(Some(handler));
     if REGISTERED.swap(true, Ordering::SeqCst) {
@@ -102,14 +113,17 @@ mod tests {
         CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     };
 
+    /// Review round 1 of pull request 3 (V4): a logoff and a shutdown (5 and 6) are declined like codes 3 and 4, so
+    /// Windows' default handler ends the process (design part 3.8).
     #[test]
-    fn ctrl_c_and_ctrl_break_return_at_once_and_close_logoff_and_shutdown_wait() {
+    fn ctrl_c_and_ctrl_break_return_at_once_close_waits_and_logoff_and_shutdown_are_declined() {
         assert_eq!(stop_kind(CTRL_C_EVENT), Some(StopKind::Return));
         assert_eq!(stop_kind(CTRL_BREAK_EVENT), Some(StopKind::Return));
-        for code in [CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT] {
-            assert_eq!(stop_kind(code), Some(StopKind::WaitForExit), "{code}");
+        assert_eq!(stop_kind(CTRL_CLOSE_EVENT), Some(StopKind::WaitForExit));
+        assert_eq!((CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT), (5, 6));
+        for code in [CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, 3, 4] {
+            assert_eq!(stop_kind(code), None, "{code}");
         }
-        assert_eq!((stop_kind(3), stop_kind(4)), (None, None));
     }
 
     #[test]
