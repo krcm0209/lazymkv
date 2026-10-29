@@ -1,11 +1,15 @@
 //! The engine's data folder (design part 3.5, MISS-ARCH-18; Rulings W6, T3-3-a to T3-3-c): created, when absent,
 //! owned by Administrators with the protected access list from its first moment; then, created or found, refused if it
-//! is a link, a junction, a file or a folder of another owner, and otherwise given the protected access list. Its
-//! default place comes from the registry, not the environment (Ruling W1, amended after the whole-branch review (F2)),
-//! as does an account's profile folder, where MakeMKV writes its debug log (review round 1 of pull request 3 (V14)).
+//! is a link, a junction, a file or a folder of another owner, or if any entry below it, at any depth and without
+//! following links, is a link or a junction or is owned by any account but Administrators or SYSTEM (review round 1 of
+//! pull request 3 (V3)); and otherwise given the protected access list. Setting the list replaces only the inherited
+//! entries below: each entry keeps its owner, its explicit entries and any protected list as they were, which is why
+//! every entry is checked before any change. Its default place comes from the registry, not the environment (Ruling
+//! W1, amended after the whole-branch review (F2)), as does an account's profile folder, where MakeMKV writes its debug
+//! log (review round 1 of pull request 3 (V14)).
 
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, Metadata};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::MetadataExt;
@@ -35,9 +39,13 @@ const SYSTEM_DRIVE: &str = "%SystemDrive%";
 
 /// Makes `path` the engine's data folder (design part 3.5, MISS-ARCH-18; Rulings W6, T3-3-a to T3-3-c). An absent
 /// folder is created owned by Administrators. A link, a junction, a file, or a folder owned by any account but
-/// Administrators or SYSTEM is refused. Then the protected access list `folder_sddl(reader_sid)` is set, and everything
-/// below inherits it. `reader_sid` is the owner's account, the engine's own token user. Err is a sentence for standard
-/// error. Def: T3-3. Use: T3-23.
+/// Administrators or SYSTEM is refused. So is a folder holding, at any depth below it, an entry that is a link or a
+/// junction or that is owned by any account but Administrators or SYSTEM, found without following links and named in
+/// the refusal (review round 1 of pull request 3 (V3)). Every refusal comes before any change. Then the protected
+/// access list `folder_sddl(reader_sid)` is set, and the entries below inherit it: the set replaces only their
+/// inherited entries and leaves each entry's owner, its explicit entries and any protected list as they were.
+/// `reader_sid` is the owner's account, the engine's own token user. Err is a sentence for standard error, with SIDs,
+/// never account names. Def: T3-3. Use: T3-23.
 pub fn protect_data_folder(path: &Path, reader_sid: &str) -> Result<(), String> {
     let unreadable = |error: io::Error| format!("{} could not be read: {error}", path.display());
     let metadata = match fs::symlink_metadata(path) {
@@ -57,7 +65,7 @@ pub fn protect_data_folder(path: &Path, reader_sid: &str) -> Result<(), String> 
     };
     // Ruling T3-3-b: SetNamedSecurityInfoW follows a link, so a link, a junction or a file is refused before any
     // change.
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_dir() {
+    if is_link(&metadata) || !metadata.is_dir() {
         return Err(format!(
             "{} is a link, a junction or a file, not a folder; the engine will not use it (design part 3.5)",
             path.display()
@@ -71,7 +79,53 @@ pub fn protect_data_folder(path: &Path, reader_sid: &str) -> Result<(), String> 
             path.display()
         ));
     }
+    // Rulings T3-3-b and T3-3-c, widened to every entry below (review round 1 of pull request 3 (V3)): the set would
+    // follow a link below, and an entry another account owns could change its own list after the set, so either is
+    // refused here, before any change.
+    check_below(path)?;
     set_list(path, reader_sid).map_err(|error| format!("{}'s access list could not be set: {error}", path.display()))
+}
+
+/// Whether `metadata`, read without following a link, is a reparse point: a symbolic link, a junction or any other.
+fn is_link(metadata: &Metadata) -> bool {
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Refuses the data folder `folder` when any entry below it, at any depth, is a link or a junction, or is owned by any
+/// account but Administrators or SYSTEM (design part 3.5; review round 1 of pull request 3 (V3)). The walk reads each
+/// entry with `symlink_metadata`, so it never follows a link and never descends into one. An entry or a folder that
+/// cannot be read, or whose owner cannot be read, refuses the folder too, so an entry whose list excludes
+/// Administrators is refused. Err is a sentence for standard error naming the entry, with SIDs only.
+fn check_below(folder: &Path) -> Result<(), String> {
+    let unreadable = |path: &Path, error: io::Error| format!("{} could not be read: {error}", path.display());
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(listed) = folders.pop() {
+        for entry in fs::read_dir(&listed).map_err(|error| unreadable(&listed, error))? {
+            let entry = entry.map_err(|error| unreadable(&listed, error))?.path();
+            let metadata = fs::symlink_metadata(&entry).map_err(|error| unreadable(&entry, error))?;
+            if is_link(&metadata) {
+                return Err(format!(
+                    "{} is a link or a junction; the engine will not use the data folder {} (design part 3.5)",
+                    entry.display(),
+                    folder.display()
+                ));
+            }
+            let owner =
+                owner_of(&entry).map_err(|error| format!("{}'s owner could not be read: {error}", entry.display()))?;
+            if !owner_allowed(&owner) {
+                return Err(format!(
+                    "{} is owned by {owner}, neither Administrators nor SYSTEM; the engine will not use the data \
+                     folder {} (design part 3.5)",
+                    entry.display(),
+                    folder.display()
+                ));
+            }
+            if metadata.is_dir() {
+                folders.push(entry);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The engine's default data folder (design part 3.1; Ruling W1, amended after the whole-branch review (F2)): the value
@@ -187,7 +241,10 @@ fn owner_of(path: &Path) -> io::Result<String> {
     sid
 }
 
-/// Sets `folder_sddl(reader_sid)` on `path` as a protected list, which Windows propagates to everything below.
+/// Sets `folder_sddl(reader_sid)` on `path` as a protected list, which Windows propagates to everything below. The
+/// propagation replaces only each entry's inherited entries and leaves its owner, its explicit entries and any
+/// protected list as they were, so `check_below` must first have found every entry below neither a link nor a junction
+/// and owned by Administrators or SYSTEM (review round 1 of pull request 3 (V3)).
 fn set_list(path: &Path, reader_sid: &str) -> io::Result<()> {
     let descriptor = Descriptor::from_sddl(&folder_sddl(reader_sid))?;
     let dacl = descriptor.dacl();
@@ -290,6 +347,8 @@ mod tests {
         set_owner(&path, ADMINISTRATORS_SID);
         set_open_list(&path, "D:AI(A;OICI;FA;;;WD)"); // WD is Everyone
         fs::write(path.join("settings.json"), "{}").unwrap();
+        // An administrator's file, as the folder's: review round 1 of pull request 3 (V3) refuses any other owner.
+        set_owner(&path.join("settings.json"), ADMINISTRATORS_SID);
         protect_data_folder(&path, &own.user_sid).unwrap();
         let read = read_path(&path).unwrap();
         assert_eq!(read.owner, ADMINISTRATORS_SID);
@@ -351,6 +410,99 @@ mod tests {
         let file = dir.0.join("file");
         fs::write(&file, "").unwrap();
         assert_eq!(protect_data_folder(&file, &own.user_sid), Err(refusal(&file)));
+    }
+
+    /// The refusal of `entry`, below the data folder `folder`, owned by `owner` (review round 1 of pull request 3
+    /// (V3)).
+    fn owner_refusal(entry: &Path, owner: &str, folder: &Path) -> String {
+        format!(
+            "{} is owned by {owner}, neither Administrators nor SYSTEM; the engine will not use the data folder {} \
+             (design part 3.5)",
+            entry.display(),
+            folder.display()
+        )
+    }
+
+    /// Review round 1 of pull request 3 (V3): a settings.json the user owns keeps its owner's implicit right to change
+    /// its list after the protected list propagates, so the folder is refused, naming the file, before any change.
+    #[test]
+    fn a_file_below_owned_by_another_account_is_refused_and_the_folder_keeps_its_list() {
+        let own = own_token().unwrap();
+        let dir = Scratch::new("folder-below-owner");
+        let path = dir.0.join("data");
+        fs::create_dir(&path).unwrap();
+        set_owner(&path, ADMINISTRATORS_SID);
+        set_open_list(&path, "D:AI(A;OICI;FA;;;WD)"); // WD is Everyone
+        let settings = path.join("settings.json");
+        fs::write(&settings, "{}").unwrap();
+        set_owner(&settings, &own.user_sid);
+        let (folder_before, file_before) = (read_path(&path).unwrap(), read_path(&settings).unwrap());
+        assert_eq!(protect_data_folder(&path, &own.user_sid), Err(owner_refusal(&settings, &own.user_sid, &path)));
+        assert!(read_path(&path).unwrap() == folder_before, "a refused folder keeps its owner and list");
+        assert!(read_path(&settings).unwrap() == file_before, "the refused file keeps its owner and list");
+    }
+
+    /// Review round 1 of pull request 3 (V3): the walk goes to any depth.
+    #[test]
+    fn an_entry_owned_by_another_account_deeper_down_is_refused() {
+        let own = own_token().unwrap();
+        let dir = Scratch::new("folder-deep-owner");
+        let path = dir.0.join("data");
+        let job = path.join("jobs").join("abc-1");
+        fs::create_dir_all(&job).unwrap();
+        for folder in [&path, &path.join("jobs"), &job] {
+            set_owner(folder, ADMINISTRATORS_SID);
+        }
+        let state = job.join("state.json");
+        fs::write(&state, "{}").unwrap();
+        set_owner(&state, &own.user_sid);
+        assert_eq!(protect_data_folder(&path, &own.user_sid), Err(owner_refusal(&state, &own.user_sid, &path)));
+    }
+
+    /// Review round 1 of pull request 3 (V3): a junction below the folder is refused before the list is set, so the
+    /// propagation never reaches its target (Ruling T3-3-b, widened).
+    #[test]
+    fn a_junction_below_the_folder_is_refused_and_its_target_keeps_its_list() {
+        let own = own_token().unwrap();
+        let dir = Scratch::new("folder-below-link");
+        let (path, target) = (dir.0.join("data"), dir.0.join("target"));
+        for folder in [&path, &target] {
+            fs::create_dir(folder).unwrap();
+            set_owner(folder, ADMINISTRATORS_SID);
+            set_open_list(folder, "D:AI(A;OICI;FA;;;WD)"); // WD is Everyone
+        }
+        let link = path.join("inner");
+        let made = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(&link).arg(&target)
+            .output().unwrap();
+        assert!(made.status.success(), "mklink /J failed");
+        let (folder_before, target_before) = (read_path(&path).unwrap(), read_path(&target).unwrap());
+        assert_eq!(
+            protect_data_folder(&path, &own.user_sid),
+            Err(format!(
+                "{} is a link or a junction; the engine will not use the data folder {} (design part 3.5)",
+                link.display(),
+                path.display()
+            ))
+        );
+        assert!(read_path(&target).unwrap() == target_before, "the junction's target kept its list");
+        assert!(read_path(&path).unwrap() == folder_before, "a refused folder keeps its owner and list");
+    }
+
+    /// Review round 1 of pull request 3 (V3): the canary that this elevated token's default owner is Administrators.
+    /// The engine's own files below, written between two starts, must not refuse the second start. A failure naming an
+    /// `S-1-5-21-` owner means the token's default owner is its user, which needs a ruling of its own, not a weaker
+    /// walk.
+    #[test]
+    fn a_restart_accepts_the_entries_its_own_token_wrote_below() {
+        let own = own_token().unwrap();
+        let dir = Scratch::new("folder-restart");
+        let path = dir.0.join("data");
+        protect_data_folder(&path, &own.user_sid).unwrap();
+        fs::write(path.join("engine.log"), "").unwrap();
+        let job = path.join("jobs").join("abc-1");
+        fs::create_dir_all(&job).unwrap();
+        fs::write(job.join("state.json"), "{}").unwrap();
+        assert_eq!(protect_data_folder(&path, &own.user_sid), Ok(()));
     }
 
     #[test]
