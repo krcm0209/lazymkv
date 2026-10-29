@@ -74,6 +74,20 @@ pub fn main_with(args: &[String], err: &mut dyn Write) -> i32 {
     }
 }
 
+/// The binary's arguments as text (M7, amended at review round 1 of pull request 3 (R5)): each word through
+/// `OsString::into_string`, in order. Err is `lazymkv-engine: an argument is not Unicode: <the word, U+FFFD for each
+/// unit that is not>` for the first word that is not Unicode, and the words after it are not read; the binary prints
+/// it and exits 1 before it reads, creates or locks anything, on every system, so such a word never exits 101 and
+/// never names another data folder. Def: PR #14 review round 1 (R5). Use: main.rs.
+pub fn unicode_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, String> {
+    args.into_iter()
+        .map(|word| {
+            word.into_string()
+                .map_err(|word| format!("lazymkv-engine: an argument is not Unicode: {}", word.to_string_lossy()))
+        })
+        .collect()
+}
+
 /// `--data`'s value, None without it (design part 3.1; Ruling W1), or the usage error's message in argparse's words:
 /// a missing value, or `unrecognized arguments: <the words left, joined by " ">`. Def: T21, T3-23. Use: T21, T3-23.
 pub(crate) fn data_arg(args: &[String]) -> Result<Option<String>, String> {
@@ -111,6 +125,31 @@ mod tests {
     fn data_is_optional() {
         assert_eq!(data_arg(&[]), Ok(None));
         assert_eq!(data_arg(&words(&["--data", "x"])), Ok(Some("x".to_string())));
+    }
+
+    #[test]
+    fn unicode_arguments_pass_through_in_order() {
+        let args = ["--data", "x"].map(OsString::from);
+        assert_eq!(unicode_args(args), Ok(words(&["--data", "x"])));
+    }
+
+    /// A byte that is not UTF-8 on Unix, an unpaired surrogate on Windows: the refusal names the first such word
+    /// lossily, and the words after it are not read.
+    #[test]
+    fn an_argument_that_is_not_unicode_is_refused_by_name() {
+        #[cfg(unix)]
+        let word = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b"a-\xff".to_vec())
+        };
+        #[cfg(windows)]
+        let word = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[u16::from(b'a'), u16::from(b'-'), 0xD800])
+        };
+        let after = std::iter::from_fn(|| -> Option<OsString> { panic!("a word after the refused one was read") });
+        let args = [OsString::from("--data"), word].into_iter().chain(after);
+        assert_eq!(unicode_args(args), Err("lazymkv-engine: an argument is not Unicode: a-\u{FFFD}".to_string()));
     }
 
     #[test]
