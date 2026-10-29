@@ -19,8 +19,8 @@ use lazymkv_engine::native::{run_with, NativeOptions, ENGINE_RUNNING, NOT_ELEVAT
 use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::security::{test_name, TokenFacts};
 use lazymkv_platform::fakes::{MemorySecrets, RecordingEjector, ScriptedDrives};
-use lazymkv_platform::win::{own_token, program_data, EngineMutex, PipeConnector, PipeServer, WinHost};
-use lazymkv_platform::{ConnectError, Host, IpcConnector, StdProcessGuard};
+use lazymkv_platform::win::{own_token, program_data, EngineMutex, PipeServer, WinHost};
+use lazymkv_platform::{Host, StdProcessGuard};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
@@ -146,6 +146,9 @@ fn a_second_native_engine_says_an_engine_is_running() {
     assert!(!data.exists(), "the mutex comes before the data folder (W3)");
 }
 
+/// Review round 1 of pull request 3 (R23): the test holds the pipe's name first, as another process would. With the
+/// name held, an engine that bound its pipe before the folder check would answer `another process holds the pipe
+/// <pipe> (design part 3.3)` instead, so the folder's text proves W3's order.
 #[test]
 fn a_native_engine_refuses_a_data_folder_owned_by_the_user() {
     let (mutex, pipe, data) = names("native-owner");
@@ -153,13 +156,14 @@ fn a_native_engine_refuses_a_data_folder_owned_by_the_user() {
     let sid = own_token().unwrap().user_sid;
     let set = Command::new("icacls").arg(&data).args(["/setowner", &format!("*{sid}")]).output().unwrap();
     assert!(set.status.success(), "icacls /setowner: {}", String::from_utf8_lossy(&set.stdout));
+    let held = PipeServer::bind(&pipe).expect("another process's pipe");
     let (code, err) = refused(&data, options(&mutex, &pipe));
+    drop(held);
     let _ = fs::remove_dir_all(&data);
     assert_eq!(code, 1, "{err}");
     assert!(err.starts_with(&format!("lazymkv-engine: {} is owned by S-1-5-", data.display())), "{err}");
     assert!(err.ends_with(", neither Administrators nor SYSTEM; the engine will not use it (design part 3.5)\n"), "{err}");
     assert!(EngineMutex::take(&mutex).is_ok(), "the refusal released the mutex");
-    assert_eq!(PipeConnector::new(&pipe).connect().err(), Some(ConnectError::NotRunning), "the pipe comes after the folder");
 }
 
 #[test]
