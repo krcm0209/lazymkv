@@ -3,12 +3,9 @@
 
 use std::io;
 use std::path::Path;
-use std::ptr::null_mut;
 use std::time::Duration;
 
-use windows_sys::Win32::Storage::FileSystem::{
-    GetFullPathNameW, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-};
+use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
 use super::wide;
 
@@ -31,41 +28,41 @@ const UNC_PREFIX: &[u16] = &[SEP, SEP, QUERY, SEP, b'U' as u16, b'N' as u16, b'C
 
 /// `path` as the NUL-terminated wide (UTF-16, 16-bit Unicode) string Windows takes. Err `InvalidInput` with the text
 /// `the path holds a NUL character` when the path holds one, since Windows would read the name only up to it. A path
-/// whose wide form, NUL included, reaches 248 units and does not already start with `\\?\` or `\??\` is made absolute
-/// with `GetFullPathNameW` and given the verbatim prefix, as std's `get_long_path` does, so a name past MAX_PATH (260
-/// units) reaches `MoveFileExW` whatever the machine's LongPathsEnabled setting (Ruling T3-4-c); a shorter path is
-/// passed as given. Named apart from `win::wide` (T3-2), which takes any text and checks nothing.
+/// that already starts with `\\?\` or `\??\`, and the empty path, are passed as given. So is a path that is absolute in
+/// std's sense (a drive and a separator, or `\\` and a second separator; `std_absolute`) and whose wide form, NUL
+/// included, is under 248 units. Any other path is made absolute with `std::path::absolute` (`GetFullPathNameW`) and
+/// given the verbatim prefix, as std's `get_long_path` does: a path of 248 units or more, so a name past MAX_PATH (260
+/// units) reaches `MoveFileExW` whatever the machine's LongPathsEnabled setting (Ruling T3-4-c), and a relative path of
+/// any length, a root-relative path (`\x`) and a drive-relative path (`C:x`), whose absolute form may pass MAX_PATH
+/// though the given one is short (PR #14 review round 1 (R10, R49)). Named apart from `win::wide` (T3-2), which takes
+/// any text and checks nothing.
 fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
     let name = wide(path);
     if name[..name.len() - 1].contains(&0) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "the path holds a NUL character"));
     }
-    if name.len() < LEGACY_MAX_PATH || name.starts_with(VERBATIM_PREFIX) || name.starts_with(NT_PREFIX) {
+    if name.starts_with(VERBATIM_PREFIX) || name.starts_with(NT_PREFIX) || name == [0] {
         return Ok(name);
     }
-    Ok(verbatim(&full_path(&name)?))
+    if name.len() < LEGACY_MAX_PATH && std_absolute(&name) {
+        return Ok(name);
+    }
+    let absolute = wide(&std::path::absolute(path)?);
+    Ok(verbatim(&absolute[..absolute.len() - 1]))
 }
 
-/// `name`, a NUL-terminated wide path, made absolute and normalized by `GetFullPathNameW`, without its NUL. The first
-/// call asks the length, NUL included, and the next fills a buffer of that length; a length that no longer fits, when
-/// the current folder changed between the two, is asked for again.
-fn full_path(name: &[u16]) -> io::Result<Vec<u16>> {
-    // SAFETY: `name` is NUL-terminated and outlives the call; a null buffer of length 0 asks only for the length, and
-    // the file-part pointer may be null.
-    let mut needed = unsafe { GetFullPathNameW(name.as_ptr(), 0, null_mut(), null_mut()) };
-    loop {
-        if needed == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut buffer = vec![0u16; needed as usize];
-        // SAFETY: `buffer` holds `needed` units, the length passed with it, and outlives the call; `name` is
-        // NUL-terminated and outlives it; the file-part pointer may be null.
-        let written = unsafe { GetFullPathNameW(name.as_ptr(), needed, buffer.as_mut_ptr(), null_mut()) };
-        if written != 0 && written < needed {
-            buffer.truncate(written as usize);
-            return Ok(buffer);
-        }
-        needed = written;
+/// Whether `name` is a path std passes to Windows as it is, without resolving it: a drive, a colon and the end or a
+/// separator (`C:`, `C:\x`, `C:/x`), or two separators (`\\server`, `//x`). A leading separator that is not doubled is
+/// a root-relative path, and `C:x` is a drive-relative one; neither is absolute.
+fn std_absolute(name: &[u16]) -> bool {
+    const COLON: u16 = b':' as u16;
+    const SLASH: u16 = b'/' as u16;
+    let separator = |unit: u16| unit == SEP || unit == SLASH;
+    match name {
+        [drive, COLON, 0] => !separator(*drive),
+        [drive, COLON, sep, ..] => !separator(*drive) && separator(*sep),
+        [first, second, ..] => separator(*first) && separator(*second),
+        _ => false,
     }
 }
 
@@ -135,7 +132,7 @@ mod tests {
     use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
-    use super::{move_no_replace, move_replacing};
+    use super::{move_no_replace, move_replacing, verbatim, wide_path};
     use crate::security::test_name;
     use crate::testutil::skip;
     use crate::{rename_no_replace, write_atomic};
@@ -261,6 +258,43 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         poller.join().unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "200");
+    }
+
+    /// `wide_path`'s result as text, without its NUL.
+    fn text(wide: &[u16]) -> String {
+        assert_eq!(wide.last(), Some(&0), "no closing NUL");
+        String::from_utf16(&wide[..wide.len() - 1]).unwrap()
+    }
+
+    /// PR #14 review round 1 (R10): a short path that is not absolute in std's sense is resolved and given the verbatim
+    /// prefix, since its absolute form may pass MAX_PATH where the move would fail; an absolute path comes back as given.
+    /// It touches no file.
+    #[test]
+    fn a_short_relative_path_is_made_absolute_and_verbatim() {
+        let cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+        let drive = cwd.as_bytes();
+        assert!(drive[0].is_ascii_alphabetic() && drive[1] == b':' && drive[2] == b'\\', "{cwd}");
+        assert_eq!(text(&wide_path(Path::new(r"sub\a.json")).unwrap()), format!(r"\\?\{}\sub\a.json", cwd.trim_end_matches('\\')));
+        assert_eq!(text(&wide_path(Path::new(r"\x\a.json")).unwrap()), format!(r"\\?\{}:\x\a.json", drive[0] as char));
+        for same in [r"C:\x\a.json", r"\\server\share\a.json"] {
+            assert_eq!(text(&wide_path(Path::new(same)).unwrap()), same);
+        }
+    }
+
+    /// PR #14 review round 1 (R49): each absolute form `GetFullPathNameW` returns gets its verbatim prefix, and a
+    /// verbatim path is kept.
+    #[test]
+    fn verbatim_prefixes_each_absolute_form() {
+        for (full, expected) in [
+            (r"C:\a", r"\\?\C:\a"),
+            (r"\\server\share\a", r"\\?\UNC\server\share\a"),
+            (r"\\.\COM1", r"\\?\COM1"),
+            (r"\\?\C:\a", r"\\?\C:\a"),
+            (r"\??\C:\a", r"\??\C:\a"),
+        ] {
+            let full: Vec<u16> = full.encode_utf16().collect();
+            assert_eq!(text(&verbatim(&full)), expected);
+        }
     }
 
     /// Ruling T3-4-c: names past MAX_PATH (260 units), as a long title under a deep library folder gives, reach both
