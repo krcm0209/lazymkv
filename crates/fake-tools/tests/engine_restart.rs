@@ -188,13 +188,15 @@ fn a_restart_after_a_late_answer_decides_with_the_refreshed_identity() {
 #[test]
 fn a_rebuilt_remux_promise_counts_against_another_jobs_rip_check() {
     // One volume for staging and the library. A's rip check needs 4301 + 4301 (S54) and passes; A's Remux step,
-    // resumed at the restart, replaces the rebuilt estimate with write_bytes_needed(16) = 17 (`refine_remux_promise`,
-    // engine.md:585); B's identical check needs more than 8610 with either figure, 8619 with 17.
+    // resumed at the restart, replaces the rebuilt estimate 4301 with write_bytes_needed(16) = 17
+    // (`refine_remux_promise`, engine.md:585). B's identical check needs 8619 with the refined 17 and 12903 with the
+    // estimate, so with 8618 free it waits with either, whatever the timing; with no promise from A it would need 8602
+    // and pass.
     let h = harness(&["movie-direct", "movie-direct-remux-hang"], settings());
     let (staging, movies) = (h.staging().to_str().unwrap().to_string(), h.library().to_str().unwrap().to_string());
     h.shares().same_volume(&staging, &movies);
-    h.shares().set_free(&staging, 8610);
-    h.shares().set_free(&movies, 8610);
+    h.shares().set_free(&staging, 8618);
+    h.shares().set_free(&movies, 8618);
     h.insert("tok0", DISC);
     h.run_until("Remuxing");
     let a = only_job(&h);
@@ -202,6 +204,35 @@ fn a_rebuilt_remux_promise_counts_against_another_jobs_rip_check() {
     h.scan_waits_for_lookups(false);
     h.insert("tok0", "disc-b");
     h.wait("B waits for space", |h| h.job_ids().iter().any(|id| *id != a && h.state_of(id) == "AwaitingSpace"));
+    assert_eq!(h.state_of(&a), "Remuxing");
+}
+
+/// Ruling T3-17-a (PR #14 review round 1, R21): A's Remux step, resumed at the restart, replaces the rebuilt estimate
+/// 4301 with write_bytes_needed(16) = 17 before it spawns `mkvmerge --gui-mode`, so B's rip check, which starts after
+/// that spawn, needs 8602 + 17 = 8619 and passes with exactly that free; with the estimate it would need 12903 and wait.
+/// With the test above, it pins A's resumed promise at exactly 17.
+#[test]
+fn a_resumed_remux_step_refines_the_rebuilt_promise_before_another_jobs_rip_check() {
+    let h = harness(&["movie-direct", "movie-direct-remux-hang"], settings());
+    let (staging, movies) = (root(h.staging()), root(h.library()));
+    h.shares().same_volume(&staging, &movies);
+    h.shares().set_free(&staging, 8619);
+    h.shares().set_free(&movies, 8619);
+    h.insert("tok0", DISC);
+    h.run_until("Remuxing");
+    let a = only_job(&h);
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.wait("A's remux to start", |h| h.spawns().iter().any(|spawn| spawn.args.iter().any(|arg| arg == "--gui-mode")));
+    h.insert("tok0", "disc-b");
+    // B's first SpaceOk or SpaceShort is its rip check's answer.
+    let b_check = |h: &Harness| {
+        h.job_ids().into_iter().filter(|id| *id != a).flat_map(|id| h.transitions(&id)).find_map(|line| {
+            line.event.filter(|event| matches!(event, Event::SpaceOk | Event::SpaceShort))
+        })
+    };
+    h.wait("B's rip check", |h| b_check(h).is_some());
+    assert_eq!(b_check(&h), Some(Event::SpaceOk));
     assert_eq!(h.state_of(&a), "Remuxing");
 }
 
