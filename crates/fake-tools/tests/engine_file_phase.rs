@@ -1,14 +1,13 @@
 //! The file phase on stand-ins, from the slot to the filed file (design parts 5.7, 6.4, 6.5, 8.3, 8.4).
 
+mod common;
+
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
 use std::sync::Arc;
-use std::time::Duration;
 
-use lazymkv_core::ipc::{read_reply, Reply};
+use common::Client;
 use lazymkv_core::job::{Action, Event, FailureClass, Held, NotifyEvent, State, Tool, WaitReason};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::review::ReviewReason;
@@ -16,8 +15,8 @@ use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder};
 use lazymkv_dev::cmd::plan::PlanOptions;
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
-use lazymkv_engine::testkit::{ci_factor, Harness};
-use lazymkv_platform::{Host, IpcConnector, Reach};
+use lazymkv_engine::testkit::Harness;
+use lazymkv_platform::{Host, Reach};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
@@ -579,32 +578,6 @@ impl Drop for Closed {
     }
 }
 
-/// Sends `retry` for `id` through a new client and waits for its `ok` (20 s, times `ci_factor`; design part 9.4).
-fn retry(h: &Harness, id: &str) {
-    let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
-    let mut writer = stream.writer;
-    let mut reader = stream.reader;
-    let (send, lines) = channel();
-    std::thread::spawn(move || loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => if send.send(line).is_err() { break },
-        }
-    });
-    let request = json!({"v": 1, "type": "retry", "id": 1, "payload": {"job": id}});
-    writer.write_all(format!("{request}\n").as_bytes()).unwrap();
-    writer.flush().unwrap();
-    loop {
-        let line = lines.recv_timeout(Duration::from_secs(20) * ci_factor()).expect("the retry's reply");
-        match read_reply(line.trim_end()).unwrap() {
-            Reply::Ok { id: Some(1), .. } => return,
-            Reply::Error { id: Some(1), message, .. } => panic!("retry refused: {message}"),
-            _ => {}
-        }
-    }
-}
-
 /// Runs movie-direct to Failed with its film folder closed just before File (the hook fires on VerifyFile's
 /// `mkvmerge -J <partial>`, after Decide read the library). Returns the job, the guard and the final path.
 fn run_with_the_film_folder_closed(h: &Harness) -> (String, Arc<Closed>, PathBuf) {
@@ -700,7 +673,7 @@ fn a_retry_after_the_folder_opens_files_the_title() {
         return; // root on Unix opens a folder of mode 0o000
     }
     closed.open();
-    retry(&h, &id);
+    Client::open(&h).ok("retry", json!({"job": id}));
     h.wait("Filed", |h| h.state_of(&id) == "Filed");
     assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
 }

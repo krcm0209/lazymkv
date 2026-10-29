@@ -1,6 +1,6 @@
 //! What the engine's IPC tests share (Ruling PF3-S21-22-2): `Client`, one client over the harness's in-memory pipe,
-//! and `WAIT`, the bound of its reads. engine_ipc.rs and engine_command.rs each declare `mod common;` and use a part
-//! of it, so the parts one test crate leaves unused are allowed.
+//! and `WAIT`, the bound of its reads. engine_ipc.rs, engine_command.rs and engine_file_phase.rs each declare
+//! `mod common;` and use a part of it, so the parts one test crate leaves unused are allowed.
 
 #![allow(dead_code)]
 
