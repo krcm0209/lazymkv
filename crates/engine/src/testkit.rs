@@ -10,7 +10,8 @@
 //!
 //! `Harness::new` runs the real step runner on stand-in tools (Task 23): it copies a scenario of `corpus/scenarios`
 //! and the stand-in into `<root>/tools`, never running a stand-in inside `corpus/` (S12), builds the scenario's disc
-//! from its `disc.json`, and replays its `http.json`.
+//! from its `disc.json`, and replays its `http.json`. When the scenarios hold `lazymkvctl.json`, it also copies the
+//! stand-in as `<root>/tools/lazymkvctl`, which the engine's `command` relay runs (design part 9.5, Task T3-22).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -359,6 +360,11 @@ pub struct Harness {
     lookups_wait: Arc<AtomicBool>,
     /// `on_spawn`'s actions, shared with the `TestGuard`.
     spawn_hooks: SpawnHooks,
+    /// Every `Spawn` the `TestGuard` saw, in order; empty for `new_scripted`.
+    spawns: Arc<Mutex<Vec<Spawn>>>,
+    /// The stand-in `lazymkvctl` every engine gets as `EngineConfig.ctl`; None when no scenario holds
+    /// `lazymkvctl.json`, and for `new_scripted`.
+    ctl: Option<PathBuf>,
     /// True for `new_scripted`: the engine runs `steps`; false for `new`: the real runner.
     scripted: bool,
     script: DriveScript,
@@ -415,8 +421,11 @@ impl Harness {
     ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
     /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
     ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
-    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files, and
-    ///   `on_spawn`'s actions run before the spawns they name.
+    /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files,
+    ///   `on_spawn`'s actions run before the spawns they name, and every spawn is kept for `spawns`.
+    /// - When the merged scenarios hold `lazymkvctl.json`, it copies `fake_tool` as `lazymkvctl` (with the system's
+    ///   executable suffix) into `<root>/tools`, and every engine gets that copy as `EngineConfig.ctl`, which the
+    ///   `command` relay runs (design part 9.5, Task T3-22); otherwise `ctl` is None.
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
@@ -427,6 +436,11 @@ impl Harness {
             copy_folder(&corpus.join(name), &tools)
                 .unwrap_or_else(|error| panic!("the harness copies the scenario {name}: {error}"));
         }
+        let ctl = tools.join("lazymkvctl.json").is_file().then(|| {
+            let copy = tools.join(format!("lazymkvctl{}", std::env::consts::EXE_SUFFIX));
+            fs::copy(fake_tool, &copy).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+            copy
+        });
         let mut tool_paths = serde_json::Map::new();
         for tool in Tool::ALL {
             let copy = tools.join(exe_name(tool));
@@ -450,8 +464,14 @@ impl Harness {
         defaults["tool_paths"] = Value::Object(tool_paths);
         let lookups_wait = Arc::new(AtomicBool::new(true));
         let spawn_hooks = SpawnHooks::default();
-        let guard =
-            TestGuard { wait: Arc::clone(&lookups_wait), urls, hooks: Arc::clone(&spawn_hooks), inner: native_guard() };
+        let spawns = Arc::new(Mutex::new(Vec::new()));
+        let guard = TestGuard {
+            wait: Arc::clone(&lookups_wait),
+            urls,
+            hooks: Arc::clone(&spawn_hooks),
+            spawns: Arc::clone(&spawns),
+            inner: native_guard(),
+        };
         let runner = Runner {
             steps: ScriptedSteps::new(Vec::new()),
             scripted: false,
@@ -461,6 +481,8 @@ impl Harness {
             disc,
             lookups_wait,
             spawn_hooks,
+            spawns,
+            ctl,
         };
         let harness = folders.harness(defaults, settings, runner);
         harness.start();
@@ -506,7 +528,7 @@ impl Harness {
                 after_kill: Duration::from_millis(50),
             }),
             path_var: Some(OsString::new()),
-            ctl: None,
+            ctl: self.ctl.clone(),
             console: Some(Box::new(ConsoleBuffer(Arc::clone(&self.console)))),
         };
         let hook = Arc::clone(&self.hook);
@@ -984,6 +1006,13 @@ impl Harness {
         let needles = needles.iter().map(|needle| needle.to_string()).collect();
         lock(&self.spawn_hooks).push((needles, Some(Box::new(action))));
     }
+
+    /// Every `Spawn` the harness's `TestGuard` saw, in order (design part 12.2): the stand-in tools' and the relay's
+    /// `lazymkvctl`. Empty for `new_scripted`, whose guard is not a `TestGuard`. Def: T3-22. Use: T3-22.
+    pub fn spawns(&self) -> Vec<Spawn> {
+        self.deliver();
+        lock(&self.spawns).clone()
+    }
 }
 
 impl Drop for Harness {
@@ -1060,6 +1089,8 @@ impl Folders {
             disc: runner.disc,
             lookups_wait: runner.lookups_wait,
             spawn_hooks: runner.spawn_hooks,
+            spawns: runner.spawns,
+            ctl: runner.ctl,
             scripted: runner.scripted,
             ejector: Arc::new(RecordingEjector::new().with_removals(script_end.clone())),
             script: script_end,
@@ -1094,10 +1125,15 @@ struct Runner {
     disc: Option<(String, Value)>,
     lookups_wait: Arc<AtomicBool>,
     spawn_hooks: SpawnHooks,
+    /// The `TestGuard`'s list of spawns.
+    spawns: Arc<Mutex<Vec<Spawn>>>,
+    /// The stand-in `lazymkvctl`, when a scenario holds `lazymkvctl.json`.
+    ctl: Option<PathBuf>,
 }
 
 impl Runner {
-    /// `new_scripted`'s: the script, `native_guard()`, a transport with no answers and no scenario.
+    /// `new_scripted`'s: the script, `native_guard()`, a transport with no answers, no scenario, no spawn list and no
+    /// `lazymkvctl`.
     fn scripted(steps: ScriptedSteps, tools: PathBuf) -> Runner {
         Runner {
             steps,
@@ -1108,6 +1144,8 @@ impl Runner {
             disc: None,
             lookups_wait: Arc::new(AtomicBool::new(true)),
             spawn_hooks: SpawnHooks::default(),
+            spawns: Arc::default(),
+            ctl: None,
         }
     }
 }
@@ -1119,7 +1157,7 @@ impl Runner {
 /// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
 /// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `native_guard()` through `retry_busy`
 /// (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake job runs it (Ruling W7), and
-/// `StdProcessGuard` elsewhere.
+/// `StdProcessGuard` elsewhere. Before all of that it keeps a copy of the spawn for `Harness::spawns` (Task T3-22).
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,
@@ -1127,12 +1165,15 @@ struct TestGuard {
     urls: usize,
     /// `Harness::on_spawn`'s actions.
     hooks: SpawnHooks,
+    /// Every spawn asked for, in order (`Harness::spawns`).
+    spawns: Arc<Mutex<Vec<Spawn>>>,
     /// `native_guard()`, which starts every spawn.
     inner: Arc<dyn ProcessGuard>,
 }
 
 impl ProcessGuard for TestGuard {
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
+        lock(&self.spawns).push(spawn.clone());
         let action = lock(&self.hooks)
             .iter_mut()
             .find(|(needles, action)| {

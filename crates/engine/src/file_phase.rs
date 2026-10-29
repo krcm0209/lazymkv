@@ -135,8 +135,9 @@ pub(crate) fn partial_path(library_root: &str, job_id: &str, key: &str) -> PathB
 
 /// The four replay files of a job folder as `lazymkv-dev plan` and `decide` take them (design part 7.1):
 /// `settings.json`, `tmdb-search.json`, `tmdb-record.json` and `remembered.json`, each its absolute path in the job
-/// folder, given only when the file exists.
-fn replay_options(job_dir: &Path) -> PlanOptions {
+/// folder, given only when the file exists. The `command` relay gives the child the same files (design part 9.5).
+/// Def: T24. Use: T24, T3-22.
+pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
     let given = |name: &str| Some(job_dir.join(name)).filter(|path| path.is_file());
     PlanOptions {
         settings: given("settings.json"),

@@ -1,15 +1,17 @@
 //! The IPC server over the in-memory transport (design parts 3.7, 3.8, 9.1 to 9.4; Ruling S12).
 
-use std::collections::VecDeque;
+mod common;
+
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
+use common::{Client, WAIT};
 use lazymkv_clients::OFFLINE;
 use lazymkv_core::decision::Disposition;
-use lazymkv_core::ipc::{read_reply, Envelope, Reply, CANCELLED, MAX_LINE_BYTES};
+use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
 use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
@@ -21,9 +23,6 @@ use lazymkv_platform::{IpcConnector, Reach};
 use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
 
-/// The tests' own waits: 20 s, times `ci_factor` wherever a test waits for something to happen (Rulings R29.c2,
-/// R29.c5).
-const WAIT: Duration = Duration::from_secs(20);
 /// Task 22's disc names: the base scenario's disc, and two discs with their own fingerprints.
 const DISC_A: &str = "movie-direct";
 const DISC_B: &str = "disc-b";
@@ -76,80 +75,6 @@ fn wait_for_call(h: &Harness, tag: &str, count: usize) {
     while h.steps().calls().iter().filter(|c| c.as_str() == tag).count() < count {
         assert!(start.elapsed() < wait, "{tag} was not called {count} times within {wait:?}: {:?}", h.steps().calls());
         std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-struct Client { lines: Receiver<String>, writer: Box<dyn Write + Send>, next: u64, pushes: VecDeque<Envelope> }
-
-impl Client {
-    fn open(h: &Harness) -> Client {
-        let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
-        let (send, lines) = channel();
-        let mut reader = stream.reader;
-        std::thread::spawn(move || loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => if send.send(line).is_err() { break },
-            }
-        });
-        Client { lines, writer: stream.writer, next: 1, pushes: VecDeque::new() }
-    }
-    /// The next line, or None once the engine closed the connection.
-    fn line(&mut self) -> Option<String> {
-        // 20 s, 80 s under CI (Ruling R29.c2).
-        let wait = WAIT * ci_factor();
-        match self.lines.recv_timeout(wait) {
-            Ok(line) => Some(line),
-            Err(RecvTimeoutError::Disconnected) => None,
-            Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {wait:?}"),
-        }
-    }
-    /// Writes `line` and its newline in one write: the engine answers a line over 4 MiB as soon as it has read that
-    /// much and then drops the client, so a second write could meet a closed pipe.
-    fn raw(&mut self, line: &str) {
-        self.writer.write_all(format!("{line}\n").as_bytes()).unwrap();
-        self.writer.flush().unwrap();
-    }
-    fn request(&mut self, kind: &str, payload: Value) -> Reply {
-        let id = self.next;
-        self.next += 1;
-        self.raw(&json!({"v": 1, "type": kind, "id": id, "payload": payload}).to_string());
-        loop {
-            match read_reply(self.line().expect("a reply").trim_end()).unwrap() {
-                Reply::Push(envelope) => self.pushes.push_back(envelope),
-                reply @ (Reply::Ok { id: Some(n), .. } | Reply::Error { id: Some(n), .. }) if n == id => return reply,
-                other => panic!("unexpected {other:?}"),
-            }
-        }
-    }
-    fn ok(&mut self, kind: &str, payload: Value) -> Value {
-        match self.request(kind, payload) { Reply::Ok { result, .. } => result, other => panic!("{kind}: {other:?}") }
-    }
-    fn err(&mut self, kind: &str, payload: Value) -> String {
-        match self.request(kind, payload) { Reply::Error { message, .. } => message, other => panic!("{kind}: {other:?}") }
-    }
-    fn push(&mut self) -> Envelope {
-        if let Some(envelope) = self.pushes.pop_front() { return envelope; }
-        match read_reply(self.line().expect("a push").trim_end()).unwrap() {
-            Reply::Push(envelope) => envelope,
-            other => panic!("expected a push, got {other:?}"),
-        }
-    }
-    fn snapshot(&mut self) -> Value {
-        let envelope = self.push();
-        assert_eq!(envelope.kind, "snapshot");
-        envelope.payload
-    }
-    /// job_update pushes until one whose state is `state` (for `job` when given); returns its payload.
-    fn until_state(&mut self, job: Option<&str>, state: &str) -> Value {
-        loop {
-            let envelope = self.push();
-            if envelope.kind == "job_update" && envelope.payload["state"]["state"] == json!(state)
-                && job.map_or(true, |id| envelope.payload["id"] == json!(id)) {
-                return envelope.payload;
-            }
-        }
     }
 }
 
@@ -2141,12 +2066,12 @@ fn progress_pushes_name_the_action_and_the_title() {
 }
 
 #[test]
-fn command_is_refused_until_the_run_folder_exists() {
+fn command_without_lazymkvctl_beside_the_engine_is_refused() {
     let h = scripted(vec![]);
     let mut c = Client::open(&h);
     c.snapshot();
     assert_eq!(c.err("command", json!({"words": ["plan", "--job", "abc-1"]})),
-               "command needs the engine's run folder, which arrives in pull request 3 (S35)");
+               "command needs lazymkvctl beside the engine, and this engine has none");
 }
 
 #[test]

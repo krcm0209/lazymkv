@@ -33,6 +33,7 @@ use lazymkv_core::settings::{Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_platform::{
     DriveEvent, DriveWatcher, Ejector, Host, IpcStream, IpcTransport, KeepAwake, Platform, SecretStore, ShareConnector,
+    Spawn,
 };
 use lazymkv_tools::CancelToken;
 use serde_json::{Map, Value};
@@ -43,9 +44,13 @@ use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
     no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
     spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
-    COMMAND_REFUSED, DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
+    DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink};
+use crate::relay::{
+    child_words, command_answer, not_started, spawn_relay, RunningCommand, COMMAND_BUSY, COMMAND_NO_CTL,
+    COMMAND_WRITABLE,
+};
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
 use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
@@ -190,6 +195,10 @@ pub(crate) enum Msg {
     /// A line for engine.log from a thread that holds no store: the serve thread's refusals and failed accepts (design
     /// part 3.5; Ruling W10).
     Log(String),
+    /// The relay's child ended (design part 9.5): its `wait`, for the `command` request `id` of `client`.
+    CommandDone { client: u64, id: Option<u64>, exit: io::Result<Option<i32>> },
+    /// A client's reader thread saw its connection end (design part 9.2), so a command it runs is killed (Ruling W24).
+    Gone { client: u64 },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -274,6 +283,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         busy: Arc::clone(&busy),
         env,
         clients: Arc::clone(&clients),
+        ctl: config.ctl.clone(),
     };
     // L1: the discs already in a drive, read before the drive thread drains any event (design part 4.2).
     let present = drives.present();
@@ -696,6 +706,8 @@ struct Parts {
     env: CheckEnv,
     /// The IPC clients (design part 9.2).
     clients: Arc<Clients>,
+    /// The `lazymkvctl` the `command` relay runs (`EngineConfig.ctl`, design part 9.5); None refuses `command`.
+    ctl: Option<PathBuf>,
 }
 
 /// One job as the owner holds it.
@@ -857,6 +869,8 @@ struct Owner {
     /// The jobs whose refeed timer is pending (Ruling T3-20-a): a job gets a new refeed timer only when it has none, so
     /// its kept events are fed again by one chain of timers whatever entries `refeed` gains or loses meanwhile.
     refeed_armed: BTreeSet<String>,
+    /// The `command` that runs, one at a time (design part 9.5): taken by its `Msg::CommandDone` or by a stop.
+    command: Option<RunningCommand>,
 }
 
 impl Owner {
@@ -940,6 +954,7 @@ impl Owner {
             kept: BTreeSet::new(),
             refeed: BTreeMap::new(),
             refeed_armed: BTreeSet::new(),
+            command: None,
         };
         owner.restart(present);
         owner
@@ -1146,12 +1161,19 @@ impl Owner {
             Msg::Checked { client, id, outcome } => self.on_checked(client, id, outcome),
             Msg::CheckListed => self.release_check_token(),
             Msg::Log(line) => self.store.log(&line),
+            Msg::CommandDone { client, id, exit } => {
+                self.command = None;
+                self.reply(client, id, command_answer(exit));
+            }
+            Msg::Gone { client } => self.kill_command_of(client),
         }
     }
 
     /// One message while a forced shutdown waits for its steps (design part 3.8, PF-29): a step's end is fed, with
     /// only its notifications performed, progress still goes out, and nothing new starts: drive events, arrivals,
-    /// timers and lookup rounds are dropped, a new client is turned away and every request is refused.
+    /// timers and lookup rounds are dropped, a new client is turned away and every request is refused. The shutdown
+    /// stopped and answered a running command already (`stop_command`), so its end is dropped; a client that leaves
+    /// still kills a command it runs (Ruling T3-22-c).
     fn quiet_message(&mut self, message: Msg) {
         match message {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
@@ -1171,6 +1193,8 @@ impl Owner {
             Msg::CheckListed => self.release_check_token(),
             Msg::Connect(stream) => drop(stream),
             Msg::Log(line) => self.store.log(&line),
+            Msg::Gone { client } => self.kill_command_of(client),
+            Msg::CommandDone { .. } => {}
             Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Stop => {}
         }
     }
@@ -1190,9 +1214,11 @@ impl Owner {
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
-    /// Cancels every running step and the running check, drops their results and waits for every step, recording,
-    /// eject and check the owner started (design part 3.5), then releases KeepAwake and closes every client.
+    /// Stops a running command (`stop_command`, Ruling T3-22-d), cancels every running step and the running check,
+    /// drops their results and waits for every step, recording, eject and check the owner started (design part 3.5),
+    /// writing the engine.log lines that come meanwhile, then releases KeepAwake and closes every client.
     fn shut_down(&mut self, inbox: &Receiver<Msg>) {
+        self.stop_command(NO_CLIENT);
         self.drive_stop.store(true, Ordering::SeqCst);
         for worker in &self.workers {
             worker.cancel.cancel();
@@ -1208,6 +1234,7 @@ impl Owner {
                     drop(self.parts.outbox.take(&job));
                 }
                 Ok(Msg::Ejected { .. }) => self.ejects = self.ejects.saturating_sub(1),
+                Ok(Msg::Log(line)) => self.store.log(&line),
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -2353,7 +2380,8 @@ impl Owner {
         self.parts.clients.send(client, line);
     }
 
-    /// One request (design part 9.4): answered here, or later by the step, check or shutdown it waits for (S78).
+    /// One request (design part 9.4): answered here, or later by the step, check, command or shutdown it waits for
+    /// (S78).
     fn on_request(&mut self, client: u64, id: Option<u64>, request: Request) {
         let answer = match request {
             Request::SettingsSet { changes } => return self.settings_set(client, id, changes),
@@ -2366,11 +2394,63 @@ impl Owner {
             Request::History { before } => history_page(&self.records(), before.as_deref())
                 .map(|page| serde_json::to_value(page).unwrap_or(Value::Null)),
             Request::Shutdown { force } => return self.shutdown(client, id, force),
-            Request::Command { .. } => Err(COMMAND_REFUSED.to_string()),
+            Request::Command { words } => return self.command(client, id, words),
             Request::ReviewAction { job, action, overrides } => self.review_action(&job, &action, overrides.as_ref()),
             Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
         };
         self.reply(client, id, answer);
+    }
+
+    /// `command` (design part 9.5; Rulings W24, W25): refused, in Ruling T3-22-b's order, while a command runs, when
+    /// the engine has no `lazymkvctl`, when a non-elevated process could write its folder, for words `child_words`
+    /// refuses and when the child cannot be started. Otherwise the owner starts the child through
+    /// `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority with no extra
+    /// environment (S43), keeps its kill handle, and hands it to the relay thread, whose `Msg::CommandDone` replies
+    /// (`on_message`).
+    fn command(&mut self, client: u64, id: Option<u64>, words: Vec<String>) {
+        if self.command.is_some() {
+            return self.reply(client, id, Err(COMMAND_BUSY.to_string()));
+        }
+        let Some(ctl) = self.parts.ctl.clone() else {
+            return self.reply(client, id, Err(COMMAND_NO_CTL.to_string()));
+        };
+        // A path with no folder is refused as one whose folder could be written.
+        if ctl.parent().is_none_or(|folder| self.parts.host.user_writable(folder)) {
+            return self.reply(client, id, Err(COMMAND_WRITABLE.to_string()));
+        }
+        let job = |job_id: &str| {
+            let titles = &self.jobs.get(job_id)?.record.titles;
+            let keys: Vec<String> = titles.iter().map(|title| title.key.clone()).collect();
+            Some((self.store.job_dir(job_id), keys))
+        };
+        let args = match child_words(&words, &job) {
+            Ok(args) => args,
+            Err(refusal) => return self.reply(client, id, Err(refusal)),
+        };
+        let spawn = Spawn { program: ctl, args, env: Vec::new(), below_normal: true };
+        match self.parts.env.processes.spawn(&spawn) {
+            Err(error) => self.reply(client, id, Err(not_started(&error))),
+            Ok(child) => {
+                self.command = Some(RunningCommand { client, id, kill: child.killer() });
+                let clients = Arc::clone(&self.parts.clients);
+                self.threads.push(spawn_relay(child, client, id, clients, self.sender.clone()));
+            }
+        }
+    }
+
+    /// Kills the running command's child when `client` runs it, as its client left (Ruling T3-22-c); the relay then
+    /// reports its end. A kill that fails is logged.
+    fn kill_command_of(&self, client: u64) {
+        if let Some(command) = self.command.as_ref().filter(|command| command.client == client) {
+            self.kill_command(command);
+        }
+    }
+
+    /// Kills `command`'s child; a kill that fails is logged (engine.log).
+    fn kill_command(&self, command: &RunningCommand) {
+        if let Err(error) = command.kill.kill() {
+            self.store.log(&format!("the command's lazymkvctl could not be killed: {error}"));
+        }
     }
 
     /// `settings_set` (design part 9.4, ENG-19): `changes` over the settings in force, one level deep, so an object
@@ -2781,12 +2861,14 @@ impl Owner {
         }
     }
 
-    /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, closes every client and stops. With a
-    /// step running and no `force`, it is refused naming the jobs. With `force`, each running step is cancelled as
-    /// `cancel` does, but a CheckSpace or Eject is let finish, and a running check is cancelled; the owner then waits
-    /// for every step (`quiet_message`) and ends in `finish_shutdown`. A pulled disc's killed step is not a running
-    /// step (M3, `is_running_step`; review round 1, V4, RR1-10): it is neither counted nor cancelled, so its job keeps
-    /// waiting for its disc, and the owner still waits for it and drops its result (`step_done`, `shut_down`).
+    /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, stops a running command
+    /// (`stop_command`, Ruling T3-22-d, after the `ok` as Ruling PF3-S21-22-4 says), closes every client and stops.
+    /// With a step running and no `force`, it is refused naming the jobs, and a running command goes on. With `force`,
+    /// a running command is stopped first, each running step is cancelled as `cancel` does, but a CheckSpace or Eject
+    /// is let finish, and a running check is cancelled; the owner then waits for every step (`quiet_message`) and ends
+    /// in `finish_shutdown`. A pulled disc's killed step is not a running step (M3, `is_running_step`; review round 1,
+    /// V4, RR1-10): it is neither counted nor cancelled, so its job keeps waiting for its disc, and the owner still
+    /// waits for it and drops its result (`step_done`, `shut_down`).
     fn shutdown(&mut self, client: u64, id: Option<u64>, force: bool) {
         // Read before the loop below bumps the generations, which would make a second worker of a job look stale.
         let running_step: Vec<bool> = self.workers.iter().map(|worker| self.is_running_step(worker)).collect();
@@ -2801,11 +2883,13 @@ impl Owner {
         running.dedup();
         if running.is_empty() {
             self.reply(client, id, Ok(Value::Null));
+            self.stop_command(client);
             return self.close_and_stop();
         }
         if !force {
             return self.reply(client, id, Err(steps_running(&running)));
         }
+        self.stop_command(client);
         if let Some(cancel) = &self.check_cancel {
             cancel.cancel();
         }
@@ -2852,15 +2936,32 @@ impl Owner {
         self.close_and_stop();
     }
 
-    /// Refuses every queued check, closes every client after what is queued for it, and stops the owner (design part
-    /// 3.8).
+    /// Stops a running command that `shutdown` has not stopped (`stop_command`), refuses every queued check, closes
+    /// every client after what is queued for it, and stops the owner (design part 3.8).
     fn close_and_stop(&mut self) {
+        self.stop_command(NO_CLIENT);
         for PendingCheck { client, id, .. } in std::mem::take(&mut self.checks) {
             self.reply(client, id, Err(STOPPING.to_string()));
         }
         self.parts.clients.close_all();
         self.stopping = true;
         self.drive_stop.store(true, Ordering::SeqCst);
+    }
+
+    /// A stop of the running command (Ruling T3-22-d): its child is killed, its `command` gets ipc_server's
+    /// `STOPPING`, and its client is closed, so a relay thread waiting on a client that never reads cannot hold the
+    /// stop. The client of the `shutdown` being answered, `asker`, is not closed here, since that would lose the
+    /// `shutdown`'s `ok`; `close_and_stop`'s `close_all` closes it after that `ok` (Ruling PF3-S21-22-4). `NO_CLIENT`
+    /// closes the command's client whoever it is. Nothing when no command runs.
+    fn stop_command(&mut self, asker: u64) {
+        let Some(command) = self.command.take() else {
+            return;
+        };
+        self.kill_command(&command);
+        self.reply(command.client, command.id, Err(STOPPING.to_string()));
+        if command.client != asker {
+            self.parts.clients.close(command.client);
+        }
     }
 
     /// Deletes `<root>/.lazymkv-partial/<id>-*.mkv.partial` in every library root of the engine's and the job's
