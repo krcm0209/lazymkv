@@ -60,16 +60,16 @@ pub const SESSION_CONFLICT: &str = "ERROR_SESSION_CREDENTIAL_CONFLICT";
 /// The code of `SESSION_CONFLICT`, 1219.
 const SESSION_CONFLICT_CODE: u32 = 1219;
 
-/// The errors of a share's first probe after which the stored credential is tried: `ERROR_ACCESS_DENIED` (5) and
-/// `ERROR_LOGON_FAILURE` (1326), how Windows says the session holds no credential the server accepts (design part
-/// 6.1). Any other error is the share not answering.
-const FALL_BACK: [u32; 2] = [5, 1326];
-
-/// The errors of `connect` that are Windows refusing the credential itself, so it is remembered and not tried again
-/// until its value changes, and a wrong password cannot lock the owner's account (Review Focus 5):
-/// `ERROR_ACCESS_DENIED` (5), `ERROR_INVALID_PASSWORD` (86), `ERROR_LOGON_FAILURE` (1326), `ERROR_ACCOUNT_RESTRICTION`
-/// (1327), `ERROR_PASSWORD_EXPIRED` (1330), `ERROR_ACCOUNT_DISABLED` (1331) and `ERROR_ACCOUNT_LOCKED_OUT` (1909).
-const CREDENTIAL_REFUSED: [u32; 7] = [5, 86, 1326, 1327, 1330, 1331, 1909];
+/// The errors that are Windows refusing a credential, not a share that does not answer (design part 6.1, amended by
+/// review round 1 of pull request 3, R8): ERROR_ACCESS_DENIED (5), ERROR_INVALID_PASSWORD (86),
+/// ERROR_SMB_GUEST_LOGON_BLOCKED (1272: the server took the identity for a guest and Windows refuses guest logons),
+/// ERROR_LOGON_FAILURE (1326), ERROR_ACCOUNT_RESTRICTION (1327), ERROR_PASSWORD_EXPIRED (1330),
+/// ERROR_ACCOUNT_DISABLED (1331) and ERROR_ACCOUNT_LOCKED_OUT (1909). After the first probe: the session holds no
+/// credential the server accepts, so the stored credential is tried. From `connect`: Windows refused the stored
+/// credential, so it is remembered and not tried again until its value changes, and a wrong password cannot lock the
+/// owner's account (Review Focus 5). After the probe that follows a connection: the share refused access again (R2).
+/// Any other error is the share not answering.
+const REFUSED: [u32; 8] = [5, 86, 1272, 1326, 1327, 1330, 1331, 1909];
 
 /// What `access` reports after a `reach` that got in to a drive root, through the session's own access, and through
 /// lazymkv's stored credential (design parts 6.1, 7.1).
@@ -121,7 +121,7 @@ impl<A: ShareApi> Shares<A> {
         };
         // A drive root never connects; a share falls back only when the session's access was refused.
         let share = match &target.share {
-            Some(share) if FALL_BACK.contains(&first) => share,
+            Some(share) if REFUSED.contains(&first) => share,
             Some(share) => return Err(no_answer(share, first)),
             None => return Err(no_answer(&target.path, first)),
         };
@@ -146,7 +146,7 @@ impl<A: ShareApi> Shares<A> {
             Err(SESSION_CONFLICT_CODE) => Err(format!(
                 "{share}: {SESSION_CONFLICT}: this session already reaches the server as another user, so lazymkv's stored credential was not used"
             )),
-            Err(code) if CREDENTIAL_REFUSED.contains(&code) => {
+            Err(code) if REFUSED.contains(&code) => {
                 lock(&self.refused).insert(target.key.clone(), (hash, code));
                 Err(refused_text(share, first, code))
             }
@@ -379,8 +379,8 @@ mod tests {
     }
 
     #[test]
-    fn access_denied_and_logon_failure_fall_back_to_the_stored_credential_once() {
-        for code in [5, 1326] {
+    fn a_refused_session_access_falls_back_to_the_stored_credential_once() {
+        for code in [5, 86, 1272, 1326, 1327, 1330, 1331, 1909] {
             let (api, secrets) = (api(&[Err(code), Ok(())], Ok(())), counted(&[(NAME, CREDENTIAL)]));
             assert_eq!(connector(&api, &secrets).reach(ROOT), Reach::Reachable, "{code}");
             // assert!, not assert_eq!: a failure prints no recorded half of the credential.
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn any_other_first_error_is_unreachable_with_no_fallback() {
-        for code in [53, 67, 121] {
+        for code in [53, 64, 67, 121, 1231] {
             let (api, secrets) = (api(&[Err(code)], Ok(())), counted(&[(NAME, CREDENTIAL)]));
             let reach = connector(&api, &secrets).reach(ROOT);
             assert_eq!(reach, Reach::Unreachable(format!(r"\\nas\media does not answer: {}", e(code))));
@@ -402,11 +402,13 @@ mod tests {
 
     #[test]
     fn denied_with_no_readable_credential_says_so() {
-        let (api, secrets) = (api(&[Err(5)], Ok(())), counted(&[]));
-        let reach = connector(&api, &secrets).reach(ROOT);
-        let text = format!(r"\\nas\media refused this session's access ({}), and this session can read no lazymkv credential for it", e(5));
-        assert_eq!(reach, Reach::Unreachable(text));
-        assert!(connects(&api).is_empty());
+        for code in [5, 1272] {
+            let (api, secrets) = (api(&[Err(code)], Ok(())), counted(&[]));
+            let reach = connector(&api, &secrets).reach(ROOT);
+            let text = format!(r"\\nas\media refused this session's access ({}), and this session can read no lazymkv credential for it", e(code));
+            assert_eq!(reach, Reach::Unreachable(text), "{code}");
+            assert!(connects(&api).is_empty());
+        }
     }
 
     #[test]
@@ -447,9 +449,10 @@ mod tests {
 
     #[test]
     fn no_text_holds_the_sentinel_user_or_password() {
-        let cases: [(&[Result<(), u32>], Result<(), u32>, &str); 7] = [
+        let cases: [(&[Result<(), u32>], Result<(), u32>, &str); 8] = [
             (&[Err(53)], Ok(()), CREDENTIAL),
             (&[Err(5)], Err(1326), CREDENTIAL),
+            (&[Err(5)], Err(1272), CREDENTIAL),
             (&[Err(5)], Err(1219), CREDENTIAL),
             (&[Err(5)], Err(53), CREDENTIAL),
             (&[Err(5), Err(5)], Ok(()), CREDENTIAL),
@@ -472,14 +475,16 @@ mod tests {
     /// Review Focus 5.
     #[test]
     fn a_refused_stored_credential_is_not_tried_again_until_it_changes() {
-        let (api, secrets) = (api(&[Err(5)], Err(1326)), counted(&[(NAME, CREDENTIAL)]));
-        let shares = connector(&api, &secrets);
-        let first = shares.reach(ROOT);
-        assert_eq!(shares.reach(ROOT), first);
-        assert_eq!(connects(&api).len(), 1);
-        secrets.set(NAME, "user-sentinel-7c1e\npass-sentinel-4b9d-new").unwrap();
-        shares.reach(ROOT);
-        assert_eq!(connects(&api).len(), 2);
+        for code in [1326, 1272] {
+            let (api, secrets) = (api(&[Err(5)], Err(code)), counted(&[(NAME, CREDENTIAL)]));
+            let shares = connector(&api, &secrets);
+            let first = shares.reach(ROOT);
+            assert_eq!(shares.reach(ROOT), first, "{code}");
+            assert_eq!(connects(&api).len(), 1, "{code}");
+            secrets.set(NAME, "user-sentinel-7c1e\npass-sentinel-4b9d-new").unwrap();
+            shares.reach(ROOT);
+            assert_eq!(connects(&api).len(), 2, "{code}");
+        }
     }
 
     #[test]
