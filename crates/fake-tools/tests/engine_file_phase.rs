@@ -1,8 +1,14 @@
 //! The file phase on stand-ins, from the slot to the filed file (design parts 5.7, 6.4, 6.5, 8.3, 8.4).
 
 use std::fs;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::time::Duration;
 
+use lazymkv_core::ipc::{read_reply, Reply};
 use lazymkv_core::job::{Action, Event, FailureClass, Held, NotifyEvent, State, Tool, WaitReason};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::review::ReviewReason;
@@ -10,8 +16,8 @@ use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder};
 use lazymkv_dev::cmd::plan::PlanOptions;
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
-use lazymkv_engine::testkit::Harness;
-use lazymkv_platform::Host;
+use lazymkv_engine::testkit::{ci_factor, Harness};
+use lazymkv_platform::{Host, IpcConnector, Reach};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
@@ -499,4 +505,202 @@ fn no_ffprobe_lets_the_disc_phase_finish_and_waits_in_awaiting_tool() {
     let found = events(&h, &id);
     assert!(found.contains(&Event::Ejected) && found.contains(&Event::ToolMissing { tool: Tool::Ffprobe }), "{found:?}");
     assert!(h.notifications().iter().any(|n| n.event == NotifyEvent::Waiting { reason: WaitReason::Tool }));
+}
+
+/// A folder this process cannot open (L7), closed once by `close` (which creates it first) and opened again by `open`
+/// or a drop: Unix mode 0o000 and back to 0o755; Windows a handle to the folder opened with share mode 0 and
+/// FILE_FLAG_BACKUP_SEMANTICS (0x0200_0000, which opening a folder needs), so the listing and the rename into it fail
+/// with a sharing violation until `open` drops it. Windows does not use an access-list deny because the mini PC's
+/// elevated SSH session holds the backup and restore privileges, which bypass one (Ruling T3-18-a). So `holds` is
+/// always true on Windows, and its guard matters only on Unix, where root opens a folder of mode 0o000.
+struct Closed {
+    folder: PathBuf,
+    once: AtomicBool, // `close` has acted
+    shut: AtomicBool, // closed now
+    #[cfg(windows)]
+    held: std::sync::Mutex<Option<fs::File>>, // the handle that closes the folder
+}
+
+impl Closed {
+    fn new(folder: PathBuf) -> Closed {
+        Closed {
+            folder,
+            once: AtomicBool::new(false),
+            shut: AtomicBool::new(false),
+            #[cfg(windows)]
+            held: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Creates the folder and closes it, on the first call only.
+    fn close(&self) {
+        if self.once.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        fs::create_dir_all(&self.folder).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.folder, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut options = fs::OpenOptions::new();
+            let handle = options.read(true).share_mode(0).custom_flags(0x0200_0000).open(&self.folder).unwrap();
+            *self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+        }
+        self.shut.store(true, Ordering::SeqCst);
+    }
+
+    /// Closed, and `fs::read_dir` of the folder fails (false for root on Unix, which opens a folder of mode 0o000).
+    fn holds(&self) -> bool {
+        self.shut.load(Ordering::SeqCst) && fs::read_dir(&self.folder).is_err()
+    }
+
+    /// Opens the folder again, only while it is closed.
+    fn open(&self) {
+        if !self.shut.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.folder, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        drop(self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+    }
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        self.open();
+    }
+}
+
+/// Sends `retry` for `id` through a new client and waits for its `ok` (20 s, times `ci_factor`; design part 9.4).
+fn retry(h: &Harness, id: &str) {
+    let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
+    let mut writer = stream.writer;
+    let mut reader = stream.reader;
+    let (send, lines) = channel();
+    std::thread::spawn(move || loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => if send.send(line).is_err() { break },
+        }
+    });
+    let request = json!({"v": 1, "type": "retry", "id": 1, "payload": {"job": id}});
+    writer.write_all(format!("{request}\n").as_bytes()).unwrap();
+    writer.flush().unwrap();
+    loop {
+        let line = lines.recv_timeout(Duration::from_secs(20) * ci_factor()).expect("the retry's reply");
+        match read_reply(line.trim_end()).unwrap() {
+            Reply::Ok { id: Some(1), .. } => return,
+            Reply::Error { id: Some(1), message, .. } => panic!("retry refused: {message}"),
+            _ => {}
+        }
+    }
+}
+
+/// Runs movie-direct to Failed with its film folder closed just before File (the hook fires on VerifyFile's
+/// `mkvmerge -J <partial>`, after Decide read the library). Returns the job, the guard and the final path.
+fn run_with_the_film_folder_closed(h: &Harness) -> (String, Arc<Closed>, PathBuf) {
+    let target = final_path(h);
+    let closed = Arc::new(Closed::new(target.parent().unwrap().to_path_buf()));
+    let later = Arc::downgrade(&closed);
+    h.on_spawn(&["-J", ".partial"], move || {
+        if let Some(closed) = later.upgrade() {
+            closed.close();
+        }
+    });
+    let id = run_to(h, "Failed");
+    (id, closed, target)
+}
+
+/// Ruling W22 (R-B1; engine.md:591): a library folder that cannot be read fails Decide as Unknown naming it, instead of
+/// reading as a folder holding nothing.
+#[test]
+fn a_library_folder_that_cannot_be_read_fails_decide_rather_than_reading_as_empty() {
+    let h = harness(&[], json!({}));
+    let film = final_path(&h).parent().unwrap().to_path_buf();
+    fs::create_dir_all(film.parent().unwrap()).unwrap();
+    fs::write(&film, b"").unwrap();
+    let id = run_to(&h, "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.starts_with(&format!("the library folder {} could not be read: ", film.display())), "{message}");
+    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::DecisionFailed { .. })));
+}
+
+/// Ruling W22: a film folder that does not exist still reads as no file, so the job files as before.
+#[test]
+fn an_absent_library_folder_still_reads_as_no_file() {
+    let h = harness(&[], json!({}));
+    let id = run_to(&h, "Filed");
+    let decision = h.record(&id).titles[0].decision.clone().unwrap();
+    assert!(!decision.reviews.contains(&ReviewReason::PathCollision), "{:?}", decision.reviews);
+    assert_eq!(decision.path.map(|path| PathBuf::from(path.path)), Some(final_path(&h)));
+}
+
+/// Ruling W22 (V7, design part 6.1): Decide asks `reach` of the library root before it reads the library, so a share
+/// that does not answer fails Decide naming it instead of reading as an empty folder.
+#[test]
+fn decide_asks_the_library_share_before_reading_it() {
+    let h = harness(&[], json!({}));
+    h.insert("tok0", "movie-direct");
+    h.run_until("Inspecting");
+    let id = h.job_ids().pop().unwrap();
+    let library = h.library().to_str().unwrap().to_string();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".into()));
+    h.restart();
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    let why = format!(
+        "the library share holding {library} does not answer (cable out); the library was not read, and a retry once \
+         the share answers decides again"
+    );
+    assert_eq!(record.message.as_deref(), Some(why.as_str()));
+}
+
+/// L7 (design parts 2.10, 6.5; Ruling W28): the title's folder is present but cannot be opened, so File fails as
+/// Unknown naming that folder (never the library root, so LIB-7 stands), the partial file stays in
+/// `.lazymkv-partial`, and nothing is renamed.
+#[test]
+fn a_present_but_inaccessible_folder_fails_filing_and_keeps_the_partial() {
+    let h = harness(&[], json!({}));
+    let (id, closed, target) = run_with_the_film_folder_closed(&h);
+    if !closed.holds() {
+        return; // root on Unix opens a folder of mode 0o000
+    }
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let partial = h.library().join(".lazymkv-partial").join(format!("{id}-{KEY}.mkv.partial"));
+    let film = target.parent().unwrap();
+    let message = record.message.unwrap_or_default();
+    let head = format!("{} is present but cannot be opened (", film.display());
+    let tail = format!("); the partial file stays at {}, and a retry tries again", partial.display());
+    assert!(message.starts_with(&head) && message.ends_with(&tail), "{message}");
+    assert_eq!(fs::read(&partial).unwrap(), b"lazymkv-test-mkv");
+    assert!(record.collisions.is_empty(), "{:?}", record.collisions);
+    closed.open();
+    assert!(!target.exists());
+}
+
+/// L7 (design part 6.5): a `retry` once the folder opens files the title.
+#[test]
+fn a_retry_after_the_folder_opens_files_the_title() {
+    let h = harness(&[], json!({}));
+    let (id, closed, target) = run_with_the_film_folder_closed(&h);
+    if !closed.holds() {
+        return; // root on Unix opens a folder of mode 0o000
+    }
+    closed.open();
+    retry(&h, &id);
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
 }

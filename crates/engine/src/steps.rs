@@ -286,6 +286,67 @@ pub(crate) fn next_attempt_dir(title_dir: &Path) -> PathBuf {
     title_dir.join(format!("attempt-{}", highest + 1))
 }
 
+/// The folder of the job folder the Fingerprint step snapshots into before it compares fingerprints (engine.md:587,
+/// review round 1's V10). Def: T3-18. Use: T3-18.
+pub(crate) const FRESH_SNAPSHOT: &str = "fingerprint.lazymkv-new";
+
+/// `path` removed, a folder with everything in it and anything else as a file; a missing one is not an error.
+fn remove_entry(path: &Path) -> io::Result<()> {
+    let removed = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    }
+}
+
+/// The Fingerprint step's recording (design part 5.4 step 2; engine.md:587): `tools::snapshot` of the disc at `root`
+/// into `<job_dir>/FRESH_SNAPSHOT`, which a crash may have left and is removed first; on the job's `fingerprint`,
+/// `files.json`, `nav` and `meta.json` replace the job folder's own, and `FRESH_SNAPSHOT` is removed. On any other
+/// outcome the job folder's snapshot is untouched and `FRESH_SNAPSHOT` is removed. Err is the step's message:
+/// `the disc's recording could not be written: <error>` (the snapshot, or a leftover that cannot be removed),
+/// `the disc's fingerprint <found or "none"> differs from the job's <fingerprint>`, or `the disc's recording could not
+/// be put in place: <error>` (the swap). Def: T3-18. Use: T3-18.
+pub(crate) fn snapshot_aside(
+    root: &Path,
+    label: &str,
+    job_dir: &Path,
+    captured_unix: u64,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let fresh = job_dir.join(FRESH_SNAPSHOT);
+    let unwritten = |error: io::Error| format!("the disc's recording could not be written: {error}");
+    remove_entry(&fresh).map_err(unwritten)?;
+    // A removal that fails after a failed or differing snapshot leaves the folder to the next run's first removal, so
+    // its error never replaces the step's message (Ruling PF3-S18-20-3).
+    let found = match snapshot(root, label, &fresh, captured_unix) {
+        Ok(meta) => meta.fingerprint,
+        Err(error) => {
+            let _ = remove_entry(&fresh);
+            return Err(unwritten(error));
+        }
+    };
+    if found.as_deref() != Some(fingerprint) {
+        let _ = remove_entry(&fresh);
+        let found = found.as_deref().unwrap_or("none");
+        return Err(format!("the disc's fingerprint {found} differs from the job's {fingerprint}"));
+    }
+    let unplaced = |error: io::Error| format!("the disc's recording could not be put in place: {error}");
+    for name in ["files.json", "nav", "meta.json"] {
+        let (from, to) = (fresh.join(name), job_dir.join(name));
+        remove_entry(&to).map_err(unplaced)?;
+        match fs::symlink_metadata(&from) {
+            Ok(_) => fs::rename(&from, &to).map_err(unplaced)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(unplaced(error)),
+        }
+    }
+    fs::remove_dir(&fresh).map_err(unplaced)
+}
+
 /// rip-summary.json's `started`: `host.local_time` of the title record's `rip_started_ms`, None when the record has
 /// none (R23.7; Ruling W16). Def: T3-9. Use: T3-9 (`write_rip_summary`).
 pub(crate) fn rip_started_text(title: &TitleRecord, host: &dyn Host) -> Option<String> {
@@ -629,7 +690,9 @@ impl Step<'_> {
     }
 
     /// Fingerprint, for a job a restart left in Detected (design parts 5.2, 5.4 step 2): the recording written again
-    /// with `tools::snapshot`; the same fingerprint gives FingerprintDone, anything else FingerprintFailed { Unknown }.
+    /// with `snapshot_aside`, into a fresh folder that replaces the job folder's snapshot only when the fingerprint is
+    /// the job's (engine.md:587), so a different disc leaves the job's recording as it was; the same fingerprint gives
+    /// FingerprintDone, anything else FingerprintFailed { Unknown } with `snapshot_aside`'s message.
     fn fingerprint(&self) -> Outcome {
         let failed = |failure| Event::FingerprintFailed { failure };
         let Some(root) = &self.job.drive_root else {
@@ -637,19 +700,9 @@ impl Step<'_> {
         };
         let host = self.steps.host.as_ref();
         let label = host.volume_label(root).unwrap_or_default();
-        match snapshot(root, &label, &self.job.job_dir, host.now_unix()) {
-            Ok(meta) if meta.fingerprint.as_deref() == Some(self.job.record.fingerprint.as_str()) => {
-                Ok(event(Event::FingerprintDone))
-            }
-            Ok(meta) => Ok(unknown(
-                failed,
-                format!(
-                    "the disc's fingerprint {} differs from the job's {}",
-                    meta.fingerprint.as_deref().unwrap_or("none"),
-                    self.job.record.fingerprint
-                ),
-            )),
-            Err(error) => Ok(unknown(failed, format!("the disc's recording could not be written: {error}"))),
+        match snapshot_aside(root, &label, &self.job.job_dir, host.now_unix(), &self.job.record.fingerprint) {
+            Ok(()) => Ok(event(Event::FingerprintDone)),
+            Err(message) => Ok(unknown(failed, message)),
         }
     }
 
@@ -1351,8 +1404,8 @@ impl Step<'_> {
     /// facts, then rendered again with the `library_facts` of the path the last render chose while they differ from
     /// the facts it was rendered with (Ruling R24.c2: the facts can lead to an edition-named path, whose own facts may
     /// hold a collision). The film folder does not change with the edition, so this settles at once; facts seen before
-    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs or the decision
-    /// could not be made.
+    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs, the library facts
+    /// (`library_facts`' error, Ruling W22) or the decision could not be made.
     fn title_doc(&self, ctx: &Ctx, plan: &Plan, key: &str) -> Result<DecideDoc, String> {
         let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
         let mut inputs = match &probes {
@@ -1370,7 +1423,8 @@ impl Step<'_> {
                 DecisionEntry::Results(found) => found.decision.path.clone(),
                 DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
             };
-            let facts = path.map(|path| library_facts(&path, self.job.settings.edition_style)).unwrap_or_default();
+            let style = self.job.settings.edition_style;
+            let facts = path.map(|path| library_facts(&path, style)).transpose()?.unwrap_or_default();
             if seen.contains(&facts) {
                 return Ok(doc);
             }
@@ -1396,9 +1450,32 @@ impl Step<'_> {
     /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
     /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
     /// gives DecisionFailed { Unknown } with its sentence.
+    ///
+    /// Before anything else it asks `reach` of the plan kind's library root, when that root is set, as File does
+    /// (Ruling W22, review round 1's V7): a root that does not answer gives DecisionFailed { Unknown } with `the
+    /// library share holding <root> does not answer (<why>); the library was not read, and a retry once the share
+    /// answers decides again`, so a share that does not answer never reads as an empty library. An unset root asks
+    /// nothing, as the namer then gives no path. A library read that fails is DecisionFailed { Unknown } with
+    /// `library_facts`' error.
     fn decide(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let mut plan = self.job_plan(failed)?.clone();
+        let settings = &self.job.settings;
+        let library = match plan.kind {
+            Kind::Movie => settings.movies_root.as_deref(),
+            Kind::Tv => settings.tv_root.as_deref(),
+        };
+        if let Some(root) = library {
+            if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                return Ok(unknown(
+                    failed,
+                    format!(
+                        "the library share holding {root} does not answer ({why}); the library was not read, and a \
+                         retry once the share answers decides again"
+                    ),
+                ));
+            }
+        }
         if plan.identity.lookup_pending {
             let job = self.job;
             let refreshed = refreshed_plan(&plan, &job.job_dir, &job.lookups, &job.settings);
@@ -1622,6 +1699,13 @@ impl Step<'_> {
     /// message saying the final path holds the file. On Windows `MoveFileExW` renames in one step, so that half state
     /// cannot arise and those branches are not compiled (Ruling T3-4-b).
     ///
+    /// L7 (design part 6.5, Ruling W28): once `create_dir_all` of the final path's folder returns Ok or
+    /// `AlreadyExists`, that folder is opened with `fs::read_dir` before the rename. A folder that is present but
+    /// cannot be opened, as phase 0's experiment 9 met on the share, gives FileFailed { Unknown } with `<folder> is
+    /// present but cannot be opened (<error>); the partial file stays at <partial>, and a retry tries again`, records
+    /// no collision, and renames nothing. The folder opened is the title's own, never the library root, so LIB-7
+    /// stands. Any other `create_dir_all` error gives FileFailed { Unknown } with `<folder>: <error>`.
+    ///
     /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
     /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
     /// and ERROR_BAD_NET_NAME as NotFound: only a NotFound on a share that answers counts as a partial file gone or a
@@ -1702,8 +1786,22 @@ impl Step<'_> {
                 }
             }
             if let Some(folder) = target.parent() {
-                let made = fs::create_dir_all(folder);
-                made.map_err(|error| unknown(failed, format!("{}: {error}", folder.display())))?;
+                match fs::create_dir_all(folder) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Ok(unknown(failed, format!("{}: {error}", folder.display()))),
+                }
+                // L7 (Ruling W28): a folder that is present but cannot be opened stops the rename.
+                if let Err(error) = fs::read_dir(folder) {
+                    let (shown, stays) = (folder.display(), partial.display());
+                    return Ok(unknown(
+                        failed,
+                        format!(
+                            "{shown} is present but cannot be opened ({error}); the partial file stays at {stays}, \
+                             and a retry tries again"
+                        ),
+                    ));
+                }
             }
             self.check_cancel()?;
             match rename_no_replace(&partial, target) {
@@ -1892,5 +1990,75 @@ mod tests {
         assert_eq!(rip_started_text(&title, &host).as_deref(), Some("2023-11-14 22:13:20.123"));
         title.rip_started_ms = None;
         assert_eq!(rip_started_text(&title, &host), None);
+    }
+
+    /// A synthetic disc under `s` as the harness builds one: an index, a playlist and a stream of `stream` zero bytes.
+    fn disc_volume(s: &Scratch, name: &str, stream: usize) -> PathBuf {
+        s.write(&format!("{name}/BDMV/index.bdmv"), "INDX0200");
+        s.write(&format!("{name}/BDMV/PLAYLIST/00800.mpls"), "MPLS0200");
+        s.write(&format!("{name}/BDMV/STREAM/00001.m2ts"), vec![0u8; stream]);
+        s.0.join(name)
+    }
+
+    /// The job folder's snapshot, read whole.
+    fn snapshot_files(job: &Path) -> Vec<Vec<u8>> {
+        ["files.json", "meta.json", "nav/BDMV/index.bdmv", "nav/BDMV/PLAYLIST/00800.mpls"]
+            .iter()
+            .map(|file| fs::read(job.join(file)).unwrap())
+            .collect()
+    }
+
+    /// engine.md:587 (V10): a different disc in the job's drive leaves the job's nav/, files.json and meta.json as they
+    /// were, and no fresh snapshot behind.
+    #[test]
+    fn a_different_disc_leaves_the_jobs_snapshot_unchanged() {
+        let s = Scratch::new("aside-differs");
+        let job = s.0.join("job");
+        let fingerprint = snapshot(&disc_volume(&s, "a", 1000), "A", &job, 1).unwrap().fingerprint.unwrap();
+        let before = snapshot_files(&job);
+        let error = snapshot_aside(&disc_volume(&s, "b", 2000), "B", &job, 2, &fingerprint).unwrap_err();
+        let tail = format!(" differs from the job's {fingerprint}");
+        assert!(error.starts_with("the disc's fingerprint ") && error.ends_with(&tail), "{error}");
+        assert_eq!(snapshot_files(&job), before);
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
+    }
+
+    #[test]
+    fn a_matching_disc_swaps_in_the_new_snapshot() {
+        let s = Scratch::new("aside-matches");
+        let job = s.0.join("job");
+        let disc = disc_volume(&s, "a", 1000);
+        let fingerprint = snapshot(&disc, "A", &job, 1).unwrap().fingerprint.unwrap();
+        fs::write(job.join("nav/BDMV/stale.bdmv"), b"an older snapshot's file").unwrap();
+        snapshot_aside(&disc, "A", &job, 2, &fingerprint).unwrap();
+        let meta: Value = serde_json::from_slice(&fs::read(job.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["captured_unix"], json!(2));
+        assert!(job.join("nav/BDMV/index.bdmv").is_file());
+        assert!(!job.join("nav/BDMV/stale.bdmv").exists());
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
+    }
+
+    #[test]
+    fn a_fresh_snapshot_a_crash_left_is_replaced() {
+        let s = Scratch::new("aside-leftover");
+        let job = s.0.join("job");
+        let disc = disc_volume(&s, "a", 1000);
+        let fingerprint = snapshot(&disc, "A", &job, 1).unwrap().fingerprint.unwrap();
+        s.write(&format!("job/{FRESH_SNAPSHOT}/nav/BDMV/left.bdmv"), "left by a crash");
+        snapshot_aside(&disc, "A", &job, 2, &fingerprint).unwrap();
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
+        assert!(!job.join("nav/BDMV/left.bdmv").exists());
+    }
+
+    #[test]
+    fn a_disc_that_cannot_be_walked_leaves_the_jobs_snapshot_unchanged() {
+        let s = Scratch::new("aside-unwalked");
+        let job = s.0.join("job");
+        let fingerprint = snapshot(&disc_volume(&s, "a", 1000), "A", &job, 1).unwrap().fingerprint.unwrap();
+        let before = snapshot_files(&job);
+        let error = snapshot_aside(&s.0.join("absent"), "", &job, 2, &fingerprint).unwrap_err();
+        assert!(error.starts_with("the disc's recording could not be written: "), "{error}");
+        assert_eq!(snapshot_files(&job), before);
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
     }
 }
