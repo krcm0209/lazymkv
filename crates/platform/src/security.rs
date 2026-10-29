@@ -1,7 +1,8 @@
 //! The pure security rules of design parts 3.2 to 3.5 and P6: the security descriptors of the mutex, the pipe and the
-//! data folder, the verdict on the token at the other end of the pipe, the production names and the tests' own names.
-//! Compiled and tested on every system; `platform::win` applies them.
+//! data folder, the verdict on the token at the other end of the pipe, the environment a guarded child gets, the
+//! production names and the tests' own names. Compiled and tested on every system; `platform::win` applies them.
 
+use std::ffi::OsString;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::ConnectError;
@@ -95,6 +96,63 @@ pub const PIPE_NAME: &str = r"\\.\pipe\lazymkv";
 /// The engine's mutex, in the namespace every logon session shares (design part 3.3, ARCH-16). Only the binaries use
 /// it. Def: T3-2. Use: T3-23.
 pub const MUTEX_NAME: &str = r"Global\lazymkv-engine";
+
+/// The variables Windows itself defines for a logon session: the only ones of the engine's environment a guarded child
+/// inherits (review round 1 of pull request 3 (V1)). Def: PR #14 review round 1 (V1). Use: PR #14 review round 1 (V1).
+pub const CHILD_ENV_NAMES: [&str; 31] = [
+    "SystemRoot",
+    "windir",
+    "SystemDrive",
+    "ComSpec",
+    "PATHEXT",
+    "PATH",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL",
+    "PROCESSOR_REVISION",
+    "COMPUTERNAME",
+    "ProgramData",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERNAME",
+    "USERDOMAIN",
+    "TEMP",
+    "TMP",
+];
+
+/// The environment a guarded child gets: the pairs of `inherited` whose name is valid UTF-8 and equals a name of
+/// `CHILD_ENV_NAMES` ignoring ASCII case, in their order and with their own spelling, then `extra` in its order, so
+/// that where `extra` names a kept variable again, std's later `env` wins. Every other name is dropped, `=C:`-style
+/// entries among them. This is design part 3.5's rule, "if a non-elevated process could write there, it could choose
+/// what the engine runs", applied to the children's environment (review round 1 of pull request 3 (V1)): Windows
+/// builds the elevated engine's environment over HKCU's Environment, which a non-elevated process of the owner can
+/// write, and an option variable there (JAVA_TOOL_OPTIONS, FFREPORT, MKVTOOLNIX_OPTIONS) could choose what an
+/// elevated tool loads or where it writes. A list of the names kept, not of the names dropped, since makemkvcon is
+/// closed source and the Java runtime, Qt and .NET read vendor variables nobody lists.
+/// Def: PR #14 review round 1 (V1). Use: PR #14 review round 1 (V1).
+pub fn child_environment<I: IntoIterator<Item = (OsString, OsString)>>(
+    inherited: I,
+    extra: &[(String, String)],
+) -> Vec<(OsString, OsString)> {
+    let listed = |name: &str| CHILD_ENV_NAMES.iter().any(|kept| kept.eq_ignore_ascii_case(name));
+    let mut environment: Vec<(OsString, OsString)> =
+        inherited.into_iter().filter(|(name, _)| name.to_str().is_some_and(listed)).collect();
+    environment.extend(extra.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))));
+    environment
+}
 
 /// The count `test_name` appends, process-wide, from 0.
 static NEXT_TEST_NAME: AtomicU32 = AtomicU32::new(0);
@@ -191,6 +249,64 @@ mod tests {
         assert!(first.starts_with(&prefix), "{first}");
         assert!(second.starts_with(&prefix), "{second}");
         assert!(first[prefix.len()..].parse::<u32>().is_ok(), "{first}");
+    }
+
+    /// `pairs` as the environment pairs `child_environment` takes and gives.
+    fn pairs(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))).collect()
+    }
+
+    /// Review round 1 of pull request 3 (V1).
+    #[test]
+    fn the_child_environment_keeps_windows_own_variables_whatever_their_case() {
+        let inherited = pairs(&[
+            ("Path", "p"),
+            ("SYSTEMROOT", "s"),
+            ("windir", "w"),
+            ("TEMP", "t"),
+            ("userprofile", "u"),
+            ("ProgramFiles(x86)", "x"),
+        ]);
+        assert_eq!(child_environment(inherited.clone(), &[]), inherited);
+    }
+
+    /// Review round 1 of pull request 3 (V1): a name the list does not hold is dropped, however like a listed one it
+    /// looks.
+    #[test]
+    fn the_child_environment_drops_every_variable_it_does_not_name() {
+        let inherited = pairs(&[
+            ("JAVA_TOOL_OPTIONS", "-agentpath:x"),
+            ("_JAVA_OPTIONS", "x"),
+            ("JDK_JAVA_OPTIONS", "x"),
+            ("OPENJ9_JAVA_OPTIONS", "x"),
+            ("JAVA_HOME", "x"),
+            ("CLASSPATH", "x"),
+            ("FFREPORT", "file=x"),
+            ("MKVTOOLNIX_OPTIONS", "--redirect-output x"),
+            ("MTX_OPTIONS", "x"),
+            ("MKVMERGE_OPTIONS", "x"),
+            ("MKVMERGE_DEBUG", "x"),
+            ("QT_PLUGIN_PATH", "x"),
+            ("COR_PROFILER_PATH", "x"),
+            ("PATH_EXTRA", "x"),
+            ("=C:", "C:\\"),
+            ("PATH", "p"),
+        ]);
+        assert_eq!(child_environment(inherited, &[]), pairs(&[("PATH", "p")]));
+    }
+
+    /// Review round 1 of pull request 3 (V1): `Spawn::env` comes after what is kept, so where it names a kept variable
+    /// again, std's later `env` wins.
+    #[test]
+    fn a_spawns_own_variables_come_after_the_kept_ones() {
+        let extra = [
+            ("LAZYMKV_TEST_HELPER".to_string(), "print-env".to_string()),
+            ("TEMP".to_string(), "mine".to_string()),
+        ];
+        assert_eq!(
+            child_environment(pairs(&[("TEMP", "t"), ("FOO", "f")]), &extra),
+            pairs(&[("TEMP", "t"), ("LAZYMKV_TEST_HELPER", "print-env"), ("TEMP", "mine")])
+        );
     }
 
     #[test]

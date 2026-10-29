@@ -108,7 +108,8 @@ pub struct Spawn {
     pub program: PathBuf,
     /// The arguments, one string each.
     pub args: Vec<String>,
-    /// Extra environment variables for the child. The engine leaves this empty (S43).
+    /// Extra environment variables for the child, added after what the runner keeps of the inherited environment. The
+    /// engine leaves this empty (S43).
     pub env: Vec<(String, String)>,
     /// Whether to start the child at below-normal priority. A no-op where the platform has no such class.
     pub below_normal: bool,

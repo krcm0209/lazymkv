@@ -4,7 +4,9 @@
 //! handles ends a process of the job at once, with the exception's code, so no fault dialog holds a step (review
 //! round 1 of pull request 3 (R1)). Each child has a console of its own with no window, so the stop events of the
 //! engine's console reach the engine alone, whose handler cancels the steps through the Job Objects (design part 3.8;
-//! Ruling W19; review round 1 of pull request 3 (V9)).
+//! Ruling W19; review round 1 of pull request 3 (V9)). A child inherits only the variables `security::CHILD_ENV_NAMES`
+//! names, then gets `Spawn::env`, so a variable a non-elevated process set reaches no tool (review round 1 of pull
+//! request 3 (V1)).
 
 use std::io::{self, Read};
 use std::mem::size_of;
@@ -28,6 +30,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::process::handed_over;
+use crate::security::child_environment;
 use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 
 /// The Windows `ProcessGuard` (spec 4.3, design part 4.2; Ruling W7): each child in a Job Object of its own with
@@ -42,8 +45,13 @@ use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 /// Ruling W19), and no tool ends by its own default handler first. Not `DETACHED_PROCESS`, under which a console
 /// grandchild would open a window on the owner's desktop, nor `CREATE_NEW_PROCESS_GROUP`, which Ctrl+Break still
 /// reaches. The hidden console is a process of its own, not a thread of the child, so the child still has one thread
-/// at its resume (Ruling T3-5-b; review round 1 of pull request 3 (V9)). Standard input null, output and error piped,
-/// `Spawn::env` added (Rulings T9-a to T9-e hold).
+/// at its resume (Ruling T3-5-b; review round 1 of pull request 3 (V9)). Standard input null, output and error piped
+/// (Rulings T9-a to T9-d hold). The environment starts empty and gets the inherited variables
+/// `security::CHILD_ENV_NAMES` names, the ones Windows defines for a logon session, then `Spawn::env`
+/// (`security::child_environment`); T9-e otherwise holds (Ruling W7, amended at review round 1 of pull request 3
+/// (V1)). The engine's environment is built over HKCU's Environment, which a non-elevated process of the owner can
+/// write, so an option variable there (JAVA_TOOL_OPTIONS, FFREPORT, MKVTOOLNIX_OPTIONS) reaches no elevated tool, nor
+/// the relay's `lazymkvctl`, nor any grandchild, makemkvcon's Java included.
 /// Def: T3-5. Use: T3-23.
 pub struct JobProcessGuard;
 
@@ -58,7 +66,8 @@ impl ProcessGuard for JobProcessGuard {
         // error is returned unchanged (a missing program is NotFound) while the empty job closes.
         let mut child = Command::new(&spawn.program)
             .args(&spawn.args)
-            .envs(spawn.env.iter().map(|(name, value)| (name, value)))
+            .env_clear()
+            .envs(child_environment(std::env::vars_os(), &spawn.env))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -413,6 +422,24 @@ mod tests {
         waiter.join().unwrap();
     }
 
+    /// The `env-probe` mode (review round 1 of pull request 3 (V1)). It writes `planted <bool>`, whether its own
+    /// environment has JAVA_TOOL_OPTIONS, then starts `print-env` under the job runner and copies the child's standard
+    /// output to its own. A call that fails writes `probe-error <os error>`.
+    fn env_probe() {
+        say(&format!("planted {}", std::env::var_os("JAVA_TOOL_OPTIONS").is_some()));
+        let mut child = match JobProcessGuard.spawn(&helper("print-env")) {
+            Ok(child) => child,
+            Err(error) => return say(&format!("probe-error {error}")),
+        };
+        if let Err(error) = io::copy(&mut child.take_stdout(), &mut io::stdout()) {
+            say(&format!("probe-error {error}"));
+        }
+        match child.wait() {
+            Ok(Some(0)) => {}
+            other => say(&format!("probe-error the child ended {other:?}")),
+        }
+    }
+
     #[test]
     fn the_job_runner_kills_its_child() {
         check_kills_its_child(&JobProcessGuard);
@@ -573,13 +600,39 @@ mod tests {
         assert_eq!(said, ["probe alive"]);
     }
 
+    /// Review round 1 of pull request 3 (V1): option variables in the engine's environment, which a non-elevated
+    /// process of the owner can set through HKCU's Environment, do not reach a guarded child; the variables Windows
+    /// defines for a logon session and `Spawn::env` do. The probe stands for the engine, with the variables planted on
+    /// it, since `set_var` here would race the other tests.
+    #[test]
+    fn option_variables_in_the_engines_environment_do_not_reach_a_guarded_child() {
+        let planted = [
+            ("JAVA_TOOL_OPTIONS", "-Dlazymkv.planted=1"),
+            ("FFREPORT", "file=lazymkv-planted.log"),
+            ("MKVTOOLNIX_OPTIONS", "--lazymkv-planted"),
+        ];
+        let output = probe("env-probe", &planted);
+        let errors: Vec<&str> = output.lines().filter(|line| line.starts_with("probe-error")).collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(output.lines().any(|line| line == "planted true"), "the variables were not planted on the probe");
+        // The child writes names only, so no value, which would hold the account name, reaches a message.
+        let names: Vec<&str> = output.lines().filter_map(|line| line.strip_prefix("env ")).collect();
+        let has = |wanted: &str| names.iter().any(|name| name.eq_ignore_ascii_case(wanted));
+        let reached: Vec<&str> = planted.iter().map(|(name, _)| *name).filter(|name| has(name)).collect();
+        assert!(reached.is_empty(), "planted variables reached the guarded child: {reached:?}");
+        for name in ["SystemRoot", "PATH", "LAZYMKV_TEST_HELPER"] {
+            assert!(has(name), "the guarded child has no {name}");
+        }
+    }
+
     /// The child `probe` starts: this test binary running only this test, in the mode LAZYMKV_TEST_HELPER names.
-    /// `console-probe` runs `console_probe`. Any other mode returns at once.
+    /// `console-probe` runs `console_probe`, `env-probe` runs `env_probe`. Any other mode returns at once.
     #[test]
     #[ignore]
     fn probe_child() {
         match std::env::var("LAZYMKV_TEST_HELPER").as_deref() {
             Ok("console-probe") => console_probe(),
+            Ok("env-probe") => env_probe(),
             _ => {}
         }
     }

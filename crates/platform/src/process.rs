@@ -119,7 +119,9 @@ pub(crate) mod tests {
     /// names. `sleep` sleeps until killed; `echo` prints one line to each stream; `spawn-grandchild` starts this test
     /// binary again as `print-pid-sleep`, with this child's standard output and error, then writes `child <pid>` and
     /// sleeps 60 s; `print-pid-sleep` writes `grandchild <pid>` and sleeps 60 s; `raise`, on Windows only, raises the
-    /// exception `RAISED`, which nothing handles. Any other mode returns at once.
+    /// exception `RAISED`, which nothing handles; `print-env` writes `env <NAME>` on a line of its own for each
+    /// variable of its environment, the names only, never the values, which hold the account name. Any other mode
+    /// returns at once.
     #[test]
     #[ignore]
     fn helper_child() {
@@ -145,6 +147,11 @@ pub(crate) mod tests {
             Ok("print-pid-sleep") => {
                 say(&format!("grandchild {}", std::process::id()));
                 std::thread::sleep(Duration::from_secs(60));
+            }
+            Ok("print-env") => {
+                for (name, _) in std::env::vars_os() {
+                    say(&format!("env {}", name.to_string_lossy()));
+                }
             }
             #[cfg(windows)]
             Ok("raise") => {
