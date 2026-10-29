@@ -13,8 +13,9 @@ $ErrorActionPreference = 'Stop'
 $name = 'lazymkv-engine'
 $run = 'C:\lazymkv\run'
 $release = 'C:\lazymkv\target\release'
-# The trees the programs are built from and copied out of (Owner decision 13).
-$trees = 'C:\lazymkv\src', 'C:\lazymkv\target'
+# The trees the programs are built from and copied out of (Owner decision 13), and the run folder's parent, which a
+# writer could rename away to put its own run folder in its place (Ruling T3-24-c).
+$trees = (Split-Path $run), 'C:\lazymkv\src', 'C:\lazymkv\target'
 # lazymkv-ocr.exe arrives with pull request 5 and is copied once it exists.
 $required = 'lazymkv-engine.exe', 'lazymkvctl.exe'
 $optional = 'lazymkv-ocr.exe'
@@ -55,7 +56,7 @@ try {
         if ($writers.Count -eq 0) { continue }
         $list = $writers -join ', '
         if (-not $AcceptWritableBuild) {
-            throw "$tree lets $list write, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program before it is copied (Owner decision 13); give -AcceptWritableBuild to accept that on this development machine (scripts/box.sh recreates C:\lazymkv\src at every sync, so a list set on it does not last)"
+            throw "$tree lets $list write, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program before it is copied or replace the run folder itself (Owner decision 13); give -AcceptWritableBuild to accept that on this development machine (scripts/box.sh recreates C:\lazymkv\src at every sync, so a list set on it does not last)"
         }
         "accepted: $tree lets $list write (-AcceptWritableBuild, Owner decision 13)"
     }
@@ -68,6 +69,10 @@ try {
     $sid = $identity.User.Value
     $dacl = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;$sid)"
     New-Item -ItemType Directory -Force -Path $run | Out-Null
+    # A link would send the access list and the programs to its target, as for the data folder (Rulings T3-3-b, T3-24-c).
+    if ((Get-Item -LiteralPath $run -Force).Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+        throw "$run is a link, not a folder; remove it by hand and run the script again (design part 3.5)"
+    }
     $protected = New-Object System.Security.AccessControl.DirectorySecurity
     $protected.SetSecurityDescriptorSddlForm("O:BA$dacl", [System.Security.AccessControl.AccessControlSections]'Owner, Access')
     [System.IO.Directory]::SetAccessControl($run, $protected)
@@ -83,7 +88,15 @@ try {
     }
     foreach ($program in $known) {
         $from = Join-Path $release $program
-        if (Test-Path -LiteralPath $from -PathType Leaf) { Copy-Item -LiteralPath $from -Destination $run -Force }
+        if (Test-Path -LiteralPath $from -PathType Leaf) {
+            # A new file each time, so it inherits the protected list and keeps no earlier file's owner (Ruling T3-24-c).
+            $to = Join-Path $run $program
+            if (Test-Path -LiteralPath $to) {
+                try { Remove-Item -LiteralPath $to -Force -ErrorAction Stop }
+                catch { throw "cannot remove the earlier $to ($($_.Exception.Message)); stop any engine running from it with lazymkvctl stop, or remove it by hand, and run the script again (design part 3.5)" }
+            }
+            Copy-Item -LiteralPath $from -Destination $run -Force
+        }
     }
     $ctl = Join-Path $run 'lazymkvctl.exe'
     cmd /c "$ctl status >nul 2>&1"

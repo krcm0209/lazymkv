@@ -29,6 +29,9 @@ fn the_task_script_names_the_task_the_run_folder_and_no_trigger() {
     for absent in ["New-ScheduledTaskTrigger", "-Trigger"] {
         assert!(!text.contains(absent), "the script holds {absent}");
     }
+    // Ruling T3-24-c: the run folder's parent is checked with the build trees, since whoever can write it can rename
+    // the run folder away and put its own in its place.
+    assert!(text.contains("$trees = (Split-Path $run), "), "the script does not check the run folder's parent");
 }
 
 /// Design part 3.5: the run folder gets the data folder's protected list, one string with `protect_data_folder`'s.
