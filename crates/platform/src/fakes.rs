@@ -1,6 +1,6 @@
-//! In-memory fakes of the platform traits (design part 4.2), behind the `fakes` feature: a scripted drive watcher, a
-//! recording ejector, a counting keep-awake, fake shares, in-memory secrets, an in-memory pipe and a fake host. Every
-//! engine and client test builds its `Platform` from these (Tasks 22 to 29).
+//! In-memory fakes of the platform traits (design part 4.2), behind the `fakes` feature and in this crate's own tests:
+//! a scripted drive watcher, a recording ejector, a counting keep-awake, fake shares, in-memory secrets, an in-memory
+//! pipe and a fake host. Every engine and client test builds its `Platform` from these (Tasks 22 to 29).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufReader, Read, Write};
@@ -760,6 +760,15 @@ mod tests {
         assert_eq!(secrets.get("webhook_url"), None);
         secrets.set("webhook_url", "http://ha.local/api/webhook/x").unwrap();
         assert_eq!(secrets.get("webhook_url").as_deref(), Some("http://ha.local/api/webhook/x"));
+    }
+
+    #[test]
+    fn memory_secrets_compare_names_exactly() {
+        let secrets = MemorySecrets::new().with(r"share:\\server\share", "user-sentinel-7c1e\npass-sentinel-4b9d");
+        assert_eq!(secrets.get(r"share:\\server\share").as_deref(), Some("user-sentinel-7c1e\npass-sentinel-4b9d"));
+        assert_eq!(secrets.get(r"share:\\SERVER\Share"), None);
+        secrets.set("tmdb_token", "token-sentinel-2f6a").unwrap();
+        assert_eq!(secrets.get("TMDB_TOKEN"), None);
     }
 
     #[test]

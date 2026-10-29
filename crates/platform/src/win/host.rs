@@ -435,13 +435,14 @@ mod tests {
     use std::process::Command;
 
     use lazymkv_core::job::Tool;
+    use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     use windows_sys::Win32::System::Time::SystemTimeToFileTime;
 
     use super::WinHost;
-    use crate::testutil::{reg_query, temp_dir};
+    use crate::testutil::reg_query;
     use crate::win::wide;
     use crate::Host;
 
@@ -526,7 +527,7 @@ mod tests {
         // Some: the volume answered (its label may be empty). None: the path is not a volume root.
         assert!(host.volume_label(&PathBuf::from(format!(r"{drive}\"))).is_some());
         assert!(host.volume_label(&PathBuf::from(&drive)).is_some());
-        assert_eq!(host.volume_label(&temp_dir("host-label").join("absent")), None);
+        assert_eq!(host.volume_label(&Scratch::new("host-label").0.join("absent")), None);
     }
 
     #[test]
@@ -566,15 +567,14 @@ mod tests {
     /// `set_var` here would race the other tests.
     #[test]
     fn the_program_files_variables_do_not_move_the_install_paths() {
-        let planted = temp_dir("host-program-files");
+        let planted = Scratch::new("host-program-files");
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "win::host::tests::install_paths_child", "--ignored", "--nocapture"])
             .env("LAZYMKV_TEST_HELPER", INSTALL_PATHS_CHILD)
-            .env("ProgramFiles", &planted)
-            .env("ProgramFiles(x86)", &planted)
+            .env("ProgramFiles", &planted.0)
+            .env("ProgramFiles(x86)", &planted.0)
             .output()
             .unwrap();
-        let _ = fs::remove_dir_all(&planted);
         assert!(output.status.success(), "the child failed: {}", String::from_utf8_lossy(&output.stderr));
         let text = String::from_utf8_lossy(&output.stdout);
         let host = WinHost::new();
@@ -587,7 +587,7 @@ mod tests {
             assert!(
                 theirs == Some(expected.as_str()),
                 "the child's {name} path differs from this process's; it lies under the planted folder: {}",
-                theirs.is_some_and(|line| line.contains(&*planted.to_string_lossy()))
+                theirs.is_some_and(|line| line.contains(&*planted.0.to_string_lossy()))
             );
         }
     }
@@ -618,11 +618,12 @@ mod tests {
 
     #[test]
     fn a_fresh_temp_folder_is_user_writable() {
-        let dir = temp_dir("host-writable");
+        let scratch = Scratch::new("host-writable");
+        let dir = &scratch.0;
         let file = dir.join("tool.exe");
         fs::write(&file, b"x").unwrap();
         let host = WinHost::new();
-        assert!(host.user_writable(&dir));
+        assert!(host.user_writable(dir));
         assert!(host.user_writable(&file));
     }
 
@@ -637,6 +638,6 @@ mod tests {
     #[test]
     fn a_path_that_cannot_be_read_counts_as_writable() {
         // Ruling W17: any failure answers true, so a lookup never trusts what it could not judge.
-        assert!(WinHost::new().user_writable(&temp_dir("host-absent").join("absent")));
+        assert!(WinHost::new().user_writable(&Scratch::new("host-absent").0.join("absent")));
     }
 }

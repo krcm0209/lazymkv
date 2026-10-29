@@ -1,6 +1,6 @@
 //! lazymkv-platform: the operating-system seams of spec 4.3 as traits (design parts 4.1, 4.2), their Windows
 //! implementations in `win` on `windows-sys` (`cfg(windows)`), the pure helpers they use, which every system tests, and
-//! in-memory fakes behind the `fakes` feature.
+//! in-memory fakes behind the `fakes` feature (and in this crate's own tests).
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use lazymkv_core::job::Tool;
 
-/// The in-memory fakes of every platform trait, for the tests of the crates above this one (design part 4.2).
-/// Def: T8. Use: T22 to T29.
-#[cfg(feature = "fakes")]
+/// The in-memory fakes of every platform trait, for the tests of the crates above this one and for this crate's own
+/// tests (design part 4.2). Def: T8. Use: T22 to T29.
+#[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
 
 /// The Windows implementations of the platform traits and helpers; every `windows-sys` call of the workspace sits
@@ -362,11 +362,12 @@ mod tests {
     use std::io;
 
     use super::*;
-    use crate::testutil::temp_dir;
+    use lazymkv_core::testsupport::Scratch;
 
     #[test]
     fn write_atomic_replaces_the_file_whole() {
-        let dir = temp_dir("atomic");
+        let scratch = Scratch::new("atomic");
+        let dir = &scratch.0;
         let path = dir.join("state.json");
         write_atomic(&path, b"{\"format\":\"lazymkv job v1\",\"longer\":true}").unwrap();
         write_atomic(&path, b"{}").unwrap();
@@ -376,7 +377,8 @@ mod tests {
 
     #[test]
     fn a_temporary_file_a_crash_left_is_removed_at_the_next_write() {
-        let dir = temp_dir("atomic-left");
+        let scratch = Scratch::new("atomic-left");
+        let dir = &scratch.0;
         fs::write(dir.join("state.json.lazymkv-tmp"), "junk").unwrap();
         write_atomic(&dir.join("state.json"), b"{}").unwrap();
         assert!(!dir.join(format!("state.json{TEMP_SUFFIX}")).exists());
@@ -385,7 +387,8 @@ mod tests {
 
     #[test]
     fn write_atomic_into_a_missing_folder_fails_with_not_found() {
-        let dir = temp_dir("atomic-missing");
+        let scratch = Scratch::new("atomic-missing");
+        let dir = &scratch.0;
         let error = write_atomic(&dir.join("absent").join("state.json"), b"{}").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(!dir.join("absent").exists());
@@ -393,7 +396,8 @@ mod tests {
 
     #[test]
     fn rename_no_replace_refuses_an_existing_target() {
-        let dir = temp_dir("rename-taken");
+        let scratch = Scratch::new("rename-taken");
+        let dir = &scratch.0;
         let (from, to) = (dir.join("a.mkv.partial"), dir.join("a.mkv"));
         fs::write(&from, "new").unwrap();
         fs::write(&to, "old").unwrap();
@@ -404,7 +408,8 @@ mod tests {
 
     #[test]
     fn rename_no_replace_moves_when_the_target_is_free() {
-        let dir = temp_dir("rename-free");
+        let scratch = Scratch::new("rename-free");
+        let dir = &scratch.0;
         let (from, to) = (dir.join("a.mkv.partial"), dir.join("a.mkv"));
         fs::write(&from, "placeholder").unwrap();
         rename_no_replace(&from, &to).unwrap();

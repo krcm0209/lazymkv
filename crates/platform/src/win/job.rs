@@ -203,6 +203,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetPriorityClass, OpenProcess, WaitForSingleObject, BELOW_NORMAL_PRIORITY_CLASS,
@@ -211,7 +212,7 @@ mod tests {
 
     use super::JobProcessGuard;
     use crate::process::tests::{check_kills_its_child, check_pipes_both_streams_and_adds_env, helper};
-    use crate::testutil::{ci_factor, temp_dir};
+    use crate::testutil::ci_factor;
     use crate::{GuardedChild, ProcessGuard, Spawn};
 
     /// How long a killed tree may take to end. A hang is the failure it catches, so it does not scale (Global
@@ -406,10 +407,11 @@ mod tests {
 
     #[test]
     fn a_program_that_cannot_start_is_the_os_error() {
-        let dir = temp_dir("job-missing");
+        let scratch = Scratch::new("job-missing");
+        let dir = &scratch.0;
         let spawn = Spawn { program: dir.join("absent.exe"), args: Vec::new(), env: Vec::new(), below_normal: false };
         let error = JobProcessGuard.spawn(&spawn).err().expect("an absent program does not start");
-        std::fs::remove_dir(&dir).unwrap();
+        std::fs::remove_dir(dir).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }

@@ -202,6 +202,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{ConvertStringSidToSidW, SetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
@@ -210,17 +211,8 @@ mod tests {
 
     use super::*;
     use crate::security::{folder_sddl, ADMINISTRATORS_SID};
-    use crate::testutil::{reg_query, temp_dir};
+    use crate::testutil::reg_query;
     use crate::win::{own_token, read_descriptor, read_path, wide, AclEntry, Descriptor};
-
-    /// Removes the test's folder when the test ends, failed or not (Global Constraints).
-    struct Cleanup(PathBuf);
-
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     /// The entries `folder_sddl(sid)` holds, read with the reader the folder is read with.
     fn folder_entries(sid: &str) -> Vec<AclEntry> {
@@ -263,7 +255,7 @@ mod tests {
     #[test]
     fn an_absent_folder_is_created_owned_by_administrators_with_the_protected_list() {
         let own = own_token().unwrap();
-        let dir = Cleanup(temp_dir("folder-new"));
+        let dir = Scratch::new("folder-new");
         let path = dir.0.join("data");
         protect_data_folder(&path, &own.user_sid).unwrap();
         let read = read_path(&path).unwrap();
@@ -275,7 +267,7 @@ mod tests {
     #[test]
     fn an_existing_folder_owned_by_administrators_gets_the_list_again() {
         let own = own_token().unwrap();
-        let dir = Cleanup(temp_dir("folder-again"));
+        let dir = Scratch::new("folder-again");
         let path = dir.0.join("data");
         fs::create_dir(&path).unwrap();
         set_owner(&path, ADMINISTRATORS_SID);
@@ -293,7 +285,7 @@ mod tests {
     #[test]
     fn a_folder_owned_by_the_user_is_refused_by_sid() {
         let own = own_token().unwrap();
-        let dir = Cleanup(temp_dir("folder-user"));
+        let dir = Scratch::new("folder-user");
         let path = dir.0.join("data");
         fs::create_dir(&path).unwrap();
         set_owner(&path, &own.user_sid);
@@ -312,7 +304,7 @@ mod tests {
     #[test]
     fn a_file_created_below_inherits_the_list() {
         let own = own_token().unwrap();
-        let dir = Cleanup(temp_dir("folder-below"));
+        let dir = Scratch::new("folder-below");
         let path = dir.0.join("data");
         protect_data_folder(&path, &own.user_sid).unwrap();
         fs::write(path.join("engine.log"), "").unwrap();
@@ -324,7 +316,7 @@ mod tests {
     #[test]
     fn a_junction_or_a_file_in_place_of_the_folder_is_refused() {
         let own = own_token().unwrap();
-        let dir = Cleanup(temp_dir("folder-link"));
+        let dir = Scratch::new("folder-link");
         let target = dir.0.join("target");
         fs::create_dir(&target).unwrap();
         set_owner(&target, ADMINISTRATORS_SID); // so only Ruling T3-3-b can refuse it
@@ -347,7 +339,7 @@ mod tests {
     #[test]
     fn a_missing_parent_is_not_created() {
         let own = own_token().unwrap();
-        let dir = Cleanup(temp_dir("folder-parent"));
+        let dir = Scratch::new("folder-parent");
         let path = dir.0.join("absent").join("data");
         let error = protect_data_folder(&path, &own.user_sid).unwrap_err();
         assert!(error.starts_with(&format!("{} could not be created: ", path.display())), "{error}");

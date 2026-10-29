@@ -127,26 +127,18 @@ mod tests {
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
-    use std::path::{Component, Path, PathBuf, Prefix};
+    use std::path::{Component, Path, Prefix};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
+    use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
     use super::{move_no_replace, move_replacing};
     use crate::security::test_name;
-    use crate::testutil::{skip, temp_dir};
+    use crate::testutil::skip;
     use crate::{rename_no_replace, write_atomic};
-
-    /// Removes the test's folder when the test ends, failed or not (Global Constraints).
-    struct Cleanup(PathBuf);
-
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     /// The upper-case drive letter `path` starts with, or None for a path without one.
     fn drive_of(path: &Path) -> Option<u8> {
@@ -161,8 +153,8 @@ mod tests {
 
     #[test]
     fn the_no_replace_move_refuses_an_existing_target_and_keeps_both_files() {
-        let dir = temp_dir("files-taken");
-        let _cleanup = Cleanup(dir.clone());
+        let scratch = Scratch::new("files-taken");
+        let dir = &scratch.0;
         let (from, to) = (dir.join("a.mkv.partial"), dir.join("a.mkv"));
         fs::write(&from, "new").unwrap();
         fs::write(&to, "old").unwrap();
@@ -178,8 +170,8 @@ mod tests {
     /// the target folder is on D: and the temporary folder on C:; on the mini PC both are on C:, so it skips there).
     #[test]
     fn the_no_replace_move_across_volumes_fails_rather_than_copies() {
-        let dir = temp_dir("files-xvol");
-        let _cleanup = Cleanup(dir.clone());
+        let scratch = Scratch::new("files-xvol");
+        let dir = &scratch.0;
         let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
         match (drive_of(&dir), drive_of(&exe_dir)) {
             (Some(temp), Some(exe)) if temp != exe => {}
@@ -201,8 +193,8 @@ mod tests {
 
     #[test]
     fn a_path_holding_nul_is_invalid_input_and_nothing_moves() {
-        let dir = temp_dir("files-nul");
-        let _cleanup = Cleanup(dir.clone());
+        let scratch = Scratch::new("files-nul");
+        let dir = &scratch.0;
         fs::write(dir.join("a"), "kept").unwrap();
         let error = move_no_replace(&dir.join("a\0b"), &dir.join("c")).unwrap_err();
         assert_eq!((error.kind(), error.to_string()), (io::ErrorKind::InvalidInput, "the path holds a NUL character".to_string()));
@@ -213,8 +205,8 @@ mod tests {
 
     #[test]
     fn a_name_outside_ascii_survives_both_moves() {
-        let dir = temp_dir("files-names");
-        let _cleanup = Cleanup(dir.clone());
+        let scratch = Scratch::new("files-names");
+        let dir = &scratch.0;
         write_atomic(&dir.join("Café Ōsaka 千 (2001).json"), b"{}").unwrap();
         let partial = dir.join("Café Ōsaka 千 (2001).mkv.partial");
         fs::write(&partial, "placeholder").unwrap();
@@ -230,8 +222,8 @@ mod tests {
     #[test]
     fn a_replace_over_a_target_held_open_returns_the_raw_os_error_the_store_retries() {
         for share in [FILE_SHARE_READ | FILE_SHARE_WRITE, 0] {
-            let dir = temp_dir("files-held");
-            let _cleanup = Cleanup(dir.clone());
+            let scratch = Scratch::new("files-held");
+            let dir = &scratch.0;
             let path = dir.join("state.json");
             fs::write(&path, b"old").unwrap();
             let held = fs::OpenOptions::new().read(true).share_mode(share).open(&path).unwrap();
@@ -249,8 +241,8 @@ mod tests {
     /// Ruling T3-4-a: a reader that opens the target again and again, as the harness's polls do, never fails a write.
     #[test]
     fn a_target_another_thread_keeps_opening_is_replaced_every_time() {
-        let dir = temp_dir("files-polled");
-        let _cleanup = Cleanup(dir.clone());
+        let scratch = Scratch::new("files-polled");
+        let dir = &scratch.0;
         let path = dir.join("drives.json");
         write_atomic(&path, b"0").unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -275,8 +267,8 @@ mod tests {
     /// moves through the verbatim prefix, whatever the machine's LongPathsEnabled setting.
     #[test]
     fn a_path_longer_than_max_path_is_moved_through_the_verbatim_prefix() {
-        let dir = temp_dir("files-long");
-        let _cleanup = Cleanup(dir.clone());
+        let scratch = Scratch::new("files-long");
+        let dir = &scratch.0;
         let folder = (1..=5).fold(dir.clone(), |path, n| path.join(format!("{n} Synthetic Folder Of A Deep Library")));
         fs::create_dir_all(&folder).unwrap();
         let movie = "Synthetic Movie With A Long Title (2001) {tmdb-900001} - 1080p";

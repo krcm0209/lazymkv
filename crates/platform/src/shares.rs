@@ -271,7 +271,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::{Arc, Mutex};
 
-    use crate::testutil::Secrets;
+    use crate::fakes::MemorySecrets;
     use crate::{Reach, SecretStore, ShareConnector};
 
     const ROOT: &str = r"\\nas\media\lazymkv-staging\engine";
@@ -338,9 +338,9 @@ mod tests {
         (share.to_string(), "user-sentinel-7c1e".to_string(), "pass-sentinel-4b9d".to_string())
     }
 
-    /// testutil::Secrets that counts its reads.
+    /// `fakes::MemorySecrets` that counts its reads.
     struct Counted {
-        inner: Secrets,
+        inner: MemorySecrets,
         gets: AtomicUsize,
     }
 
@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn counted(entries: &[(&str, &str)]) -> Arc<Counted> {
-        let inner = entries.iter().fold(Secrets::new(), |secrets, (name, value)| secrets.with(name, value));
+        let inner = entries.iter().fold(MemorySecrets::new(), |secrets, (name, value)| secrets.with(name, value));
         Arc::new(Counted { inner, gets: AtomicUsize::new(0) })
     }
 

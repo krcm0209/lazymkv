@@ -101,17 +101,20 @@ fn test_share_root() -> Option<String> {
 mod tests {
     use std::sync::Arc;
 
+    use lazymkv_core::testsupport::Scratch;
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
 
     use super::share_connector;
-    use crate::testutil::{skip, temp_dir, Secrets};
+    use crate::fakes::MemorySecrets;
+    use crate::testutil::skip;
     use crate::Reach;
 
     #[test]
     fn a_local_temp_folder_is_reachable_with_free_space() {
-        let dir = temp_dir("share-local");
+        let scratch = Scratch::new("share-local");
+        let dir = &scratch.0;
         let root = dir.to_str().unwrap();
-        let shares = share_connector(Arc::new(Secrets::new()));
+        let shares = share_connector(Arc::new(MemorySecrets::new()));
         assert_eq!(shares.reach(root), Reach::Reachable);
         assert!(shares.free_bytes(root).unwrap() > 0);
         assert_eq!(shares.access(root), Some("local folder"));
@@ -126,7 +129,7 @@ mod tests {
             return skip("every drive letter from D to Z is in use");
         };
         let root = format!(r"{letter}:\lazymkv");
-        let shares = share_connector(Arc::new(Secrets::new()));
+        let shares = share_connector(Arc::new(MemorySecrets::new()));
         let Reach::Unreachable(text) = shares.reach(&root) else { panic!("{root} reads as reachable") };
         assert!(text.starts_with(&format!(r"{letter}:\ does not answer: ")), "{text}");
         assert!(text.contains("(os error "), "{text}");
@@ -141,15 +144,15 @@ mod desktop {
     use std::{fs, io};
 
     use super::{share_connector, test_share_root};
+    use crate::fakes::MemorySecrets;
     use crate::security::test_name;
-    use crate::testutil::Secrets;
     use crate::{rename_no_replace, Reach};
 
     #[test]
     #[ignore = "desktop session, LAZYMKV_TEST_SHARE_ROOT under lazymkv-staging (design part 12.4)"]
     fn a_real_share_root_is_reachable_with_the_session_access() {
         let Some(root) = test_share_root() else { return };
-        let shares = share_connector(Arc::new(Secrets::new()));
+        let shares = share_connector(Arc::new(MemorySecrets::new()));
         assert_eq!(shares.reach(&root), Reach::Reachable);
         assert_eq!(shares.access(&root), Some("the session's access"));
     }
@@ -159,7 +162,7 @@ mod desktop {
     fn a_real_share_reports_free_space_and_refuses_a_move_over_a_file() {
         let Some(root) = test_share_root() else { return };
         assert!(root.to_ascii_lowercase().contains(r"\lazymkv-staging\"), "{root} is not under lazymkv-staging (Owner decision 9)");
-        let shares = share_connector(Arc::new(Secrets::new()));
+        let shares = share_connector(Arc::new(MemorySecrets::new()));
         assert!(shares.free_bytes(&root).unwrap() > 0);
         let dir = std::path::Path::new(&root).join(test_name("share-move"));
         fs::create_dir_all(&dir).unwrap();
