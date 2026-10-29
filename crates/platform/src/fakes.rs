@@ -364,18 +364,27 @@ impl ShareConnector for FakeShares {
 /// A secret store that keeps its secrets in memory (spec 4.3, design part 4.2). Def: T8. Use: T22 to T29.
 pub struct MemorySecrets {
     secrets: Mutex<BTreeMap<String, String>>,
+    /// What every `set` fails with after `refuse_sets`; None until then.
+    refusal: Mutex<Option<String>>,
 }
 
 impl MemorySecrets {
     /// An empty store (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn new() -> MemorySecrets {
-        MemorySecrets { secrets: Mutex::default() }
+        MemorySecrets { secrets: Mutex::default(), refusal: Mutex::new(None) }
     }
 
     /// The store with `name` already set to `value` (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn with(self, name: &str, value: &str) -> MemorySecrets {
         lock(&self.secrets).insert(name.to_string(), value.to_string());
         self
+    }
+
+    /// Makes every later `set` fail with Err(reason), storing nothing, as Credential Manager's `set` can: a value over
+    /// 2560 bytes, or a logon session with no vault (Ruling W13). Def: PR #14 review round 1 (R24).
+    /// Use: PR #14 review round 1 (R24).
+    pub fn refuse_sets(&self, reason: &str) {
+        *lock(&self.refusal) = Some(reason.to_string());
     }
 }
 
@@ -391,6 +400,9 @@ impl SecretStore for MemorySecrets {
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        if let Some(reason) = lock(&self.refusal).as_ref() {
+            return Err(reason.clone());
+        }
         lock(&self.secrets).insert(name.to_string(), value.to_string());
         Ok(())
     }
@@ -785,6 +797,14 @@ mod tests {
         assert_eq!(secrets.get(r"share:\\SERVER\Share"), None);
         secrets.set("tmdb_token", "token-sentinel-2f6a").unwrap();
         assert_eq!(secrets.get("TMDB_TOKEN"), None);
+    }
+
+    #[test]
+    fn memory_secrets_can_refuse_every_set() {
+        let secrets = MemorySecrets::new();
+        secrets.refuse_sets("no vault");
+        assert_eq!(secrets.set("tmdb_token", "token-sentinel-2f6a"), Err("no vault".to_string()));
+        assert_eq!(secrets.get("tmdb_token"), None);
     }
 
     #[test]

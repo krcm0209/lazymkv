@@ -1007,6 +1007,13 @@ impl Harness {
         &self.shares
     }
 
+    /// The secrets, shared by every engine the harness starts (design part 4.2). Def: PR #14 review round 1 (R24).
+    /// Use: PR #14 review round 1 (R24).
+    pub fn secrets(&self) -> &MemorySecrets {
+        self.deliver();
+        &self.secrets
+    }
+
     /// The host (design part 4.2). Def: T22. Use: T22 to T29.
     pub fn host(&self) -> &FakeHost {
         self.deliver();

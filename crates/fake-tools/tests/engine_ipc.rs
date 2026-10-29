@@ -19,7 +19,7 @@ use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
 use lazymkv_engine::NO_DELIVERY;
-use lazymkv_platform::{IpcConnector, Reach};
+use lazymkv_platform::{IpcConnector, Reach, SecretStore};
 use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
 
@@ -415,6 +415,25 @@ fn a_two_line_share_value_is_stored() {
     assert!(!line.contains("sentinel"), "{line}");
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"][name], json!({"set": true, "host": null}));
     assert!(!h.engine_log().contains("sentinel"));
+}
+
+/// Ruling W13: a value the store refuses is answered with the store's reason after the name, is not echoed or logged,
+/// and its share is not listed.
+#[test]
+fn a_secret_the_store_refuses_is_named_and_its_share_not_listed() {
+    let h = scripted(vec![]);
+    h.secrets().refuse_sets("Credential Manager refused the entry: test refusal");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let name = r"share:\\nas\media";
+    let message = c.err("secret_set", json!({"name": name, "value": "user-sentinel-7c1e\r\npass-sentinel-4b9d"}));
+    assert_eq!(message, format!("{name} could not be stored: Credential Manager refused the entry: test refusal"));
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"].get(name), None);
+    assert!(!h.engine_log().contains("sentinel"));
+    assert_eq!(h.secrets().get(name), None);
 }
 
 // ---- Retry (design part 9.4, L3) ----
