@@ -227,6 +227,8 @@ mod tests {
             let error = write_atomic(&path, b"new").unwrap_err();
             println!("share {share:#x}: {error}");
             assert!(matches!(error.raw_os_error(), Some(5 | 32 | 33)), "share {share:#x}: {error:?}");
+            // PR #14 review round 1 (R17): the failed write removed its temporary file, while the holder is still open.
+            assert!(!dir.join("state.json.lazymkv-tmp").exists(), "share {share:#x}: the temporary file was left");
             drop(held);
             assert_eq!(fs::read(&path).unwrap(), b"old", "share {share:#x}");
             write_atomic(&path, b"new").unwrap();

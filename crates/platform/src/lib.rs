@@ -308,7 +308,9 @@ pub const TEMP_SUFFIX: &str = ".lazymkv-tmp";
 /// (os errors 5, 32 and 33; 10 tries, 10 ms apart, Ruling T3-4-a), and the last error comes back with its raw code,
 /// which the store's state.json retry reads (RR1-2); elsewhere it is `std::fs::rename`. It creates no folders: a
 /// missing parent gives `ErrorKind::NotFound`, because each caller owns its folder layout (Ruling T9-c). A path with no
-/// file name gives `ErrorKind::InvalidInput`. Def: T9; T3-4 swaps in `MoveFileExW` on Windows. Use: T21 to T26.
+/// file name gives `ErrorKind::InvalidInput`. A failure after the temporary file was made (the write, the flush or the
+/// move) removes it, best effort, and returns that failure's error (PR #14 review round 1 (R17)). Def: T9; T3-4 swaps
+/// in `MoveFileExW` on Windows. Use: T21 to T26.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
@@ -321,17 +323,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         _ => {}
     }
     let mut file = std::fs::File::create(&temp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    let flushed = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     #[cfg(windows)]
-    {
-        win::move_replacing(&temp, path)
-    }
+    let placed = flushed.and_then(|()| win::move_replacing(&temp, path));
     #[cfg(not(windows))]
-    {
-        std::fs::rename(&temp, path)
+    let placed = flushed.and_then(|()| std::fs::rename(&temp, path));
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    placed
 }
 
 /// Moves `from` to `to` and fails with `ErrorKind::AlreadyExists` when `to` is there, so a finished file is never
@@ -384,6 +385,23 @@ mod tests {
         write_atomic(&dir.join("state.json"), b"{}").unwrap();
         assert!(!dir.join(format!("state.json{TEMP_SUFFIX}")).exists());
         assert_eq!(fs::read_to_string(dir.join("state.json")).unwrap(), "{}");
+    }
+
+    /// PR #14 review round 1 (R17): a write whose move fails removes the temporary file it made. The target is a
+    /// folder, which no move replaces on any system, and the folder and its file stay as they were.
+    #[test]
+    fn a_write_whose_move_fails_leaves_no_temporary_file() {
+        let scratch = Scratch::new("atomic-move-fails");
+        let dir = &scratch.0;
+        let target = dir.join("state.json");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside.txt"), "kept").unwrap();
+        assert!(write_atomic(&target, b"{}").is_err());
+        assert!(!dir.join(format!("state.json{TEMP_SUFFIX}")).exists());
+        assert!(target.is_dir());
+        assert_eq!(fs::read_to_string(target.join("inside.txt")).unwrap(), "kept");
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
     }
 
     #[test]
