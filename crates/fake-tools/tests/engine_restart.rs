@@ -599,3 +599,103 @@ fn awaiting_lookup_recreates_its_timer() {
     assert!(matches!(fired.old, Some(State::AwaitingLookup { .. })));
     assert!(matches!(fired.event, Some(Event::LookupPending | Event::LookupAnswered)));
 }
+
+// ---- Unpersisted transitions (review round 1, V1, RR1-16; Ruling W23) ----
+
+/// The ID of the first job of the base scenario's disc.
+fn first_job(h: &Harness) -> String {
+    format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase())
+}
+
+/// RR1-16 (engine.md:593; Ruling W23): with no Java and a profile MakeMKV rejects, RunScan posts ToolMissing { Java }
+/// and the fallback's `record.profile`, then reports ScanDone. When ToolMissing's transition and the failure fed in its
+/// place both cannot be persisted, the report stops there: ScanDone is not fed, so no Scanned is persisted with the
+/// job profile while scan.txt came from the fallback.
+#[test]
+fn a_lost_tool_missing_java_stops_the_report_before_scan_done() {
+    use lazymkv_core::job::Tool;
+    let h = harness(&["movie-direct", "movie-direct-fallback"], json!({"keep_tuning_evidence": false,
+        "drive_settle_s": 0, "drive_ready_timeout_s": 1, "tool_paths": {"java": null}}));
+    h.refuse_persists(|_, transition| {
+        transition.event == Some(Event::ToolMissing { tool: Tool::Java }) || matches!(transition.new, State::Failed { .. })
+    });
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Fingerprinted until a restart resumes it");
+    h.wait("the lost ToolMissing's failure kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    let lines = h.transitions(&id);
+    assert!(lines.iter().all(|line| line.event != Some(Event::ScanDone)), "ScanDone was fed: {lines:?}");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Fingerprinted);
+    assert_eq!(record.profile, "job.mmcp.xml");
+    assert!(h.job_dir(&id).join("fallback.mmcp.xml").is_file(), "the fallback scan ran");
+}
+
+/// V1 (engine.md:592; Ruling W23): CheckSpace's SpaceOk in Planned, a state with no failure row, whose transition
+/// cannot be persisted is kept and fed again at a one-minute timer, again after each refusal, until it persists; the
+/// job then rips and files as usual.
+#[test]
+fn a_planned_job_whose_next_transition_failed_to_persist_moves_on_at_the_retry_timer() {
+    let h = harness(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::SpaceOk));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Planned; SpaceOk is fed again in 1 minute");
+    h.wait("SpaceOk kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.state_of(&id), "Planned");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.fire_timers();
+    h.wait("SpaceOk kept again", |h| h.engine_log().matches(&kept).count() == 2);
+    assert_eq!(h.state_of(&id), "Planned");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("SpaceOk persisted", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::SpaceOk)));
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::SpaceOk)).unwrap();
+    let planned = State::Planned { mode: lazymkv_core::plan::Mode::Direct };
+    assert_eq!((fed.old, fed.new), (Some(planned), State::Ripping));
+    h.run_until("Filed");
+}
+
+/// V1 (engine.md:592; Ruling W23): Eject's Ejected in RipVerified, a state with no failure row, whose transition cannot
+/// be persisted is kept and fed again at the one-minute timer; the disc is not ejected a second time.
+#[test]
+fn a_rip_verified_job_moves_on_at_the_retry_timer() {
+    let h = harness(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::Ejected));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state RipVerified; Ejected is fed again in 1 minute");
+    h.wait("Ejected kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.state_of(&id), "RipVerified");
+    assert_eq!(h.timers().pending(), vec![1]);
+    assert_eq!(h.ejector().calls(), vec!["tok0".to_string()]);
+    h.allow_persists();
+    h.fire_timers();
+    h.run_until("Filed");
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::Ejected)).unwrap();
+    assert_eq!((fed.old, fed.new), (Some(State::RipVerified { after_copy: false }), State::Ejected { after_copy: false }));
+    assert_eq!(h.ejector().calls(), vec!["tok0".to_string()]);
+}
+
+/// V1 (engine.md:592; Ruling W23): an Ejected job's FilePhaseSlot whose transition cannot be persisted goes back into
+/// the slot's queue (review round 1) and is granted again at the one-minute timer, with no other job's transition,
+/// lookup round, `settings_set` or restart needed.
+#[test]
+fn an_ejected_jobs_slot_grant_is_persisted_at_the_retry_timer() {
+    let h = harness(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::FilePhaseSlot));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Ejected; FilePhaseSlot is fed again in 1 minute");
+    h.wait("FilePhaseSlot kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.state_of(&id), "Ejected");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.run_until("Filed");
+    let granted = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::FilePhaseSlot)).unwrap();
+    assert_eq!((granted.old, granted.new), (Some(State::Ejected { after_copy: false }), State::Inspecting));
+}

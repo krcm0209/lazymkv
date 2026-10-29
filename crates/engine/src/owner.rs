@@ -60,6 +60,8 @@ use crate::EngineConfig;
 const DRIVE_POLL: Duration = Duration::from_millis(50);
 /// How often `EngineHandle::wait_until` looks at the jobs, and `EngineHandle::wait_for_exit` at the owner thread.
 const WAIT_POLL: Duration = Duration::from_millis(20);
+/// The minutes after which an event `unpersisted` kept is fed again (Ruling W23).
+const REFEED_MINUTES: u32 = 1;
 
 /// The actions whose step returns no event, so their result writes no `returned no event` line (design part 5.2, PF-6:
 /// `ExtractSubtitleEvidence` runs with `Decide` as one unit). Def: T22. Use: T22, T24.
@@ -782,6 +784,19 @@ struct Quiet {
     cancelled: Vec<(String, String)>,
 }
 
+/// What `feed` did with an event (review round 1, V1, RR1-16; Ruling W23). Def: T3-20. Use: T3-20.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fed {
+    /// The reducer refused it in the job's state, or there is no such job: nothing changed, and a refusal wrote its
+    /// job.log line `rejected <event> in <state>`.
+    Rejected,
+    /// Its transition was persisted, the stop hook's case included (`commit`).
+    Persisted,
+    /// The reducer took it but its transition could not be persisted: the job keeps its persisted state
+    /// (`unpersisted`).
+    NotPersisted,
+}
+
 /// The job-owner thread's state (design part 4.4).
 struct Owner {
     store: Arc<Store>,
@@ -833,6 +848,10 @@ struct Owner {
     /// persisted (review round 1, V1, RR1-1): each left its file-phase place, so the restart sequence seeds none of
     /// them as a holder. A later persisted transition of the job takes it out.
     kept: BTreeSet<String>,
+    /// The event, with its message, that each job in Planned or RipVerified, or an Ejected job's FilePhaseSlot, was fed
+    /// when its transition could not be persisted, fed again at its `REFEED_MINUTES` timer until it persists (review
+    /// round 1, V1; Ruling W23). A persisted transition of the job takes its entry out.
+    refeed: BTreeMap<String, (Event, Option<String>)>,
 }
 
 impl Owner {
@@ -914,6 +933,7 @@ impl Owner {
             rescans: BTreeSet::new(),
             quiet: None,
             kept: BTreeSet::new(),
+            refeed: BTreeMap::new(),
         };
         owner.restart(present);
         owner
@@ -1409,18 +1429,24 @@ impl Owner {
         self.commit(&id, None, state, actions, None, Some((arrival, job_dir)));
     }
 
-    /// Feeds `event` to `id`'s reducer; true when its transition was persisted (`commit`). A rejected event writes the
-    /// job.log line `rejected <event> in <state>`, changes nothing and gives false.
-    fn feed(&mut self, id: &str, event: Event, message: Option<String>) -> bool {
+    /// Feeds `event` to `id`'s reducer and says what came of it (`Fed`): a refused event writes the job.log line
+    /// `rejected <event> in <state>` and changes nothing.
+    fn feed(&mut self, id: &str, event: Event, message: Option<String>) -> Fed {
         let Some(job) = self.jobs.get(id) else {
-            return false;
+            return Fed::Rejected;
         };
         match reduce(&job.record.state, &event) {
-            Ok((new, actions)) => self.commit(id, Some(event), new, actions, message, None),
+            Ok((new, actions)) => {
+                if self.commit(id, Some(event), new, actions, message, None) {
+                    Fed::Persisted
+                } else {
+                    Fed::NotPersisted
+                }
+            }
             Err(rejected) => {
                 let line = format!("rejected {} in {}", event_tag(&event), rejected.state.as_str());
                 self.store.job_log(id, &line);
-                false
+                Fed::Rejected
             }
         }
     }
@@ -1499,6 +1525,8 @@ impl Owner {
         if new == State::Filed && record.state != State::Filed {
             record.filed_unix = Some(now);
         }
+        // Ruling W23: `unpersisted` keeps the message with an event it feeds again.
+        let given = message.clone();
         if new.is_waiting() || matches!(new, State::Failed { .. }) {
             // R22.8: an event that leaves the state as it was and brings no sentence keeps the state's message.
             if message.is_some() || record.state != new {
@@ -1532,12 +1560,13 @@ impl Owner {
                 }
                 self.give_back(id);
                 if transition.old.is_some() {
-                    self.unpersisted(id, &transition, &error);
+                    self.unpersisted(id, &transition, given, &error);
                 }
                 return None;
             }
         }
         self.kept.remove(id);
+        self.refeed.remove(id);
         lock(&self.shown).insert(id.to_string(), record.clone());
         if let Some(job) = self.jobs.get_mut(id) {
             job.record = record;
@@ -1561,14 +1590,15 @@ impl Owner {
     ///   so the job fails as Unknown, releases its promises, the token and its file-phase place, is notified, and can
     ///   be retried. The failure is written over the job's persisted record, since the lost transition's posted edits
     ///   went with it (RR1-16): a Retry resumes from what state.json held, so a title whose verification was lost is
-    ///   ripped again. A state with no failure row gets nothing: Planned and RipVerified wait for a restart (listed for
-    ///   pull request 3), a waiting, failed or held job can be retried or approved again, and an Ejected job's grant is
-    ///   undone in `grant_next`.
+    ///   ripped again. In a state with no failure row, Planned and RipVerified keep the event in `refeed`, and so does
+    ///   an Ejected job its FilePhaseSlot, whose grant `grant_next` also undoes; each is fed again by `on_timer` after
+    ///   `REFEED_MINUTES` until it persists (Ruling W23). A waiting, failed or held job gets nothing: it can be retried
+    ///   or approved again.
     /// - A transition into Failed, the failure itself (also the guard against feeding again), follows RR1-1: no state
     ///   is changed in memory and nothing is notified or published; the job keeps its persisted state, its promises are
     ///   released, it leaves its file-phase place, which is granted again, and engine.log says `<id>: keeps its
     ///   persisted state <state> until a restart resumes it`.
-    fn unpersisted(&mut self, id: &str, transition: &Transition, error: &io::Error) {
+    fn unpersisted(&mut self, id: &str, transition: &Transition, message: Option<String>, error: &io::Error) {
         if self.quiet.is_some() || self.stopping {
             return;
         }
@@ -1586,6 +1616,20 @@ impl Owner {
                 let into = transition.new.as_str();
                 let message = format!("the {what} transition into {into} could not be persisted: {error}");
                 self.feed(id, failure, Some(message));
+                return;
+            }
+            let Some(event) = transition.event.clone() else {
+                return;
+            };
+            let keeps = matches!(state, State::Planned { .. } | State::RipVerified { .. });
+            if keeps || event == Event::FilePhaseSlot {
+                // Ruling W23: the timer before the line, so a test that sees the line finds the timer.
+                let tag = event_tag(&event);
+                if self.refeed.insert(id.to_string(), (event, message)).is_none() {
+                    self.start_timer(id, REFEED_MINUTES);
+                }
+                let state = state.as_str();
+                self.store.log(&format!("{id}: keeps its persisted state {state}; {tag} is fed again in 1 minute"));
             }
             return;
         }
@@ -1649,7 +1693,7 @@ impl Owner {
                 if state.as_ref().is_some_and(|state| reduce(state, &event).is_ok()) {
                     self.slots.grant(&head);
                     let tag = event_tag(&event);
-                    let delivered = self.feed(&head, event, None);
+                    let delivered = self.feed(&head, event, None) == Fed::Persisted;
                     if self.stopping {
                         return;
                     }
@@ -1678,7 +1722,7 @@ impl Owner {
                 return;
             }
             self.slots.grant(&head);
-            let granted = self.feed(&head, Event::FilePhaseSlot, None);
+            let granted = self.feed(&head, Event::FilePhaseSlot, None) == Fed::Persisted;
             if self.stopping {
                 return;
             }
@@ -1991,16 +2035,18 @@ impl Owner {
     /// failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its `ok` (design part
     /// 9.4, R-A7, S78), or, when that failure could not be persisted, the error `cancel_not_persisted` (review round 1,
     /// V1, RR1-4). A stale one is dropped with what its step posted (R-A7), unless a newer step of the job runs,
-    /// whose posts it must not take. Otherwise each posted event is fed, then the result's event. The posted edits
-    /// travel with them in `Job::edits` and land in the write of the first transition the report feeds, the one they
-    /// came with: `persist_transition` applies them to its copy of the record, so they reach the job's record only with
-    /// a persisted transition, and a transition that could not be persisted drops them before `unpersisted` feeds the
-    /// failure row (R22.3; the final review of review round 1, S1, RR1-16). Edits no transition took, because every
-    /// event was rejected or the step reported none, are dropped, so a panic's failure carries none. A result with no
-    /// event, from an action other than those that report none, writes `<tag> returned no event` to job.log, followed
-    /// by `: <message>` when it has one; then, unless another step of the job's current generation runs (one a posted
-    /// event handed out; a stale step does not count), a step that panicked fails its job (`panic_failure`, design
-    /// part 5.2) and any other gives the token back, since no step of the job runs any more (L2).
+    /// whose posts it must not take. Otherwise each posted event is fed, then the result's event; a posted event whose
+    /// transition was accepted but could not be persisted ends the report there, and neither a later posted event nor
+    /// the result's event is fed (RR1-16; Ruling W23). The posted edits travel with them in `Job::edits` and land in
+    /// the write of the first transition the report feeds, the one they came with: `persist_transition` applies them to
+    /// its copy of the record, so they reach the job's record only with a persisted transition, and a transition that
+    /// could not be persisted drops them before `unpersisted` feeds the failure row (R22.3; the final review of review
+    /// round 1, S1, RR1-16). Edits no transition took, because every event was rejected or the step reported none, are
+    /// dropped, so a panic's failure carries none. A result with no event, from an action other than those that report
+    /// none, writes `<tag> returned no event` to job.log, followed by `: <message>` when it has one; then, unless
+    /// another step of the job's current generation runs (one a posted event handed out; a stale step does not count),
+    /// a step that panicked fails its job (`panic_failure`, design part 5.2) and any other gives the token back, since
+    /// no step of the job runs any more (L2).
     fn step_done(&mut self, id: &str, generation: u64, result: StepResult) {
         self.log_panic(id, &result);
         let mut worker = self.finish_worker(id, generation);
@@ -2008,7 +2054,7 @@ impl Owner {
             if !self.workers.iter().any(|worker| worker.job == id) {
                 drop(self.parts.outbox.take(id));
             }
-            let persisted = self.feed(id, cancelled.event, Some(CANCELLED.to_string()));
+            let persisted = self.feed(id, cancelled.event, Some(CANCELLED.to_string())) == Fed::Persisted;
             for (client, request) in cancelled.replies {
                 let line = if persisted {
                     reply_ok(request, Value::Null)
@@ -2030,8 +2076,8 @@ impl Owner {
             job.edits = posted.edits;
         }
         for event in posted.first {
-            self.feed(id, event, None);
-            if self.stopping {
+            let fed = self.feed(id, event, None);
+            if self.stopping || fed == Fed::NotPersisted {
                 self.drop_edits(id);
                 return;
             }
@@ -2150,8 +2196,11 @@ impl Owner {
     /// A StartTimer timer ran out (design part 5.2). AwaitingLookup gets a lookup round, unless one runs (design part
     /// 8.3); a running round a `retry` started becomes the timer's, so its end starts the timer again. AwaitingNetwork
     /// gets NetworkRetry through `deliver`: a return to a disc-phase state waits for the token in its queue (design
-    /// part 5.4, way (d), L2).
+    /// part 5.4, way (d), L2). A job with a kept event (`refeed`) has it fed again instead (Ruling W23).
     fn on_timer(&mut self, id: &str) {
+        if let Some((event, message)) = self.refeed.remove(id) {
+            return self.feed_again(id, event, message);
+        }
         let Some(job) = self.jobs.get(id) else {
             return;
         };
@@ -2162,6 +2211,25 @@ impl Owner {
             State::AwaitingLookup { .. } => self.start_round(id),
             State::AwaitingNetwork { .. } => self.deliver(id, Event::NetworkRetry),
             _ => {}
+        }
+    }
+
+    /// A kept event's timer ran out (Ruling W23). A FilePhaseSlot asks for the slot again, so the queue's order holds;
+    /// an event whose transition keeps the disc-phase token, SpaceOk into Ripping or Copying, goes through `deliver`,
+    /// which waits for the token (L2) and carries no message, as SpaceOk has none; any other event is fed with its
+    /// message. A refusal again keeps it for another timer through `unpersisted`.
+    fn feed_again(&mut self, id: &str, event: Event, message: Option<String>) {
+        if event == Event::FilePhaseSlot {
+            return self.grant_next();
+        }
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        match reduce(&job.record.state, &event) {
+            Ok((new, actions)) if keeps_token(&new, &actions) => self.deliver(id, event),
+            _ => {
+                self.feed(id, event, message);
+            }
         }
     }
 
