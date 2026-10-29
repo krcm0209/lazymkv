@@ -914,20 +914,21 @@ written, and a run that printed `skipped:` counts as not run. Each line names th
 
 ## Tests
 
-`cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of commit `9ce7811`, lists 2820 tests:
-1716 in `lazymkv-core`, 420 in `lazymkv-dev`, 8 in `lazymkv-capture`, 292 in `fake-tools`, 156 in `lazymkv-platform`, 36
-in `lazymkv-tools`, 32 in `lazymkv-clients`, 137 in `lazymkv-engine` and 23 in `lazymkv-ctl`. The baseline is pull
-request 2's 2573, below, so pull request 3 added 247: 135 in `lazymkv-platform`, 67 in `fake-tools`, 31 in
+`cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of commit `5698f26`, lists 2824 tests:
+1716 in `lazymkv-core`, 420 in `lazymkv-dev`, 8 in `lazymkv-capture`, 293 in `fake-tools`, 158 in `lazymkv-platform`, 36
+in `lazymkv-tools`, 32 in `lazymkv-clients`, 138 in `lazymkv-engine` and 23 in `lazymkv-ctl`. The baseline is pull
+request 2's 2573, below, so pull request 3 added 251: 137 in `lazymkv-platform`, 68 in `fake-tools`, 32 in
 `lazymkv-engine`, 6 in `lazymkv-tools`, 4 in `lazymkv-core`, 2 in `lazymkv-ctl`, 1 in `lazymkv-clients` and 1 in
 `lazymkv-dev`, counted net of the tests it replaced or moved off Windows; `lazymkv-capture` gained none.
 
-The list is the mini PC's: the `cfg(windows)` tests of pull request 3 are in it, and on CI run 40866232126 windows
-passed 2813 and ignored 7, ubuntu passed 2722 and macos 2722, each ignoring 1. The junction run of that tree passed 2813
-and ignored 7 (`lazymkv-platform`'s `process::tests::helper_child`, `win::eject::tests::the_tray_opens_on_eject`,
-`an_inserted_and_removed_disc_is_reported_once_each`, the two `win::shares::desktop` tests, the `win::shares::over_ssh`
-test and the `win::shares::arranged` test), and its RP21 guard read the clone and passed over `corpus/scenarios/`,
-`command-relay` included. `LAZYMKV_OCR_TEXT` was not set. Its `skipped:` lines, each with what ran instead, and none
-saying the clone is absent:
+The list is the mini PC's: the `cfg(windows)` tests of pull request 3 are in it, and on CI run 40920091405, the run of
+`5698f26`, windows passed 2816 and ignored 8, ubuntu passed 2722 and macos 2722, each ignoring 1. The junction run of
+that tree passed 2816 and ignored 8 (`lazymkv-platform`'s `process::tests::helper_child`,
+`win::eject::tests::the_tray_opens_on_eject`, `an_inserted_and_removed_disc_is_reported_once_each`, the two
+`win::shares::desktop` tests, the `win::shares::over_ssh` test, the `win::shares::arranged` test and
+`win::host::tests::install_paths_child`, the child process the install-path test starts, which does nothing without
+`LAZYMKV_TEST_HELPER`), and its RP21 guard read the clone and passed over `corpus/scenarios/`, `command-relay` included.
+`LAZYMKV_OCR_TEXT` was not set. Its `skipped:` lines, each with what ran instead, and none saying the clone is absent:
 
 - `skipped: LAZYMKV_TEST_VAULT is not set; the vault tests run on CI and, after Owner decision 8, in the desktop session (design part 6.1)`, twice, from `win::creds`' round trip and its case test: both ran on `windows-latest` in the CI run above and in the desktop session (Pull request 3 on the mini PC, step 4: `win::creds` 4 passed, no skip).
 - `skipped: the temporary folder and this test binary are on one volume, so no move across volumes can be tried`, from `win::files`' `the_no_replace_move_across_volumes_fails_rather_than_copies`: it ran on `windows-latest`, whose temporary folder is on another volume.
