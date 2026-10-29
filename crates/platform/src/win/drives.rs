@@ -22,7 +22,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     PostQuitMessage, RegisterClassW, RegisterDeviceNotificationW, SetTimer, UnregisterClassW,
     UnregisterDeviceNotification, CW_USEDEFAULT, DBT_DEVTYP_DEVICEINTERFACE, DEVICE_NOTIFY_WINDOW_HANDLE,
-    DEV_BROADCAST_DEVICEINTERFACE_W, HDEVNOTIFY, MSG, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_TIMER, WNDCLASSW,
+    DEV_BROADCAST_DEVICEINTERFACE_W, HDEVNOTIFY, MSG, WM_APP, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_TIMER,
+    WNDCLASSW,
 };
 
 use super::wide;
@@ -35,6 +36,9 @@ const CLASS: &str = "lazymkv-drive-watcher";
 const TITLE: &str = "lazymkv drive watcher";
 /// The id of the poll's timer on a watcher's window.
 const TIMER: usize = 1;
+/// The message `WinDrives`' drop posts to end the window thread (W8; review round 1 of pull request 3, R6), in the
+/// class's own range, so a WM_CLOSE from another process never stops the watcher.
+const STOP: u32 = WM_APP;
 
 /// The queue `next` and `present` read and the window thread feeds, with the condition variable `next` waits on.
 type Shared = Arc<(Mutex<DriveQueue>, Condvar)>;
@@ -67,7 +71,7 @@ thread_local! {
 pub struct WinDrives {
     /// The queue the window thread feeds.
     queue: Shared,
-    /// The window (its HWND as a number, so the watcher can move to another thread), which drop closes.
+    /// The window (its HWND as a number, so the watcher can move to another thread), which drop stops with `STOP`.
     window: usize,
     /// The window thread, joined on drop.
     thread: Option<JoinHandle<()>>,
@@ -119,9 +123,9 @@ impl DriveWatcher for WinDrives {
 
 impl Drop for WinDrives {
     fn drop(&mut self) {
-        // SAFETY: `window` is the window the thread created; PostMessageW only queues WM_CLOSE for it, with no
-        // pointer among its parameters, and fails when the window is already gone.
-        unsafe { PostMessageW(self.window as HWND, WM_CLOSE, 0, 0) };
+        // SAFETY: `window` is the window the thread created; PostMessageW only queues `STOP` for it, with no pointer
+        // among its parameters, and fails when the window is already gone.
+        unsafe { PostMessageW(self.window as HWND, STOP, 0, 0) };
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -187,8 +191,9 @@ fn rescan() {
 }
 
 /// The window procedure of every watcher's window (Ruling W8): a device change and the poll's timer scan the drives,
-/// WM_CLOSE destroys the window, and WM_DESTROY lets the device notification and the timer go and ends the message
-/// loop. Every other message gets Windows' default.
+/// `STOP`, which only the drop posts, destroys the window, WM_CLOSE is ignored (review round 1 of pull request 3, R6),
+/// and WM_DESTROY lets the device notification and the timer go and ends the message loop. Every other message gets
+/// Windows' default.
 ///
 /// # Safety
 ///
@@ -204,11 +209,14 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
             rescan();
             0
         }
-        WM_CLOSE => {
+        STOP => {
             // SAFETY: `window` is this thread's window, which the message is for.
             unsafe { DestroyWindow(window) };
             0
         }
+        // Ignored (R6): only another process sends it, such as Task Scheduler before it ends the task or a tool that
+        // closes a process's windows, and the watcher lives as long as the engine.
+        WM_CLOSE => 0,
         WM_DESTROY => {
             let notification = with_watch(|watch| std::mem::replace(&mut watch.notification, null_mut()));
             let notification = notification.unwrap_or(null_mut());
@@ -369,6 +377,7 @@ mod tests {
     };
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
     use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SendMessageW};
 
     use super::*;
     use crate::drives::DRIVE_POLL_EVERY;
@@ -393,6 +402,33 @@ mod tests {
         drop(second);
         let limit = Duration::from_secs(5) * ci_factor();
         assert!(started.elapsed() < limit, "the window threads took {:?} to end", started.elapsed());
+    }
+
+    /// Drops `watcher` on a thread of its own and fails when the drop has not ended the window thread within 5 s (times
+    /// `ci_factor`), so a drop that never ends it fails the test instead of hanging it.
+    fn drop_ends_the_window_thread(watcher: WinDrives) {
+        let (done, dropped) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(watcher);
+            let _ = done.send(());
+        });
+        let limit = Duration::from_secs(5) * ci_factor();
+        assert!(dropped.recv_timeout(limit).is_ok(), "the drop did not end the window thread within {limit:?}");
+    }
+
+    /// Review round 1 of pull request 3 (R6): a WM_CLOSE from outside the watcher, such as Task Scheduler's before it
+    /// ends the task, leaves the window and its thread running, and the drop still ends the thread.
+    #[test]
+    fn an_outside_wm_close_leaves_the_watcher_running() {
+        let watcher = WinDrives::new().expect("the watcher starts");
+        let window = watcher.window as HWND;
+        // SAFETY: `window` is the watcher's window; the call returns once its thread handled the message, which carries
+        // no pointer.
+        unsafe { SendMessageW(window, WM_CLOSE, 0, 0) };
+        // SAFETY: IsWindow only reads whether the handle names a window.
+        assert_ne!(unsafe { IsWindow(window) }, 0, "an outside WM_CLOSE destroyed the window");
+        assert!(!watcher.thread.as_ref().unwrap().is_finished(), "an outside WM_CLOSE ended the window thread");
+        drop_ends_the_window_thread(watcher);
     }
 
     /// Holds on any drive set (Ruling PF3-S15-17-4): each id is of the `D:` form with its root, the ids are strictly
