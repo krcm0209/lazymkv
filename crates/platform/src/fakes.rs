@@ -481,11 +481,15 @@ impl IpcTransport for MemoryIpc {
     fn accept(&self) -> io::Result<IpcStream> {
         let incoming = lock(&self.incoming);
         loop {
-            // Read before each wait, so a stream queued after `close` is never handed out.
+            // Read before each wait and after it, so no stream is handed out once `close` ran.
             if self.closed.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the transport is closed"));
             }
             match incoming.recv_timeout(MEMORY_ACCEPT_POLL) {
+                // The stream drops, so its client reads end of file, as the real server drops its instance.
+                Ok(_) if self.closed.load(Ordering::SeqCst) => {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the transport is closed"));
+                }
                 Ok(stream) => return Ok(stream),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
@@ -807,6 +811,21 @@ mod tests {
         ipc.close();
         assert_eq!(result.recv_timeout(Duration::from_secs(5)).unwrap(), Some(io::ErrorKind::BrokenPipe));
         assert_eq!(ipc.accept().err().map(|error| error.kind()), Some(io::ErrorKind::BrokenPipe));
+    }
+
+    #[test]
+    fn a_stream_that_comes_while_close_runs_is_not_handed_out() {
+        let (ipc, connector) = MemoryIpc::new();
+        let ipc = Arc::new(ipc);
+        let waiting = Arc::clone(&ipc);
+        let (done, result) = channel();
+        std::thread::spawn(move || {
+            let _ = done.send(waiting.accept().err().map(|error| error.kind()));
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        ipc.close();
+        let _client = connector.connect().unwrap();
+        assert_eq!(result.recv_timeout(Duration::from_secs(5)).unwrap(), Some(io::ErrorKind::BrokenPipe));
     }
 
     #[test]
