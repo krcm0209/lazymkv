@@ -109,7 +109,7 @@ pub(crate) mod tests {
     pub(crate) const RAISED: u32 = 0xE04C_4D4B;
 
     /// Writes `line` on a line of its own to standard output and flushes it (Ruling T3-5-c).
-    fn say(line: &str) {
+    pub(crate) fn say(line: &str) {
         let mut out = std::io::stdout();
         out.write_all(format!("\n{line}\n").as_bytes()).unwrap();
         out.flush().unwrap();

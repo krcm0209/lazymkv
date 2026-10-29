@@ -2,7 +2,9 @@
 //! its own, created suspended and assigned to the job before its first instruction, so a kill, or the engine's end,
 //! takes the child's whole tree with it, the grandchildren it starts at once included. An exception that nothing
 //! handles ends a process of the job at once, with the exception's code, so no fault dialog holds a step (review
-//! round 1 of pull request 3 (R1)).
+//! round 1 of pull request 3 (R1)). Each child has a console of its own with no window, so the stop events of the
+//! engine's console reach the engine alone, whose handler cancels the steps through the Job Objects (design part 3.8;
+//! Ruling W19; review round 1 of pull request 3 (V9)).
 
 use std::io::{self, Read};
 use std::mem::size_of;
@@ -22,7 +24,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenThread, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    OpenThread, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
 };
 
 use crate::process::handed_over;
@@ -34,8 +36,14 @@ use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 /// `TerminateJobObject(job, 1)` and ends the child's whole tree; so does the engine's end, since closing a job's last
 /// handle kills what it holds (design part 3.8). A process of the tree that crashes ends at once with its exception
 /// code, which the drivers report as any failure, instead of waiting on a fault dialog that nobody may answer (review
-/// round 1 of pull request 3 (R1)). Standard input null, output and error piped, `Spawn::env` added (Rulings T9-a to
-/// T9-e hold).
+/// round 1 of pull request 3 (R1)). Each child is created with `CREATE_NO_WINDOW`: a console of its own with no
+/// window, which the console programs it starts share (makemkvcon's Java), so Ctrl+C, Ctrl+Break and the close of the
+/// engine's console reach the engine alone, whose handler cancels the steps through the Job Objects (design part 3.8;
+/// Ruling W19), and no tool ends by its own default handler first. Not `DETACHED_PROCESS`, under which a console
+/// grandchild would open a window on the owner's desktop, nor `CREATE_NEW_PROCESS_GROUP`, which Ctrl+Break still
+/// reaches. The hidden console is a process of its own, not a thread of the child, so the child still has one thread
+/// at its resume (Ruling T3-5-b; review round 1 of pull request 3 (V9)). Standard input null, output and error piped,
+/// `Spawn::env` added (Rulings T9-a to T9-e hold).
 /// Def: T3-5. Use: T3-23.
 pub struct JobProcessGuard;
 
@@ -43,7 +51,9 @@ impl ProcessGuard for JobProcessGuard {
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
         // Nothing has started if the job cannot be made.
         let job = Job::new()?;
-        let flags = if spawn.below_normal { CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS } else { CREATE_SUSPENDED };
+        // A console of its own with no window (review round 1 of pull request 3 (V9)).
+        let flags = CREATE_SUSPENDED | CREATE_NO_WINDOW;
+        let flags = if spawn.below_normal { flags | BELOW_NORMAL_PRIORITY_CLASS } else { flags };
         // std's own spawn keeps its handle discipline, so a concurrent spawn never inherits this child's pipe ends. Its
         // error is returned unchanged (a missing program is NotFound) while the empty job closes.
         let mut child = Command::new(&spawn.program)
@@ -214,29 +224,39 @@ mod tests {
     use std::io::{self, BufRead, BufReader, Read};
     use std::mem::size_of;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
     use std::ptr::null_mut;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use lazymkv_core::testsupport::Scratch;
+    use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, SetConsoleCtrlHandler, CTRL_BREAK_EVENT};
     use windows_sys::Win32::System::JobObjects::{
         JobObjectExtendedLimitInformation, QueryInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetPriorityClass, OpenProcess, WaitForSingleObject, BELOW_NORMAL_PRIORITY_CLASS,
-        IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        CREATE_NO_WINDOW, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
     };
 
     use super::JobProcessGuard;
-    use crate::process::tests::{check_kills_its_child, check_pipes_both_streams_and_adds_env, helper, RAISED};
+    use crate::process::tests::{check_kills_its_child, check_pipes_both_streams_and_adds_env, helper, say, RAISED};
     use crate::testutil::ci_factor;
     use crate::{GuardedChild, ProcessGuard, Spawn};
 
     /// How long a killed tree may take to end. A hang is the failure it catches, so it does not scale (Global
     /// Constraints).
     const ENDS_WITHIN: Duration = Duration::from_secs(10);
+    /// How long the console probe waits for its guarded child after the Ctrl+Break: a child the event reaches ends at
+    /// once (review round 1 of pull request 3 (V9)).
+    const BREAK_ENDS_WITHIN: Duration = Duration::from_secs(2);
+    /// The arguments that make this test binary run only `probe_child`.
+    const PROBE_ARGS: [&str; 4] = ["--exact", "win::job::tests::probe_child", "--ignored", "--nocapture"];
 
     /// A handle to the running process `pid`, opened while it runs, so a reused id cannot answer for it.
     fn open_process(pid: u32) -> OwnedHandle {
@@ -313,6 +333,84 @@ mod tests {
         let lines = lines_of(&mut *child);
         let (parent, grandchild) = pids(&lines);
         (child, lines, [open_process(parent), open_process(grandchild)])
+    }
+
+    /// Whether a line of `lines` that starts with `prefix` came within 10 s (scaled).
+    fn line_came(lines: &mpsc::Receiver<Option<String>>, prefix: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
+        loop {
+            match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Some(line)) if line.starts_with(prefix) => return true,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return false,
+            }
+        }
+    }
+
+    /// This test binary as `probe_child` in `mode`, with the variables `env` names. std starts it, not the job runner,
+    /// so the planted variables reach it, with `CREATE_NO_WINDOW`, so it sits on a hidden console of its own and an
+    /// event it sends never reaches this process's console. Asserts that it succeeded; returns its standard output.
+    fn probe(mode: &str, env: &[(&str, &str)]) -> String {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(PROBE_ARGS)
+            .env("LAZYMKV_TEST_HELPER", mode)
+            .envs(env.iter().copied())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "the probe failed: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The probe's console routine: TRUE for Ctrl+Break, so the probe outlives the event it sends; FALSE otherwise.
+    extern "system" fn break_routine(code: u32) -> BOOL {
+        BOOL::from(code == CTRL_BREAK_EVENT)
+    }
+
+    /// The `console-probe` mode (review round 1 of pull request 3 (V9)). With a routine that keeps this process alive
+    /// through a Ctrl+Break, it starts `print-pid-sleep` under the job runner, waits for its `grandchild` line, sends
+    /// Ctrl+Break to every process on its own console, and writes `probe alive` if the child still runs 2 s later, or
+    /// `probe ended <code>` if it ended. It then kills the child through its kill handle and waits for it. A call that
+    /// fails writes `probe-error <os error>`.
+    fn console_probe() {
+        let routine: unsafe extern "system" fn(u32) -> BOOL = break_routine;
+        // SAFETY: `routine` is `break_routine`, a function of this module with the signature `PHANDLER_ROUTINE` names,
+        // so it lives as long as the process, and it touches nothing.
+        if unsafe { SetConsoleCtrlHandler(Some(routine), 1) } == 0 {
+            return say(&format!("probe-error {}", io::Error::last_os_error()));
+        }
+        let mut child = match JobProcessGuard.spawn(&helper("print-pid-sleep")) {
+            Ok(child) => child,
+            Err(error) => return say(&format!("probe-error {error}")),
+        };
+        let killer = child.killer();
+        let lines = lines_of(&mut *child);
+        let sent = if line_came(&lines, "grandchild ") {
+            // SAFETY: GenerateConsoleCtrlEvent takes no pointer.
+            let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0) } != 0;
+            if !sent {
+                say(&format!("probe-error {}", io::Error::last_os_error()));
+            }
+            sent
+        } else {
+            say("probe-error the child wrote no grandchild line");
+            false
+        };
+        let (tx, rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _ = tx.send(child.wait().map_err(|error| error.kind()));
+        });
+        if sent {
+            match rx.recv_timeout(BREAK_ENDS_WITHIN) {
+                Ok(Ok(Some(code))) => say(&format!("probe ended {code}")),
+                Ok(other) => say(&format!("probe ended {other:?}")),
+                Err(_) => say("probe alive"),
+            }
+        }
+        if let Err(error) = killer.kill() {
+            say(&format!("probe-error {error}"));
+        }
+        waiter.join().unwrap();
     }
 
     #[test]
@@ -463,6 +561,27 @@ mod tests {
         killer.kill().unwrap();
         waiter.join().unwrap();
         assert_eq!(status.expect("the child that raised did not end within 10 s"), Ok(Some(RAISED as i32)));
+    }
+
+    /// Review round 1 of pull request 3 (V9): a Ctrl+Break on the console the engine runs in reaches the engine alone,
+    /// whose handler cancels the steps through the Job Objects, and not a guarded child, which has a hidden console of
+    /// its own. The probe stands for the engine, on a hidden console of its own.
+    #[test]
+    fn a_ctrl_break_on_the_engines_console_does_not_reach_a_guarded_child() {
+        let output = probe("console-probe", &[]);
+        let said: Vec<&str> = output.lines().filter(|line| line.starts_with("probe")).collect();
+        assert_eq!(said, ["probe alive"]);
+    }
+
+    /// The child `probe` starts: this test binary running only this test, in the mode LAZYMKV_TEST_HELPER names.
+    /// `console-probe` runs `console_probe`. Any other mode returns at once.
+    #[test]
+    #[ignore]
+    fn probe_child() {
+        match std::env::var("LAZYMKV_TEST_HELPER").as_deref() {
+            Ok("console-probe") => console_probe(),
+            _ => {}
+        }
     }
 
     #[test]
