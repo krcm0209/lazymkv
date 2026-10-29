@@ -166,29 +166,22 @@ impl PipeServer {
         let facts = token_of_process(pid).map_err(|error| refused(format!("its token could not be read: {error}")))?;
         token_verdict(&facts, &self.own_user_sid).map_err(|verdict| refused(verdict.to_string()))
     }
-}
 
-/// `close` ran: the accept that met it returns `BrokenPipe`.
-struct Closed;
-
-/// `accept`'s error once `close` ran (Ruling W10).
-fn closed_error() -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, "the pipe server is closed")
-}
-
-impl IpcTransport for PipeServer {
-    fn accept(&self) -> io::Result<IpcStream> {
+    /// The steps of `accept` (Ruling W10): a connection whose client passed its check, handed out once the next
+    /// instance listens. Their operating-system errors pass `not_closed` once, in `accept` (review round 1 of pull
+    /// request 3 (R29)).
+    fn accept_steps(&self) -> io::Result<IpcStream> {
         // 1. A closed server accepts nothing.
         if self.closed.load(Ordering::SeqCst) {
             return Err(closed_error());
         }
         // Made before the listening instance is taken, so a failure here leaves the name held.
-        let event = manual_event().map_err(not_closed)?;
+        let event = manual_event()?;
         // 2. The listening instance, or a new one when an earlier accept left none.
         let taken = lock(&self.listening).take();
         let instance = match taken {
             Some(instance) => instance,
-            None => self.create_instance(false).map_err(not_closed)?,
+            None => self.create_instance(false)?,
         };
         if self.closed.load(Ordering::SeqCst) {
             return Err(closed_error());
@@ -204,7 +197,7 @@ impl IpcTransport for PipeServer {
             if self.closed.load(Ordering::SeqCst) {
                 return Err(closed_error());
             }
-            *listening = Some(self.create_instance(false).map_err(not_closed)?);
+            *listening = Some(self.create_instance(false)?);
         }
         // 5. A failed connect drops its instance.
         if let Some(code) = failed {
@@ -213,7 +206,22 @@ impl IpcTransport for PipeServer {
         // 6. The client check; a refused client's instance is dropped, with no DisconnectNamedPipe.
         self.check_client(&instance)?;
         // 7. The stream.
-        pipe_stream(instance).map_err(not_closed)
+        pipe_stream(instance)
+    }
+}
+
+/// `close` ran: the accept that met it returns `BrokenPipe`.
+struct Closed;
+
+/// `accept`'s error once `close` ran (Ruling W10).
+fn closed_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "the pipe server is closed")
+}
+
+impl IpcTransport for PipeServer {
+    fn accept(&self) -> io::Result<IpcStream> {
+        // Every operating-system error leaving the steps passes `not_closed` once, here (PF3-S10-12-2).
+        self.accept_steps().map_err(not_closed)
     }
 
     fn close(&self) {
