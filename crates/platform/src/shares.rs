@@ -211,12 +211,11 @@ struct Target {
 
 /// The target of `root`, or None for a root that is neither a share nor a drive-letter root.
 fn target(root: &str) -> Option<Target> {
-    if let Some(share) = share_of(root) {
-        let key = share.to_ascii_lowercase();
-        return Some(Target { path: format!(r"{share}\"), share: Some(share), key });
+    let key = volume_key(root)?;
+    match share_of(root) {
+        Some(share) => Some(Target { path: format!(r"{share}\"), share: Some(share), key }),
+        None => Some(Target { path: format!(r"{}:\", drive_letter(root)?), share: None, key }),
     }
-    let letter = drive_letter(root)?;
-    Some(Target { path: format!(r"{letter}:\"), share: None, key: format!("{letter}:") })
 }
 
 /// The upper-case letter of a drive-letter root, one ASCII letter, a colon and '\' or '/'; None for any other root.
