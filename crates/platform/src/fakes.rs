@@ -196,7 +196,7 @@ impl KeepAwake for CountingKeepAwake {
 
 /// What a `FakeShares` has been told, keyed by the exact root string (Ruling T8-a): the free bytes, the reach, the
 /// volumes, each stalled root's gate (the same `Arc` its `StallGate` holds), the access `access` reports and the free
-/// space errors.
+/// space errors; and what it counted: the calls of `reach` and `free_bytes`, and the delayed reach answers.
 #[derive(Default)]
 struct SharesState {
     free: BTreeMap<String, u64>,
@@ -205,6 +205,15 @@ struct SharesState {
     stalls: BTreeMap<String, Gate>,
     access: BTreeMap<String, &'static str>,
     free_errors: BTreeMap<String, String>,
+    /// The `reach` calls of each root, counted at entry, before a stall. Def: PR #14 review round 1 (R33).
+    /// Use: PR #14 review round 1 (R33, R34, R11).
+    reaches: BTreeMap<String, usize>,
+    /// The `free_bytes` calls of each root, counted at entry, before a stall. Def: PR #14 review round 1 (R33).
+    /// Use: PR #14 review round 1 (R33, R34, R11).
+    free_reads: BTreeMap<String, usize>,
+    /// Per root, `set_reach_after`'s countdown: how many more `reach` calls answer as before, and the answer that
+    /// takes over after them. Def: PR #14 review round 1 (R28). Use: PR #14 review round 1 (R28).
+    reach_after: BTreeMap<String, (usize, Reach)>,
 }
 
 /// One stall's state: whether it was released, and how many calls wait on it (engine.md:584).
@@ -219,7 +228,8 @@ type Gate = Arc<(Mutex<GateState>, Condvar)>;
 
 /// Fake shares (spec 4.3, design part 4.2, Ruling T8-a): every root is reachable, has `u64::MAX` free bytes, is its
 /// own volume, reports no access and answers at once until a test says otherwise. Roots are matched by their exact
-/// string, so no path rule runs. Def: T8, T3-17. Use: T22 to T29, T3-17.
+/// string, so no path rule runs. It counts each root's `reach` and `free_bytes` calls (`reaches`, `free_reads`).
+/// Def: T8, T3-17. Use: T22 to T29, T3-17.
 pub struct FakeShares {
     state: Mutex<SharesState>,
 }
@@ -274,6 +284,26 @@ impl FakeShares {
     /// `set_free(root, ..)` clears it. Def: T3-17. Use: T3-17.
     pub fn set_free_error(&self, root: &str, message: &str) {
         lock(&self.state).free_errors.insert(root.to_string(), message.to_string());
+    }
+
+    /// How many times `reach(root)` was called, each counted as the call came in, before a stall held it.
+    /// Def: PR #14 review round 1 (R33). Use: PR #14 review round 1 (R33, R34, R11).
+    pub fn reaches(&self, root: &str) -> usize {
+        lock(&self.state).reaches.get(root).copied().unwrap_or(0)
+    }
+
+    /// How many times `free_bytes(root)` was called, answered or failed, each counted as the call came in, before a
+    /// stall held it. Def: PR #14 review round 1 (R33). Use: PR #14 review round 1 (R33, R34, R11).
+    pub fn free_reads(&self, root: &str) -> usize {
+        lock(&self.state).free_reads.get(root).copied().unwrap_or(0)
+    }
+
+    /// Lets the next `calls` calls of `reach(root)` answer as before; the call after them, and every later one, answers
+    /// `reach`, as if `set_reach(root, reach)` had run just before it, so `free_bytes` and `access` follow from then
+    /// on. A later `set_reach_after` of the same root replaces the countdown. Def: PR #14 review round 1 (R28).
+    /// Use: PR #14 review round 1 (R28).
+    pub fn set_reach_after(&self, root: &str, calls: usize, reach: Reach) {
+        lock(&self.state).reach_after.insert(root.to_string(), (calls, reach));
     }
 
     /// Waits while `root`'s stall is closed, with no lock of the fake held, so other roots answer (engine.md:584).
@@ -331,11 +361,24 @@ impl Default for FakeShares {
 
 impl ShareConnector for FakeShares {
     fn reach(&self, root: &str) -> Reach {
+        *lock(&self.state).reaches.entry(root.to_string()).or_default() += 1;
         self.pass(root);
-        lock(&self.state).reach.get(root).cloned().unwrap_or(Reach::Reachable)
+        let mut state = lock(&self.state);
+        // `set_reach_after`'s countdown: answer as before while calls are left, then take the new answer for good.
+        match state.reach_after.remove(root) {
+            Some((left, reach)) if left > 0 => {
+                state.reach_after.insert(root.to_string(), (left - 1, reach));
+            }
+            Some((_, reach)) => {
+                state.reach.insert(root.to_string(), reach);
+            }
+            None => {}
+        }
+        state.reach.get(root).cloned().unwrap_or(Reach::Reachable)
     }
 
     fn free_bytes(&self, root: &str) -> io::Result<u64> {
+        *lock(&self.state).free_reads.entry(root.to_string()).or_default() += 1;
         self.pass(root);
         let state = lock(&self.state);
         if let Some(Reach::Unreachable(message)) = state.reach.get(root) {
@@ -778,6 +821,53 @@ mod tests {
         assert_eq!(shares.access("/m"), Some("lazymkv's stored credential"));
         shares.set_reach("/s", Reach::Reachable);
         assert_eq!(shares.access("/s"), Some("the session's access"));
+    }
+
+    #[test]
+    fn the_fake_counts_reaches_and_free_space_reads() {
+        let shares = Arc::new(FakeShares::new());
+        assert_eq!((shares.reaches("/s"), shares.free_reads("/s")), (0, 0));
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.free_bytes("/s").unwrap(), u64::MAX);
+        shares.set_reach("/m", Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.reach("/m"), Reach::Unreachable("cable out".to_string()));
+        assert!(shares.free_bytes("/m").is_err());
+        shares.set_free_error("/m", "access is denied");
+        assert!(shares.free_bytes("/m").is_err());
+        assert_eq!((shares.reaches("/s"), shares.free_reads("/s")), (2, 1));
+        assert_eq!((shares.reaches("/m"), shares.free_reads("/m")), (1, 2));
+        assert_eq!((shares.reaches("/t"), shares.free_reads("/t")), (0, 0));
+        // A call is counted as it comes in, while a stall still holds it.
+        let gate = shares.stall("/t");
+        let caller = Arc::clone(&shares);
+        let stalled = std::thread::spawn(move || caller.reach("/t"));
+        assert!(gate.wait_for_caller(Duration::from_secs(5) * crate::testutil::ci_factor()));
+        assert_eq!(shares.reaches("/t"), 1);
+        gate.release();
+        assert_eq!(stalled.join().unwrap(), Reach::Reachable);
+        assert_eq!(shares.reaches("/t"), 1);
+    }
+
+    #[test]
+    fn set_reach_after_answers_as_before_then_the_new_answer() {
+        let shares = FakeShares::new();
+        shares.set_free("/s", 7);
+        shares.set_access("/s", "the session's access");
+        shares.set_reach_after("/s", 2, Reach::Unreachable("cable out".to_string()));
+        for _ in 0..2 {
+            assert_eq!(shares.reach("/s"), Reach::Reachable);
+            assert_eq!(shares.free_bytes("/s").unwrap(), 7);
+            assert_eq!(shares.access("/s"), Some("the session's access"));
+        }
+        assert_eq!(shares.reach("/s"), Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.free_bytes("/s").unwrap_err().to_string(), "cable out");
+        assert_eq!(shares.access("/s"), None);
+        assert_eq!(shares.reach("/s"), Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.reach("/m"), Reach::Reachable);
+        shares.set_reach("/s", Reach::Reachable);
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.free_bytes("/s").unwrap(), 7);
     }
 
     #[test]
