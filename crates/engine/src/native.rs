@@ -2,13 +2,17 @@
 //! sequence, the native `Platform`, and the wait for a stop.
 //!
 //! The start-up texts, each one line on standard error with exit 1 (Rulings W2 to W4, T3-23-d, PF3-S23-24-2):
-//! `NOT_ELEVATED`; `ENGINE_RUNNING`; a squatter, `lazymkv-engine: <mutex> is held by <account>, which is not an engine
-//! (design part 3.3)`; a mutex error, `lazymkv-engine: <mutex> could not be taken: <error>`; no `--data` and no
-//! `%ProgramData%`, `NO_PROGRAM_DATA`; a refused data folder, `lazymkv-engine: ` and `protect_data_folder`'s text; a
-//! held pipe, `lazymkv-engine: another process holds the pipe <pipe> (design part 3.3)`; any other start failure,
-//! `lazymkv-engine: the engine could not start: <error>`; a stop that failed, `lazymkv-engine: the engine did not
-//! stop cleanly: <error>`; and `STOPPED_STARTING` when the console stops a start.
+//! `NOT_ELEVATED`; no `--data` and no ProgramData folder in the registry, `NO_PROGRAM_DATA`; no `--data` and a
+//! `ProgramData` variable that names another folder, `lazymkv-engine: the ProgramData variable (<variable>) differs
+//! from the registry's ProgramData (<registry>); give --data DIR (design part 3.5)` (whole-branch review F2);
+//! `ENGINE_RUNNING`; a squatter, `lazymkv-engine: <mutex> is held by <account>, which is not an engine (design part
+//! 3.3)`; a mutex error, `lazymkv-engine: <mutex> could not be taken: <error>`; a refused data folder,
+//! `lazymkv-engine: ` and `protect_data_folder`'s text; a held pipe, `lazymkv-engine: another process holds the pipe
+//! <pipe> (design part 3.3)`; any other start failure, `lazymkv-engine: the engine could not start: <error>`; a stop
+//! that failed, `lazymkv-engine: the engine did not stop cleanly: <error>`; and `STOPPED_STARTING` when the console
+//! stops a start.
 
+use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -33,8 +37,9 @@ pub const ENGINE_RUNNING: &str = "lazymkv-engine: an engine is already running (
 /// The console's stop event before `start` returned (design part 3.8; Ruling W19). Def: T3-23. Use: T3-23.
 pub const STOPPED_STARTING: &str = "lazymkv-engine: stopped by the console while starting (design part 3.8)";
 
-/// A start with no `--data` while `%ProgramData%` is not set (design part 3.1; Ruling W1).
-const NO_PROGRAM_DATA: &str = "lazymkv-engine: %ProgramData% is not set; give --data DIR";
+/// A start with no `--data` whose registry gives no ProgramData folder (design part 3.1; Ruling W1, amended after the
+/// whole-branch review (F2)).
+const NO_PROGRAM_DATA: &str = "lazymkv-engine: the registry's ProgramData could not be read; give --data DIR";
 
 /// What `run_with` builds the engine from; each None takes the production part (Rulings W26, W27). Def: T3-23.
 /// Use: T3-23.
@@ -59,6 +64,9 @@ pub struct NativeOptions {
     pub console_stop: Option<Box<dyn FnOnce(Box<dyn Fn() + Send + Sync>) -> io::Result<()> + Send>>,
     /// None: `win::own_token()` (design part 3.2).
     pub token: Option<TokenFacts>,
+    /// The `ProgramData` variable compared with the registry's folder when no `--data` is given (design part 3.5;
+    /// whole-branch review F2). None: the process's own variable.
+    pub program_data_var: Option<OsString>,
 }
 
 impl NativeOptions {
@@ -75,14 +83,16 @@ impl NativeOptions {
             console: None,
             console_stop: None,
             token: None,
+            program_data_var: None,
         }
     }
 }
 
 /// Runs the engine on Windows until a `shutdown` request or the console's stop event stops it (design parts 3.1 to
-/// 3.8; Rulings W1 to W5, W19, W26): the arguments, the elevation check, the mutex, the data folder, the first pipe
-/// instance, the console handler, then `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and
-/// 2 for a usage error; every refusal's text goes to `err` (Step 3 lists them). Def: T3-23. Use: T3-23.
+/// 3.8; Rulings W1 to W5, W19, W26): the arguments, the elevation check, the default data folder's place when no
+/// `--data` is given (whole-branch review F2), the mutex, the data folder, the first pipe instance, the console
+/// handler, then `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a usage error;
+/// every refusal's text goes to `err` (Step 3 lists them). Def: T3-23. Use: T3-23.
 pub fn run_with(args: &[String], err: &mut dyn Write, options: NativeOptions) -> i32 {
     let data = match data_arg(args) {
         Ok(data) => data,
@@ -103,8 +113,19 @@ pub fn run_with(args: &[String], err: &mut dyn Write, options: NativeOptions) ->
 /// `run_with` after the arguments (Ruling W3's order): Err is the refusal's or the failure's start-up text. The mutex
 /// is held until this returns, on every path, so the engine releases it on exit (design part 3.8).
 fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
-    let NativeOptions { mutex, pipe, drives, ejector, processes, secrets, http, console, console_stop, token } =
-        options;
+    let NativeOptions {
+        mutex,
+        pipe,
+        drives,
+        ejector,
+        processes,
+        secrets,
+        http,
+        console,
+        console_stop,
+        token,
+        program_data_var,
+    } = options;
     // Design part 3.2; Ruling W3: the check only reads the token, so it comes before the mutex, the first step with an
     // effect.
     let token = match token {
@@ -114,11 +135,13 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
     if !token.elevated {
         return Err(NOT_ELEVATED.to_string());
     }
-    let _mutex = EngineMutex::take(&mutex).map_err(|refusal| mutex_refusal_text(&mutex, &refusal))?;
+    // Whole-branch review F2: the default folder's check, like the elevation check, only reads the process's own
+    // inputs, so it too comes before the mutex.
     let data = match data {
         Some(data) => PathBuf::from(data),
-        None => program_data().ok_or(NO_PROGRAM_DATA)?.join("lazymkv"),
+        None => default_data(program_data_var.or_else(|| std::env::var_os("ProgramData")))?,
     };
+    let _mutex = EngineMutex::take(&mutex).map_err(|refusal| mutex_refusal_text(&mutex, &refusal))?;
     protect_data_folder(&data, &token.user_sid).map_err(|text| format!("lazymkv-engine: {text}"))?;
     let ipc = PipeServer::bind(&pipe).map_err(|error| match error.kind() {
         io::ErrorKind::AddrInUse => {
@@ -180,6 +203,34 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
     *lock(&slot) = Some(engine.shutdown_handle());
     engine.wait_for_exit(None);
     engine.stop().map_err(|error| format!("lazymkv-engine: the engine did not stop cleanly: {error}"))
+}
+
+/// The data folder of a start with no `--data` (design part 3.1; Ruling W1, amended after the whole-branch review
+/// (F2)): `program_data()`, the registry's ProgramData folder joined with `lazymkv`. Err is `NO_PROGRAM_DATA` when the
+/// registry gives none, and the refusal naming both folders when `variable`, the `ProgramData` variable, is set and
+/// is not the registry's folder (`same_folder`): a non-elevated process of the user can set the variable, and the
+/// engine would otherwise trust a folder it chose (design part 3.5).
+fn default_data(variable: Option<OsString>) -> Result<PathBuf, String> {
+    let data = program_data().ok_or(NO_PROGRAM_DATA)?;
+    let registry = data.parent().ok_or(NO_PROGRAM_DATA)?;
+    match variable {
+        Some(variable) if !same_folder(Path::new(&variable), registry) => Err(format!(
+            "lazymkv-engine: the ProgramData variable ({}) differs from the registry's ProgramData ({}); give --data \
+             DIR (design part 3.5)",
+            Path::new(&variable).display(),
+            registry.display()
+        )),
+        _ => Ok(data),
+    }
+}
+
+/// Whether `a` and `b` name the same folder, compared part by part and case-insensitively, as Windows compares names,
+/// so a trailing separator or a forward slash makes no difference.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let parts = |path: &Path| -> Vec<String> {
+        path.components().map(|part| part.as_os_str().to_string_lossy().to_lowercase()).collect()
+    };
+    parts(a) == parts(b)
 }
 
 /// A start failure's text (Ruling T3-23-d).
@@ -248,6 +299,17 @@ mod tests {
         let error = io::Error::from_raw_os_error(5);
         let expected = format!(r"lazymkv-engine: Global\x could not be taken: {error}");
         assert_eq!(mutex_refusal_text(r"Global\x", &MutexRefusal::Os(error)), expected);
+    }
+
+    #[test]
+    fn a_program_data_variable_is_the_registrys_folder_whatever_its_case_or_separators() {
+        let registry = Path::new(r"C:\ProgramData");
+        for same in [r"C:\ProgramData", r"c:\programdata", r"C:\PROGRAMDATA\", "C:/ProgramData"] {
+            assert!(same_folder(Path::new(same), registry), "{same}");
+        }
+        for other in [r"D:\ProgramData", r"C:\ProgramData\lazymkv", r"C:\Data\ProgramData", r"C:\", "ProgramData", ""] {
+            assert!(!same_folder(Path::new(other), registry), "{other}");
+        }
     }
 
     #[test]

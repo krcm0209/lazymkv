@@ -19,7 +19,7 @@ use lazymkv_engine::native::{run_with, NativeOptions, ENGINE_RUNNING, NOT_ELEVAT
 use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::security::{test_name, TokenFacts};
 use lazymkv_platform::fakes::{MemorySecrets, RecordingEjector, ScriptedDrives};
-use lazymkv_platform::win::{own_token, EngineMutex, PipeConnector, PipeServer, WinHost};
+use lazymkv_platform::win::{own_token, program_data, EngineMutex, PipeConnector, PipeServer, WinHost};
 use lazymkv_platform::{ConnectError, Host, IpcConnector, StdProcessGuard};
 use serde_json::{json, Value};
 
@@ -71,13 +71,18 @@ fn options(mutex: &str, pipe: &str) -> NativeOptions {
         console: Some(Box::new(std::io::sink())),
         console_stop: Some(Box::new(|_| Ok(()))),
         token: None,
+        program_data_var: None,
     }
 }
 
-/// `run_with(["--data", data], .., options)` on a thread: its exit code and standard error. Fails the test when it
-/// has not returned within 30 s (120 s under CI), since it then started an engine instead of refusing.
+/// `run_with(["--data", data], .., options)` on a thread: its exit code and standard error (`refused_with`).
 fn refused(data: &Path, options: NativeOptions) -> (i32, String) {
-    let args = vec!["--data".to_string(), data.display().to_string()];
+    refused_with(vec!["--data".to_string(), data.display().to_string()], options)
+}
+
+/// `run_with(args, .., options)` on a thread: its exit code and standard error. Fails the test when it has not
+/// returned within 30 s (120 s under CI), since it then started an engine instead of refusing.
+fn refused_with(args: Vec<String>, options: NativeOptions) -> (i32, String) {
     let (send, got) = channel();
     std::thread::spawn(move || {
         let mut err = Vec::new();
@@ -180,6 +185,36 @@ fn a_native_engine_that_is_not_elevated_says_so_before_the_mutex() {
     drop(held);
     assert_eq!((code, err), (1, format!("{NOT_ELEVATED}\n")));
     assert!(!data.exists(), "no data folder before the elevation check (W3)");
+}
+
+/// Whole-branch review F2: with no `--data`, a `ProgramData` variable that names another folder than the registry's is
+/// refused before the mutex. The test holds the mutex first, as another engine would, and the token says elevated, so
+/// an engine that met the mutex before the check would say `ENGINE_RUNNING` instead and reach no data folder. The
+/// variable names a folder of the test's own next to the registry's, which is never created.
+#[test]
+fn a_native_engine_refuses_a_program_data_variable_that_differs_from_the_registry() {
+    let (mutex, pipe, _) = names("native-program-data");
+    let own = own_token().unwrap();
+    let held = own.elevated.then(|| EngineMutex::take(&mutex).expect("another engine's mutex"));
+    let registry = program_data().expect("the registry's ProgramData folder");
+    let registry = registry.parent().expect("the ProgramData folder above lazymkv");
+    let variable = registry.with_file_name(test_name("native-program-data"));
+    let token = TokenFacts { elevated: true, ..own };
+    let options = NativeOptions {
+        token: Some(token),
+        program_data_var: Some(variable.clone().into_os_string()),
+        ..options(&mutex, &pipe)
+    };
+    let (code, err) = refused_with(Vec::new(), options);
+    drop(held);
+    let expected = format!(
+        "lazymkv-engine: the ProgramData variable ({}) differs from the registry's ProgramData ({}); give --data DIR \
+         (design part 3.5)\n",
+        variable.display(),
+        registry.display()
+    );
+    assert_eq!((code, err), (1, expected));
+    assert!(!variable.exists(), "the variable's folder was not created");
 }
 
 #[test]

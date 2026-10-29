@@ -1,10 +1,11 @@
 //! The engine's `Host` on Windows (design part 4.2's helpers outside the traits; parts 3.6, 4.6, 7.2; Rulings W17,
 //! W18): the clock and the local time, MakeMKV's registration key and debug log, a Toolhelp process snapshot, the
-//! volume label, the Program Files install paths, and the writable test with the user's filtered token.
+//! volume label, the Program Files install paths from the registry, and the writable test with the user's filtered
+//! token.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, OsString};
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -28,11 +29,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_SZ};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime};
 
-use super::{token_facts, wide, MAXIMUM_ALLOWED, SE_GROUP_INTEGRITY};
+use super::{registry_text, token_facts, until_nul, wide, MAXIMUM_ALLOWED, SE_GROUP_INTEGRITY};
 use crate::localtime::format_local_time;
 use crate::security::ElevationType;
 use crate::Host;
@@ -56,11 +57,14 @@ const FILE_WRITE_RIGHTS: u32 = FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRI
 const PRIVILEGE_UNITS: usize = 64;
 /// The units of a volume-name buffer: `MAX_PATH` and its NUL.
 const LABEL_UNITS: usize = 261;
+/// The key below `HKEY_LOCAL_MACHINE` whose values `ProgramFilesDir (x86)` and `ProgramFilesDir` name the Program Files
+/// folders (design part 3.6; Ruling W18, amended after the whole-branch review (F1)).
+const CURRENT_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
 
 /// The engine's `Host` on Windows (design part 4.2's helpers outside the traits; parts 3.6, 4.6, 7.2; Rulings W17,
 /// W18): the system clock, the local time from the time-zone rules, MakeMKV's key from the registry, a Toolhelp
-/// process snapshot, the volume label, the Program Files install paths, and the writable test with the user's
-/// filtered token. It holds no handle between calls. Def: T3-7. Use: T3-23.
+/// process snapshot, the volume label, the Program Files install paths from the registry, never from the environment,
+/// and the writable test with the user's filtered token. It holds no handle between calls. Def: T3-7. Use: T3-23.
 pub struct WinHost;
 
 impl WinHost {
@@ -110,14 +114,25 @@ impl Host for WinHost {
         label_of(root)
     }
 
-    /// Design part 3.6; Ruling W18 reads the Program Files folders, not the registry.
+    /// Design part 3.6; Ruling W18, amended after the whole-branch review (F1): the Program Files folder is the value
+    /// `ProgramFilesDir (x86)` (MakeMKV) or `ProgramFilesDir` (MKVToolNix) under `HKEY_LOCAL_MACHINE`'s
+    /// `CURRENT_VERSION_KEY`, read as `REG_SZ` with `RRF_NOEXPAND`, and never the `ProgramFiles(x86)` or
+    /// `ProgramFiles` variable, which a non-elevated process of the user can set for the elevated engine. None for a
+    /// value that cannot be read, is empty, still holds a `%` or is not absolute, since the folder must not come back
+    /// from the environment through an expansion.
     fn default_install_path(&self, tool: Tool) -> Option<PathBuf> {
-        let (variable, below) = match tool {
-            Tool::Makemkvcon => ("ProgramFiles(x86)", r"MakeMKV\makemkvcon64.exe"),
-            Tool::Mkvmerge => ("ProgramFiles", r"MKVToolNix\mkvmerge.exe"),
+        let (value, below) = match tool {
+            Tool::Makemkvcon => ("ProgramFilesDir (x86)", r"MakeMKV\makemkvcon64.exe"),
+            Tool::Mkvmerge => ("ProgramFilesDir", r"MKVToolNix\mkvmerge.exe"),
             Tool::Ffprobe | Tool::Ffmpeg | Tool::Java => return None,
         };
-        std::env::var_os(variable).map(|folder| PathBuf::from(folder).join(below))
+        let folder = registry_text(HKEY_LOCAL_MACHINE, CURRENT_VERSION_KEY, value, RRF_RT_REG_SZ | RRF_NOEXPAND)?;
+        if folder.contains(&u16::from(b'%')) {
+            return None;
+        }
+        let folder = PathBuf::from(OsString::from_wide(&folder));
+        // An empty value gives an empty path, which is not absolute either.
+        folder.is_absolute().then(|| folder.join(below))
     }
 
     /// Ruling W17: true at the first call that fails, so a lookup never trusts what it could not judge.
@@ -146,47 +161,11 @@ fn offset_minutes(unix_ms: u64) -> Option<i32> {
     i32::try_from((i128::from(local_ticks) - i128::from(ticks)) / TICKS_PER_MINUTE).ok()
 }
 
-/// `units` up to its first NUL, or all of it when it holds none.
-fn until_nul(units: &[u16]) -> &[u16] {
-    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
-    &units[..end]
-}
-
 /// MakeMKV's registration key, `app_Key` under `HKCU\Software\MakeMKV` (design part 7.2), or None when it is unset,
 /// empty or cannot be read. The value is never formatted into a log line, an error or a message (S61).
 fn app_key() -> Option<String> {
-    let (key, value) = (wide(r"Software\MakeMKV"), wide("app_Key"));
-    let mut size = 0u32;
-    // SAFETY: both names are NUL-terminated and outlive the call; with no type or data pointer, the call writes only
-    // the value's size in bytes to `size`.
-    let status = unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(), null_mut(), &mut size)
-    };
-    if status != ERROR_SUCCESS {
-        return None;
-    }
-    let mut data = vec![0u16; (size as usize).div_ceil(2).max(1)];
-    let mut written = u32::try_from(data.len() * 2).ok()?;
-    // SAFETY: as above; `data` holds `written` bytes, the size passed, and the call writes at most that many to it and
-    // the count it wrote to `written`.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_REG_SZ,
-            null_mut(),
-            data.as_mut_ptr().cast(),
-            &mut written,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return None;
-    }
-    // The count in a binding whose address is never taken, bounded by the buffer before it bounds the read.
-    let units = (written as usize / 2).min(data.len());
-    let text = until_nul(&data[..units]);
-    (!text.is_empty()).then(|| String::from_utf16_lossy(text))
+    let text = registry_text(HKEY_CURRENT_USER, r"Software\MakeMKV", "app_Key", RRF_RT_REG_SZ)?;
+    (!text.is_empty()).then(|| String::from_utf16_lossy(&text))
 }
 
 /// The image names of the running processes from a Toolhelp snapshot (design part 5.3), or an empty list when the
@@ -451,7 +430,9 @@ fn granted_access(descriptor: &LocalMemory, token: &OwnedHandle) -> io::Result<u
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
+    use std::process::Command;
 
     use lazymkv_core::job::Tool;
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
@@ -460,9 +441,14 @@ mod tests {
     use windows_sys::Win32::System::Time::SystemTimeToFileTime;
 
     use super::WinHost;
-    use crate::testutil::temp_dir;
+    use crate::testutil::{reg_query, temp_dir};
     use crate::win::wide;
     use crate::Host;
+
+    /// The key `reg query` reads the Program Files folders from.
+    const CURRENT_VERSION: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion";
+    /// The LAZYMKV_TEST_HELPER value that makes `install_paths_child` write its install paths.
+    const INSTALL_PATHS_CHILD: &str = "print-install-paths";
 
     /// `local_time`'s text back into its fields.
     fn fields(text: &str) -> SYSTEMTIME {
@@ -562,15 +548,72 @@ mod tests {
     }
 
     #[test]
-    fn default_install_paths_are_under_program_files_and_none_for_ffprobe() {
+    fn default_install_paths_are_the_registrys_program_files_folders_and_none_for_ffprobe() {
+        // Whole-branch review F1: the folders are the HKLM values, read here by `reg query` in a child process.
+        let folder = |value: &str| PathBuf::from(reg_query(CURRENT_VERSION, value).expect("a Program Files value"));
         let host = WinHost::new();
-        let x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
-        let plain = std::env::var_os("ProgramFiles").map(PathBuf::from);
-        assert_eq!(host.default_install_path(Tool::Makemkvcon), x86.map(|p| p.join(r"MakeMKV\makemkvcon64.exe")));
-        assert_eq!(host.default_install_path(Tool::Mkvmerge), plain.map(|p| p.join(r"MKVToolNix\mkvmerge.exe")));
+        let makemkvcon = folder("ProgramFilesDir (x86)").join(r"MakeMKV\makemkvcon64.exe");
+        assert_eq!(host.default_install_path(Tool::Makemkvcon), Some(makemkvcon));
+        let mkvmerge = folder("ProgramFilesDir").join(r"MKVToolNix\mkvmerge.exe");
+        assert_eq!(host.default_install_path(Tool::Mkvmerge), Some(mkvmerge));
         for tool in [Tool::Ffprobe, Tool::Ffmpeg, Tool::Java] {
             assert_eq!(host.default_install_path(tool), None, "{tool:?}");
         }
+    }
+
+    /// Whole-branch review F1: a child whose `ProgramFiles` and `ProgramFiles(x86)` name a temporary folder, as a user
+    /// variable a non-elevated process set would, finds the same install paths as this process. A child process, since
+    /// `set_var` here would race the other tests.
+    #[test]
+    fn the_program_files_variables_do_not_move_the_install_paths() {
+        let planted = temp_dir("host-program-files");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "win::host::tests::install_paths_child", "--ignored", "--nocapture"])
+            .env("LAZYMKV_TEST_HELPER", INSTALL_PATHS_CHILD)
+            .env("ProgramFiles", &planted)
+            .env("ProgramFiles(x86)", &planted)
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&planted);
+        assert!(output.status.success(), "the child failed: {}", String::from_utf8_lossy(&output.stderr));
+        let text = String::from_utf8_lossy(&output.stdout);
+        let host = WinHost::new();
+        for (tool, name) in [(Tool::Makemkvcon, "makemkvcon"), (Tool::Mkvmerge, "mkvmerge")] {
+            let ours = host.default_install_path(tool);
+            assert!(ours.is_some(), "this process has no {name} install path");
+            let expected = install_path_line(name, ours.as_deref());
+            let theirs = text.lines().find(|line| line.starts_with(&format!("install-path {name} ")));
+            // Only booleans reach the message: a moved path names the temporary folder, which holds the account name.
+            assert!(
+                theirs == Some(expected.as_str()),
+                "the child's {name} path differs from this process's; it lies under the planted folder: {}",
+                theirs.is_some_and(|line| line.contains(&*planted.to_string_lossy()))
+            );
+        }
+    }
+
+    /// The line `install_paths_child` writes for one tool's install path.
+    fn install_path_line(name: &str, path: Option<&std::path::Path>) -> String {
+        format!("install-path {name} {}", path.map_or("none".to_string(), |path| path.display().to_string()))
+    }
+
+    /// The child `the_program_files_variables_do_not_move_the_install_paths` starts: this test binary running only this
+    /// test, which writes one `install_path_line` per tool when LAZYMKV_TEST_HELPER names `INSTALL_PATHS_CHILD`, and
+    /// does nothing otherwise.
+    #[test]
+    #[ignore]
+    fn install_paths_child() {
+        if std::env::var("LAZYMKV_TEST_HELPER").as_deref() != Ok(INSTALL_PATHS_CHILD) {
+            return;
+        }
+        let host = WinHost::new();
+        let mut out = std::io::stdout();
+        for (tool, name) in [(Tool::Makemkvcon, "makemkvcon"), (Tool::Mkvmerge, "mkvmerge")] {
+            // A line of its own, apart from the test harness's progress text.
+            let line = install_path_line(name, host.default_install_path(tool).as_deref());
+            out.write_all(format!("\n{line}\n").as_bytes()).unwrap();
+        }
+        out.flush().unwrap();
     }
 
     #[test]

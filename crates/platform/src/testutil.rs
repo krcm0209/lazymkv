@@ -1,7 +1,7 @@
 //! The test helpers of the plan's Global Constraints, compiled under `cfg(test)` only: a fresh temporary folder, the
 //! continuous integration (CI) factor for waits, the `skipped:` and `CUE:` lines written past the test harness's
-//! capture, an in-memory secret store for this crate's own tests, and the pipe tests' bounded wait (`within`) and line
-//! read (`line`).
+//! capture, an in-memory secret store for this crate's own tests, the pipe tests' bounded wait (`within`) and line read
+//! (`line`), and, on Windows, a registry value read through `reg query` (`reg_query`).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -77,6 +77,23 @@ pub(crate) fn line(reader: &mut dyn BufRead) -> String {
     let mut line = String::new();
     reader.read_line(&mut line).expect("a line");
     line
+}
+
+/// The string value `value` of the registry key `key` as `reg query` prints it, unexpanded, read in a child process so
+/// that it does not share the code under test; None when `reg query` fails or prints no `REG_SZ` or `REG_EXPAND_SZ`
+/// line for it.
+#[cfg(windows)]
+pub(crate) fn reg_query(key: &str, value: &str) -> Option<String> {
+    let output = std::process::Command::new("reg").args(["query", key, "/v", value]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // A value line reads `    <value>    <type>    <data>`.
+    String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
+        let typed = line.trim_start().strip_prefix(value)?.trim_start();
+        let data = typed.strip_prefix("REG_SZ").or_else(|| typed.strip_prefix("REG_EXPAND_SZ"))?;
+        Some(data.trim().to_string())
+    })
 }
 
 /// Locks `mutex`, ignoring a poison left by a panicked test thread, so one failed test does not cascade into others.

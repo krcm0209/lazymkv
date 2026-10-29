@@ -1115,12 +1115,13 @@ impl Harness {
     /// buffer of its own for standard error, and `NativeOptions { mutex: Global\<the pipe's name after
     /// \\.\pipe\>, pipe, drives: the harness's SharedDrives, ejector: its RecordingEjector with removals, processes:
     /// its TestGuard, secrets: its MemorySecrets, http: its recorded transport, console: its console buffer,
-    /// console_stop: a closure that keeps the handler, token: None }`. The real WinHost, WinKeepAwake and share
-    /// connector run, so `host()`, `awake()` and `shares()` are not this engine's. It returns once a client through
-    /// `pipe_client()` has read its snapshot line (60 s cap, 240 s under continuous integration, CI), and panics with
-    /// `run_with`'s standard error when `run_with` returned first. `restart`, `run_until` and `run_until_event` are not
-    /// for it. Native harnesses of one test process run one at a time (`NativeSlot`): the real WinHost shows S55 every
-    /// running `makemkvcon64`, another native harness's stand-in included, so it first waits until no other is alive.
+    /// console_stop: a closure that keeps the handler, token: None, program_data_var: None }`. The real WinHost,
+    /// WinKeepAwake and share connector run, so `host()`, `awake()` and `shares()` are not this engine's. It returns
+    /// once a client through `pipe_client()` has read its snapshot line (60 s cap, 240 s under continuous integration,
+    /// CI), and panics with `run_with`'s standard error when `run_with` returned first. `restart`, `run_until` and
+    /// `run_until_event` are not for it. Native harnesses of one test process run one at a time (`NativeSlot`): the
+    /// real WinHost shows S55 every running `makemkvcon64`, another native harness's stand-in included, so it first
+    /// waits until no other is alive.
     /// Def: T3-23. Use: T3-23.
     pub fn new_native(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str) -> Harness {
         let slot = NativeSlot::take();
@@ -1154,6 +1155,7 @@ impl Harness {
             console: Some(Box::new(ConsoleBuffer(Arc::clone(&harness.console)))),
             console_stop: Some(Box::new(console_stop)),
             token: None,
+            program_data_var: None,
         };
         let args = vec!["--data".to_string(), harness.data.display().to_string()];
         let stderr = Arc::new(Mutex::new(Vec::new()));

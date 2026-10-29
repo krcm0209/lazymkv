@@ -54,8 +54,9 @@ pub fn exe_name(tool: Tool) -> String {
 ///    path is not a file and `EXE_SUFFIX` is not empty, the path with `EXE_SUFFIX` appended, when that is a file
 ///    (engine.md:583);
 /// 2. the tool's file name in `resources`, when that is a file and `host.user_writable(resources)` is false;
-/// 3. `host.default_install_path(tool)`, when that is a file; it is not judged, since Windows' own access lists
-///    protect the Program Files install folders (design part 3.6);
+/// 3. `host.default_install_path(tool)`, whose install folder is read from the registry on Windows, never from the
+///    environment (Ruling W18, amended after the whole-branch review (F1)), when that is a file; it is not judged,
+///    since Windows' own access lists protect the Program Files install folders (design part 3.6);
 /// 4. the tool's file name in the first absolute folder of `path_var` that holds it as a file, where
 ///    `host.user_writable` calls neither the folder nor the file writable; relative and empty entries are dropped
 ///    (engine.md:580).

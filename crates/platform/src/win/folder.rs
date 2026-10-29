@@ -1,9 +1,12 @@
 //! The engine's data folder (design part 3.5, MISS-ARCH-18; Rulings W6, T3-3-a to T3-3-c): created, when absent,
 //! owned by Administrators with the protected access list from its first moment; then, created or found, refused if it
-//! is a link, a junction, a file or a folder of another owner, and otherwise given the protected access list.
+//! is a link, a junction, a file or a folder of another owner, and otherwise given the protected access list. Its
+//! default place comes from the registry, not the environment (Ruling W1, amended after the whole-branch review (F2)).
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -15,9 +18,18 @@ use windows_sys::Win32::Security::{
     PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT};
+use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 
-use super::{sid_string, wide, Descriptor};
+use super::{registry_text, sid_string, wide, Descriptor};
 use crate::security::{folder_sddl, owner_allowed};
+
+/// The key below `HKEY_LOCAL_MACHINE` whose value `ProgramData` names the machine's ProgramData folder, as
+/// `%SystemDrive%\ProgramData` (whole-branch review F2).
+const PROFILE_LIST_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+/// The variable the registry's `ProgramData` value starts with; it is replaced by the Windows folder's drive, never
+/// read from the environment.
+const SYSTEM_DRIVE: &str = "%SystemDrive%";
 
 /// Makes `path` the engine's data folder (design part 3.5, MISS-ARCH-18; Rulings W6, T3-3-a to T3-3-c). An absent
 /// folder is created owned by Administrators. A link, a junction, a file, or a folder owned by any account but
@@ -60,12 +72,54 @@ pub fn protect_data_folder(path: &Path, reader_sid: &str) -> Result<(), String> 
     set_list(path, reader_sid).map_err(|error| format!("{}'s access list could not be set: {error}", path.display()))
 }
 
-/// `%ProgramData%` from the environment (design part 3.1, Ruling W1), or None when it is unset, empty or not an
-/// absolute path. The engine's default data folder is this joined with `lazymkv`. Def: T3-3. Use: T3-23.
+/// The engine's default data folder (design part 3.1; Ruling W1, amended after the whole-branch review (F2)): the value
+/// `ProgramData` under `HKEY_LOCAL_MACHINE`'s `PROFILE_LIST_KEY`, read with `RRF_NOEXPAND`, its leading
+/// `%SystemDrive%` replaced by the drive of the Windows folder (`GetSystemWindowsDirectoryW`), joined with `lazymkv`.
+/// No environment variable is read, since a non-elevated process of the user can set `ProgramData` and `SystemDrive`
+/// for the elevated engine. None when the value cannot be read, still holds a `%` after the replacement, or is not an
+/// absolute path. Def: T3-3. Use: T3-23.
 pub fn program_data() -> Option<PathBuf> {
-    let folder = PathBuf::from(std::env::var_os("ProgramData")?);
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    let value = registry_text(HKEY_LOCAL_MACHINE, PROFILE_LIST_KEY, "ProgramData", flags)?;
+    let variable: Vec<u16> = SYSTEM_DRIVE.encode_utf16().collect();
+    let units = match value.get(..variable.len()) {
+        Some(head) if String::from_utf16_lossy(head).eq_ignore_ascii_case(SYSTEM_DRIVE) => {
+            let mut units = system_drive()?;
+            units.extend_from_slice(&value[variable.len()..]);
+            units
+        }
+        _ => value,
+    };
+    if units.contains(&u16::from(b'%')) {
+        return None;
+    }
+    let folder = PathBuf::from(OsString::from_wide(&units));
     // An empty value gives an empty path, which is not absolute either.
-    folder.is_absolute().then_some(folder)
+    folder.is_absolute().then(|| folder.join("lazymkv"))
+}
+
+/// The drive of the Windows folder, such as `C:`, as UTF-16 units; None when the folder cannot be read or does not
+/// start with a drive letter and a colon.
+fn system_drive() -> Option<Vec<u16>> {
+    // SAFETY: with no buffer and a size of 0, the call writes nothing and returns the size it needs, NUL included.
+    let needed = unsafe { GetSystemWindowsDirectoryW(null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut folder = vec![0u16; needed as usize];
+    // SAFETY: `folder` holds the `needed` units passed, and the call writes at most that many to it.
+    let length = unsafe { GetSystemWindowsDirectoryW(folder.as_mut_ptr(), needed) };
+    // The length in a binding whose address is never taken, checked non-zero and below the buffer's size, which a
+    // successful call returns, before it bounds the read.
+    let length = length as usize;
+    if length == 0 || length >= folder.len() {
+        return None;
+    }
+    let is_letter = |unit: u16| u8::try_from(unit).is_ok_and(|byte| byte.is_ascii_alphabetic());
+    match folder[..length] {
+        [letter, colon, ..] if is_letter(letter) && colon == u16::from(b':') => Some(vec![letter, colon]),
+        _ => None,
+    }
 }
 
 /// Creates the last component of `path` with a descriptor that makes it owned by Administrators and protected from its
@@ -156,7 +210,7 @@ mod tests {
 
     use super::*;
     use crate::security::{folder_sddl, ADMINISTRATORS_SID};
-    use crate::testutil::temp_dir;
+    use crate::testutil::{reg_query, temp_dir};
     use crate::win::{own_token, read_descriptor, read_path, wide, AclEntry, Descriptor};
 
     /// Removes the test's folder when the test ends, failed or not (Global Constraints).
@@ -300,10 +354,16 @@ mod tests {
         assert!(!dir.0.join("absent").exists());
     }
 
+    /// Whole-branch review F2: the folder is the HKLM value, read here by `reg query` in a child process, with its
+    /// `%SystemDrive%` replaced by the system drive, joined with `lazymkv`. The test's own `SystemDrive` stands in for
+    /// the drive, since nothing here sets it.
     #[test]
-    fn program_data_is_read_from_the_environment() {
-        let set = PathBuf::from(std::env::var_os("ProgramData").expect("Windows sets ProgramData"));
-        assert!(set.is_absolute());
-        assert_eq!(program_data(), Some(set));
+    fn program_data_is_derived_from_the_registry() {
+        let key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+        let value = reg_query(key, "ProgramData").expect("the registry names ProgramData");
+        let drive = std::env::var("SystemDrive").expect("Windows sets SystemDrive");
+        let expected = PathBuf::from(value.replacen("%SystemDrive%", &drive, 1)).join("lazymkv");
+        assert!(expected.is_absolute(), "{}", expected.display());
+        assert_eq!(program_data(), Some(expected));
     }
 }
