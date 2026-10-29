@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -134,8 +135,9 @@ pub(crate) fn partial_path(library_root: &str, job_id: &str, key: &str) -> PathB
 
 /// The four replay files of a job folder as `lazymkv-dev plan` and `decide` take them (design part 7.1):
 /// `settings.json`, `tmdb-search.json`, `tmdb-record.json` and `remembered.json`, each its absolute path in the job
-/// folder, given only when the file exists.
-fn replay_options(job_dir: &Path) -> PlanOptions {
+/// folder, given only when the file exists. The `command` relay gives the child the same files (design part 9.5).
+/// Def: T24. Use: T24, T3-22.
+pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
     let given = |name: &str| Some(job_dir.join(name)).filter(|path| path.is_file());
     PlanOptions {
         settings: given("settings.json"),
@@ -278,20 +280,48 @@ fn namer_cut(name: &str, film: &str, style: EditionStyle) -> Option<Cut> {
 /// from one listing of the film's folder `<root>/<components[0]>` (Ruling R24.5); a missing folder gives no facts.
 /// The names are read in byte order and the first wins a key: a plain copy gives `theatrical` the name "", and an
 /// edition sets `folder_has_edition_named_file` and gives `theatrical` (for "Theatrical Cut") or its lower-cased name
-/// the edition name. Def: T24. Use: T24.
-pub(crate) fn library_facts(path: &NamedPath, style: EditionStyle) -> LibraryFacts {
-    let mut facts = LibraryFacts { path_collision: Path::new(&path.path).exists(), ..LibraryFacts::default() };
+/// the edition name.
+///
+/// Changed (Ruling W22, R-B1; engine.md:591): every read error but NotFound is Err(`the library folder <folder> could
+/// not be read: <error>`), `<folder>` being the film's folder `<root>/<components[0]>` (or `path.path` without
+/// components), for the final path's metadata, the folder's listing, an entry of it and an entry's metadata. NotFound
+/// reads as absent, as before, so inputs that read without error give the same facts and decide's output is unchanged.
+/// Def: T24, its errors T3-18. Use: T24.
+pub(crate) fn library_facts(path: &NamedPath, style: EditionStyle) -> Result<LibraryFacts, String> {
+    let folder = match path.components.first() {
+        Some(film) => Path::new(&path.root).join(film),
+        None => PathBuf::from(&path.path),
+    };
+    let unread = |error: io::Error| format!("the library folder {} could not be read: {error}", folder.display());
+    let path_collision = match fs::metadata(&path.path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(unread(error)),
+    };
+    let mut facts = LibraryFacts { path_collision, ..LibraryFacts::default() };
     let Some(film) = path.components.first() else {
-        return facts;
+        return Ok(facts);
     };
-    let Ok(entries) = fs::read_dir(Path::new(&path.root).join(film)) else {
-        return facts;
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(facts),
+        Err(error) => return Err(unread(error)),
     };
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| !entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect();
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(unread)?;
+        let is_dir = match fs::metadata(entry.path()) {
+            Ok(meta) => meta.is_dir(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(unread(error)),
+        };
+        if is_dir {
+            continue;
+        }
+        if let Ok(name) = entry.file_name().into_string() {
+            names.push(name);
+        }
+    }
     names.sort();
     for name in &names {
         match namer_cut(name, film, style) {
@@ -306,7 +336,7 @@ pub(crate) fn library_facts(path: &NamedPath, style: EditionStyle) -> LibraryFac
             None => {}
         }
     }
-    facts
+    Ok(facts)
 }
 
 /// The plan with its identity made again from the job's saved answers (design part 8.4, R24.2): `refresh_identity`
@@ -407,14 +437,14 @@ mod tests {
         s.write(&format!("{folder}/{folder} - 1080p 2.mkv"), "x");
         s.write(&format!("{folder}/poster.jpg"), "x");
         assert_eq!(
-            library_facts(&path, EditionStyle::Jellyfin),
+            library_facts(&path, EditionStyle::Jellyfin).unwrap(),
             LibraryFacts {
                 folder_has_edition_named_file: true,
                 earlier_edition_names: [("extended cut".to_string(), "Extended Cut".to_string())].into(),
                 path_collision: false,
             }
         );
-        assert_eq!(library_facts(&path, EditionStyle::Combined), LibraryFacts::default());
+        assert_eq!(library_facts(&path, EditionStyle::Combined).unwrap(), LibraryFacts::default());
     }
 
     #[test]
@@ -424,7 +454,7 @@ mod tests {
         let folder = path.components[0].clone();
         s.write(&format!("{folder}/{}", path.components[1]), "x");
         s.write(&format!("{folder}/{folder} - 2160p Theatrical Cut {{edition-Theatrical Cut}}.mkv"), "x");
-        let facts = library_facts(&path, EditionStyle::Combined);
+        let facts = library_facts(&path, EditionStyle::Combined).unwrap();
         assert!(facts.path_collision && facts.folder_has_edition_named_file);
         assert_eq!(facts.earlier_edition_names, [("theatrical".to_string(), String::new())].into());
     }
@@ -432,7 +462,19 @@ mod tests {
     #[test]
     fn a_missing_film_folder_gives_no_facts() {
         let s = Scratch::new("no-film-folder");
-        assert_eq!(library_facts(&film_path(&s.0), EditionStyle::Jellyfin), LibraryFacts::default());
+        assert_eq!(library_facts(&film_path(&s.0), EditionStyle::Jellyfin).unwrap(), LibraryFacts::default());
+    }
+
+    /// Ruling W22: a film folder that cannot be listed is an error naming it, not a folder holding nothing. A regular
+    /// file stands where the folder goes, so the read fails on every system with an error other than NotFound.
+    #[test]
+    fn a_film_folder_that_cannot_be_listed_is_an_error_naming_it() {
+        let s = Scratch::new("unlistable-film");
+        let path = film_path(&s.0);
+        let folder = s.0.join(&path.components[0]);
+        std::fs::write(&folder, b"").unwrap();
+        let error = library_facts(&path, EditionStyle::Jellyfin).unwrap_err();
+        assert!(error.starts_with(&format!("the library folder {} could not be read: ", folder.display())), "{error}");
     }
 
     #[test]

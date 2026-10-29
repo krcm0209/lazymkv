@@ -4,6 +4,7 @@
 
 pub mod cmd;
 pub mod evidence;
+pub mod forms;
 pub mod pyjson;
 pub mod runner;
 #[cfg(test)]

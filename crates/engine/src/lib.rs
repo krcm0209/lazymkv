@@ -3,8 +3,12 @@
 mod arrival;
 mod file_phase;
 mod ipc_server;
+/// The engine on Windows (design parts 3.1 to 3.8). Def: T3-23. Use: T3-23.
+#[cfg(windows)]
+pub mod native;
 mod notify;
 mod owner;
+mod relay;
 mod restart;
 mod selftest;
 mod space;
@@ -21,13 +25,13 @@ use std::path::PathBuf;
 use lazymkv_dev::Args;
 use lazymkv_tools::Limits;
 
-pub use notify::NotifySink;
-pub use owner::{start, EngineHandle, JobContext, Services, StepResult, StepRunner};
+pub use notify::{NoDelivery, NotifySink, NO_DELIVERY};
+pub use owner::{start, EngineHandle, JobContext, Services, ShutdownHandle, StepResult, StepRunner};
 pub use timers::{StdTimers, Timers};
 
-/// The engine's start-up configuration (design parts 3.5, 3.6; S44): the data folder, the resources folder the tool
-/// lookup reads second, limits that replace `Limits::from_settings` (tests only), and the `PATH` the tool lookup reads
-/// last. Def: T21. Use: T22 to T29.
+/// The engine's start-up configuration (design parts 3.5, 3.6, 9.5; S44): the data folder, the resources folder the
+/// tool lookup reads second, limits that replace `Limits::from_settings` (tests only), the `PATH` the tool lookup reads
+/// last, the `lazymkvctl` the `command` relay runs, and the console writer. Def: T21. Use: T22 to T29.
 pub struct EngineConfig {
     /// The data folder (`--data DIR`, design part 3.5).
     pub data: PathBuf,
@@ -37,36 +41,45 @@ pub struct EngineConfig {
     pub limits_override: Option<Limits>,
     /// The `PATH` the tool lookup reads last (design part 3.6).
     pub path_var: Option<OsString>,
+    /// The `lazymkvctl` the `command` relay runs as its child (design part 9.5); None refuses `command` with
+    /// `COMMAND_NO_CTL`. Def: T3-10. Use: T3-22, T3-23.
+    pub ctl: Option<PathBuf>,
+    /// Where every engine.log line is also written: standard error in a console run (design part 3.5), the harness's
+    /// buffer in tests; None writes engine.log only. Def: T3-10. Use: T3-10, T3-23.
+    pub console: Option<Box<dyn Write + Send>>,
 }
 
-/// The binary's usage line.
-const USAGE: &str = "usage: lazymkv-engine --data DIR";
+/// The binary's usage line; `--data` is the one optional argument (design part 3.1; Ruling W1). Def: T21, T3-23.
+/// Use: T21, T3-23.
+pub const USAGE: &str = "usage: lazymkv-engine [--data DIR]";
 
-/// The lazymkv-engine binary's run (design parts 3.1, 4.2, 4.6; S28). `--data DIR` is parsed with dev's `Args`. A
-/// usage error prints "usage: lazymkv-engine --data DIR" and "lazymkv-engine: error: <message>" to `err` and returns
-/// 2. Otherwise PR 2 prints its OS's sentence and returns 1: "lazymkv-engine runs only on Windows in this version"
-/// outside Windows, and "lazymkv-engine has no Windows implementations in this build" on Windows. It creates nothing.
-/// Def: T21. Use: T21.
+/// The lazymkv-engine binary's run (design parts 3.1, 4.2, 4.6; S28; Rulings W1, W2). On Windows it is
+/// `native::run_with(args, err, NativeOptions::production())`. Elsewhere it reads the arguments with `data_arg`: a
+/// usage error prints `USAGE` and `lazymkv-engine: error: <message>` to `err` and returns 2; otherwise it prints
+/// `lazymkv-engine runs only on Windows in this version` and returns 1, creating nothing. Def: T21, T3-23.
+/// Use: T21, T3-23.
 pub fn main_with(args: &[String], err: &mut dyn Write) -> i32 {
-    if let Err(message) = data_arg(args) {
-        let _ = writeln!(err, "{USAGE}\nlazymkv-engine: error: {message}");
-        return 2;
+    #[cfg(windows)]
+    {
+        native::run_with(args, err, native::NativeOptions::production())
     }
     #[cfg(not(windows))]
-    let sentence = "lazymkv-engine runs only on Windows in this version";
-    #[cfg(windows)]
-    let sentence = "lazymkv-engine has no Windows implementations in this build";
-    let _ = writeln!(err, "{sentence}");
-    1
+    {
+        if let Err(message) = data_arg(args) {
+            let _ = writeln!(err, "{USAGE}\nlazymkv-engine: error: {message}");
+            return 2;
+        }
+        let _ = writeln!(err, "lazymkv-engine runs only on Windows in this version");
+        1
+    }
 }
 
-/// The `--data` value, or the usage error's message in argparse's words: a missing value, a missing `--data` (checked
-/// first, as argparse does), or words left over.
-fn data_arg(args: &[String]) -> Result<String, String> {
+/// `--data`'s value, None without it (design part 3.1; Ruling W1), or the usage error's message in argparse's words:
+/// a missing value, or `unrecognized arguments: <the words left, joined by " ">`. Def: T21, T3-23. Use: T21, T3-23.
+pub(crate) fn data_arg(args: &[String]) -> Result<Option<String>, String> {
     let mut parsed = Args::new(args, &["--data"]);
     let data = parsed.flag("--data")?;
     let rest = parsed.positionals()?;
-    let data = data.ok_or_else(|| "the following arguments are required: --data".to_string())?;
     if !rest.is_empty() {
         return Err(format!("unrecognized arguments: {}", rest.join(" ")));
     }
@@ -77,26 +90,34 @@ fn data_arg(args: &[String]) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn words(text: &[&str]) -> Vec<String> {
+        text.iter().map(|word| word.to_string()).collect()
+    }
+
     #[test]
     fn a_missing_data_value_is_a_usage_error_exit_2() {
-        let words = |text: &[&str]| text.iter().map(|word| word.to_string()).collect::<Vec<String>>();
         let mut err = Vec::new();
         assert_eq!(main_with(&words(&["--data"]), &mut err), 2);
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            "usage: lazymkv-engine --data DIR\nlazymkv-engine: error: argument --data: expected one argument\n"
-        );
+        assert_eq!(String::from_utf8(err).unwrap(),
+                   "usage: lazymkv-engine [--data DIR]\nlazymkv-engine: error: argument --data: expected one argument\n");
         let mut err = Vec::new();
         assert_eq!(main_with(&words(&["--data", "x", "extra"]), &mut err), 2);
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            "usage: lazymkv-engine --data DIR\nlazymkv-engine: error: unrecognized arguments: extra\n"
-        );
+        assert_eq!(String::from_utf8(err).unwrap(),
+                   "usage: lazymkv-engine [--data DIR]\nlazymkv-engine: error: unrecognized arguments: extra\n");
+    }
+
+    /// Ruling W1. It never calls `main_with` with valid arguments, which would start an engine on Windows.
+    #[test]
+    fn data_is_optional() {
+        assert_eq!(data_arg(&[]), Ok(None));
+        assert_eq!(data_arg(&words(&["--data", "x"])), Ok(Some("x".to_string())));
+    }
+
+    #[test]
+    fn words_left_over_are_a_usage_error() {
         let mut err = Vec::new();
-        assert_eq!(main_with(&[], &mut err), 2);
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            "usage: lazymkv-engine --data DIR\nlazymkv-engine: error: the following arguments are required: --data\n"
-        );
+        assert_eq!(main_with(&words(&["extra"]), &mut err), 2);
+        assert_eq!(String::from_utf8(err).unwrap(),
+                   "usage: lazymkv-engine [--data DIR]\nlazymkv-engine: error: unrecognized arguments: extra\n");
     }
 }

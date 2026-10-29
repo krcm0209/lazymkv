@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use lazymkv_clients::{HttpTransport, LookupBook};
 use lazymkv_core::ipc::{
-    is_secret_name, job_summary, push_line, reply_error, reply_ok, JobSummary, JobUpdate, Notification, Progress, Push,
-    Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+    is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
+    Notification, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
 };
 use lazymkv_core::job::{
     job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
@@ -32,7 +32,8 @@ use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::{Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_platform::{
-    DriveEvent, DriveWatcher, Ejector, Host, IpcStream, KeepAwake, Platform, SecretStore, ShareConnector,
+    DriveEvent, DriveWatcher, Ejector, Host, IpcStream, IpcTransport, KeepAwake, Platform, SecretStore, ShareConnector,
+    Spawn,
 };
 use lazymkv_tools::CancelToken;
 use serde_json::{Map, Value};
@@ -42,13 +43,17 @@ use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLD
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
     no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
-    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, COMMAND_REFUSED,
-    DISCARD_REFUSED, STOPPING, UI_QUIT_REFUSED,
+    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
+    DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink};
+use crate::relay::{
+    child_words, command_answer, not_started, spawn_relay, RunningCommand, COMMAND_BUSY, COMMAND_NO_CTL,
+    COMMAND_WRITABLE,
+};
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
-use crate::space::{rebuild_promises, Promises, PromisedStep};
+use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
 #[cfg(any(test, feature = "testkit"))]
 use crate::store::PersistFaults;
@@ -58,8 +63,10 @@ use crate::EngineConfig;
 
 /// How long the drive thread waits for each drive event before it looks at its stop flag again.
 const DRIVE_POLL: Duration = Duration::from_millis(50);
-/// How often `EngineHandle::wait_until` looks at the jobs.
+/// How often `EngineHandle::wait_until` looks at the jobs, and `EngineHandle::wait_for_exit` at the owner thread.
 const WAIT_POLL: Duration = Duration::from_millis(20);
+/// The minutes after which an event `unpersisted` kept is fed again (Ruling W23).
+const REFEED_MINUTES: u32 = 1;
 
 /// The actions whose step returns no event, so their result writes no `returned no event` line (design part 5.2, PF-6:
 /// `ExtractSubtitleEvidence` runs with `Decide` as one unit). Def: T22. Use: T22, T24.
@@ -167,8 +174,10 @@ pub(crate) enum Msg {
     StepDone { job: String, generation: u64, result: StepResult },
     /// A running step's progress: the running action's serde tag, the title key and the fraction (S7).
     Progress { job: String, step: String, title: Option<String>, fraction: f64 },
-    /// A StartTimer timer of the job ran out.
+    /// A StartTimer timer of the job ran out; a refeed timer sends `Refeed` instead (Ruling T3-20-a).
     Timer { job: String },
+    /// A refeed timer of the job ran out: its kept event, if it still has one, is fed again (Rulings W23, T3-20-a).
+    Refeed { job: String },
     /// A lookup round of the job ended (design part 8.3): `book.pending()`, or why the round could not run.
     RoundDone { job: String, pending: Result<(bool, bool), String> },
     /// The eject of an already-ripped disc returned.
@@ -183,6 +192,13 @@ pub(crate) enum Msg {
     CheckListed,
     /// `EngineHandle::stop`.
     Stop,
+    /// A line for engine.log from a thread that holds no store: the serve thread's refusals and failed accepts (design
+    /// part 3.5; Ruling W10).
+    Log(String),
+    /// The relay's child ended (design part 9.5): its `wait`, for the `command` request `id` of `client`.
+    CommandDone { client: u64, id: Option<u64>, exit: io::Result<Option<i32>> },
+    /// A client's reader thread saw its connection end (design part 9.2), so a command it runs is killed (Ruling W24).
+    Gone { client: u64 },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -207,10 +223,11 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
 /// lines are persisted by then (design part 3.5); the IPC server's serve thread starts last (Task 26). With
 /// `services.steps` None it runs the real runner, `RealSteps` (Task 23), over the owner's Outbox, the space promises,
 /// the last scan's Java use and the MakeMKV state, which the owner keeps for the self-test. Def: T22. Use: T22.
-pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
+pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
     let Services { platform, http, notify, timers, steps } = services;
     let clock = Arc::clone(&platform.host);
-    let store = Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), None);
+    let console = config.console.take();
+    let store = Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), console);
     #[cfg(any(test, feature = "testkit"))]
     let store = match hooks.persist_faults {
         Some(faults) => store.with_faults(faults),
@@ -235,6 +252,7 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
         java_in_use: Arc::clone(&java_in_use),
         makemkv: Arc::clone(&makemkv),
         cancel: CancelToken::default(),
+        shares: Arc::clone(&platform.shares),
     };
     // PF-28: the MakeMKV check at start runs to its end before any step runs or any client is accepted (S79).
     let selftest = first_selftest(env.makemkv_check(&store.settings().0, false));
@@ -245,11 +263,12 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
     });
     let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
     let (delivered, notifier_done) = channel::<()>();
-    let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }));
+    let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }), Arc::clone(&store));
     let (sender, inbox) = channel::<Msg>();
     let shown = Arc::new(Mutex::new(BTreeMap::new()));
     let busy = Arc::new(AtomicBool::new(false));
     let drive_stop = Arc::new(AtomicBool::new(false));
+    let clients = Arc::new(Clients::new());
     let parts = Parts {
         host,
         ejector,
@@ -263,7 +282,8 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
         shares,
         busy: Arc::clone(&busy),
         env,
-        clients: Arc::new(Clients::new()),
+        clients: Arc::clone(&clients),
+        ctl: config.ctl.clone(),
     };
     // L1: the discs already in a drive, read before the drive thread drains any event (design part 4.2).
     let present = drives.present();
@@ -281,6 +301,7 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
     let owner = thread::spawn(move || owner.run(inbox));
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
     let serve_stop = Arc::new(AtomicBool::new(false));
+    let transport = Arc::clone(&ipc);
     let serve = spawn_serve(ipc, Arc::clone(&serve_stop), sender.clone());
     Ok(EngineHandle {
         sender,
@@ -293,7 +314,8 @@ pub(crate) fn start_until(config: EngineConfig, services: Services, hooks: TestH
         jobs: shown,
         serve,
         serve_stop,
-        waker: Mutex::new(None),
+        ipc: transport,
+        clients,
     })
 }
 
@@ -319,9 +341,10 @@ pub struct EngineHandle {
     serve: JoinHandle<()>,
     /// Raised to end the serve thread.
     serve_stop: Arc<AtomicBool>,
-    /// How `stop` wakes the serve thread from the transport's waiting `accept`; None leaves the thread to end with
-    /// its transport.
-    waker: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The transport the serve thread accepts from; `stop` closes it.
+    ipc: Arc<dyn IpcTransport>,
+    /// The owner's clients; `stop` drains their writers.
+    clients: Arc<Clients>,
 }
 
 impl EngineHandle {
@@ -352,44 +375,75 @@ impl EngineHandle {
         }
     }
 
-    /// Sets how `stop` wakes the IPC serve thread, which waits in the transport's `accept` (design part 4.4): the
-    /// testkit connects once through its `MemoryConnector`, because `MemoryIpc::accept` holds its lock while it waits.
-    /// Without a waker, `stop` leaves the serve thread to end with its transport. Def: T26. Use: T26.
-    pub(crate) fn set_ipc_waker(&self, wake: Box<dyn FnOnce() + Send>) {
-        *lock(&self.waker) = Some(wake);
+    /// A handle that asks this engine's owner for a shutdown from any thread (design part 3.8; engine.md:581 (a)).
+    /// Def: T3-10. Use: T3-10, T3-23.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle { sender: self.sender.clone() }
+    }
+
+    /// True once the owner thread has left its loop, after a `shutdown` request or a stop; false when `timeout` passed
+    /// first; None waits without a limit. It polls `JoinHandle::is_finished` every `WAIT_POLL` (engine.md:581 (b)).
+    /// Def: T3-10. Use: T3-10, T3-23.
+    pub fn wait_for_exit(&self, timeout: Option<Duration>) -> bool {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        loop {
+            if self.owner.is_finished() {
+                return true;
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return false;
+            }
+            thread::sleep(WAIT_POLL);
+        }
     }
 
     /// Cancels every running step's CancelToken (CheckSpace and Eject included), drops their results, writes the
     /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk and a client's reader
-    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first, woken by the IPC
-    /// waker, so no client connects while the engine stops; then the drive thread, so every drive event it handed over
-    /// is handled before the owner stops; the owner then waits for every step, recording, eject and check it started,
-    /// closes every client, and the notifier delivers what was raised. An arrival still waiting for its volume is not
-    /// waited for: it only reads, and its late result goes nowhere. A step, recording or eject that panics still
-    /// reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked. Def: T22.
-    /// Use: T22 to T29.
+    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first: `stop` closes the
+    /// transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client connects while the
+    /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops; the
+    /// owner then waits for every step, recording, eject and check it started, closes every client, and the notifier
+    /// delivers what was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
+    /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4). An arrival still waiting for its volume is
+    /// not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that panics still
+    /// reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked. Def: T22,
+    /// T3-10. Use: T22 to T29, T3-23.
     pub fn stop(self) -> io::Result<()> {
-        let EngineHandle { sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, waker, .. } =
-            self;
+        let EngineHandle {
+            sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, ipc, clients, ..
+        } = self;
         serve_stop.store(true, Ordering::SeqCst);
-        let served = match waker.into_inner().unwrap_or_else(PoisonError::into_inner) {
-            Some(wake) => {
-                wake();
-                serve.join().is_ok()
-            }
-            None => true,
-        };
+        ipc.close();
+        let served = serve.join();
         drive_stop.store(true, Ordering::SeqCst);
         let drive = drive.join();
         let _ = sender.send(Msg::Stop);
         drop(sender);
         let owner = owner.join();
         let _ = notifier_done.recv();
+        clients.drain(CLIENT_DRAIN);
         store.log("engine stopped");
-        if drive.is_err() || owner.is_err() || !served {
+        if served.is_err() || drive.is_err() || owner.is_err() {
             return Err(io::Error::other("lazymkv-engine: an engine thread panicked"));
         }
         Ok(())
+    }
+}
+
+/// Asks the owner for a shutdown as a `shutdown` request with no client does (design part 3.8: Ctrl+C in a console
+/// run is a forced shutdown). It sends `Msg::Request` with `client: NO_CLIENT`, `id: None` and
+/// `request: Request::Shutdown { force }`, so the reply goes nowhere; a send to an owner that has stopped does nothing.
+/// Def: T3-10. Use: T3-10, T3-23.
+#[derive(Clone)]
+pub struct ShutdownHandle {
+    /// The owner thread's channel.
+    sender: Sender<Msg>,
+}
+
+impl ShutdownHandle {
+    /// See the struct. Def: T3-10. Use: T3-10, T3-23.
+    pub fn shutdown(&self, force: bool) {
+        let _ = self.sender.send(Msg::Request { client: NO_CLIENT, id: None, request: Request::Shutdown { force } });
     }
 }
 
@@ -622,8 +676,8 @@ struct Delivered {
 }
 
 impl NotifySink for Delivered {
-    fn deliver(&mut self, notification: &Notification) {
-        self.sink.deliver(notification);
+    fn deliver(&mut self, notification: &Notification) -> Result<(), String> {
+        self.sink.deliver(notification)
     }
 }
 
@@ -652,6 +706,8 @@ struct Parts {
     env: CheckEnv,
     /// The IPC clients (design part 9.2).
     clients: Arc<Clients>,
+    /// The `lazymkvctl` the `command` relay runs (`EngineConfig.ctl`, design part 9.5); None refuses `command`.
+    ctl: Option<PathBuf>,
 }
 
 /// One job as the owner holds it.
@@ -742,6 +798,19 @@ struct Quiet {
     cancelled: Vec<(String, String)>,
 }
 
+/// What `feed` did with an event (review round 1, V1, RR1-16; Ruling W23). Def: T3-20. Use: T3-20.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fed {
+    /// The reducer refused it in the job's state, or there is no such job: nothing changed, and a refusal wrote its
+    /// job.log line `rejected <event> in <state>`.
+    Rejected,
+    /// Its transition was persisted, the stop hook's case included (`commit`).
+    Persisted,
+    /// The reducer took it but its transition could not be persisted: the job keeps its persisted state
+    /// (`unpersisted`).
+    NotPersisted,
+}
+
 /// The job-owner thread's state (design part 4.4).
 struct Owner {
     store: Arc<Store>,
@@ -793,6 +862,15 @@ struct Owner {
     /// persisted (review round 1, V1, RR1-1): each left its file-phase place, so the restart sequence seeds none of
     /// them as a holder. A later persisted transition of the job takes it out.
     kept: BTreeSet<String>,
+    /// The event, with its message, that each job in Planned or RipVerified, or an Ejected job's FilePhaseSlot or
+    /// LookupPending, was fed when its transition could not be persisted, fed again at its `REFEED_MINUTES` timer until
+    /// it persists (review round 1, V1; Rulings W23, T3-20-b). A persisted transition of the job takes its entry out.
+    refeed: BTreeMap<String, (Event, Option<String>)>,
+    /// The jobs whose refeed timer is pending (Ruling T3-20-a): a job gets a new refeed timer only when it has none, so
+    /// its kept events are fed again by one chain of timers whatever entries `refeed` gains or loses meanwhile.
+    refeed_armed: BTreeSet<String>,
+    /// The `command` that runs, one at a time (design part 9.5): taken by its `Msg::CommandDone` or by a stop.
+    command: Option<RunningCommand>,
 }
 
 impl Owner {
@@ -874,6 +952,9 @@ impl Owner {
             rescans: BTreeSet::new(),
             quiet: None,
             kept: BTreeSet::new(),
+            refeed: BTreeMap::new(),
+            refeed_armed: BTreeSet::new(),
+            command: None,
         };
         owner.restart(present);
         owner
@@ -889,7 +970,8 @@ impl Owner {
     ///    that cannot be persisted feeds the state's failure row (`unpersisted`, V1); then, in each noted drive no fed
     ///    job holds, the disc of the latest job of its fingerprint is noted when that job failed in its disc phase, and
     ///    the drive becomes its record's drive, so a Retry uses the disc (spec 10.3);
-    /// 4. the space promises of the resumed jobs (`rebuild_promises`), the token and the slot are rebuilt, the slot
+    /// 4. the space promises of the resumed jobs (`rebuild_promises`, which reads no share and no staged file, so a
+    ///    share that stalls never holds the restart up; engine.md:585), the token and the slot are rebuilt, the slot
     ///    seeded only with the planned holders whose state still holds a place and that `unpersisted` did not leave
     ///    with their persisted state (RR1-1, RR1-5), and the noted drives are recorded handled;
     /// 5. the resume actions are performed, the slot is granted, then the arrivals are routed as fresh insertions.
@@ -960,6 +1042,7 @@ impl Owner {
             resumed.push((id.clone(), transition.actions));
         }
         self.note_failed_discs(&plan.noted, &discs);
+        // engine.md:585: `rebuild_promises` reads no share, so this lock is never held across share input and output.
         {
             let mut promises = lock(&self.parts.promises);
             for (id, _) in &resumed {
@@ -1070,18 +1153,27 @@ impl Owner {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
             Msg::Progress { job, step, title, fraction } => self.on_progress(job, step, title, fraction),
             Msg::Timer { job } => self.on_timer(&job),
+            Msg::Refeed { job } => self.on_refeed(&job),
             Msg::RoundDone { job, pending } => self.on_round_done(&job, pending),
             Msg::Ejected { drive } => self.on_ejected(&drive),
             Msg::Connect(stream) => self.on_connect(stream),
             Msg::Request { client, id, request } => self.on_request(client, id, request),
             Msg::Checked { client, id, outcome } => self.on_checked(client, id, outcome),
             Msg::CheckListed => self.release_check_token(),
+            Msg::Log(line) => self.store.log(&line),
+            Msg::CommandDone { client, id, exit } => {
+                self.command = None;
+                self.reply(client, id, command_answer(exit));
+            }
+            Msg::Gone { client } => self.kill_command_of(client),
         }
     }
 
     /// One message while a forced shutdown waits for its steps (design part 3.8, PF-29): a step's end is fed, with
     /// only its notifications performed, progress still goes out, and nothing new starts: drive events, arrivals,
-    /// timers and lookup rounds are dropped, a new client is turned away and every request is refused.
+    /// timers and lookup rounds are dropped, a new client is turned away and every request is refused. The shutdown
+    /// stopped and answered a running command already (`stop_command`), so its end is dropped; a client that leaves
+    /// still kills a command it runs (Ruling T3-22-c).
     fn quiet_message(&mut self, message: Msg) {
         match message {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
@@ -1100,7 +1192,10 @@ impl Owner {
             }
             Msg::CheckListed => self.release_check_token(),
             Msg::Connect(stream) => drop(stream),
-            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Stop => {}
+            Msg::Log(line) => self.store.log(&line),
+            Msg::Gone { client } => self.kill_command_of(client),
+            Msg::CommandDone { .. } => {}
+            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Stop => {}
         }
     }
 
@@ -1119,9 +1214,11 @@ impl Owner {
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
-    /// Cancels every running step and the running check, drops their results and waits for every step, recording,
-    /// eject and check the owner started (design part 3.5), then releases KeepAwake and closes every client.
+    /// Stops a running command (`stop_command`, Ruling T3-22-d), cancels every running step and the running check,
+    /// drops their results and waits for every step, recording, eject and check the owner started (design part 3.5),
+    /// writing the engine.log lines that come meanwhile, then releases KeepAwake and closes every client.
     fn shut_down(&mut self, inbox: &Receiver<Msg>) {
+        self.stop_command(NO_CLIENT);
         self.drive_stop.store(true, Ordering::SeqCst);
         for worker in &self.workers {
             worker.cancel.cancel();
@@ -1137,6 +1234,7 @@ impl Owner {
                     drop(self.parts.outbox.take(&job));
                 }
                 Ok(Msg::Ejected { .. }) => self.ejects = self.ejects.saturating_sub(1),
+                Ok(Msg::Log(line)) => self.store.log(&line),
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -1365,18 +1463,24 @@ impl Owner {
         self.commit(&id, None, state, actions, None, Some((arrival, job_dir)));
     }
 
-    /// Feeds `event` to `id`'s reducer; true when its transition was persisted (`commit`). A rejected event writes the
-    /// job.log line `rejected <event> in <state>`, changes nothing and gives false.
-    fn feed(&mut self, id: &str, event: Event, message: Option<String>) -> bool {
+    /// Feeds `event` to `id`'s reducer and says what came of it (`Fed`): a refused event writes the job.log line
+    /// `rejected <event> in <state>` and changes nothing.
+    fn feed(&mut self, id: &str, event: Event, message: Option<String>) -> Fed {
         let Some(job) = self.jobs.get(id) else {
-            return false;
+            return Fed::Rejected;
         };
         match reduce(&job.record.state, &event) {
-            Ok((new, actions)) => self.commit(id, Some(event), new, actions, message, None),
+            Ok((new, actions)) => {
+                if self.commit(id, Some(event), new, actions, message, None) {
+                    Fed::Persisted
+                } else {
+                    Fed::NotPersisted
+                }
+            }
             Err(rejected) => {
                 let line = format!("rejected {} in {}", event_tag(&event), rejected.state.as_str());
                 self.store.job_log(id, &line);
-                false
+                Fed::Rejected
             }
         }
     }
@@ -1455,6 +1559,8 @@ impl Owner {
         if new == State::Filed && record.state != State::Filed {
             record.filed_unix = Some(now);
         }
+        // Ruling W23: `unpersisted` keeps the message with an event it feeds again.
+        let given = message.clone();
         if new.is_waiting() || matches!(new, State::Failed { .. }) {
             // R22.8: an event that leaves the state as it was and brings no sentence keeps the state's message.
             if message.is_some() || record.state != new {
@@ -1488,12 +1594,13 @@ impl Owner {
                 }
                 self.give_back(id);
                 if transition.old.is_some() {
-                    self.unpersisted(id, &transition, &error);
+                    self.unpersisted(id, &transition, given, &error);
                 }
                 return None;
             }
         }
         self.kept.remove(id);
+        self.refeed.remove(id);
         lock(&self.shown).insert(id.to_string(), record.clone());
         if let Some(job) = self.jobs.get_mut(id) {
             job.record = record;
@@ -1517,14 +1624,17 @@ impl Owner {
     ///   so the job fails as Unknown, releases its promises, the token and its file-phase place, is notified, and can
     ///   be retried. The failure is written over the job's persisted record, since the lost transition's posted edits
     ///   went with it (RR1-16): a Retry resumes from what state.json held, so a title whose verification was lost is
-    ///   ripped again. A state with no failure row gets nothing: Planned and RipVerified wait for a restart (listed for
-    ///   pull request 3), a waiting, failed or held job can be retried or approved again, and an Ejected job's grant is
-    ///   undone in `grant_next`.
+    ///   ripped again. In a state with no failure row, Planned and RipVerified keep the event in `refeed`, and so does
+    ///   an Ejected job its FilePhaseSlot, whose grant `grant_next` also undoes, and its LookupPending, fed after a
+    ///   lookup round's end took the job out of the slot's queue (Ruling T3-20-b); each is fed again at its refeed
+    ///   timer (`on_refeed`) after `REFEED_MINUTES` until it persists (Ruling W23), and a job whose refeed timer is
+    ///   pending (`refeed_armed`) gets no second one (Ruling T3-20-a). A waiting, failed or held job gets nothing: it
+    ///   can be retried or approved again.
     /// - A transition into Failed, the failure itself (also the guard against feeding again), follows RR1-1: no state
     ///   is changed in memory and nothing is notified or published; the job keeps its persisted state, its promises are
     ///   released, it leaves its file-phase place, which is granted again, and engine.log says `<id>: keeps its
     ///   persisted state <state> until a restart resumes it`.
-    fn unpersisted(&mut self, id: &str, transition: &Transition, error: &io::Error) {
+    fn unpersisted(&mut self, id: &str, transition: &Transition, message: Option<String>, error: &io::Error) {
         if self.quiet.is_some() || self.stopping {
             return;
         }
@@ -1542,6 +1652,23 @@ impl Owner {
                 let into = transition.new.as_str();
                 let message = format!("the {what} transition into {into} could not be persisted: {error}");
                 self.feed(id, failure, Some(message));
+                return;
+            }
+            let Some(event) = transition.event.clone() else {
+                return;
+            };
+            let keeps = matches!(state, State::Planned { .. } | State::RipVerified { .. })
+                || event == Event::FilePhaseSlot
+                || (event == Event::LookupPending && state == State::Ejected { after_copy: false });
+            if keeps {
+                // Ruling W23: the timer before the line, so a test that sees the line finds the timer.
+                let tag = event_tag(&event);
+                self.refeed.insert(id.to_string(), (event, message));
+                if self.refeed_armed.insert(id.to_string()) {
+                    self.start_refeed(id);
+                }
+                let state = state.as_str();
+                self.store.log(&format!("{id}: keeps its persisted state {state}; {tag} is fed again in 1 minute"));
             }
             return;
         }
@@ -1605,7 +1732,7 @@ impl Owner {
                 if state.as_ref().is_some_and(|state| reduce(state, &event).is_ok()) {
                     self.slots.grant(&head);
                     let tag = event_tag(&event);
-                    let delivered = self.feed(&head, event, None);
+                    let delivered = self.feed(&head, event, None) == Fed::Persisted;
                     if self.stopping {
                         return;
                     }
@@ -1634,7 +1761,7 @@ impl Owner {
                 return;
             }
             self.slots.grant(&head);
-            let granted = self.feed(&head, Event::FilePhaseSlot, None);
+            let granted = self.feed(&head, Event::FilePhaseSlot, None) == Fed::Persisted;
             if self.stopping {
                 return;
             }
@@ -1729,24 +1856,25 @@ impl Owner {
     }
 
     /// Design part 5.8's promises released as steps finish: leaving Ripping releases the job's Rip promise, leaving
-    /// Remuxing its Remux promise, and a new Failed or waiting state releases both of its promises.
+    /// Remuxing its Remux promise, and a new Failed or waiting state releases both of its promises. The releases are
+    /// computed from the transition first (`released_steps`), and the promises are locked only when there is one, a
+    /// lock no check holds across share input and output (engine.md:584).
     fn release_promises(&self, id: &str, transition: &Transition) {
+        let released = released_steps(transition);
+        if released.is_empty() {
+            return;
+        }
         let mut promises = lock(&self.parts.promises);
-        if transition.old == Some(State::Ripping) && transition.new != State::Ripping {
-            promises.release(id, PromisedStep::Rip);
-        }
-        if transition.old == Some(State::Remuxing) && transition.new != State::Remuxing {
-            promises.release(id, PromisedStep::Remux);
-        }
-        if transition.new.is_waiting() || matches!(transition.new, State::Failed { .. }) {
-            promises.release(id, PromisedStep::Rip);
-            promises.release(id, PromisedStep::Remux);
+        for step in released {
+            promises.release(id, step);
         }
     }
 
     /// A return from a wait, or a Retry, runs no space check, so the promises of the state it returns to are rebuilt
     /// as at a restart (design parts 5.8, 5.10, Rulings S75, R25.c2: `rebuild_promises`), after `release_promises`
-    /// released what the job held when it started to wait or failed.
+    /// released what the job held when it started to wait or failed. `rebuild_promises` reads no share and no staged
+    /// file, so a stalled share never holds the owner thread here; a Remuxing job's Remux step replaces the estimate it
+    /// gives (engine.md:585, Ruling T3-17-a).
     fn promise_on_return(&self, id: &str, transition: &Transition) {
         let back = transition.old.as_ref().is_some_and(|old| old.is_waiting() || matches!(old, State::Failed { .. }));
         let (true, Some(job)) = (back, self.jobs.get(id)) else {
@@ -1836,13 +1964,25 @@ impl Owner {
         let _ = self.notifications.send(notification);
     }
 
-    /// StartTimer (design part 5.2): the timer sends `Msg::Timer` for the job.
+    /// StartTimer (design part 5.2): the timer sends `Msg::Timer` for the job. A refeed timer is `start_refeed`'s.
     fn start_timer(&self, id: &str, minutes: u32) {
         let (sender, job) = (self.sender.clone(), id.to_string());
         self.parts.timers.start(
             minutes,
             Box::new(move || {
                 let _ = sender.send(Msg::Timer { job });
+            }),
+        );
+    }
+
+    /// A refeed timer (Rulings W23, T3-20-a): after `REFEED_MINUTES` it sends `Msg::Refeed` for the job, never
+    /// `Msg::Timer`, so a refeed timer and a StartTimer timer are never taken for each other.
+    fn start_refeed(&self, id: &str) {
+        let (sender, job) = (self.sender.clone(), id.to_string());
+        self.parts.timers.start(
+            REFEED_MINUTES,
+            Box::new(move || {
+                let _ = sender.send(Msg::Refeed { job });
             }),
         );
     }
@@ -1946,16 +2086,18 @@ impl Owner {
     /// failure is fed with the message `cancelled by the owner`, then each waiting `cancel` gets its `ok` (design part
     /// 9.4, R-A7, S78), or, when that failure could not be persisted, the error `cancel_not_persisted` (review round 1,
     /// V1, RR1-4). A stale one is dropped with what its step posted (R-A7), unless a newer step of the job runs,
-    /// whose posts it must not take. Otherwise each posted event is fed, then the result's event. The posted edits
-    /// travel with them in `Job::edits` and land in the write of the first transition the report feeds, the one they
-    /// came with: `persist_transition` applies them to its copy of the record, so they reach the job's record only with
-    /// a persisted transition, and a transition that could not be persisted drops them before `unpersisted` feeds the
-    /// failure row (R22.3; the final review of review round 1, S1, RR1-16). Edits no transition took, because every
-    /// event was rejected or the step reported none, are dropped, so a panic's failure carries none. A result with no
-    /// event, from an action other than those that report none, writes `<tag> returned no event` to job.log, followed
-    /// by `: <message>` when it has one; then, unless another step of the job's current generation runs (one a posted
-    /// event handed out; a stale step does not count), a step that panicked fails its job (`panic_failure`, design
-    /// part 5.2) and any other gives the token back, since no step of the job runs any more (L2).
+    /// whose posts it must not take. Otherwise each posted event is fed, then the result's event; a posted event whose
+    /// transition was accepted but could not be persisted ends the report there, and neither a later posted event nor
+    /// the result's event is fed (RR1-16; Ruling W23). The posted edits travel with them in `Job::edits` and land in
+    /// the write of the first transition the report feeds, the one they came with: `persist_transition` applies them to
+    /// its copy of the record, so they reach the job's record only with a persisted transition, and a transition that
+    /// could not be persisted drops them before `unpersisted` feeds the failure row (R22.3; the final review of review
+    /// round 1, S1, RR1-16). Edits no transition took, because every event was rejected or the step reported none, are
+    /// dropped, so a panic's failure carries none. A result with no event, from an action other than those that report
+    /// none, writes `<tag> returned no event` to job.log, followed by `: <message>` when it has one; then, unless
+    /// another step of the job's current generation runs (one a posted event handed out; a stale step does not count),
+    /// a step that panicked fails its job (`panic_failure`, design part 5.2) and any other gives the token back, since
+    /// no step of the job runs any more (L2).
     fn step_done(&mut self, id: &str, generation: u64, result: StepResult) {
         self.log_panic(id, &result);
         let mut worker = self.finish_worker(id, generation);
@@ -1963,7 +2105,7 @@ impl Owner {
             if !self.workers.iter().any(|worker| worker.job == id) {
                 drop(self.parts.outbox.take(id));
             }
-            let persisted = self.feed(id, cancelled.event, Some(CANCELLED.to_string()));
+            let persisted = self.feed(id, cancelled.event, Some(CANCELLED.to_string())) == Fed::Persisted;
             for (client, request) in cancelled.replies {
                 let line = if persisted {
                     reply_ok(request, Value::Null)
@@ -1985,8 +2127,8 @@ impl Owner {
             job.edits = posted.edits;
         }
         for event in posted.first {
-            self.feed(id, event, None);
-            if self.stopping {
+            let fed = self.feed(id, event, None);
+            if self.stopping || fed == Fed::NotPersisted {
                 self.drop_edits(id);
                 return;
             }
@@ -2105,7 +2247,7 @@ impl Owner {
     /// A StartTimer timer ran out (design part 5.2). AwaitingLookup gets a lookup round, unless one runs (design part
     /// 8.3); a running round a `retry` started becomes the timer's, so its end starts the timer again. AwaitingNetwork
     /// gets NetworkRetry through `deliver`: a return to a disc-phase state waits for the token in its queue (design
-    /// part 5.4, way (d), L2).
+    /// part 5.4, way (d), L2). A refeed timer sends `Msg::Refeed` instead and never comes here (Ruling T3-20-a).
     fn on_timer(&mut self, id: &str) {
         let Some(job) = self.jobs.get(id) else {
             return;
@@ -2117,6 +2259,36 @@ impl Owner {
             State::AwaitingLookup { .. } => self.start_round(id),
             State::AwaitingNetwork { .. } => self.deliver(id, Event::NetworkRetry),
             _ => {}
+        }
+    }
+
+    /// A refeed timer ran out (Rulings W23, T3-20-a): the job's timer is no longer pending (`refeed_armed`), and its
+    /// kept event, if it still has one, is fed again (`feed_again`). An entry a persisted transition took out leaves
+    /// nothing to do, whatever state the job is in now.
+    fn on_refeed(&mut self, id: &str) {
+        self.refeed_armed.remove(id);
+        if let Some((event, message)) = self.refeed.remove(id) {
+            self.feed_again(id, event, message);
+        }
+    }
+
+    /// A kept event's timer ran out (Ruling W23). A FilePhaseSlot asks for the slot again, so the queue's order holds;
+    /// an event whose transition keeps the disc-phase token, SpaceOk into Ripping or Copying, goes through `deliver`,
+    /// which waits for the token (L2) and carries no message, as SpaceOk has none; any other event is fed with its
+    /// message, an Ejected job's LookupPending among them, a plain event and no slot grant (Ruling T3-20-b). A refusal
+    /// again keeps it for another timer through `unpersisted`.
+    fn feed_again(&mut self, id: &str, event: Event, message: Option<String>) {
+        if event == Event::FilePhaseSlot {
+            return self.grant_next();
+        }
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        match reduce(&job.record.state, &event) {
+            Ok((new, actions)) if keeps_token(&new, &actions) => self.deliver(id, event),
+            _ => {
+                self.feed(id, event, message);
+            }
         }
     }
 
@@ -2208,7 +2380,8 @@ impl Owner {
         self.parts.clients.send(client, line);
     }
 
-    /// One request (design part 9.4): answered here, or later by the step, check or shutdown it waits for (S78).
+    /// One request (design part 9.4): answered here, or later by the step, check, command or shutdown it waits for
+    /// (S78).
     fn on_request(&mut self, client: u64, id: Option<u64>, request: Request) {
         let answer = match request {
             Request::SettingsSet { changes } => return self.settings_set(client, id, changes),
@@ -2221,11 +2394,63 @@ impl Owner {
             Request::History { before } => history_page(&self.records(), before.as_deref())
                 .map(|page| serde_json::to_value(page).unwrap_or(Value::Null)),
             Request::Shutdown { force } => return self.shutdown(client, id, force),
-            Request::Command { .. } => Err(COMMAND_REFUSED.to_string()),
+            Request::Command { words } => return self.command(client, id, words),
             Request::ReviewAction { job, action, overrides } => self.review_action(&job, &action, overrides.as_ref()),
             Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
         };
         self.reply(client, id, answer);
+    }
+
+    /// `command` (design part 9.5; Rulings W24, W25): refused, in Ruling T3-22-b's order, while a command runs, when
+    /// the engine has no `lazymkvctl`, when a non-elevated process could write its folder, for words `child_words`
+    /// refuses and when the child cannot be started. Otherwise the owner starts the child through
+    /// `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority with no extra
+    /// environment (S43), keeps its kill handle, and hands it to the relay thread, whose `Msg::CommandDone` replies
+    /// (`on_message`).
+    fn command(&mut self, client: u64, id: Option<u64>, words: Vec<String>) {
+        if self.command.is_some() {
+            return self.reply(client, id, Err(COMMAND_BUSY.to_string()));
+        }
+        let Some(ctl) = self.parts.ctl.clone() else {
+            return self.reply(client, id, Err(COMMAND_NO_CTL.to_string()));
+        };
+        // A path with no folder is refused as one whose folder could be written.
+        if ctl.parent().is_none_or(|folder| self.parts.host.user_writable(folder)) {
+            return self.reply(client, id, Err(COMMAND_WRITABLE.to_string()));
+        }
+        let job = |job_id: &str| {
+            let titles = &self.jobs.get(job_id)?.record.titles;
+            let keys: Vec<String> = titles.iter().map(|title| title.key.clone()).collect();
+            Some((self.store.job_dir(job_id), keys))
+        };
+        let args = match child_words(&words, &job) {
+            Ok(args) => args,
+            Err(refusal) => return self.reply(client, id, Err(refusal)),
+        };
+        let spawn = Spawn { program: ctl, args, env: Vec::new(), below_normal: true };
+        match self.parts.env.processes.spawn(&spawn) {
+            Err(error) => self.reply(client, id, Err(not_started(&error))),
+            Ok(child) => {
+                self.command = Some(RunningCommand { client, id, kill: child.killer() });
+                let clients = Arc::clone(&self.parts.clients);
+                self.threads.push(spawn_relay(child, client, id, clients, self.sender.clone()));
+            }
+        }
+    }
+
+    /// Kills the running command's child when `client` runs it, as its client left (Ruling T3-22-c); the relay then
+    /// reports its end. A kill that fails is logged.
+    fn kill_command_of(&self, client: u64) {
+        if let Some(command) = self.command.as_ref().filter(|command| command.client == client) {
+            self.kill_command(command);
+        }
+    }
+
+    /// Kills `command`'s child; a kill that fails is logged (engine.log).
+    fn kill_command(&self, command: &RunningCommand) {
+        if let Err(error) = command.kill.kill() {
+            self.store.log(&format!("the command's lazymkvctl could not be killed: {error}"));
+        }
     }
 
     /// `settings_set` (design part 9.4, ENG-19): `changes` over the settings in force, one level deep, so an object
@@ -2295,11 +2520,15 @@ impl Owner {
         }
     }
 
-    /// `secret_set` (design part 9.4, S77): a name `is_secret_name` takes is stored through `SecretStore`, and a share
-    /// name joins the names the snapshot lists; the value is never echoed or logged.
+    /// `secret_set` (design part 9.4, S77; Ruling W12): a name `is_secret_name` takes is stored through `SecretStore`,
+    /// a share name's value only when `share_credential` reads it as a user name and a password on two lines, and a
+    /// share name joins the names the snapshot lists; the value is never echoed or logged.
     fn secret_set(&mut self, name: &str, value: &str) -> Result<Value, String> {
         if !is_secret_name(name) {
             return Err(not_a_secret(name));
+        }
+        if !SECRET_NAMES.contains(&name) {
+            share_credential(value).map_err(|shape| format!("{name} could not be stored: {shape}"))?;
         }
         self.parts.secrets.set(name, value).map_err(|error| format!("{name} could not be stored: {error}"))?;
         if !SECRET_NAMES.contains(&name) {
@@ -2632,12 +2861,14 @@ impl Owner {
         }
     }
 
-    /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, closes every client and stops. With a
-    /// step running and no `force`, it is refused naming the jobs. With `force`, each running step is cancelled as
-    /// `cancel` does, but a CheckSpace or Eject is let finish, and a running check is cancelled; the owner then waits
-    /// for every step (`quiet_message`) and ends in `finish_shutdown`. A pulled disc's killed step is not a running
-    /// step (M3, `is_running_step`; review round 1, V4, RR1-10): it is neither counted nor cancelled, so its job keeps
-    /// waiting for its disc, and the owner still waits for it and drops its result (`step_done`, `shut_down`).
+    /// `shutdown` (design part 3.8, S83). With no step running it replies `ok`, stops a running command
+    /// (`stop_command`, Ruling T3-22-d, after the `ok` as Ruling PF3-S21-22-4 says), closes every client and stops.
+    /// With a step running and no `force`, it is refused naming the jobs, and a running command goes on. With `force`,
+    /// a running command is stopped first, each running step is cancelled as `cancel` does, but a CheckSpace or Eject
+    /// is let finish, and a running check is cancelled; the owner then waits for every step (`quiet_message`) and ends
+    /// in `finish_shutdown`. A pulled disc's killed step is not a running step (M3, `is_running_step`; review round 1,
+    /// V4, RR1-10): it is neither counted nor cancelled, so its job keeps waiting for its disc, and the owner still
+    /// waits for it and drops its result (`step_done`, `shut_down`).
     fn shutdown(&mut self, client: u64, id: Option<u64>, force: bool) {
         // Read before the loop below bumps the generations, which would make a second worker of a job look stale.
         let running_step: Vec<bool> = self.workers.iter().map(|worker| self.is_running_step(worker)).collect();
@@ -2652,11 +2883,13 @@ impl Owner {
         running.dedup();
         if running.is_empty() {
             self.reply(client, id, Ok(Value::Null));
+            self.stop_command(client);
             return self.close_and_stop();
         }
         if !force {
             return self.reply(client, id, Err(steps_running(&running)));
         }
+        self.stop_command(client);
         if let Some(cancel) = &self.check_cancel {
             cancel.cancel();
         }
@@ -2703,15 +2936,32 @@ impl Owner {
         self.close_and_stop();
     }
 
-    /// Refuses every queued check, closes every client after what is queued for it, and stops the owner (design part
-    /// 3.8).
+    /// Stops a running command that `shutdown` has not stopped (`stop_command`), refuses every queued check, closes
+    /// every client after what is queued for it, and stops the owner (design part 3.8).
     fn close_and_stop(&mut self) {
+        self.stop_command(NO_CLIENT);
         for PendingCheck { client, id, .. } in std::mem::take(&mut self.checks) {
             self.reply(client, id, Err(STOPPING.to_string()));
         }
         self.parts.clients.close_all();
         self.stopping = true;
         self.drive_stop.store(true, Ordering::SeqCst);
+    }
+
+    /// A stop of the running command (Ruling T3-22-d): its child is killed, its `command` gets ipc_server's
+    /// `STOPPING`, and its client is closed, so a relay thread waiting on a client that never reads cannot hold the
+    /// stop. The client of the `shutdown` being answered, `asker`, is not closed here, since that would lose the
+    /// `shutdown`'s `ok`; `close_and_stop`'s `close_all` closes it after that `ok` (Ruling PF3-S21-22-4). `NO_CLIENT`
+    /// closes the command's client whoever it is. Nothing when no command runs.
+    fn stop_command(&mut self, asker: u64) {
+        let Some(command) = self.command.take() else {
+            return;
+        };
+        self.kill_command(&command);
+        self.reply(command.client, command.id, Err(STOPPING.to_string()));
+        if command.client != asker {
+            self.parts.clients.close(command.client);
+        }
     }
 
     /// Deletes `<root>/.lazymkv-partial/<id>-*.mkv.partial` in every library root of the engine's and the job's

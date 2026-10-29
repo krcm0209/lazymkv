@@ -137,13 +137,63 @@ fn a_drive_listing_finds_the_index_and_ignores_msg_5010() {
         &[("drive-list.txt", DRIVES.as_bytes())]);
     let out = scratch.0.join("job/drive-list.txt");
     fs::create_dir_all(out.parent().unwrap()).unwrap();
-    let listing = env.run(|ctx| list_drives(ctx, &program, false, "tok0", &out)).unwrap();
+    let listing = env.run(|ctx| list_drives(ctx, &program, false, "tok0", &out, None)).unwrap();
     assert_eq!(listing.index, Some(0));
     assert_eq!(listing.summary.drives.len(), 2);
     assert_eq!(listing.run.exit_code, Some(0));
     assert_eq!(fs::read(&out).unwrap(), DRIVES.as_bytes());
-    let other = env.run(|ctx| list_drives(ctx, &program, false, "tok1", &out)).unwrap();
+    let other = env.run(|ctx| list_drives(ctx, &program, false, "tok1", &out, None)).unwrap();
     assert_eq!(other.index, None);
+}
+
+/// Ruling W20 (S57 amended for the listings outside a job): a listing given a limit is killed once the limit passes
+/// with no final `MSG:5010`, and `past_limit` tells that kill from the exit wait's. The limit is 5 s, long enough for a
+/// freshly copied stand-in to start while the other tests run, as in `a_scan_past_its_limit_is_killed_and_fails_as_unknown`.
+#[test]
+fn a_listing_with_a_limit_is_killed_when_it_hangs() {
+    let scratch = Scratch::new("drive-list-limit");
+    let env = Env::new();
+    env.watchdog();
+    let program = stand_in(&scratch,
+        r#"{"responses":[{"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":1}]}"#,
+        &[("drive-list.txt", DRIVES.as_bytes())]);
+    let out = scratch.0.join("selftest/drive-list.txt");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let started = Instant::now();
+    let listing =
+        env.run(|ctx| list_drives(ctx, &program, false, "tok0", &out, Some(Duration::from_secs(5)))).unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(listing.past_limit);
+    assert!(listing.run.timed_out);
+    assert!(!listing.run.cancelled);
+    assert_eq!(listing.index, Some(0));
+    assert_eq!(fs::read_to_string(&out).unwrap(), format!("{}\n", DRIVES.lines().next().unwrap()));
+}
+
+/// S57 for a job's listing: with no limit, a listing that hangs before its final message is killed by no limit, the
+/// header limit included; here only the cancel, raised after 3 s, ends it.
+#[test]
+fn a_listing_without_a_limit_still_waits_for_its_final_message() {
+    let scratch = Scratch::new("drive-list-no-limit");
+    let mut env = Env::new();
+    env.limits.header = Duration::from_secs(1);
+    let program = stand_in(&scratch,
+        r#"{"responses":[{"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":1}]}"#,
+        &[("drive-list.txt", DRIVES.as_bytes())]);
+    let out = scratch.0.join("job/drive-list.txt");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let cancel = env.cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        cancel.cancel();
+    });
+    let started = Instant::now();
+    let listing = env.run(|ctx| list_drives(ctx, &program, false, "tok0", &out, None)).unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(listing.run.cancelled);
+    assert!(!listing.run.timed_out && !listing.past_limit);
 }
 
 #[test]
@@ -448,7 +498,7 @@ fn another_makemkvcon_running_fails_the_step_naming_it() {
     assert_eq!(scan_failure(&outcome), (UNKNOWN, "another MakeMKV process is running: makemkvcon64.exe".to_string()));
     assert!(!out.exists());
     let listed = env.run(|ctx| list_drives(ctx, &scratch.0.join(format!("tools/makemkvcon64{EXE}")), false, "tok0",
-        &scratch.0.join("job/drive-list.txt")));
+        &scratch.0.join("job/drive-list.txt"), None));
     let error = listed.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::ResourceBusy);
     assert_eq!(error.to_string(), "another MakeMKV process is running: makemkvcon64.exe");

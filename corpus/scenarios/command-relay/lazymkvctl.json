@@ -1,0 +1,6 @@
+{"responses":[
+ {"args_contain":["--relay-burst"],"stdout":"relay-burst.txt"},
+ {"args_contain":["--relay-hang"],"stdout":"relay-hang.txt","hang_after_line":1},
+ {"args_contain":["--relay-exit-3"],"stdout":"relay-plan-out.txt","stderr":"relay-plan-err.txt","exit_code":3},
+ {"args_contain":["decide","--rec"],"stdout":"relay-decide-out.txt"},
+ {"args_contain":["plan"],"stdout":"relay-plan-out.txt","stderr":"relay-plan-err.txt"}]}

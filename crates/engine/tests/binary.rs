@@ -1,15 +1,18 @@
-//! The PR 2 engine binary (design part 4.2, S28): it creates nothing and exits 1 with its OS's sentence.
+//! The engine binary (design parts 3.1, 4.2; S28; Rulings W1, W2, M7). Outside Windows it creates nothing and exits 1
+//! with S28's sentence. On Windows only its usage errors run here: a start would take the engine's mutex and pipe, so
+//! Task T3-23 tests the start through `native::run_with` with names of its own (`engine_native.rs`).
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn run_engine(data: &Path) -> (Option<i32>, String) {
+#[cfg(not(windows))]
+fn run_engine(data: &std::path::Path) -> (Option<i32>, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_lazymkv-engine")).arg("--data").arg(data).output().unwrap();
     (output.status.code(), String::from_utf8(output.stderr).unwrap())
 }
 
-fn absent_data() -> PathBuf {
+#[cfg(not(windows))]
+fn absent_data() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("lazymkv-engine-binary-{}", std::process::id()))
 }
 
@@ -18,14 +21,6 @@ fn absent_data() -> PathBuf {
 fn the_binary_refuses_to_run_outside_windows_in_this_version() {
     let data = absent_data();
     assert_eq!(run_engine(&data), (Some(1), "lazymkv-engine runs only on Windows in this version\n".to_string()));
-    assert!(!data.exists());
-}
-
-#[cfg(windows)]
-#[test]
-fn the_binary_has_no_windows_implementations_in_this_build() {
-    let data = absent_data();
-    assert_eq!(run_engine(&data), (Some(1), "lazymkv-engine has no Windows implementations in this build\n".to_string()));
     assert!(!data.exists());
 }
 
@@ -44,12 +39,34 @@ fn not_unicode() -> OsString {
     OsString::from_wide(&wide)
 }
 
-/// The binary reads its arguments lossily, as lazymkv-dev's and lazymkvctl's mains do, so a data folder whose name is
-/// not Unicode reaches `main_with` and exits 1 instead of panicking with exit 101 (ruling at the final review).
+/// The binary reads its arguments lossily, as lazymkv-dev's and lazymkvctl's mains do, so a word that is not Unicode
+/// reaches `main_with` instead of panicking with exit 101 (M7): outside Windows as a data folder, exit 1.
+#[cfg(not(windows))]
 #[test]
 fn an_argument_that_is_not_unicode_is_read_lossily() {
     let data = std::env::temp_dir().join(not_unicode());
     let output = Command::new(env!("CARGO_BIN_EXE_lazymkv-engine")).arg("--data").arg(&data).output().unwrap();
     assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(!data.exists());
+}
+
+/// M7 on Windows: the word reaches `run_with` as a word left over, a usage error that starts nothing.
+#[cfg(windows)]
+#[test]
+fn an_argument_that_is_not_unicode_is_read_lossily() {
+    let word = not_unicode();
+    let output = Command::new(env!("CARGO_BIN_EXE_lazymkv-engine")).arg(&word).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8(output.stderr).unwrap(),
+               "usage: lazymkv-engine [--data DIR]\nlazymkv-engine: error: unrecognized arguments: lazymkv-engine-\u{FFFD}\n");
+    assert!(!std::env::temp_dir().join(&word).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn an_unknown_argument_is_a_usage_error_exit_2() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lazymkv-engine")).arg("extra").output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8(output.stderr).unwrap(),
+               "usage: lazymkv-engine [--data DIR]\nlazymkv-engine: error: unrecognized arguments: extra\n");
 }

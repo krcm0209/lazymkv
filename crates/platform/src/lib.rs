@@ -1,4 +1,6 @@
-//! lazymkv-platform: the operating-system seams of spec 4.3 as traits, with in-memory fakes behind the `fakes` feature (design parts 4.1, 4.2). Pull request 2 holds no Windows API; the Windows implementations arrive in pull request 3.
+//! lazymkv-platform: the operating-system seams of spec 4.3 as traits (design parts 4.1, 4.2), their Windows
+//! implementations in `win` on `windows-sys` (`cfg(windows)`), the pure helpers they use, which every system tests, and
+//! in-memory fakes behind the `fakes` feature.
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,8 +14,50 @@ use lazymkv_core::job::Tool;
 #[cfg(feature = "fakes")]
 pub mod fakes;
 
+/// The Windows implementations of the platform traits and helpers; every `windows-sys` call of the workspace sits
+/// here (design parts 4.2, 4.3). Compiled only on Windows. Def: T3-1. Use: T3-2 to T3-16, T3-23.
+#[cfg(windows)]
+pub mod win;
+
+/// Phase 0's local-time text, from Unix milliseconds and an offset from Coordinated Universal Time (UTC), with no
+/// date-time crate (design part 4.6, R23.7). Compiled and tested on every system. Def: T3-7. Use: T3-7.
+pub mod localtime;
+
+/// The parts of design part 6.1 that need no Windows call, compiled and tested on every system (design part 4.2):
+/// the Credential Manager target of a secret (Ruling W13), the share and the volume of a root (S11), and the share
+/// connector's order of attempts (P7; Ruling W14). Def: T3-13; T3-14 adds the share connector. Use: T3-13, T3-14.
+pub mod shares;
+
+/// The parts of the `Ejector` that need no Windows call, compiled and tested on every system (design parts 4.2, 5.6
+/// step 8): the letter of a drive id and phase 0's eject report. `win::eject` makes the Windows calls.
+/// Def: T3-15. Use: T3-15.
+pub mod eject;
+
+/// The pure half of design part 4.2's drive watcher, compiled and tested on every system (Ruling W8): the drive id,
+/// the scan's filter, whether a volume answers, and the queue of arrivals and removals. `win::drives` makes the
+/// Windows calls. Def: T3-16. Use: T3-16.
+pub mod drives;
+
 mod process;
 pub use process::StdProcessGuard;
+
+/// The process runner the engine uses on this system (spec 4.3, design part 4.2; Ruling W7): `win::JobProcessGuard`
+/// on Windows, `StdProcessGuard` elsewhere. Def: T3-5. Use: T3-5 (testkit), T3-23.
+pub fn native_guard() -> Arc<dyn ProcessGuard> {
+    #[cfg(windows)]
+    {
+        Arc::new(win::JobProcessGuard)
+    }
+    #[cfg(not(windows))]
+    {
+        Arc::new(StdProcessGuard)
+    }
+}
+
+/// The pure security rules of design parts 3.2 to 3.5: the descriptor strings, the token verdict and the names.
+/// Def: T3-2. Use: T3-2, T3-3, T3-4, T3-11 to T3-14, T3-23, T3-24.
+pub mod security;
+pub use security::{MUTEX_NAME, PIPE_NAME};
 
 /// A change in the set of optical drives the machine holds (spec 4.3, design part 4.2): a disc arrived in `drive`,
 /// whose contents are readable under `root`, or the drive's disc went away. Def: T8. Use: T22, T25.
@@ -34,13 +78,20 @@ pub enum DriveEvent {
     },
 }
 
-/// Delivers disc arrivals and removals to the engine's drive thread (spec 4.3, design part 4.2).
-/// Def: T8. Use: T22, T25.
+/// Delivers disc arrivals and removals to the engine's drive thread (spec 4.3, design parts 4.2, 5.4). Drive ids are
+/// MakeMKV's `D:` form, the letter in upper case and a colon (engine.md:575). A disc counts as present once its volume
+/// answers: a disc whose volume does not answer is not listed and arrives through `next` once it answers, so it gets
+/// `drive_settle_s` and the readiness wait like any arrival, while a disc `present` lists is read at once (Ruling W8,
+/// engine.md:582). `ScriptedDrives` replays what a test scripts (Rulings T8-b, T8-f): an event a test queued before
+/// the engine started is reported although `present` lists its outcome. Def: T8, its promises T3-16. Use: T22, T25,
+/// T3-23.
 pub trait DriveWatcher: Send {
-    /// Waits up to `timeout` for the next event and returns it, or None when none came in that time.
+    /// Waits up to `timeout` for the next event and returns it, or None when none came in that time. It never reports
+    /// as `Arrived` a disc the last `present` listed until that drive's `Removed` (L1a).
     fn next(&mut self, timeout: Duration) -> Option<DriveEvent>;
-    /// The drives holding a disc right now, as (drive, root). The engine reads this at start (design part 4.2, L1),
-    /// before it drains any event, and does not rely on the order.
+    /// The drives holding a disc at the moment of the call, as (drive, root). Every event queued before the call is
+    /// dropped, since the list holds its outcome (L1a). The engine reads this at start (design part 4.2, L1), before it
+    /// drains any event, and does not rely on the order.
     fn present(&self) -> Vec<(String, PathBuf)>;
 }
 
@@ -120,8 +171,16 @@ pub trait ShareConnector: Send + Sync {
     fn reach(&self, root: &str) -> Reach;
     /// The free bytes on the volume holding `root`.
     fn free_bytes(&self, root: &str) -> io::Result<u64>;
-    /// An identifier of the volume holding `root`, equal for two roots on one volume (S11), or None when unknown.
+    /// An identifier of the volume holding `root`, equal for two roots on one volume (S11), or None when unknown. It answers
+    /// from the text of `root` alone, with no input or output, so the owner thread may call it (design part 6.1's rule,
+    /// engine.md:585).
     fn volume(&self, root: &str) -> Option<String>;
+    /// How the last successful `reach` of the share holding `root` got in: "local folder", "the session's access" or
+    /// "lazymkv's stored credential"; None before any, after a failed one, and for a connector that does not say.
+    /// For job.log's share access line (design parts 6.1, 7.1). Def: T3-14. Use: T3-17.
+    fn access(&self, _root: &str) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Holds the owner's secrets outside the settings files (spec 4.3, design part 4.2). Def: T8. Use: T26.
@@ -141,11 +200,20 @@ pub struct IpcStream {
     pub writer: Box<dyn Write + Send>,
 }
 
-/// The engine's end of the pipe: hands out one stream per client that connects (spec 4.3, design part 4.2).
-/// Def: T8. Use: T26.
+/// The engine's end of the pipe: hands out one stream per client that connects (spec 4.3, design parts 4.2, 4.4;
+/// Ruling W10). Def: T8, T3-10. Use: T26, T3-10, T3-11, T3-23.
 pub trait IpcTransport: Send + Sync {
-    /// Waits for the next client. Err when the transport is closed.
+    /// Waits for the next client (engine.md:581 (d); Ruling W10). Err by kind: `BrokenPipe` only once `close` ran, or
+    /// once no client can ever connect again (`MemoryIpc` with every connector dropped, Ruling T8-e), and it ends the
+    /// serve thread; `PermissionDenied` a refused client, its text `process <pid>: <verdict>`; `ConnectionAborted` a
+    /// client gone before its check; any other kind one failed accept, which the serve thread logs and retries after
+    /// `ACCEPT_PAUSE`. Only the transport's own client check returns `PermissionDenied` or `ConnectionAborted`: an
+    /// operating-system error of kind BrokenPipe, PermissionDenied or ConnectionAborted is returned as Other, with its
+    /// text kept, so it never reads as closed, refused or gone (Ruling PF3-S10-12-2).
     fn accept(&self) -> io::Result<IpcStream>;
+    /// Closes the transport: an `accept` waiting now and every later one return `BrokenPipe` (design part 3.8: on exit
+    /// the engine closes the pipe). Streams already handed out are not touched.
+    fn close(&self);
 }
 
 /// Why a client could not reach the engine (spec 4.3, design part 4.2). Def: T8. Use: T28.
@@ -153,7 +221,8 @@ pub trait IpcTransport: Send + Sync {
 pub enum ConnectError {
     /// Nothing listens on the pipe.
     NotRunning,
-    /// Something listens and turned the client away.
+    /// Something listens and turned the client away, or it is not an elevated process of the client's user and the
+    /// client turned it away (design part 3.3; Ruling W11).
     Refused,
     /// The pipe exists but only an elevated client may open it.
     NotElevated,
@@ -176,14 +245,20 @@ pub trait Autostart {
     fn remove(&self) -> Result<(), String>;
 }
 
-/// What the engine asks of the machine it runs on (spec 4.3, design part 4.2): the clock, the calendar date, MakeMKV's
-/// registration key and debug log, the running programs, a disc's label and where each tool is installed by default.
-/// Def: T8. Use: T11, T22.
+/// What the engine asks of the machine it runs on (spec 4.3, design part 4.2): the clock, the calendar date and the
+/// local time, MakeMKV's registration key and debug log, the running programs, a disc's label, where each tool is
+/// installed by default, and whether a non-elevated process of the user could write a path.
+/// Def: T8; T3-7 adds now_ms, local_time and user_writable. Use: T11, T22, T3-8, T3-9, T3-22, T3-23.
 pub trait Host: Send + Sync {
     /// The current time, in seconds since the Unix epoch.
     fn now_unix(&self) -> u64;
+    /// The current time in milliseconds since the Unix epoch (R23.7, Ruling W16).
+    fn now_ms(&self) -> u64;
     /// Today's local date as `yyyy-MM-dd`, the form phase 0's files keep (design part 4.6).
     fn local_date(&self) -> String;
+    /// The instant `unix_ms` as local time, `yyyy-MM-dd HH:mm:ss.fff`, under that instant's daylight-saving rule: the
+    /// form phase 0 wrote `started` in (design part 4.6, R23.7; scripts/phase0/rip-title.ps1:103).
+    fn local_time(&self, unix_ms: u64) -> String;
     /// MakeMKV's registration key, or None when none is set.
     fn makemkv_app_key(&self) -> Option<String>;
     /// MakeMKV's debug log, or None when the machine has none.
@@ -194,10 +269,14 @@ pub trait Host: Send + Sync {
     fn volume_label(&self, root: &Path) -> Option<String>;
     /// Where `tool` is installed by default on this machine, or None when it has no such place.
     fn default_install_path(&self, tool: Tool) -> Option<PathBuf>;
+    /// Whether a non-elevated process of the user could write `path` (design part 3.6, Ruling W17): for a folder, add a
+    /// file or a folder, delete a child, delete it, or change its access list or owner; for a file, write, append,
+    /// delete it, or change its access list or owner. True when it cannot be told.
+    fn user_writable(&self, path: &Path) -> bool;
 }
 
-/// Everything the engine takes from the operating system, in one bundle (spec 4.3, design part 4.2). Windows fills it
-/// in pull request 3 and the fakes fill it in tests. Def: T8. Use: T22.
+/// Everything the engine takes from the operating system, in one bundle (spec 4.3, design part 4.2). On Windows
+/// `engine::native` fills it from `win`; the fakes fill it in tests. Def: T8. Use: T22, T3-23.
 pub struct Platform {
     /// Disc arrivals and removals.
     pub drives: Box<dyn DriveWatcher>,
@@ -222,11 +301,13 @@ pub struct Platform {
 pub const TEMP_SUFFIX: &str = ".lazymkv-tmp";
 
 /// Writes `bytes` to `path` so that a reader sees the old file or the new one whole, never a part (design part 7.4,
-/// S13). It writes `<file name>.lazymkv-tmp` beside `path`, after removing one a crash left there, flushes it to disk
-/// with `sync_all`, and renames it over `path`. It creates no folders: a missing parent gives
-/// `ErrorKind::NotFound`, because each caller owns its folder layout (Ruling T9-c). A path with no file name gives
-/// `ErrorKind::InvalidInput`. Pull request 3 swaps in `FlushFileBuffers` with
-/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`. Def: T9. Use: T21 to T26.
+/// S13). It writes `<file name>.lazymkv-tmp` beside `path`, after removing one a crash left there, flushes it with
+/// `sync_all` (`FlushFileBuffers` on Windows), and puts it in place of `path`. On Windows that is
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, tried again while the target is held open
+/// (os errors 5, 32 and 33; 10 tries, 10 ms apart, Ruling T3-4-a), and the last error comes back with its raw code,
+/// which the store's state.json retry reads (RR1-2); elsewhere it is `std::fs::rename`. It creates no folders: a
+/// missing parent gives `ErrorKind::NotFound`, because each caller owns its folder layout (Ruling T9-c). A path with no
+/// file name gives `ErrorKind::InvalidInput`. Def: T9; T3-4 swaps in `MoveFileExW` on Windows. Use: T21 to T26.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
@@ -242,33 +323,38 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(&temp, path)
+    #[cfg(windows)]
+    {
+        win::move_replacing(&temp, path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&temp, path)
+    }
 }
 
 /// Moves `from` to `to` and fails with `ErrorKind::AlreadyExists` when `to` is there, so a finished file is never
-/// overwritten (design part 6.5, S13). It is `hard_link` then `remove_file`: `hard_link` refuses an existing `to` and
-/// that error comes back unchanged. Pull request 3 swaps in `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` or
-/// `MOVEFILE_COPY_ALLOWED`. Def: T9. Use: T24.
+/// overwritten (design part 6.5, LIB-8, S13). On Windows it is one `MoveFileExW(from, to, 0)`: without
+/// `MOVEFILE_REPLACE_EXISTING` an existing `to` fails with os error 80 or 183, and without `MOVEFILE_COPY_ALLOWED` a
+/// move to another volume fails with os error 17 instead of copying, so within a share it is the server's rename.
+/// Elsewhere, where only the Linux and macOS CI runs use it, it is `hard_link` then `remove_file`, which is not atomic:
+/// a stop between the two leaves both names on one file, which File then finishes (design part 6.5).
+/// Def: T9; T3-4 swaps in `MoveFileExW` on Windows. Use: T24, T26, T3-14.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-    std::fs::hard_link(from, to)?;
-    std::fs::remove_file(from)
+    #[cfg(windows)]
+    {
+        win::move_no_replace(from, to)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::hard_link(from, to)?;
+        std::fs::remove_file(from)
+    }
 }
 
 #[cfg(test)]
-pub(crate) mod testutil {
-    use std::path::PathBuf;
-
-    /// A fresh, empty directory under the system temporary folder.
-    pub fn temp_dir(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("lazymkv-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-}
+#[allow(dead_code)] // ci_factor, skip and cue serve the Windows tests, so the other systems never call them
+mod testutil;
 
 #[cfg(test)]
 mod tests {

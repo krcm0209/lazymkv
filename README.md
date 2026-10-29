@@ -24,8 +24,11 @@ rulings and what may still be overturned, what is left for phase 2 and how many 
 direct-mode engine
 ([`docs/superpowers/specs/2026-10-21-phase-2-engine-design.md`](docs/superpowers/specs/2026-10-21-phase-2-engine-design.md)),
 with a developer mode that keeps every rip's evidence for tuning. Its second pull request runs a whole job on stand-in
-tools on any OS, from a disc's arrival to a filed placeholder file, with no disc, no network and no Windows API;
-[`docs/phase2/engine.md`](docs/phase2/engine.md) says how to run it and how many tests there are.
+tools on any OS, from a disc's arrival to a filed placeholder file, with no disc and no network. Its third adds the
+Windows pieces: the engine binary behind its mutex and protected named pipe, `lazymkvctl`'s pipe client, the share
+connection, Credential Manager secrets and the desktop task script, so on Windows the same job runs through the real
+pipe and the Job Object runner; [`docs/phase2/engine.md`](docs/phase2/engine.md) says how to run them and how many
+tests there are.
 
 Installing (planned; decision D17): one installer carries every tool the app needs except MakeMKV: mkvmerge and
 ffmpeg/ffprobe, and the ocrs OCR engine compiled in with its models (decision D22); nothing is downloaded at run time.
@@ -34,32 +37,34 @@ install.
 
 ## Layout
 
-- `crates/` - the Rust workspace: `capture` (records tool output with timing, snapshots a disc, ejects),
-  `fake-tools` (the stand-in for `makemkvcon`, `mkvmerge`, `ffprobe`, `ffmpeg` and `java`, chosen by its file name,
-  which replays a scenario's responses, and every test that runs it), `core` (the decision rules, with no I/O:
-  the robot-output parser and the typed disc model, identification, the title planner, the audio and subtitle track
-  rules, the namer, the verification of a rip, confidence and disposition, the job state reducer, the persisted job and
-  drive records and the IPC messages, the `makemkvcon` line reader, and phase 0's track reconciler, audio content rule
-  and subtitle text rule) and `dev`, the `lazymkv-dev` binary that runs them over recordings (`plan` and `decide`, scan
-  summaries, track comparison, the tuning-dataset harness `retune` for audio and, with `--subtitles`, for subtitles, the
-  audio and subtitle labels, the phase 0 readers, the goldens), and phase 2's `platform` (the operating-system traits,
-  with in-memory fakes), `tools` (the `makemkvcon`, `mkvmerge` and `ffprobe` drivers, their recorded runs and the disc
-  snapshot's file input and output), `clients` (TheDiscDB and TMDb behind an HTTP transport, replayed from recorded
-  answers in tests), `engine` (the `lazymkv-engine` job owner, its persistence and its IPC server) and `ctl`
-  (`lazymkvctl`: the local `plan`, `decide` and `retune`, and the engine commands). Tests:
-  `cargo test --workspace`; with the evidence clone at `corpus/owner/` they also compare the Rust with the goldens
-  phase 0's Python wrote, and without it those
-  comparisons print `skipped: ...` and pass. The port was built and tested on the mini PC (Windows) during the
-  port; the CI workflow (`.github/workflows/ci.yml`) then built and tested it on Linux, macOS and Windows runners,
-  all green (run 38910414789 on cec66c1), so the cfg(unix) code (runner.rs's signal exit status, audio_report.rs's
-  symlink test, the `date` clock path, the Unix-only assertions in align.rs, ocr_compare.rs and labels/tests.rs) has
-  compiled and run. The decision core's tests, where each part is tested and how many tests there are, are in
+- `crates/` - the Rust workspace: `capture` (records tool output with timing, snapshots a disc, ejects), `fake-tools`
+  (the stand-in for `makemkvcon`, `mkvmerge`, `ffprobe`, `ffmpeg` and `java`, chosen by its file name, which replays a
+  scenario's responses, and every test that runs it), `core` (the decision rules, with no I/O: the robot-output parser
+  and the typed disc model, identification, the title planner, the audio and subtitle track rules, the namer, the
+  verification of a rip, confidence and disposition, the job state reducer, the persisted job and drive records and the
+  IPC messages, the `makemkvcon` line reader, and phase 0's track reconciler, audio content rule and subtitle text rule)
+  and `dev`, the `lazymkv-dev` binary that runs them over recordings (`plan` and `decide`, scan summaries, track
+  comparison, the tuning-dataset harness `retune` for audio and, with `--subtitles`, for subtitles, the audio and
+  subtitle labels, the phase 0 readers, the goldens), and phase 2's `platform` (the operating-system traits, their
+  Windows implementations and in-memory fakes), `tools` (the `makemkvcon`, `mkvmerge` and `ffprobe` drivers, their
+  recorded runs and the disc snapshot's file input and output), `clients` (TheDiscDB and TMDb behind an HTTP transport,
+  replayed from recorded answers in tests), `engine` (the `lazymkv-engine` job owner, its persistence, its IPC server,
+  its Windows start-up and the `command` relay) and `ctl` (`lazymkvctl`: the local `plan`, `decide` and `retune`, and
+  the engine commands, over the named pipe on Windows). Tests: `cargo test --workspace`; with the evidence clone at
+  `corpus/owner/` they also compare the Rust with the goldens phase 0's Python wrote, and without it those comparisons
+  print `skipped: ...` and pass. The port was built and tested on the mini PC (Windows) during the port; the CI workflow
+  (`.github/workflows/ci.yml`) then built and tested it on Linux, macOS and Windows runners, all green (run 38910414789
+  on cec66c1), so the cfg(unix) code (runner.rs's signal exit status, audio_report.rs's symlink test, the `date` clock
+  path, the Unix-only assertions in align.rs, ocr_compare.rs and labels/tests.rs) has compiled and run. The decision
+  core's tests, where each part is tested and how many tests there are, are in
   [`docs/phase1/decision-core.md`](docs/phase1/decision-core.md), and phase 2's in
   [`docs/phase2/engine.md`](docs/phase2/engine.md).
-- `scripts/phase0/` - the PowerShell jobs that run on the ripping machine, and the Mac's shell helpers that sync,
-  start and wait for them and pull their recordings. Phase 0's Python analyses are now `crates/core` and
-  `lazymkv-dev`; [`docs/phase1/rust-port-tests.md`](docs/phase1/rust-port-tests.md) maps each of their tests to
-  its Rust port.
+- `scripts/` - `box.sh`, which mirrors the working tree to the mini PC and runs one command there; `engine-task.ps1`,
+  which copies the engine into `C:\lazymkv\run` and starts it as the desktop task `lazymkv-engine`; and `phase0/`, the
+  PowerShell jobs that run on the ripping machine (`platform-ignored.ps1` among them, the desktop-session run of the
+  platform's ignored tests) and the Mac's shell helpers that sync, start and wait for them and pull their recordings.
+  Phase 0's Python analyses are now `crates/core` and `lazymkv-dev`;
+  [`docs/phase1/rust-port-tests.md`](docs/phase1/rust-port-tests.md) maps each of their tests to its Rust port.
 - `corpus/` - recordings: pinned public scan logs, TheDiscDB's API answers and replay scenarios. The owner's
   recordings (MakeMKV scans and rip logs of the owner's discs, probe output, TheDiscDB and TMDb answers) are the private
   evidence repository [`lazymkv-evidence`](https://github.com/krcm0209/lazymkv-evidence), cloned at `corpus/owner/`

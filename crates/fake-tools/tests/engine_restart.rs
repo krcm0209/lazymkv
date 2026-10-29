@@ -187,8 +187,9 @@ fn a_restart_after_a_late_answer_decides_with_the_refreshed_identity() {
 
 #[test]
 fn a_rebuilt_remux_promise_counts_against_another_jobs_rip_check() {
-    // One volume for staging and the library. A's rip check needs 4301 + 4301 (S54) and passes; after the restart in
-    // Remuxing, A's rebuilt Remux promise is write_bytes_needed(16) = 17, so B's identical check needs 8619 > 8610.
+    // One volume for staging and the library. A's rip check needs 4301 + 4301 (S54) and passes; A's Remux step,
+    // resumed at the restart, replaces the rebuilt estimate with write_bytes_needed(16) = 17 (`refine_remux_promise`,
+    // engine.md:585); B's identical check needs more than 8610 with either figure, 8619 with 17.
     let h = harness(&["movie-direct", "movie-direct-remux-hang"], settings());
     let (staging, movies) = (h.staging().to_str().unwrap().to_string(), h.library().to_str().unwrap().to_string());
     h.shares().same_volume(&staging, &movies);
@@ -202,6 +203,38 @@ fn a_rebuilt_remux_promise_counts_against_another_jobs_rip_check() {
     h.insert("tok0", "disc-b");
     h.wait("B waits for space", |h| h.job_ids().iter().any(|id| *id != a && h.state_of(id) == "AwaitingSpace"));
     assert_eq!(h.state_of(&a), "Remuxing");
+}
+
+/// engine.md:590 (V7): a restart into Remuxing runs DeletePartialFile and Remux, and each asks `reach` of the title's
+/// library root before it touches the share, so with the share not answering nothing there is deleted or written and
+/// Remux fails naming the share and the way out.
+#[test]
+fn a_restart_into_remuxing_with_the_library_share_unreachable_fails_remux_without_writing() {
+    let h = harness(&["movie-direct"], settings());
+    h.insert("tok0", DISC);
+    h.run_until("Remuxing");
+    let id = only_job(&h);
+    let library = root(h.library());
+    let partial = h.library().join(".lazymkv-partial").join(format!("{id}-t00-00800.mkv.partial"));
+    fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    fs::write(&partial, b"sentinel").unwrap();
+    h.shares().set_reach(&library, Reach::Unreachable("cable out".into()));
+    h.restart();
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    let record = state_json(&h.job_dir(&id));
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    let why = format!(
+        "t00-00800: the library share holding {library} does not answer (cable out); the remux was not started, and a \
+         retry once the share answers runs it"
+    );
+    assert_eq!(record.message.as_deref(), Some(why.as_str()));
+    assert_eq!(fs::read(&partial).unwrap(), b"sentinel");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    let kept = format!(
+        "t00-00800: the library share holding {library} does not answer (cable out); the partial file {} was not deleted",
+        partial.display()
+    );
+    assert!(log.contains(&kept), "{log}");
 }
 
 #[test]
@@ -260,8 +293,11 @@ fn a_restart_in_verified_with_another_size_at_the_final_path_fails_as_unknown() 
     assert_eq!(fs::read(final_path(&h)).unwrap(), b"abc");
 }
 
+/// Off Windows only (S13): there `rename_no_replace` is a hard link then a remove, and on Windows one `MoveFileExW`,
+/// so the half state cannot arise there and a hard link at the final path is a collision (Ruling T3-4-b).
 /// Design part 6.5 with `rename_no_replace`'s two steps (hard link, then remove): a stop between them leaves both names
 /// on one file, and File after the restart removes the partial name and records the filed file, with no collision.
+#[cfg(not(windows))]
 #[test]
 fn a_restart_after_a_rename_stopped_between_link_and_remove_finishes_it() {
     let h = harness(&["movie-direct"], settings());
@@ -562,4 +598,175 @@ fn awaiting_lookup_recreates_its_timer() {
     let fired = transitions(&dir).pop().unwrap();
     assert!(matches!(fired.old, Some(State::AwaitingLookup { .. })));
     assert!(matches!(fired.event, Some(Event::LookupPending | Event::LookupAnswered)));
+}
+
+// ---- Unpersisted transitions (review round 1, V1, RR1-16; Ruling W23) ----
+
+/// The ID of the first job of the base scenario's disc.
+fn first_job(h: &Harness) -> String {
+    format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase())
+}
+
+/// RR1-16 (engine.md:593; Ruling W23): with no Java and a profile MakeMKV rejects, RunScan posts ToolMissing { Java }
+/// and the fallback's `record.profile`, then reports ScanDone. When ToolMissing's transition and the failure fed in its
+/// place both cannot be persisted, the report stops there: ScanDone is not fed, so no Scanned is persisted with the
+/// job profile while scan.txt came from the fallback.
+#[test]
+fn a_lost_tool_missing_java_stops_the_report_before_scan_done() {
+    use lazymkv_core::job::Tool;
+    let h = harness(&["movie-direct", "movie-direct-fallback"], json!({"keep_tuning_evidence": false,
+        "drive_settle_s": 0, "drive_ready_timeout_s": 1, "tool_paths": {"java": null}}));
+    h.refuse_persists(|_, transition| {
+        transition.event == Some(Event::ToolMissing { tool: Tool::Java }) || matches!(transition.new, State::Failed { .. })
+    });
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Fingerprinted until a restart resumes it");
+    h.wait("the lost ToolMissing's failure kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    let lines = h.transitions(&id);
+    assert!(lines.iter().all(|line| line.event != Some(Event::ScanDone)), "ScanDone was fed: {lines:?}");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Fingerprinted);
+    assert_eq!(record.profile, "job.mmcp.xml");
+    assert!(h.job_dir(&id).join("fallback.mmcp.xml").is_file(), "the fallback scan ran");
+}
+
+/// V1 (engine.md:592; Ruling W23): CheckSpace's SpaceOk in Planned, a state with no failure row, whose transition
+/// cannot be persisted is kept and fed again at a one-minute timer, again after each refusal, until it persists; the
+/// job then rips and files as usual.
+#[test]
+fn a_planned_job_whose_next_transition_failed_to_persist_moves_on_at_the_retry_timer() {
+    let h = harness(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::SpaceOk));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Planned; SpaceOk is fed again in 1 minute");
+    h.wait("SpaceOk kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.state_of(&id), "Planned");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.fire_timers();
+    h.wait("SpaceOk kept again", |h| h.engine_log().matches(&kept).count() == 2);
+    assert_eq!(h.state_of(&id), "Planned");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("SpaceOk persisted", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::SpaceOk)));
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::SpaceOk)).unwrap();
+    let planned = State::Planned { mode: lazymkv_core::plan::Mode::Direct };
+    assert_eq!((fed.old, fed.new), (Some(planned), State::Ripping));
+    h.run_until("Filed");
+}
+
+/// V1 (engine.md:592; Ruling W23): Eject's Ejected in RipVerified, a state with no failure row, whose transition cannot
+/// be persisted is kept and fed again at the one-minute timer; the disc is not ejected a second time.
+#[test]
+fn a_rip_verified_job_moves_on_at_the_retry_timer() {
+    let h = harness(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::Ejected));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state RipVerified; Ejected is fed again in 1 minute");
+    h.wait("Ejected kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.state_of(&id), "RipVerified");
+    assert_eq!(h.timers().pending(), vec![1]);
+    assert_eq!(h.ejector().calls(), vec!["tok0".to_string()]);
+    h.allow_persists();
+    h.fire_timers();
+    h.run_until("Filed");
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::Ejected)).unwrap();
+    assert_eq!((fed.old, fed.new), (Some(State::RipVerified { after_copy: false }), State::Ejected { after_copy: false }));
+    assert_eq!(h.ejector().calls(), vec!["tok0".to_string()]);
+}
+
+/// V1 (engine.md:592; Ruling W23): an Ejected job's FilePhaseSlot whose transition cannot be persisted goes back into
+/// the slot's queue (review round 1) and is granted again at the one-minute timer, with no other job's transition,
+/// lookup round, `settings_set` or restart needed.
+#[test]
+fn an_ejected_jobs_slot_grant_is_persisted_at_the_retry_timer() {
+    let h = harness(&["movie-direct"], settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::FilePhaseSlot));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Ejected; FilePhaseSlot is fed again in 1 minute");
+    h.wait("FilePhaseSlot kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.state_of(&id), "Ejected");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.run_until("Filed");
+    let granted = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::FilePhaseSlot)).unwrap();
+    assert_eq!((granted.old, granted.new), (Some(State::Ejected { after_copy: false }), State::Inspecting));
+}
+
+/// Ruling T3-20-a: a refeed timer sends its own message. A's FilePhaseSlot is refused and kept with a refeed timer,
+/// then B's Ejected grants A the slot, which takes A's entry out while that timer is still pending; A then reaches
+/// AwaitingLookup with its hourly timer. The refeed timer running out finds no entry and does nothing: no lookup round
+/// starts, so no transition follows, and only the hourly timer stays pending, one chain as spec 10.1 retries hourly.
+#[test]
+fn a_refeed_timer_whose_entry_a_later_grant_took_out_starts_no_lookup_round() {
+    use lazymkv_engine::testkit::StepScript;
+    use lazymkv_engine::StepResult;
+    fn ok(event: Event) -> StepScript {
+        StepScript::Result(StepResult { event: Some(event), message: None })
+    }
+    let disc_phase = || {
+        vec![
+            ("RunScan", ok(Event::ScanDone)),
+            ("Plan", ok(Event::PlanDone { mode: lazymkv_core::plan::Mode::Direct })),
+            ("CheckSpace", ok(Event::SpaceOk)),
+            ("RipTitle", ok(Event::TitleRipped)),
+            ("VerifyFile", ok(Event::TitleVerified { last: true })),
+            ("Eject", ok(Event::Ejected)),
+        ]
+    };
+    let mut steps = disc_phase(); // A's disc phase
+    steps.extend(disc_phase()); // B's disc phase
+    steps.extend([("Probe", ok(Event::ProbeDone)), ("Decide", ok(Event::LookupPending))]); // A's file phase
+    let h = Harness::new_scripted(steps, settings());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::FilePhaseSlot));
+    h.insert("tok0", DISC);
+    let a = first_job(&h);
+    let kept = format!("{a}: keeps its persisted state Ejected; FilePhaseSlot is fed again in 1 minute");
+    h.wait("A's FilePhaseSlot kept", |h| h.engine_log().contains(&kept));
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.insert("tok1", "disc-b");
+    h.wait("A in AwaitingLookup", |h| h.state_of(&a) == "AwaitingLookup");
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![1, 60], "the refeed timer outlives A's entry");
+    let before = h.transitions(&a).len();
+    h.timers().fire_lasting(1);
+    h.settle();
+    let lines = h.transitions(&a);
+    assert_eq!(lines.len(), before, "a lookup round ran: {:?}", lines.last());
+    assert_eq!(h.timers().pending(), vec![60]);
+    assert_eq!(h.state_of(&a), "AwaitingLookup");
+}
+
+/// Ruling T3-20-b: a lookup round's end takes an Ejected job with a lookup still pending out of the slot's queue and
+/// feeds LookupPending. When that transition cannot be persisted, the event is kept with its waiting message and fed
+/// again at the one-minute refeed timer, so the job reaches AwaitingLookup; its hourly timer's round answers, and the
+/// job files.
+#[test]
+fn an_ejected_jobs_refused_lookup_pending_is_kept_and_fed_again_at_the_retry_timer() {
+    let h = harness(&["movie-direct", "movie-direct-lookup-later"], settings());
+    h.scan_waits_for_lookups(false);
+    h.refuse_persists(|_, transition| transition.event == Some(Event::LookupPending));
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    let kept = format!("{id}: keeps its persisted state Ejected; LookupPending is fed again in 1 minute");
+    h.wait("LookupPending kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.state_of(&id), "Ejected");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupPending)).unwrap();
+    assert_eq!(fed.old, Some(State::Ejected { after_copy: false }));
+    assert!(h.record(&id).message.is_some(), "the waiting message is fed again with the kept event");
+    h.fire_timers();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
 }

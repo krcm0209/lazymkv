@@ -1,6 +1,7 @@
 //! lazymkv-ctl: lazymkvctl's commands. plan, decide and retune run locally through lazymkv_dev::dispatch; the rest go to the engine over IPC (design parts 4.1, 9.5, 9.6).
 
 use lazymkv_dev::evidence::{default_spec, Ctx};
+use lazymkv_dev::forms::read_forms;
 use lazymkv_dev::{Args, COMMANDS};
 use lazymkv_platform::IpcConnector;
 use std::io::{Read, Write};
@@ -8,12 +9,13 @@ use std::path::PathBuf;
 
 mod engine_cmds;
 
-/// What lazymkvctl reads and writes: the dev context, the engine connector (None in PR 2's binary, S38), and the
-/// three streams (design parts 9.5, 9.6). Def: T27. Use: T27, T28.
+/// What lazymkvctl reads and writes: the dev context, the engine connector (the named pipe's client on Windows, design
+/// part 3.3; None on Linux and macOS, S38), and the three streams (design parts 9.5, 9.6). Def: T27, T3-12.
+/// Use: T27, T28, T3-12.
 pub struct Env<'a> {
     /// The working folder, environment and runner that the local commands run over.
     pub ctx: &'a Ctx,
-    /// The way to the engine; None when the build has no transport, which is every build in PR 2.
+    /// The way to the engine; None when the build has no transport, as on Linux and macOS (S38).
     pub connector: Option<&'a dyn IpcConnector>,
     /// Standard input, which `secret set` reads its value from.
     pub stdin: &'a mut dyn Read,
@@ -102,43 +104,6 @@ pub fn run(argv: &[String], env: Env) -> i32 {
 pub(crate) fn argument_error(err: &mut dyn Write, name: &str, message: &str) -> i32 {
     let _ = writeln!(err, "lazymkvctl {name}: error: {message}");
     2
-}
-
-/// What `--job` and `--jobs` took out of a local command's words, and the words left for dev's parser; `--title`
-/// is only checked, since the engine form sends the words unchanged (T28-g).
-struct Forms {
-    job: Option<String>,
-    jobs: bool,
-    words: Vec<String>,
-}
-
-/// Takes `--job`, `--jobs` and `--title` out of `rest` and checks which of them `name` allows (Ruling S87). Err is the
-/// text of an argument error.
-fn read_forms(name: &str, rest: &[String]) -> Result<Forms, String> {
-    let mut args = Args::new(rest, &["--job", "--jobs", "--title"]);
-    let job = args.flag("--job")?;
-    let jobs = args.switch("--jobs");
-    let title = args.flag("--title")?;
-    let words = args.rest()?;
-    if name == "retune" {
-        if job.is_some() {
-            return Err("argument --job: not allowed with retune; use --jobs".to_string());
-        }
-    } else if jobs {
-        return Err("argument --jobs: only with retune".to_string());
-    }
-    if title.is_some() && job.is_none() {
-        return Err("argument --title: only with --job".to_string());
-    }
-    if job.is_some() {
-        match (name, &title) {
-            ("decide", None) => return Err("argument --title: required with decide --job".to_string()),
-            ("decide", Some(_)) => {}
-            (_, Some(_)) => return Err(format!("argument --title: not allowed with {name}")),
-            (_, None) => {}
-        }
-    }
-    Ok(Forms { job, jobs, words })
 }
 
 /// A command of `LOCAL_COMMANDS` (`argv[0]`): with no `--job` and no `--jobs` it runs through lazymkv-dev's

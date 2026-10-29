@@ -60,7 +60,10 @@ use crate::file_phase::{
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
 use crate::selftest::MakeMkv;
-use crate::space::{planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises};
+use crate::space::{
+    make_root, planned_remux_promise, refine_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check,
+    Promises,
+};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -163,6 +166,7 @@ fn add_collision(record: &mut JobRecord, path: String) {
 
 /// Whether `a` and `b` name one file, as both names of a rename stopped between its hard link and its remove do: both
 /// are files of equal size and modification time (design part 6.5).
+#[cfg(not(windows))]
 fn one_file(a: &Path, b: &Path) -> bool {
     match (fs::metadata(a), fs::metadata(b)) {
         (Ok(a), Ok(b)) => {
@@ -174,6 +178,7 @@ fn one_file(a: &Path, b: &Path) -> bool {
 }
 
 /// The message of a rename whose hard link was made and whose remove of the partial name failed (design part 6.5).
+#[cfg(not(windows))]
 fn half_done(partial: &Path, target: &str, error: &io::Error) -> String {
     format!("{target} holds the filed file, but the partial file {} could not be removed: {error}", partial.display())
 }
@@ -279,6 +284,73 @@ pub(crate) fn next_attempt_dir(title_dir: &Path) -> PathBuf {
         })
         .unwrap_or(0);
     title_dir.join(format!("attempt-{}", highest + 1))
+}
+
+/// The folder of the job folder the Fingerprint step snapshots into before it compares fingerprints (engine.md:587,
+/// review round 1's V10). Def: T3-18. Use: T3-18.
+pub(crate) const FRESH_SNAPSHOT: &str = "fingerprint.lazymkv-new";
+
+/// `path` removed, a folder with everything in it and anything else as a file; a missing one is not an error.
+fn remove_entry(path: &Path) -> io::Result<()> {
+    let removed = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    }
+}
+
+/// The Fingerprint step's recording (design part 5.4 step 2; engine.md:587): `tools::snapshot` of the disc at `root`
+/// into `<job_dir>/FRESH_SNAPSHOT`, which a crash may have left and is removed first; on the job's `fingerprint`,
+/// `files.json`, `nav` and `meta.json` replace the job folder's own, and `FRESH_SNAPSHOT` is removed. On any other
+/// outcome the job folder's snapshot is untouched and `FRESH_SNAPSHOT` is removed. Err is the step's message:
+/// `the disc's recording could not be written: <error>` (the snapshot, or a leftover that cannot be removed),
+/// `the disc's fingerprint <found or "none"> differs from the job's <fingerprint>`, or `the disc's recording could not
+/// be put in place: <error>` (the swap). Def: T3-18. Use: T3-18.
+pub(crate) fn snapshot_aside(
+    root: &Path,
+    label: &str,
+    job_dir: &Path,
+    captured_unix: u64,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let fresh = job_dir.join(FRESH_SNAPSHOT);
+    let unwritten = |error: io::Error| format!("the disc's recording could not be written: {error}");
+    remove_entry(&fresh).map_err(unwritten)?;
+    // A removal that fails after a failed or differing snapshot leaves the folder to the next run's first removal, so
+    // its error never replaces the step's message (Ruling PF3-S18-20-3).
+    let found = match snapshot(root, label, &fresh, captured_unix) {
+        Ok(meta) => meta.fingerprint,
+        Err(error) => {
+            let _ = remove_entry(&fresh);
+            return Err(unwritten(error));
+        }
+    };
+    if found.as_deref() != Some(fingerprint) {
+        let _ = remove_entry(&fresh);
+        let found = found.as_deref().unwrap_or("none");
+        return Err(format!("the disc's fingerprint {found} differs from the job's {fingerprint}"));
+    }
+    let unplaced = |error: io::Error| format!("the disc's recording could not be put in place: {error}");
+    for name in ["files.json", "nav", "meta.json"] {
+        let (from, to) = (fresh.join(name), job_dir.join(name));
+        remove_entry(&to).map_err(unplaced)?;
+        match fs::symlink_metadata(&from) {
+            Ok(_) => fs::rename(&from, &to).map_err(unplaced)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(unplaced(error)),
+        }
+    }
+    fs::remove_dir(&fresh).map_err(unplaced)
+}
+
+/// rip-summary.json's `started`: `host.local_time` of the title record's `rip_started_ms`, None when the record has
+/// none (R23.7; Ruling W16). Def: T3-9. Use: T3-9 (`write_rip_summary`).
+pub(crate) fn rip_started_text(title: &TitleRecord, host: &dyn Host) -> Option<String> {
+    title.rip_started_ms.map(|unix_ms| host.local_time(unix_ms))
 }
 
 /// One lookup round on its own thread (design part 8.2): run_round over the locked book, each SavedFile written with
@@ -565,7 +637,8 @@ impl Step<'_> {
     /// index <index>`. Its (version, licence code) is observed into the engine's MakeMKV state (S79), unless the step
     /// was cancelled. A listing the exit wait killed after its final message gives `failed(Unknown)` with
     /// `EXIT_WAIT_PASSED`, the process not having exited (design part 5.3, spec 10.4). A listing with no DRV line for
-    /// the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>` (RP-2).
+    /// the job's drive gives `failed(Unknown)` with `MakeMKV's drive listing has no drive <drive>` (RP-2). A job's
+    /// listing has no time limit (S57; Ruling W20 bounds only the checks).
     fn listing(&self, program: &Path, failed: fn(Failure) -> Event) -> Result<(u32, RunSummary), StepResult> {
         let drive = self.job.record.drive.as_str();
         if drive.is_empty() {
@@ -577,7 +650,7 @@ impl Step<'_> {
         let name = if n == 1 { "drive-list.txt".to_string() } else { format!("drive-list-{n}.txt") };
         let out = dir.join(&name);
         self.started(&name, program, &drive_list_args(self.debug()));
-        let listed = self.ctx(&no_progress, |ctx| list_drives(ctx, program, self.debug(), drive, &out));
+        let listed = self.ctx(&no_progress, |ctx| list_drives(ctx, program, self.debug(), drive, &out, None));
         let listing = match listed {
             Ok(listing) => listing,
             Err(error) => {
@@ -618,7 +691,9 @@ impl Step<'_> {
     }
 
     /// Fingerprint, for a job a restart left in Detected (design parts 5.2, 5.4 step 2): the recording written again
-    /// with `tools::snapshot`; the same fingerprint gives FingerprintDone, anything else FingerprintFailed { Unknown }.
+    /// with `snapshot_aside`, into a fresh folder that replaces the job folder's snapshot only when the fingerprint is
+    /// the job's (engine.md:587), so a different disc leaves the job's recording as it was; the same fingerprint gives
+    /// FingerprintDone, anything else FingerprintFailed { Unknown } with `snapshot_aside`'s message.
     fn fingerprint(&self) -> Outcome {
         let failed = |failure| Event::FingerprintFailed { failure };
         let Some(root) = &self.job.drive_root else {
@@ -626,19 +701,9 @@ impl Step<'_> {
         };
         let host = self.steps.host.as_ref();
         let label = host.volume_label(root).unwrap_or_default();
-        match snapshot(root, &label, &self.job.job_dir, host.now_unix()) {
-            Ok(meta) if meta.fingerprint.as_deref() == Some(self.job.record.fingerprint.as_str()) => {
-                Ok(event(Event::FingerprintDone))
-            }
-            Ok(meta) => Ok(unknown(
-                failed,
-                format!(
-                    "the disc's fingerprint {} differs from the job's {}",
-                    meta.fingerprint.as_deref().unwrap_or("none"),
-                    self.job.record.fingerprint
-                ),
-            )),
-            Err(error) => Ok(unknown(failed, format!("the disc's recording could not be written: {error}"))),
+        match snapshot_aside(root, &label, &self.job.job_dir, host.now_unix(), &self.job.record.fingerprint) {
+            Ok(()) => Ok(event(Event::FingerprintDone)),
+            Err(message) => Ok(unknown(failed, message)),
         }
     }
 
@@ -818,6 +883,7 @@ impl Step<'_> {
                 rip_reviews: Vec::new(),
                 decision: None,
                 filed: None,
+                rip_started_ms: None,
             })
             .collect();
         if !self.post_edit(move |record| {
@@ -864,7 +930,11 @@ impl Step<'_> {
 
     /// CheckSpace in Planned (design part 5.8): `rip_check` of the plan's rip and remux promises, staging against the
     /// library root of the plan's kind, its result through `space_result`. An unset `staging_root` gives ShareLost
-    /// saying so.
+    /// saying so. A staging root that answers `reach` is made first when only its last folder is missing (`make_root`,
+    /// design part 6.2, Ruling W15), and one that cannot be made gives ShareLost with `make_root`'s sentence; one that
+    /// does not answer is named by `rip_check`'s own `reach`. Every share read runs here, on the step's thread, before
+    /// `rip_check` locks the promises (engine.md:584). Then job.log gets `share access for <root>: <access>` for
+    /// staging and the library root whose `access` reports one (design parts 6.1, 7.1).
     fn check_space(&self) -> Outcome {
         let record = &self.job.record;
         let Some(plan) = &record.plan else {
@@ -883,10 +953,17 @@ impl Step<'_> {
         self.check_cancel()?;
         let (rip_bytes, remux_bytes) = (rip_promise(plan, disc_size), planned_remux_promise(plan));
         let shares = self.steps.shares.as_ref();
-        let checked = {
-            let mut promises = lock(&self.steps.promises);
-            rip_check(rip_bytes, remux_bytes, staging, library, shares, &mut promises, self.id)
-        };
+        if shares.reach(staging) == Reach::Reachable {
+            if let Err(sentence) = make_root(staging) {
+                return Ok(self.space_result((Event::ShareLost, Some(sentence))));
+            }
+        }
+        let checked = rip_check(rip_bytes, remux_bytes, staging, library, shares, &self.steps.promises, self.id);
+        for root in std::iter::once(staging).chain(library) {
+            if let Some(access) = shares.access(root) {
+                self.log(&format!("share access for {root}: {access}"));
+            }
+        }
         Ok(self.space_result(checked))
     }
 
@@ -948,6 +1025,10 @@ impl Step<'_> {
                 return Ok(with(failed(failure), format!("{}: {error}", rip_dir.display())));
             }
             let (drive, _) = self.listing(&makemkvcon, failed)?;
+            let started_ms = self.steps.host.now_ms();
+            if !self.post_title(key, move |title| title.rip_started_ms = Some(started_ms)) {
+                return Err(cancelled());
+            }
             self.started(&name, &makemkvcon, &rip_args(&flags, drive, index, &rip_dir));
             let ripped = self.ctx(&on_progress, |ctx| {
                 rip(ctx, &makemkvcon, &flags, drive, index, planned.source(), &rip_dir, &out, &health)
@@ -1031,7 +1112,8 @@ impl Step<'_> {
     }
 
     /// `<key>/rip-summary.json` (design part 7.1, R23.4, R23.7): written before the verification, from the run's
-    /// exit file and the title record RipTitle edited.
+    /// exit file and the title record RipTitle edited. `started` is `rip_started_text`, after `bytes`; a record without
+    /// a start writes no `started` (R23.7, Ruling W16).
     fn write_rip_summary(&self, title: &TitleRecord, rip_dir: &Path, files: &[PathBuf]) {
         let key_dir = self.job.job_dir.join(&title.key);
         let exit = read_json(&key_dir.join("rip.txt.exit.json")).unwrap_or(Value::Null);
@@ -1046,12 +1128,15 @@ impl Step<'_> {
             "title": title.scan_title,
             "profile": self.job.record.profile,
             "bytes": bytes,
-            "elapsed_s": exit["elapsed_ms"].as_u64().map(|ms| ms as f64 / 1000.0),
-            "exit_code": exit["exit_code"],
-            "files": names,
-            "dest": rip_dir.display().to_string(),
-            "cache_mb": self.job.settings.cache_mb,
         });
+        if let Some(started) = rip_started_text(title, self.steps.host.as_ref()) {
+            summary["started"] = json!(started);
+        }
+        summary["elapsed_s"] = json!(exit["elapsed_ms"].as_u64().map(|ms| ms as f64 / 1000.0));
+        summary["exit_code"] = exit["exit_code"].clone();
+        summary["files"] = json!(names);
+        summary["dest"] = json!(rip_dir.display().to_string());
+        summary["cache_mb"] = json!(self.job.settings.cache_mb);
         if let Some(index) = title.rip_index.filter(|index| *index != title.scan_title) {
             summary["rip_index"] = json!(index);
         }
@@ -1320,8 +1405,8 @@ impl Step<'_> {
     /// facts, then rendered again with the `library_facts` of the path the last render chose while they differ from
     /// the facts it was rendered with (Ruling R24.c2: the facts can lead to an edition-named path, whose own facts may
     /// hold a collision). The film folder does not change with the edition, so this settles at once; facts seen before
-    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs or the decision
-    /// could not be made.
+    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs, the library facts
+    /// (`library_facts`' error, Ruling W22) or the decision could not be made.
     fn title_doc(&self, ctx: &Ctx, plan: &Plan, key: &str) -> Result<DecideDoc, String> {
         let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
         let mut inputs = match &probes {
@@ -1339,7 +1424,8 @@ impl Step<'_> {
                 DecisionEntry::Results(found) => found.decision.path.clone(),
                 DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
             };
-            let facts = path.map(|path| library_facts(&path, self.job.settings.edition_style)).unwrap_or_default();
+            let style = self.job.settings.edition_style;
+            let facts = path.map(|path| library_facts(&path, style)).transpose()?.unwrap_or_default();
             if seen.contains(&facts) {
                 return Ok(doc);
             }
@@ -1365,9 +1451,32 @@ impl Step<'_> {
     /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
     /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
     /// gives DecisionFailed { Unknown } with its sentence.
+    ///
+    /// Before anything else it asks `reach` of the plan kind's library root, when that root is set, as File does
+    /// (Ruling W22, review round 1's V7): a root that does not answer gives DecisionFailed { Unknown } with `the
+    /// library share holding <root> does not answer (<why>); the library was not read, and a retry once the share
+    /// answers decides again`, so a share that does not answer never reads as an empty library. An unset root asks
+    /// nothing, as the namer then gives no path. A library read that fails is DecisionFailed { Unknown } with
+    /// `library_facts`' error.
     fn decide(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let mut plan = self.job_plan(failed)?.clone();
+        let settings = &self.job.settings;
+        let library = match plan.kind {
+            Kind::Movie => settings.movies_root.as_deref(),
+            Kind::Tv => settings.tv_root.as_deref(),
+        };
+        if let Some(root) = library {
+            if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                return Ok(unknown(
+                    failed,
+                    format!(
+                        "the library share holding {root} does not answer ({why}); the library was not read, and a \
+                         retry once the share answers decides again"
+                    ),
+                ));
+            }
+        }
         if plan.identity.lookup_pending {
             let job = self.job;
             let refreshed = refreshed_plan(&plan, &job.job_dir, &job.lookups, &job.settings);
@@ -1427,7 +1536,8 @@ impl Step<'_> {
     /// CheckSpace in Decided (design part 5.8, S54): `staged_remux_check` of the staged files' sizes, read before the
     /// `Promises` lock, against the library root of the plan's kind, its result through `space_result`. Sizes that
     /// cannot be read give ShareLost only when staging does not answer, and otherwise the plan's estimate (review round
-    /// 1, V3 and RR1-6(b)). An unset library root or `staging_root` gives ShareLost saying so.
+    /// 1, V3 and RR1-6(b)). An unset library root or `staging_root` gives ShareLost saying so. Its share reads all come
+    /// before the check locks the promises (engine.md:584).
     fn remux_space(&self) -> Outcome {
         let Some(plan) = &self.job.record.plan else {
             return Ok(none("the job has no plan"));
@@ -1446,10 +1556,7 @@ impl Step<'_> {
         let staged = staged_bytes(staging, self.id, plan);
         self.check_cancel()?;
         let shares = self.steps.shares.as_ref();
-        let checked = {
-            let mut promises = lock(&self.steps.promises);
-            staged_remux_check(staged, plan, staging, library, shares, &mut promises, self.id)
-        };
+        let checked = staged_remux_check(staged, plan, staging, library, shares, &self.steps.promises, self.id);
         Ok(self.space_result(checked))
     }
 
@@ -1458,16 +1565,44 @@ impl Step<'_> {
     /// decision's layout, recorded as `<key>/remux-mkvmerge.txt`, its progress forwarded with the title key. No
     /// mkvmerge gives ToolMissing { Mkvmerge }; a remux that cannot be built or fails gives RemuxFailed { Unknown }
     /// with its sentence, and the staged file stays.
+    ///
+    /// Once mkvmerge is found, the job's Remux promise becomes `remux_promise` of the staged sizes, read here on the
+    /// step's thread (`refine_remux_promise`; engine.md:585, Ruling T3-17-a), when `staging_root` and the plan kind's
+    /// library root are set. Each title asks `reach` of its library root before it touches the share, the call that
+    /// connects with the stored credential (design part 6.1); a root that does not answer gives RemuxFailed
+    /// { Unknown } with `<key>: the library share holding <root> does not answer (<why>); the remux was not started,
+    /// and a retry once the share answers runs it`, so a restart into Remuxing writes nothing to a share it has not
+    /// reached (engine.md:590, as File does since review round 1's V7).
     fn remux(&self) -> Outcome {
         let failed = |failure| Event::RemuxFailed { failure };
         let plan = self.job_plan(failed)?;
         let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
             return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
         };
+        let settings = &self.job.settings;
+        let library = match plan.kind {
+            Kind::Movie => settings.movies_root.as_deref(),
+            Kind::Tv => settings.tv_root.as_deref(),
+        };
+        if let (Some(staging), Some(library)) = (settings.staging_root.as_deref(), library) {
+            let staged = staged_bytes(staging, self.id, plan);
+            let (shares, promises) = (self.steps.shares.as_ref(), &self.steps.promises);
+            refine_remux_promise(staged, library, shares, promises, self.id, &self.cancel);
+        }
         let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         for planned in &plan.titles {
             let key = planned.key.as_str();
             let (decision, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
+            if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
+                let root = &path.root;
+                return Ok(unknown(
+                    failed,
+                    format!(
+                        "{key}: the library share holding {root} does not answer ({why}); the remux was not started, \
+                         and a retry once the share answers runs it"
+                    ),
+                ));
+            }
             let partial = partial_path(&path.root, self.id, key);
             if let Some(folder) = partial.parent() {
                 let made = fs::create_dir_all(folder);
@@ -1558,10 +1693,19 @@ impl Step<'_> {
     /// modification time recorded. A file already at the final path gives FileFailed { Unknown } with `<final> already
     /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22]. An earlier
     /// rename is taken as done, as design part 6.5 says after a restart in Verified, when the partial file is gone and
-    /// the final path holds a file of the verified size (the title's `filed` size, RP-7), and when a rename stopped
-    /// between its hard link and its remove left both names on one file (`one_file`), whose partial name is then
-    /// removed. A partial file that is gone otherwise gives FileFailed { Unknown }, as does a remove that fails after
-    /// the link, with a message saying the final path holds the file.
+    /// the final path holds a file of the verified size (the title's `filed` size, RP-7); a partial file that is gone
+    /// otherwise gives FileFailed { Unknown }. Off Windows, where `rename_no_replace` is a hard link then a remove
+    /// (S13), a rename stopped between the two leaves both names on one file (`one_file`): its partial name is then
+    /// removed and the rename taken as done, and a remove that fails after the link gives FileFailed { Unknown } with a
+    /// message saying the final path holds the file. On Windows `MoveFileExW` renames in one step, so that half state
+    /// cannot arise and those branches are not compiled (Ruling T3-4-b).
+    ///
+    /// L7 (design part 6.5, Ruling W28): once `create_dir_all` of the final path's folder returns Ok or
+    /// `AlreadyExists`, that folder is opened with `fs::read_dir` before the rename. A folder that is present but
+    /// cannot be opened, as phase 0's experiment 9 met on the share, gives FileFailed { Unknown } with `<folder> is
+    /// present but cannot be opened (<error>); the partial file stays at <partial>, and a retry tries again`, records
+    /// no collision, and renames nothing. The folder opened is the title's own, never the library root, so LIB-7
+    /// stands. Any other `create_dir_all` error gives FileFailed { Unknown } with `<folder>: <error>`.
     ///
     /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
     /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
@@ -1643,12 +1787,27 @@ impl Step<'_> {
                 }
             }
             if let Some(folder) = target.parent() {
-                let made = fs::create_dir_all(folder);
-                made.map_err(|error| unknown(failed, format!("{}: {error}", folder.display())))?;
+                match fs::create_dir_all(folder) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Ok(unknown(failed, format!("{}: {error}", folder.display()))),
+                }
+                // L7 (Ruling W28): a folder that is present but cannot be opened stops the rename.
+                if let Err(error) = fs::read_dir(folder) {
+                    let (shown, stays) = (folder.display(), partial.display());
+                    return Ok(unknown(
+                        failed,
+                        format!(
+                            "{shown} is present but cannot be opened ({error}); the partial file stays at {stays}, \
+                             and a retry tries again"
+                        ),
+                    ));
+                }
             }
             self.check_cancel()?;
             match rename_no_replace(&partial, target) {
                 Ok(()) => {}
+                #[cfg(not(windows))]
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists && one_file(&partial, target) => {
                     // Design part 6.5: an earlier rename stopped between its hard link and its remove.
                     if let Err(error) = fs::remove_file(&partial) {
@@ -1665,6 +1824,7 @@ impl Step<'_> {
                     let (shown, stays) = (&path.path, partial.display());
                     return Ok(unknown(failed, format!("{shown} already exists; the partial file stays at {stays}")));
                 }
+                #[cfg(not(windows))]
                 Err(error) if one_file(&partial, target) => {
                     // The hard link was made and only the remove of the partial name failed.
                     return Ok(unknown(failed, half_done(&partial, &path.path, &error)));
@@ -1694,7 +1854,10 @@ impl Step<'_> {
     }
 
     /// DeletePartialFile (design part 5.2; 10.1 "Resuming after a restart"): each decided title's partial file removed
-    /// before the remux runs again, a missing one ignored and any other error logged; no event.
+    /// before the remux runs again, a missing one ignored and any other error logged; no event. Each title first asks
+    /// `reach` of its library root (engine.md:590, design part 6.1); one that does not answer is skipped with the
+    /// job.log line `<key>: the library share holding <root> does not answer (<why>); the partial file <partial> was
+    /// not deleted`, and the Remux after it fails naming the share.
     fn delete_partial_file(&self) -> Outcome {
         let keys = self.job.record.plan.iter().flat_map(|plan| plan.titles.iter().map(|planned| planned.key.as_str()));
         for key in keys {
@@ -1702,6 +1865,14 @@ impl Step<'_> {
                 continue;
             };
             let partial = partial_path(&path.root, self.id, key);
+            if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
+                let (root, kept) = (&path.root, partial.display());
+                self.log(&format!(
+                    "{key}: the library share holding {root} does not answer ({why}); the partial file {kept} was not \
+                     deleted"
+                ));
+                continue;
+            }
             match fs::remove_file(&partial) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
                     self.log(&format!("{}: {error}", partial.display()));
@@ -1806,5 +1977,89 @@ mod tests {
         assert_eq!(classed(false, false), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
+    }
+
+    /// Ruling W16: `started` is the record's start, not the clock at VerifyFile.
+    #[test]
+    fn started_is_the_records_rip_start_not_the_clock() {
+        let host = lazymkv_platform::fakes::FakeHost::new("2026-10-23", 1_792_800_000);
+        let mut title = TitleRecord {
+            key: "t00-00800".to_string(), scan_title: 0, rip_index: None, attempts: 1, verified: false,
+            verify_failures: 0, read_errors: Vec::new(), rip_reviews: Vec::new(), decision: None, filed: None,
+            rip_started_ms: Some(1_700_000_000_123),
+        };
+        assert_eq!(rip_started_text(&title, &host).as_deref(), Some("2023-11-14 22:13:20.123"));
+        title.rip_started_ms = None;
+        assert_eq!(rip_started_text(&title, &host), None);
+    }
+
+    /// A synthetic disc under `s` as the harness builds one: an index, a playlist and a stream of `stream` zero bytes.
+    fn disc_volume(s: &Scratch, name: &str, stream: usize) -> PathBuf {
+        s.write(&format!("{name}/BDMV/index.bdmv"), "INDX0200");
+        s.write(&format!("{name}/BDMV/PLAYLIST/00800.mpls"), "MPLS0200");
+        s.write(&format!("{name}/BDMV/STREAM/00001.m2ts"), vec![0u8; stream]);
+        s.0.join(name)
+    }
+
+    /// The job folder's snapshot, read whole.
+    fn snapshot_files(job: &Path) -> Vec<Vec<u8>> {
+        ["files.json", "meta.json", "nav/BDMV/index.bdmv", "nav/BDMV/PLAYLIST/00800.mpls"]
+            .iter()
+            .map(|file| fs::read(job.join(file)).unwrap())
+            .collect()
+    }
+
+    /// engine.md:587 (V10): a different disc in the job's drive leaves the job's nav/, files.json and meta.json as they
+    /// were, and no fresh snapshot behind.
+    #[test]
+    fn a_different_disc_leaves_the_jobs_snapshot_unchanged() {
+        let s = Scratch::new("aside-differs");
+        let job = s.0.join("job");
+        let fingerprint = snapshot(&disc_volume(&s, "a", 1000), "A", &job, 1).unwrap().fingerprint.unwrap();
+        let before = snapshot_files(&job);
+        let error = snapshot_aside(&disc_volume(&s, "b", 2000), "B", &job, 2, &fingerprint).unwrap_err();
+        let tail = format!(" differs from the job's {fingerprint}");
+        assert!(error.starts_with("the disc's fingerprint ") && error.ends_with(&tail), "{error}");
+        assert_eq!(snapshot_files(&job), before);
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
+    }
+
+    #[test]
+    fn a_matching_disc_swaps_in_the_new_snapshot() {
+        let s = Scratch::new("aside-matches");
+        let job = s.0.join("job");
+        let disc = disc_volume(&s, "a", 1000);
+        let fingerprint = snapshot(&disc, "A", &job, 1).unwrap().fingerprint.unwrap();
+        fs::write(job.join("nav/BDMV/stale.bdmv"), b"an older snapshot's file").unwrap();
+        snapshot_aside(&disc, "A", &job, 2, &fingerprint).unwrap();
+        let meta: Value = serde_json::from_slice(&fs::read(job.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["captured_unix"], json!(2));
+        assert!(job.join("nav/BDMV/index.bdmv").is_file());
+        assert!(!job.join("nav/BDMV/stale.bdmv").exists());
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
+    }
+
+    #[test]
+    fn a_fresh_snapshot_a_crash_left_is_replaced() {
+        let s = Scratch::new("aside-leftover");
+        let job = s.0.join("job");
+        let disc = disc_volume(&s, "a", 1000);
+        let fingerprint = snapshot(&disc, "A", &job, 1).unwrap().fingerprint.unwrap();
+        s.write(&format!("job/{FRESH_SNAPSHOT}/nav/BDMV/left.bdmv"), "left by a crash");
+        snapshot_aside(&disc, "A", &job, 2, &fingerprint).unwrap();
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
+        assert!(!job.join("nav/BDMV/left.bdmv").exists());
+    }
+
+    #[test]
+    fn a_disc_that_cannot_be_walked_leaves_the_jobs_snapshot_unchanged() {
+        let s = Scratch::new("aside-unwalked");
+        let job = s.0.join("job");
+        let fingerprint = snapshot(&disc_volume(&s, "a", 1000), "A", &job, 1).unwrap().fingerprint.unwrap();
+        let before = snapshot_files(&job);
+        let error = snapshot_aside(&s.0.join("absent"), "", &job, 2, &fingerprint).unwrap_err();
+        assert!(error.starts_with("the disc's recording could not be written: "), "{error}");
+        assert_eq!(snapshot_files(&job), before);
+        assert!(!job.join(FRESH_SNAPSHOT).exists());
     }
 }

@@ -1,7 +1,7 @@
-//! The process runner on `std::process` (design part 4.2): the Linux and macOS stand-in for the Windows Job Object
-//! runner, and what pull request 2 uses on every operating system (S13). It kills only the child it started, not the
-//! child's own children, and ignores `Spawn::below_normal` (S43). Pull request 3's Job Object runner replaces it on
-//! Windows, where closing the engine also ends the child.
+//! The process runner on `std::process` (design part 4.2): the runner on Linux and macOS, and on Windows the one the
+//! driver tests in `crates/fake-tools/tests` keep (Ruling W7). It kills only the child it started, not the child's own
+//! children, and ignores `Spawn::below_normal` (S43). The engine on Windows takes `win::JobProcessGuard` through
+//! `native_guard`, which kills the tree.
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
@@ -39,7 +39,7 @@ struct StdChild {
 }
 
 /// The pipe the first time, an empty reader after that (Ruling T9-d).
-fn handed_over<R: Read + Send + 'static>(pipe: Option<R>) -> Box<dyn Read + Send> {
+pub(crate) fn handed_over<R: Read + Send + 'static>(pipe: Option<R>) -> Box<dyn Read + Send> {
     match pipe {
         Some(pipe) => Box::new(pipe),
         None => Box::new(io::empty()),
@@ -82,25 +82,39 @@ impl GuardedChild for StdChild {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
 
     use super::*;
     use crate::{ProcessGuard, Spawn};
 
-    fn helper(mode: &str) -> Spawn {
+    /// The arguments that make this test binary run only `helper_child`.
+    pub(crate) const HELPER_ARGS: [&str; 4] = ["--exact", "process::tests::helper_child", "--ignored", "--nocapture"];
+
+    /// This test binary as the child `helper_child` runs in, in `mode`.
+    pub(crate) fn helper(mode: &str) -> Spawn {
         Spawn {
             program: std::env::current_exe().unwrap(),
-            args: ["--exact", "process::tests::helper_child", "--ignored", "--nocapture"].map(String::from).to_vec(),
+            args: HELPER_ARGS.map(String::from).to_vec(),
             env: vec![("LAZYMKV_TEST_HELPER".to_string(), mode.to_string())],
             below_normal: false,
         }
     }
 
-    /// The child the runner tests start: this test binary running only this test. It sleeps until killed when
-    /// LAZYMKV_TEST_HELPER is `sleep`, prints one line to each stream when it is `echo`, and returns at once otherwise.
+    /// Writes `line` on a line of its own to standard output and flushes it (Ruling T3-5-c).
+    fn say(line: &str) {
+        let mut out = std::io::stdout();
+        out.write_all(format!("\n{line}\n").as_bytes()).unwrap();
+        out.flush().unwrap();
+    }
+
+    /// The child the runner tests start: this test binary running only this test, in the mode LAZYMKV_TEST_HELPER
+    /// names. `sleep` sleeps until killed; `echo` prints one line to each stream; `spawn-grandchild` starts this test
+    /// binary again as `print-pid-sleep`, with this child's standard output and error, then writes `child <pid>` and
+    /// sleeps 60 s; `print-pid-sleep` writes `grandchild <pid>` and sleeps 60 s. Any other mode returns at once.
     #[test]
     #[ignore]
     fn helper_child() {
@@ -112,13 +126,29 @@ mod tests {
                 std::io::stdout().write_all(b"helper-out\n").unwrap();
                 std::io::stderr().write_all(b"helper-err\n").unwrap();
             }
+            Ok("spawn-grandchild") => {
+                // The first act: the grandchild starts before this child writes anything (Review Focus 3).
+                let _grandchild = Command::new(std::env::current_exe().unwrap())
+                    .args(HELPER_ARGS)
+                    .env("LAZYMKV_TEST_HELPER", "print-pid-sleep")
+                    .stdin(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                say(&format!("child {}", std::process::id()));
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            Ok("print-pid-sleep") => {
+                say(&format!("grandchild {}", std::process::id()));
+                std::thread::sleep(Duration::from_secs(60));
+            }
             _ => {}
         }
     }
 
-    #[test]
-    fn the_runner_kills_its_child() {
-        let mut child = StdProcessGuard.spawn(&helper("sleep")).unwrap();
+    /// The body of pull request 2's `the_runner_kills_its_child`, for any runner: a sleeping child is killed, its wait
+    /// returns within 10 s with no success, and a kill after the exit is no error (Ruling T9-b).
+    pub(crate) fn check_kills_its_child(guard: &dyn ProcessGuard) {
+        let mut child = guard.spawn(&helper("sleep")).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         let killer = child.killer();
         killer.kill().unwrap();
@@ -129,9 +159,11 @@ mod tests {
         assert!(killer.kill().is_ok(), "a kill after the exit is not an error");
     }
 
-    #[test]
-    fn the_runner_pipes_the_childs_output_and_passes_its_environment() {
-        let mut child = StdProcessGuard.spawn(&helper("echo")).unwrap();
+    /// The body of pull request 2's `the_runner_pipes_the_childs_output_and_passes_its_environment`, for any runner:
+    /// both streams arrive, `Spawn::env` reaches the child, and a stream taken twice is empty the second time (Rulings
+    /// T9-d, T9-e).
+    pub(crate) fn check_pipes_both_streams_and_adds_env(guard: &dyn ProcessGuard) {
+        let mut child = guard.spawn(&helper("echo")).unwrap();
         let mut out = String::new();
         child.take_stdout().read_to_string(&mut out).unwrap();
         let mut err = String::new();
@@ -142,5 +174,15 @@ mod tests {
         let mut again = String::new();
         child.take_stdout().read_to_string(&mut again).unwrap();
         assert_eq!(again, "");
+    }
+
+    #[test]
+    fn the_runner_kills_its_child() {
+        check_kills_its_child(&StdProcessGuard);
+    }
+
+    #[test]
+    fn the_runner_pipes_the_childs_output_and_passes_its_environment() {
+        check_pipes_both_streams_and_adds_env(&StdProcessGuard);
     }
 }

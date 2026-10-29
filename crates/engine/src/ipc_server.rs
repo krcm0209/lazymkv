@@ -6,9 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Sender, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Sender, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,21 @@ use crate::owner::{Msg, NO_EVENT_ACTIONS};
 
 /// One client's queue length; a full queue drops the client (design part 4.4, S52). Def: T26. Use: T26.
 pub(crate) const CLIENT_QUEUE: usize = 256;
+/// The places of a client's queue that `send_waiting` leaves free, so that a push, or the command's own reply, that
+/// comes while a command's lines wait for the client still finds room (S52 as amended by W10; Ruling T3-22-a).
+/// Def: T3-22. Use: T3-22.
+pub(crate) const COMMAND_HEADROOM: usize = 64;
+/// How often a waiting `send_waiting` looks again.
+const SEND_POLL: Duration = Duration::from_millis(10);
+/// How long `EngineHandle::stop` waits for the clients' writers to write what was queued, such as `shutdown`'s `ok`,
+/// before it returns anyway (design parts 3.8, 9.4; Ruling W10). Def: T3-10. Use: T3-10.
+pub(crate) const CLIENT_DRAIN: Duration = Duration::from_secs(2);
+/// The serve thread's pause after a failed accept, before it tries again (engine.md:581 (d); Ruling W10).
+/// Def: T3-10. Use: T3-10.
+pub(crate) const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+/// The client number of a request no connection sent; `Clients` numbers from 1, so its replies go nowhere (design part
+/// 3.8). Def: T3-10. Use: T3-10.
+pub(crate) const NO_CLIENT: u64 = 0;
 
 /// How often a job may push progress (design part 9.2).
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
@@ -36,8 +51,6 @@ const WEBHOOK_SECRETS: [&str; 2] = ["ha_webhook_url", "webhook_url"];
 pub(crate) const DISCARD_REFUSED: &str = "discard waits for phase 3's review commands (P2, R-A1)";
 /// `ui_quit`'s refusal (Ruling S76). Def: T26. Use: T26.
 pub(crate) const UI_QUIT_REFUSED: &str = "ui_quit waits for phase 5's user interface (R-A8)";
-/// `command`'s refusal until pull request 3 (Ruling S76). Def: T26. Use: T26.
-pub(crate) const COMMAND_REFUSED: &str = "command needs the engine's run folder, which arrives in pull request 3 (S35)";
 /// The reply to a request that comes while a forced shutdown waits for its steps (design part 3.8). Def: T26.
 /// Use: T26.
 pub(crate) const STOPPING: &str = "the engine is stopping (design part 3.8)";
@@ -162,35 +175,96 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Every connected client's writer thread (design part 9.2): each client's lines go through a queue of
 /// `CLIENT_QUEUE` lines that its own thread drains into its writer, so a slow client never slows the engine. A client
-/// whose queue is full, or whose writer failed, is dropped (design part 4.4, S52). Def: T26. Use: T26.
+/// whose queue is full, or whose writer failed, is dropped (design part 4.4, S52), except that the `command` relay's
+/// lines wait for room (`send_waiting`, Rulings W10, T3-22-a). Def: T26. Use: T26.
 pub(crate) struct Clients {
     /// Each client's queue, by client number.
-    queues: Mutex<BTreeMap<u64, SyncSender<String>>>,
+    queues: Mutex<BTreeMap<u64, Queue>>,
     /// The next client number.
     next: AtomicU64,
+    /// How many writer threads `add` started that have not yet ended and dropped their writer, and the signal each
+    /// gives as it ends (`drain`).
+    writers: Arc<(Mutex<usize>, Condvar)>,
+}
+
+/// One client's queue: the sender its writer thread drains, and how many lines the client holds, queued or being
+/// written (Ruling T3-22-a). One is added before every `try_send` and taken back when it fails; the writer thread takes
+/// one after each write and stores 0 when it ends, so a `send_waiting` waiting on a writer that ended tries again and
+/// finds it gone.
+struct Queue {
+    sender: SyncSender<String>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl Queue {
+    /// `try_send` of `line`, counted in `queued`.
+    fn try_send(&self, line: String) -> Result<(), TrySendError<String>> {
+        self.queued.fetch_add(1, Ordering::SeqCst);
+        let sent = self.sender.try_send(line);
+        if sent.is_err() {
+            take_one(&self.queued);
+        }
+        sent
+    }
+}
+
+/// Takes one from `queued`, never below 0: the writer's `store(0)` at its end may come between a sender's add and its
+/// take-back.
+fn take_one(queued: &AtomicUsize) {
+    let mut count = queued.load(Ordering::SeqCst);
+    while count > 0 {
+        match queued.compare_exchange(count, count - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return,
+            Err(now) => count = now,
+        }
+    }
+}
+
+/// A writer thread's first local: dropped last, after the writer, it counts the thread out of `Clients::writers` and
+/// wakes `drain`.
+struct WriterDone(Arc<(Mutex<usize>, Condvar)>);
+
+impl Drop for WriterDone {
+    fn drop(&mut self) {
+        let (count, ended) = &*self.0;
+        *lock(count) -= 1;
+        ended.notify_all();
+    }
 }
 
 impl Clients {
     /// No client (design part 9.2). Def: T26. Use: T26.
     pub(crate) fn new() -> Clients {
-        Clients { queues: Mutex::new(BTreeMap::new()), next: AtomicU64::new(1) }
+        Clients {
+            queues: Mutex::new(BTreeMap::new()),
+            next: AtomicU64::new(1),
+            writers: Arc::new((Mutex::new(0), Condvar::new())),
+        }
     }
 
     /// Adds a client writing to `writer`, with a thread that drains its queue (`sync_channel(CLIENT_QUEUE)`), each
     /// line written with its newline in one write. The thread ends when the writer fails or the client is closed and
-    /// its queue drained. Def: T26. Use: T26.
+    /// its queue drained; `drain` counts it until then. The client's count of queued lines starts at 0 (Ruling
+    /// T3-22-a). Def: T26, T3-22. Use: T26, T3-22.
     pub(crate) fn add(&self, writer: Box<dyn Write + Send>) -> u64 {
-        let (queue, lines) = sync_channel::<String>(CLIENT_QUEUE);
+        let (sender, lines) = sync_channel::<String>(CLIENT_QUEUE);
+        let queued = Arc::new(AtomicUsize::new(0));
         let client = self.next.fetch_add(1, Ordering::SeqCst);
-        lock(&self.queues).insert(client, queue);
+        lock(&self.queues).insert(client, Queue { sender, queued: Arc::clone(&queued) });
+        *lock(&self.writers.0) += 1;
+        let writers = Arc::clone(&self.writers);
         thread::spawn(move || {
+            // Declared before `writer`, so it drops after it: the count falls once the connection is closed.
+            let _done = WriterDone(writers);
             let mut writer = writer;
             for line in lines {
                 let written = writer.write_all(format!("{line}\n").as_bytes()).and_then(|()| writer.flush());
+                take_one(&queued);
                 if written.is_err() {
                     break;
                 }
             }
+            queued.store(0, Ordering::SeqCst);
         });
         client
     }
@@ -201,6 +275,33 @@ impl Clients {
         let mut queues = lock(&self.queues);
         if queues.get(&client).is_some_and(|queue| queue.try_send(line).is_err()) {
             queues.remove(&client);
+        }
+    }
+
+    /// Queues `line` for `client` once its queue holds fewer than `CLIENT_QUEUE - COMMAND_HEADROOM` lines, waiting
+    /// for that outside the lock; false once the client is gone (closed, dropped by S52, or its writer ended). Only
+    /// the relay's `command_output` lines take this path; every other line keeps S52's drop (Rulings W10, T3-22-a).
+    /// Def: T3-22. Use: T3-22.
+    pub(crate) fn send_waiting(&self, client: u64, line: String) -> bool {
+        let mut line = line;
+        loop {
+            {
+                let mut queues = lock(&self.queues);
+                let Some(queue) = queues.get(&client) else {
+                    return false;
+                };
+                if queue.queued.load(Ordering::SeqCst) < CLIENT_QUEUE - COMMAND_HEADROOM {
+                    match queue.try_send(line) {
+                        Ok(()) => return true,
+                        Err(TrySendError::Full(back)) => line = back,
+                        Err(TrySendError::Disconnected(_)) => {
+                            queues.remove(&client);
+                            return false;
+                        }
+                    }
+                }
+            }
+            thread::sleep(SEND_POLL);
         }
     }
 
@@ -223,6 +324,16 @@ impl Clients {
     /// `close` of every client, at shutdown (design part 3.8). Def: T26. Use: T26.
     pub(crate) fn close_all(&self) {
         lock(&self.queues).clear();
+    }
+
+    /// Waits until every writer thread `add` started has ended and dropped its writer, at most `bound`; true when all
+    /// have (design parts 3.8, 9.1). Def: T3-10. Use: T3-10.
+    pub(crate) fn drain(&self, bound: Duration) -> bool {
+        let (count, ended) = &*self.writers;
+        let (count, _) = ended
+            .wait_timeout_while(lock(count), bound, |count| *count > 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        *count == 0
     }
 }
 
@@ -358,18 +469,38 @@ pub(crate) fn secret_states(secrets: &dyn SecretStore, shares: &BTreeSet<String>
         .collect()
 }
 
-/// The serve thread (design part 4.4): each stream `transport` accepts goes to the owner as `Msg::Connect`. It ends
-/// when the transport fails, the owner is gone, or a stream comes after `stop` was raised: `EngineHandle::stop` raises
-/// it, then wakes the waiting accept with a connection of its own. Def: T26. Use: T26.
+/// The serve thread (design part 4.4; engine.md:581 (d); Ruling W10): each stream `transport` accepts goes to the
+/// owner as `Msg::Connect`. A failed accept is read by its kind: `BrokenPipe`, a closed transport, ends the thread;
+/// `ConnectionAborted`, a client gone before its check, is passed over at once with no line; `PermissionDenied`, a
+/// refused client, is logged as `refused a pipe client: <error>` and the next accept follows at once; any other kind
+/// is logged as `the pipe could not accept a client: <error>` and the next accept follows after `ACCEPT_PAUSE`. The
+/// thread also ends when the owner is gone, or when a stream comes after `stop` was raised: `EngineHandle::stop` raises
+/// it, then closes the transport. Def: T26, T3-10. Use: T26, T3-10.
 pub(crate) fn spawn_serve(
     transport: Arc<dyn IpcTransport>,
     stop: Arc<AtomicBool>,
     owner: Sender<Msg>,
 ) -> JoinHandle<()> {
-    thread::spawn(move || {
-        while let Ok(stream) = transport.accept() {
-            if stop.load(Ordering::SeqCst) || owner.send(Msg::Connect(stream)).is_err() {
-                break;
+    thread::spawn(move || loop {
+        match transport.accept() {
+            Ok(stream) => {
+                if stop.load(Ordering::SeqCst) || owner.send(Msg::Connect(stream)).is_err() {
+                    break;
+                }
+            }
+            Err(error) => {
+                let (line, pause) = match error.kind() {
+                    io::ErrorKind::BrokenPipe => break,
+                    io::ErrorKind::ConnectionAborted => continue,
+                    io::ErrorKind::PermissionDenied => (format!("refused a pipe client: {error}"), None),
+                    _ => (format!("the pipe could not accept a client: {error}"), Some(ACCEPT_PAUSE)),
+                };
+                if owner.send(Msg::Log(line)).is_err() {
+                    break;
+                }
+                if let Some(pause) = pause {
+                    thread::sleep(pause);
+                }
             }
         }
     })
@@ -378,7 +509,8 @@ pub(crate) fn spawn_serve(
 /// A client's reader thread (design part 9.1): each line of at most `MAX_LINE_BYTES` that `parse_request` reads goes
 /// to the owner as `Msg::Request`; a line it refuses gets its error reply at once. A longer line gets the error reply
 /// `LINE_TOO_LONG` with no id, and the client is dropped. An empty line is skipped. When the client goes away, its
-/// connection is closed. Def: T26. Use: T26.
+/// connection is closed and the owner gets `Msg::Gone`, so a command the client runs is killed (Ruling T3-22-c).
+/// Def: T26, T3-22. Use: T26, T3-22.
 pub(crate) fn spawn_reader(client: u64, reader: Box<dyn BufRead + Send>, clients: Arc<Clients>, owner: Sender<Msg>) {
     thread::spawn(move || {
         let mut reader = reader;
@@ -401,14 +533,22 @@ pub(crate) fn spawn_reader(client: u64, reader: Box<dyn BufRead + Send>, clients
             }
         }
         clients.close(client);
+        // An owner that is gone runs no command.
+        let _ = owner.send(Msg::Gone { client });
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::owner::Msg;
+    use crate::testkit::ci_factor;
+    use lazymkv_platform::fakes::MemoryIpc;
+    use lazymkv_platform::{IpcStream, IpcTransport};
+    use std::collections::VecDeque;
     use std::io::{self, Write};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::channel;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
@@ -432,6 +572,112 @@ mod tests {
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    /// A writer that takes 100 ms per write and counts the lines it took.
+    struct Slow(Arc<AtomicUsize>);
+    impl Write for Slow {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(100));
+            self.0.fetch_add(buf.iter().filter(|&&byte| byte == b'\n').count(), Ordering::SeqCst);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    /// A transport that returns its scripted results in order, then BrokenPipe as a closed transport does, and notes
+    /// when each accept ran.
+    struct Scripted { results: Mutex<VecDeque<io::Result<IpcStream>>>, calls: Mutex<Vec<Instant>> }
+    impl IpcTransport for Scripted {
+        fn accept(&self) -> io::Result<IpcStream> {
+            self.calls.lock().unwrap().push(Instant::now());
+            let next = self.results.lock().unwrap().pop_front();
+            next.unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")))
+        }
+        fn close(&self) {}
+    }
+
+    fn stream() -> io::Result<IpcStream> {
+        Ok(IpcStream { reader: Box::new(io::Cursor::new(Vec::new())), writer: Box::new(io::sink()) })
+    }
+
+    /// Runs the serve thread over `results` to its end; returns what it sent the owner and when each accept ran.
+    fn serve(results: Vec<io::Result<IpcStream>>) -> (Vec<Msg>, Vec<Instant>) {
+        let transport = Arc::new(Scripted { results: Mutex::new(results.into()), calls: Mutex::new(Vec::new()) });
+        let (owner, inbox) = channel();
+        spawn_serve(Arc::clone(&transport) as _, Arc::new(AtomicBool::new(false)), owner).join().unwrap();
+        let calls = transport.calls.lock().unwrap().clone();
+        (inbox.try_iter().collect(), calls)
+    }
+
+    #[test]
+    fn a_refused_client_is_logged_and_the_serve_thread_goes_on() {
+        let refused = io::Error::new(io::ErrorKind::PermissionDenied, "process 4242: its token is not elevated");
+        let (sent, _) = serve(vec![Err(refused), stream()]);
+        let expected = "refused a pipe client: process 4242: its token is not elevated";
+        assert!(matches!(&sent[..], [Msg::Log(line), Msg::Connect(_)] if line == expected));
+    }
+
+    #[test]
+    fn a_failed_accept_is_logged_paused_and_retried() {
+        let (sent, calls) = serve(vec![Err(io::Error::other("the pipe broke")), stream()]);
+        let expected = "the pipe could not accept a client: the pipe broke";
+        assert!(matches!(&sent[..], [Msg::Log(line), Msg::Connect(_)] if line == expected));
+        assert!(calls[1] - calls[0] >= ACCEPT_PAUSE);
+    }
+
+    /// Ruling PF3-S10-12-4: ten clients gone before their check, then one that stays. A paused retry would take at
+    /// least ten `ACCEPT_PAUSE`s; the bound of five leaves room for a loaded runner's hiccup.
+    #[test]
+    fn a_client_gone_before_its_check_is_passed_over_without_a_line() {
+        let gone = || Err(io::Error::new(io::ErrorKind::ConnectionAborted, "the client left before its check"));
+        let mut results: Vec<io::Result<IpcStream>> = (0..10).map(|_| gone()).collect();
+        results.push(stream());
+        let (sent, calls) = serve(results);
+        assert!(!sent.iter().any(|message| matches!(message, Msg::Log(_))));
+        assert!(matches!(&sent[..], [Msg::Connect(_)]));
+        assert!(calls[10] - calls[0] < ACCEPT_PAUSE * 5, "{:?}", calls[10] - calls[0]);
+    }
+
+    #[test]
+    fn a_closed_transport_ends_the_serve_thread() {
+        let (ipc, _connector) = MemoryIpc::new();
+        let ipc = Arc::new(ipc);
+        let (owner, _inbox) = channel();
+        let serve = spawn_serve(Arc::clone(&ipc) as _, Arc::new(AtomicBool::new(false)), owner);
+        std::thread::sleep(Duration::from_millis(50));
+        ipc.close();
+        let (done, ended) = channel();
+        std::thread::spawn(move || {
+            let _ = done.send(serve.join().is_ok());
+        });
+        assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(true));
+    }
+
+    #[test]
+    fn drain_returns_once_every_closed_clients_queued_lines_are_written() {
+        let taken = Arc::new(AtomicUsize::new(0));
+        let clients = Clients::new();
+        let client = clients.add(Box::new(Slow(taken.clone())));
+        for n in 0..3 { clients.send(client, format!("{{\"n\":{n}}}")); }
+        clients.close_all();
+        assert!(clients.drain(Duration::from_secs(5)));
+        assert_eq!(taken.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn drain_gives_up_at_its_bound_for_a_client_that_never_reads() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let clients = Clients::new();
+        let client = clients.add(Box::new(Stuck(gate.clone())));
+        clients.send(client, "{}".to_string());
+        clients.close_all();
+        let started = Instant::now();
+        assert!(!clients.drain(Duration::from_millis(300)));
+        let spent = started.elapsed();
+        assert!(spent >= Duration::from_millis(300) && spent < Duration::from_secs(2), "{spent:?}");
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
     }
 
     #[test]
@@ -458,6 +704,92 @@ mod tests {
         assert_eq!(clients.count(), 1);
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
+    }
+
+    /// A writer that blocks until its gate opens, then keeps every byte.
+    struct Held(Arc<(Mutex<bool>, Condvar)>, Arc<Mutex<Vec<u8>>>);
+    impl Write for Held {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let (lock, cv) = &*self.0;
+            let mut open = lock.lock().unwrap();
+            while !*open { open = cv.wait(open).unwrap(); }
+            self.1.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    fn open(gate: &Arc<(Mutex<bool>, Condvar)>) {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    /// How many lines `client`'s queue holds by `Clients`' count (Ruling T3-22-a); 0 for a client that is gone.
+    fn queued(clients: &Clients, client: u64) -> usize {
+        lock(&clients.queues).get(&client).map_or(0, |queue| queue.queued.load(Ordering::SeqCst))
+    }
+
+    /// The first `count` lines `kept` holds once it holds them (10 s cap, times `ci_factor`; Ruling PF3-S21-22-1).
+    fn lines_of(kept: &Arc<Mutex<Vec<u8>>>, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
+        loop {
+            let text = String::from_utf8(kept.lock().unwrap().clone()).unwrap();
+            if text.lines().count() >= count { return text.lines().take(count).map(str::to_string).collect(); }
+            assert!(Instant::now() < deadline, "the writer holds {} lines", text.lines().count());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A client whose writer is held, and a thread sending it 300 numbered lines through `send_waiting`; the thread
+    /// gives true when every send did. It returns once the client's queue holds `CLIENT_QUEUE - COMMAND_HEADROOM`
+    /// lines, where `send_waiting` waits (10 s cap, times `ci_factor`; Ruling PF3-S21-22-1).
+    fn burst() -> (Arc<Clients>, u64, Arc<(Mutex<bool>, Condvar)>, Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<bool>) {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let clients = Arc::new(Clients::new());
+        let client = clients.add(Box::new(Held(gate.clone(), kept.clone())));
+        let sender = {
+            let clients = Arc::clone(&clients);
+            std::thread::spawn(move || (0..300).all(|n| clients.send_waiting(client, format!("{{\"n\":{n}}}"))))
+        };
+        let mark = CLIENT_QUEUE - COMMAND_HEADROOM;
+        let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
+        while queued(&clients, client) != mark {
+            let held = queued(&clients, client);
+            assert!(Instant::now() < deadline, "the client's queue holds {held} lines, not {mark}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (clients, client, gate, kept, sender)
+    }
+
+    #[test]
+    fn send_waiting_waits_for_room_and_keeps_every_line_in_order() {
+        let (clients, _, gate, kept, sender) = burst();
+        assert!(!sender.is_finished(), "send_waiting returned while the client's queue had no room");
+        assert_eq!(clients.count(), 1);
+        open(&gate);
+        assert!(sender.join().unwrap());
+        assert_eq!(lines_of(&kept, 300), (0..300).map(|n| format!("{{\"n\":{n}}}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_broadcast_during_a_command_burst_keeps_the_requesting_client() {
+        let (clients, _, gate, kept, sender) = burst();
+        clients.broadcast("{\"push\":1}");
+        assert_eq!(clients.count(), 1, "the broadcast dropped the client whose command waits");
+        open(&gate);
+        assert!(sender.join().unwrap());
+        assert!(lines_of(&kept, 301).contains(&"{\"push\":1}".to_string()));
+    }
+
+    #[test]
+    fn send_waiting_gives_false_once_the_client_is_closed() {
+        let (clients, client, gate, _, sender) = burst();
+        let closed = Instant::now();
+        clients.close(client);
+        assert!(!sender.join().unwrap());
+        assert!(closed.elapsed() < Duration::from_secs(5));
+        open(&gate);
     }
 
     #[test]

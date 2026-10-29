@@ -1,26 +1,28 @@
 //! The IPC server over the in-memory transport (design parts 3.7, 3.8, 9.1 to 9.4; Ruling S12).
 
-use std::collections::VecDeque;
+mod common;
+
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
+use common::{Client, WAIT};
+use lazymkv_clients::OFFLINE;
 use lazymkv_core::decision::Disposition;
-use lazymkv_core::ipc::{read_reply, Envelope, Reply, CANCELLED, MAX_LINE_BYTES};
+use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
 use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
+use lazymkv_engine::NO_DELIVERY;
 use lazymkv_platform::{IpcConnector, Reach};
+use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
 
-/// The tests' own waits: 20 s, times `ci_factor` wherever a test waits for something to happen (Rulings R29.c2,
-/// R29.c5).
-const WAIT: Duration = Duration::from_secs(20);
 /// Task 22's disc names: the base scenario's disc, and two discs with their own fingerprints.
 const DISC_A: &str = "movie-direct";
 const DISC_B: &str = "disc-b";
@@ -73,80 +75,6 @@ fn wait_for_call(h: &Harness, tag: &str, count: usize) {
     while h.steps().calls().iter().filter(|c| c.as_str() == tag).count() < count {
         assert!(start.elapsed() < wait, "{tag} was not called {count} times within {wait:?}: {:?}", h.steps().calls());
         std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-struct Client { lines: Receiver<String>, writer: Box<dyn Write + Send>, next: u64, pushes: VecDeque<Envelope> }
-
-impl Client {
-    fn open(h: &Harness) -> Client {
-        let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
-        let (send, lines) = channel();
-        let mut reader = stream.reader;
-        std::thread::spawn(move || loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => if send.send(line).is_err() { break },
-            }
-        });
-        Client { lines, writer: stream.writer, next: 1, pushes: VecDeque::new() }
-    }
-    /// The next line, or None once the engine closed the connection.
-    fn line(&mut self) -> Option<String> {
-        // 20 s, 80 s under CI (Ruling R29.c2).
-        let wait = WAIT * ci_factor();
-        match self.lines.recv_timeout(wait) {
-            Ok(line) => Some(line),
-            Err(RecvTimeoutError::Disconnected) => None,
-            Err(RecvTimeoutError::Timeout) => panic!("no line from the engine within {wait:?}"),
-        }
-    }
-    /// Writes `line` and its newline in one write: the engine answers a line over 4 MiB as soon as it has read that
-    /// much and then drops the client, so a second write could meet a closed pipe.
-    fn raw(&mut self, line: &str) {
-        self.writer.write_all(format!("{line}\n").as_bytes()).unwrap();
-        self.writer.flush().unwrap();
-    }
-    fn request(&mut self, kind: &str, payload: Value) -> Reply {
-        let id = self.next;
-        self.next += 1;
-        self.raw(&json!({"v": 1, "type": kind, "id": id, "payload": payload}).to_string());
-        loop {
-            match read_reply(self.line().expect("a reply").trim_end()).unwrap() {
-                Reply::Push(envelope) => self.pushes.push_back(envelope),
-                reply @ (Reply::Ok { id: Some(n), .. } | Reply::Error { id: Some(n), .. }) if n == id => return reply,
-                other => panic!("unexpected {other:?}"),
-            }
-        }
-    }
-    fn ok(&mut self, kind: &str, payload: Value) -> Value {
-        match self.request(kind, payload) { Reply::Ok { result, .. } => result, other => panic!("{kind}: {other:?}") }
-    }
-    fn err(&mut self, kind: &str, payload: Value) -> String {
-        match self.request(kind, payload) { Reply::Error { message, .. } => message, other => panic!("{kind}: {other:?}") }
-    }
-    fn push(&mut self) -> Envelope {
-        if let Some(envelope) = self.pushes.pop_front() { return envelope; }
-        match read_reply(self.line().expect("a push").trim_end()).unwrap() {
-            Reply::Push(envelope) => envelope,
-            other => panic!("expected a push, got {other:?}"),
-        }
-    }
-    fn snapshot(&mut self) -> Value {
-        let envelope = self.push();
-        assert_eq!(envelope.kind, "snapshot");
-        envelope.payload
-    }
-    /// job_update pushes until one whose state is `state` (for `job` when given); returns its payload.
-    fn until_state(&mut self, job: Option<&str>, state: &str) -> Value {
-        loop {
-            let envelope = self.push();
-            if envelope.kind == "job_update" && envelope.payload["state"]["state"] == json!(state)
-                && job.map_or(true, |id| envelope.payload["id"] == json!(id)) {
-                return envelope.payload;
-            }
-        }
     }
 }
 
@@ -456,6 +384,37 @@ fn secret_set_refuses_an_unknown_name_and_never_echoes_the_value() {
     assert!(!log.contains("s3cret-value"));
     let mut d = Client::open(&h);
     assert!(!d.line().unwrap().contains("s3cret-value"));
+}
+
+#[test]
+fn a_share_value_of_three_lines_is_refused_without_echoing_it() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let name = r"share:\\nas\media";
+    let value = "user-sentinel-7c1e\r\npass-sentinel-4b9d\r\nthird";
+    let message = c.err("secret_set", json!({"name": name, "value": value}));
+    assert_eq!(message, format!("{name} could not be stored: the value must be a user name and a password on two lines"));
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"].get(name), None);
+    assert!(!h.engine_log().contains("sentinel"));
+}
+
+#[test]
+fn a_two_line_share_value_is_stored() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let name = r"share:\\nas\media";
+    let value = "user-sentinel-7c1e\r\npass-sentinel-4b9d";
+    assert_eq!(c.ok("secret_set", json!({"name": name, "value": value})), Value::Null);
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"][name], json!({"set": true, "host": null}));
+    assert!(!h.engine_log().contains("sentinel"));
 }
 
 // ---- Retry (design part 9.4, L3) ----
@@ -1692,6 +1651,110 @@ fn stop_cancels_a_makemkv_check_whose_listing_hangs() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+// ---- Bounded MakeMKV checks (Ruling W20; engine.md:581 (c), :586, :594) ----
+
+/// A MakeMKV version line newer than the scenario's 2.0.0, so a listing that was observed would change
+/// `makemkv-check.json`.
+const NEWER_VERSION: &str =
+    "MSG:1005,0,1,\"MakeMKV v2.0.1 win(x64-release) started\",\"%1 started\",\"MakeMKV v2.0.1 win(x64-release)\"\n";
+
+/// The check at start lists normally, the self-test's listing hangs after its first line (no `MSG:5010`), and the
+/// job's listing, scan and rip are movie-direct's. The stand-in's counter already holds the check at start's run.
+const SELF_TEST_LISTING_HANGS: &str = r#"{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":1},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:0"],"stdout":"scan.txt","timing":"scan.txt.timing.jsonl"},
+ {"args_contain":["mkv","disc:0","t00-00800"],"stdout":"rip.txt","creates":[{"dir_arg_from_end":1,"name":"title_t00.mkv","copy_from":"placeholder.mkv"}]}]}"#;
+
+/// The check at start lists normally; the self-test's listing prints all four lines, its `MSG:5010` among them, and
+/// then does not exit.
+const SELF_TEST_LISTING_DOES_NOT_EXIT: &str = r#"{"responses":[
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt"},
+ {"args_contain":["info","disc:9999"],"stdout":"drive-list.txt","hang_after_line":100}]}"#;
+
+/// Ruling W20 (engine.md:581 (c)): the MakeMKV check at engine start passes `limits.header`, the harness's 10 s, so a
+/// `makemkvcon` that hangs at service start ends there and the engine then serves its clients. A listing the limit
+/// killed is partial, so its version is neither reported nor observed. This test takes more than 10 s.
+#[test]
+fn a_hanging_start_check_ends_at_the_header_limit_and_the_engine_serves() {
+    let h = stand_in(&[DISC_A], settings());
+    let recorded = |h: &Harness| -> Value {
+        serde_json::from_slice(&fs::read(h.data().join("selftest/makemkv-check.json")).unwrap()).unwrap()
+    };
+    assert_eq!(recorded(&h), json!({"version": "2.0.0", "licence": null}));
+    fs::write(h.tools().join("drive-list-newer.txt"), NEWER_VERSION).unwrap();
+    fs::write(h.tools().join("makemkvcon64.json"),
+        r#"{"responses":[{"args_contain":["info","disc:9999"],"stdout":"drive-list-newer.txt","hang_after_line":1}]}"#)
+        .unwrap();
+    let started = Instant::now();
+    h.restart();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(10), "the check at start ended before the header limit: {took:?}");
+    assert!(took < Duration::from_secs(10) + WAIT * ci_factor(), "{took:?}");
+    let mut c = Client::open(&h);
+    let makemkv = check(&c.snapshot()["selftest"], "makemkvcon").clone();
+    assert_eq!((&makemkv["ok"], &makemkv["busy"], &makemkv["version"]), (&json!(false), &json!(false), &Value::Null));
+    assert_eq!(makemkv["detail"], json!(LISTING_PAST_LIMIT));
+    assert_eq!(LISTING_PAST_LIMIT, "makemkvcon did not finish the drive listing within the header limit and was killed");
+    assert_eq!(recorded(&h), json!({"version": "2.0.0", "licence": null}), "a listing the limit killed is not observed");
+    assert!(c.ok("history", json!({})).as_array().unwrap().is_empty());
+}
+
+/// Ruling W20 (engine.md:586): the self-test's listing holds the disc-phase token (R26.c1) only until the header limit,
+/// so a disc that arrived while it hung gets the token once the limit kills it. The tools beside the job's are unset
+/// as in `a_makemkv_check_holds_the_disc_phase_token_until_its_listing_ends`. This test takes more than 10 s.
+#[test]
+fn a_hanging_self_test_listing_frees_the_disc_phase_token_at_the_limit() {
+    let unset = json!({"ffprobe": null, "ffmpeg": null, "java": null});
+    let h = stand_in(&[DISC_A], json!({"keep_tuning_evidence": false, "drive_settle_s": 0,
+                                       "drive_ready_timeout_s": 1, "tool_paths": unset}));
+    fs::write(h.tools().join("makemkvcon64.json"), SELF_TEST_LISTING_HANGS).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let out = h.data().join("selftest").join("drive-list.txt");
+    let at_start = fs::read(&out).unwrap();
+    let started = Instant::now();
+    c.raw(&json!({"v": 1, "type": "run_selftest", "id": 99, "payload": null}).to_string());
+    h.wait("the self-test's listing to hang", |_| fs::read(&out).is_ok_and(|now| !now.is_empty() && now != at_start));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    h.wait("the arrival to be walked", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_string());
+    h.settle();
+    assert!(h.job_ids().is_empty(), "a job started while the check's listing hung: {:?}", h.job_ids());
+    let selftest = loop {
+        match read_reply(c.line().expect("a line").trim_end()).unwrap() {
+            Reply::Ok { id: Some(99), result } => break result,
+            Reply::Push(envelope) => c.pushes.push_back(envelope),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert!(started.elapsed() >= Duration::from_secs(10), "{:?}", started.elapsed());
+    let makemkv = check(&selftest, "makemkvcon");
+    assert_eq!((&makemkv["ok"], &makemkv["busy"], &makemkv["detail"]),
+               (&json!(false), &json!(false), &json!(LISTING_PAST_LIMIT)));
+    let id = c.until_state(None, "Scanned")["id"].as_str().unwrap().to_string();
+    assert!(h.job_dir(&id).join("drive-list.txt").is_file());
+}
+
+/// M2's half that pull request 2 left optional (engine.md:594; Ruling W20): a check's listing that printed its final
+/// `MSG:5010` and then did not exit is killed by the exit wait, the harness's 10 s, and the check is not ok and says so.
+/// Its listing was whole, so its version is reported. This test takes more than 10 s.
+#[test]
+fn a_check_killed_by_the_exit_wait_is_not_ok() {
+    let h = stand_in(&[DISC_A], settings());
+    fs::write(h.tools().join("makemkvcon64.json"), SELF_TEST_LISTING_DOES_NOT_EXIT).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let started = Instant::now();
+    let result = c.ok("run_selftest", Value::Null);
+    assert!(started.elapsed() >= Duration::from_secs(10), "{:?}", started.elapsed());
+    let makemkv = check(&result, "makemkvcon");
+    assert_eq!((&makemkv["ok"], &makemkv["busy"], &makemkv["detail"]),
+               (&json!(false), &json!(false), &json!(EXIT_WAIT_PASSED)));
+    assert_eq!(makemkv["version"], json!("2.0.0"));
+}
+
 #[test]
 fn a_restart_with_a_changed_makemkv_version_returns_awaiting_makemkv_jobs() {
     let h = stand_in(&["movie-direct", "movie-direct-licence-update"], settings());
@@ -1732,6 +1795,48 @@ fn the_token_check_runs_over_the_engines_transport() {
     let result = c.ok("run_selftest", Value::Null);
     assert_eq!(check(&result, "tmdb_token")["ok"], json!(true));
     assert!(h.http().requests().iter().any(|(url, _)| url == "https://api.themoviedb.org/3/authentication"));
+}
+
+// ---- The binary's transport and sink (spec 12; design part 3.5; Ruling W26) ----
+
+/// Spec 12 and design part 3.5: a notification the sink cannot deliver is logged in engine.log with its event, its job
+/// and the sink's reason, and never blocks the job. Under pull request 3's binary sink, `NoDelivery`, every
+/// notification is one (Ruling W26).
+#[test]
+fn an_undelivered_notification_is_logged_with_its_reason() {
+    let h = stand_in(&[DISC_A], settings());
+    h.use_binary_services();
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    let line = format!("notification disc_done for {id} was not delivered: {NO_DELIVERY}");
+    h.wait("the undelivered disc_done", |h| h.engine_log().contains(&line));
+    assert_eq!(NO_DELIVERY, "no notification delivery in this build; it arrives in pull request 4");
+    assert!(h.notifications().is_empty(), "{:?}", h.notifications());
+}
+
+/// Ruling W26: with pull request 3's binary transport, `OfflineTransport`, every lookup is unreachable, so a disc goes
+/// through its disc phase and then waits in AwaitingLookup with its hourly timer, its waiting message naming the
+/// transport's reason; the recorded transport is never asked.
+#[test]
+fn with_the_offline_transport_a_disc_waits_for_its_lookups() {
+    let h = stand_in(&[DISC_A], settings());
+    h.use_binary_services();
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.settle();
+    let record = h.record(&id);
+    assert_eq!(record.state, State::AwaitingLookup { return_to: Box::new(State::Ejected { after_copy: false }) });
+    let message = record.message.unwrap_or_default();
+    assert!(message.contains(&format!("dischash: {OFFLINE}")), "{message}");
+    assert_eq!(h.timers().pending(), vec![60]);
+    assert!(h.http().requests().is_empty(), "{:?}", h.http().requests());
+    let waiting = format!("notification waiting for {id} was not delivered: {NO_DELIVERY}");
+    assert!(h.engine_log().contains(&waiting), "{}", h.engine_log());
 }
 
 // ---- Shutdown, progress, command and notifications ----
@@ -1907,6 +2012,41 @@ fn a_pulled_disc_reinserted_after_a_forced_shutdown_resumes_its_job() {
 }
 
 #[test]
+fn wait_for_exit_returns_after_a_shutdown_request() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert!(!h.wait_for_exit(Duration::from_millis(300)), "the owner left its loop before any shutdown");
+    assert_eq!(c.ok("shutdown", json!({"force": false})), Value::Null);
+    assert!(h.wait_for_exit(WAIT * ci_factor()));
+    assert_eq!(c.line(), None);
+}
+
+#[test]
+fn a_forced_shutdown_from_the_handle_needs_no_client() {
+    let h = scripted(hanging_at("Remux", 0));
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "Remux", 1);
+    let id = h.job_ids().pop().unwrap();
+    h.shutdown_handle().shutdown(false);
+    assert!(!h.wait_for_exit(Duration::from_millis(300)), "a shutdown without force stopped a running step");
+    h.shutdown_handle().shutdown(true);
+    assert!(h.wait_for_exit(WAIT * ci_factor()));
+    let stopped = h.record(&id);
+    assert_eq!(stopped.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert_eq!(stopped.message.as_deref(), Some(CANCELLED));
+}
+
+#[test]
+fn a_console_engine_mirrors_its_log_lines_to_its_console_writer() {
+    let h = scripted(vec![]);
+    h.restart();
+    h.wait("the console writer to hold every engine.log line", |h| h.console_text() == h.engine_log());
+    let log = h.engine_log();
+    assert!(log.contains(" engine started (lazymkv ") && log.contains(" engine stopped\n"), "{log}");
+}
+
+#[test]
 fn progress_pushes_name_the_action_and_the_title() {
     let h = stand_in(&["movie-direct"], settings());
     let mut c = Client::open(&h);
@@ -1926,12 +2066,12 @@ fn progress_pushes_name_the_action_and_the_title() {
 }
 
 #[test]
-fn command_is_refused_until_the_run_folder_exists() {
+fn command_without_lazymkvctl_beside_the_engine_is_refused() {
     let h = scripted(vec![]);
     let mut c = Client::open(&h);
     c.snapshot();
     assert_eq!(c.err("command", json!({"words": ["plan", "--job", "abc-1"]})),
-               "command needs the engine's run folder, which arrives in pull request 3 (S35)");
+               "command needs lazymkvctl beside the engine, and this engine has none");
 }
 
 #[test]
@@ -1961,4 +2101,174 @@ fn a_media_read_error_failure_message_says_try_the_other_drive() {
     let failed = h.notifications().pop().unwrap();
     assert_eq!(failed.event, NotifyEvent::Failed { class: FailureClass::MediaReadError });
     assert!(failed.message.ends_with("; try the other drive"), "{}", failed.message);
+}
+
+// ---- Share work off the owner thread and the share checks (engine.md:584 to :590; Rulings W15, W21) ----
+
+/// A new client's snapshot, or None when none came within `limit`. The limit proves "does not block" and is not
+/// scaled (Global Constraints).
+fn snapshot_within(h: &Harness, limit: Duration) -> Option<Value> {
+    let stream = h.client().connect().unwrap_or_else(|_| panic!("the engine accepts the client"));
+    let (send, lines) = channel();
+    let mut reader = stream.reader;
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_ok() {
+            let _ = send.send(line);
+        }
+    });
+    let line = lines.recv_timeout(limit).ok();
+    drop(stream.writer);
+    match read_reply(line?.trim_end()).unwrap() {
+        Reply::Push(envelope) if envelope.kind == "snapshot" => Some(envelope.payload),
+        other => panic!("expected the snapshot, got {other:?}"),
+    }
+}
+
+/// Whether a `job_update` of `job` reaches `c` within `limit` (unscaled, as `snapshot_within`); other pushes are kept.
+fn job_update_within(c: &mut Client, job: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(line) = c.lines.recv_timeout(left) else {
+            return false;
+        };
+        if let Reply::Push(envelope) = read_reply(line.trim_end()).unwrap() {
+            if envelope.kind == "job_update" && envelope.payload["id"] == json!(job) {
+                return true;
+            }
+            c.pushes.push_back(envelope);
+        }
+    }
+    false
+}
+
+/// engine.md:584 (design part 4.4): CheckSpace reads the shares before it locks the promises, so while the staging
+/// share stalls inside CheckSpace the owner still persists the removal's MediaRemoved and answers a new client.
+#[test]
+fn a_stalled_staging_share_does_not_stop_the_engine_answering_status() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "CheckSpace never reached the staging share");
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    let snapshot = snapshot_within(&h, Duration::from_secs(5)).expect("a snapshot within 5 s while the share stalls");
+    assert_eq!(snapshot["jobs"].as_array().unwrap().len(), 1);
+    gate.release();
+}
+
+/// engine.md:584, :585: a `retry` of an AwaitingSpace job re-checks space on its own thread and reads the shares
+/// before it locks the promises, so while that read stalls another disc's arrival is fed and its job_update arrives.
+#[test]
+fn a_return_from_a_wait_with_a_stalled_share_leaves_drive_events_flowing() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_free(&staging, 1);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingSpace")["id"].as_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    c.raw(&json!({"v": 1, "type": "retry", "id": 99, "payload": {"job": a}}).to_string());
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "the re-check never reached the staging share");
+    h.insert("tok1", DISC_B);
+    h.deliver();
+    let b = format!("{}-1", h.fingerprint(DISC_B).to_ascii_lowercase());
+    assert!(job_update_within(&mut c, &b, Duration::from_secs(5)), "no job_update of {b} while the share stalls");
+    gate.release();
+}
+
+/// engine.md:585: the restart rebuilds the promises with no share read, and the resumed CheckSpace reads the shares
+/// before it locks them, so a client is answered while the staging share stalls.
+#[test]
+fn a_restart_with_a_stalled_share_answers_a_client_before_the_share_does() {
+    let h = stand_in(&[DISC_A], settings());
+    h.insert("tok0", DISC_A);
+    h.run_until("Planned");
+    let staging = h.staging().to_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    h.restart();
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "the resumed CheckSpace never reached the staging share");
+    h.remove("tok0");
+    h.deliver();
+    h.wait("tok0 emptied", |h| h.drives_json()["drives"]["tok0"]["fingerprint"].is_null());
+    assert!(snapshot_within(&h, Duration::from_secs(5)).is_some(), "no snapshot within 5 s while the share stalls");
+    gate.release();
+}
+
+/// Ruling W21 (S81 amended): AwaitingShare's re-check asks `reach` and then `free_bytes`, so a share that answers but
+/// whose free space cannot be read keeps the job waiting, with no ShareBack to cycle on.
+#[test]
+fn awaiting_share_stays_while_the_free_space_cannot_be_read() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Reachable);
+    h.shares().set_free_error(&staging, "access is denied");
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.state_of(&id), "AwaitingShare");
+    assert!(!h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    h.shares().set_free(&staging, u64::MAX);
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+}
+
+/// engine.md:589 with Ruling W15: a staging root whose parent is missing sends the job to AwaitingShare, and a retry
+/// feeds nothing until the parent exists, so it never cycles through ShareBack.
+#[test]
+fn a_retry_while_the_staging_parent_is_missing_feeds_nothing() {
+    let h = stand_in(&[DISC_A], settings());
+    let parent = h.staging().join("absent");
+    let engine = parent.join("engine");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("settings_set", json!({"staging_root": engine.to_str().unwrap()}));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.state_of(&id), "AwaitingShare");
+    assert!(!h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    std::fs::create_dir(&parent).unwrap();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+}
+
+/// Spec 13 ("each root reachable"), Ruling W15: the self-test asks `reach` of each root before its probe.
+#[test]
+fn the_self_test_reports_an_unreachable_root_from_reach_before_its_probe() {
+    let h = stand_in(&[DISC_A], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    let found = check(&result, "staging_root");
+    assert_eq!(found["ok"], json!(false));
+    assert_eq!(found["detail"], json!(format!("{staging} is unreachable: cable out")));
+    assert_eq!(check(&result, "movies_root")["ok"], json!(true));
+}
+
+/// Design part 6.2, Ruling W15: the self-test creates a missing tuning_root whose parent is a folder.
+#[test]
+fn the_self_test_creates_a_missing_tuning_root_under_an_existing_parent() {
+    let h = stand_in(&[DISC_A], settings());
+    let tuning = h.data().parent().unwrap().join("tuning").join("engine");
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("settings_set", json!({"tuning_root": tuning.to_str().unwrap()}));
+    let result = c.ok("run_selftest", Value::Null);
+    assert_eq!(check(&result, "tuning_root")["ok"], json!(true), "{result}");
+    assert!(tuning.is_dir());
 }
