@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
-    ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_EVENT, WAIT_OBJECT_0,
+    GetLastError, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_EVENT,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
@@ -165,8 +166,9 @@ impl PipeServer {
     }
 
     /// The client check of design part 3.4 and P6 on the connected `instance`: the client's process id, its token,
-    /// then `token_verdict`, which refuses another user first, then a token that is not elevated. The texts name the
-    /// client's process id, never its account (Ruling W4).
+    /// then `token_verdict`, which refuses another user first, then a token that is not elevated. A token read that
+    /// finds no process is a client gone (`token_unread`). The texts name the client's process id, never its account
+    /// (Ruling W4).
     fn check_client(&self, instance: &OwnedHandle) -> io::Result<()> {
         let mut pid = 0u32;
         // SAFETY: `instance` is a connected instance; the call writes the client's process id to `pid`.
@@ -176,9 +178,9 @@ impl PipeServer {
         }
         // The id in a binding whose address is never taken.
         let pid = pid;
-        let refused = |text: String| io::Error::new(io::ErrorKind::PermissionDenied, format!("process {pid}: {text}"));
-        let facts = token_of_process(pid).map_err(|error| refused(format!("its token could not be read: {error}")))?;
-        token_verdict(&facts, &self.own_user_sid).map_err(|verdict| refused(verdict.to_string()))
+        let facts = token_of_process(pid).map_err(|error| token_unread(pid, error))?;
+        token_verdict(&facts, &self.own_user_sid)
+            .map_err(|verdict| io::Error::new(io::ErrorKind::PermissionDenied, format!("process {pid}: {verdict}")))
     }
 
     /// The steps of `accept` (Ruling W10): a connection whose client passed its check, handed out once the next
@@ -271,6 +273,21 @@ pub(crate) fn accept_error(code: u32) -> io::Error {
         }
         _ => not_closed(io::Error::from_raw_os_error(code as i32)),
     }
+}
+
+/// The client check's error when the token of process `pid` could not be read with `error` (Rulings W10,
+/// PF3-S10-12-2; review round 1 of pull request 3 (R12)). `ERROR_INVALID_PARAMETER` (87) is OpenProcess's answer for
+/// an id that names no process, so the client left before its check: `ConnectionAborted` with the text `the client
+/// left before its check: process <pid>: <error>`. Inside `token_of_process` only OpenProcess can give 87, as
+/// OpenProcessToken and GetTokenInformation take an open handle and fixed classes. Any other error is a refusal,
+/// `PermissionDenied` with the text `process <pid>: its token could not be read: <error>`. Def: PR #14 review round 1
+/// (R12). Use: PR #14 review round 1 (R12).
+pub(crate) fn token_unread(pid: u32, error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+        let text = format!("the client left before its check: process {pid}: {error}");
+        return io::Error::new(io::ErrorKind::ConnectionAborted, text);
+    }
+    io::Error::new(io::ErrorKind::PermissionDenied, format!("process {pid}: its token could not be read: {error}"))
 }
 
 /// `error`, unless it is an operating-system error of kind `BrokenPipe`, `PermissionDenied` or `ConnectionAborted`,
@@ -482,7 +499,7 @@ mod tests {
     use super::*;
     use crate::security::{test_name, HIGH_INTEGRITY_SID, SYSTEM_SID};
     use crate::testutil::{ci_factor, line, within};
-    use crate::win::{own_token, read_handle, sid_string, wide, SE_GROUP_INTEGRITY};
+    use crate::win::{own_token, read_handle, sid_string, token_of_process, wide, SE_GROUP_INTEGRITY};
     use crate::{IpcStream, IpcTransport};
     use std::io::{self, BufRead, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -968,5 +985,21 @@ mod tests {
         // Only operating-system errors are mapped: the client check's own refusal keeps its kind.
         let refused = io::Error::new(io::ErrorKind::PermissionDenied, "process 1: its token is not elevated");
         assert_eq!(not_closed(refused).kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_token_read_that_finds_no_process_is_a_client_gone_and_any_other_failure_a_refusal() {
+        // Review round 1 of pull request 3 (R12). An id far above any entry in the client id table names no process,
+        // and OpenProcess answers it with ERROR_INVALID_PARAMETER (87).
+        let Err(none) = token_of_process(0xFFFF_FFFC) else { panic!("the id 0xFFFFFFFC named a process") };
+        assert_eq!(none.raw_os_error(), Some(87), "{none}");
+        let gone = token_unread(7, io::Error::from_raw_os_error(87));
+        let text = format!("the client left before its check: process 7: {}", io::Error::from_raw_os_error(87));
+        assert_eq!((gone.kind(), gone.to_string()), (io::ErrorKind::ConnectionAborted, text));
+        let refused = token_unread(7, io::Error::from_raw_os_error(5));
+        let text = format!("process 7: its token could not be read: {}", io::Error::from_raw_os_error(5));
+        assert_eq!((refused.kind(), refused.to_string()), (io::ErrorKind::PermissionDenied, text));
+        // A deliberate error carries no operating-system code, so `not_closed` keeps its kind.
+        assert_eq!(not_closed(gone).kind(), io::ErrorKind::ConnectionAborted);
     }
 }
