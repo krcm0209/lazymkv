@@ -12,6 +12,9 @@
 //! and the stand-in into `<root>/tools`, never running a stand-in inside `corpus/` (S12), builds the scenario's disc
 //! from its `disc.json`, and replays its `http.json`. When the scenarios hold `lazymkvctl.json`, it also copies the
 //! stand-in as `<root>/tools/lazymkvctl`, which the engine's `command` relay runs (design part 9.5, Task T3-22).
+//!
+//! On Windows, `Harness::new_native` runs the same stand-ins under the binary's own start, `native::run_with`, behind
+//! a real mutex and pipe of the test's own names (Task T3-23).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -40,6 +43,28 @@ use lazymkv_platform::{native_guard, DriveEvent, DriveWatcher, GuardedChild, Pla
 use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
 
+#[cfg(windows)]
+use std::io::BufRead;
+#[cfg(windows)]
+use std::panic;
+#[cfg(windows)]
+use std::sync::mpsc::channel;
+#[cfg(windows)]
+use std::sync::Condvar;
+#[cfg(windows)]
+use std::thread::JoinHandle;
+
+#[cfg(windows)]
+use lazymkv_core::ipc::PROTOCOL_VERSION;
+#[cfg(windows)]
+use lazymkv_platform::win::{own_token, protect_data_folder, PipeConnector};
+#[cfg(windows)]
+use lazymkv_platform::{ConnectError, IpcConnector};
+
+#[cfg(windows)]
+use crate::native::{run_with, NativeOptions};
+#[cfg(windows)]
+use crate::owner::panic_text;
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
 use crate::{
@@ -112,6 +137,44 @@ impl<G: ProcessGuard> ProcessGuard for BusyRetry<G> {
 
 /// `Harness::on_spawn`'s actions, each with its needles; an action is taken out when it runs.
 type SpawnHooks = Arc<Mutex<Vec<(Vec<String>, Option<Box<dyn Fn() + Send + Sync>>)>>>;
+
+/// The console handler a native run installed through `NativeOptions.console_stop` (`Harness::new_native`).
+#[cfg(windows)]
+type ConsoleHandler = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
+
+/// Whether a native harness of this test process is alive, and the wait for it to go (`NativeSlot`).
+#[cfg(windows)]
+static NATIVE_SLOT: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+/// The one native harness alive in a test process at a time (`Harness::new_native`). A native engine runs on the real
+/// `WinHost`, whose process list S55 reads before every `makemkvcon` call, so another native harness's stand-in
+/// `makemkvcon64` would refuse this one's calls with `another MakeMKV process is running`. `take` waits until the slot
+/// is free; the drop frees it.
+#[cfg(windows)]
+struct NativeSlot;
+
+#[cfg(windows)]
+impl NativeSlot {
+    /// Waits until no other native harness of this process is alive, then holds the slot.
+    fn take() -> NativeSlot {
+        let (taken, freed) = &NATIVE_SLOT;
+        let mut taken = lock(taken);
+        while *taken {
+            taken = freed.wait(taken).unwrap_or_else(PoisonError::into_inner);
+        }
+        *taken = true;
+        NativeSlot
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NativeSlot {
+    fn drop(&mut self) {
+        let (taken, freed) = &NATIVE_SLOT;
+        *lock(taken) = false;
+        freed.notify_one();
+    }
+}
 
 /// Locks `mutex`, ignoring a poison a panicked thread left, so one failed assertion does not cascade.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -393,6 +456,19 @@ pub struct Harness {
     engine: Mutex<Option<EngineHandle>>,
     /// Whether `start` passes pull request 3's binary transport and sink, `use_binary_services`.
     binary_services: AtomicBool,
+    /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
+    /// once `native_exit`, `stop` or the drop took it.
+    #[cfg(windows)]
+    native: Mutex<Option<JoinHandle<i32>>>,
+    /// The native run's pipe (`new_native`); None for every other harness.
+    #[cfg(windows)]
+    pipe: Option<String>,
+    /// The console handler the native run installed (`new_native`).
+    #[cfg(windows)]
+    console_handler: ConsoleHandler,
+    /// The process's one native slot, held by a native harness until its drop has stopped its run (`new_native`).
+    #[cfg(windows)]
+    native_slot: Option<NativeSlot>,
 }
 
 impl Harness {
@@ -429,6 +505,14 @@ impl Harness {
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
+        let harness = Harness::prepared(fake_tool, scenarios, settings);
+        harness.start();
+        harness
+    }
+
+    /// `new`'s harness before its engine starts: the scratch folders, the scenario and stand-in copies, the recorded
+    /// transport and the `TestGuard` (`new`, `new_native`).
+    fn prepared(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
         let folders = Folders::make();
         let tools = folders.root.join("tools");
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("corpus").join("scenarios");
@@ -484,9 +568,7 @@ impl Harness {
             spawns,
             ctl,
         };
-        let harness = folders.harness(defaults, settings, runner);
-        harness.start();
-        harness
+        folders.harness(defaults, settings, runner)
     }
 
     /// Starts an engine with `start_until` and the stop hook over the harness's data folder and fakes, on a fresh
@@ -556,8 +638,13 @@ impl Harness {
         *lock(&self.engine) = Some(engine);
     }
 
-    /// Stops the running engine, if any, and joins its threads.
+    /// Stops the running engine, if any, and joins its threads; a native run still going is stopped as the drop stops
+    /// it (Ruling T3-23-c).
     fn stop(&self) {
+        #[cfg(windows)]
+        if let Some(outcome) = self.stop_native() {
+            assert_eq!(outcome, Ok(0), "the harness's native engine stops");
+        }
         let engine = lock(&self.engine).take();
         if let Some(engine) = engine {
             engine.stop().expect("the harness's engine stops");
@@ -719,8 +806,13 @@ impl Harness {
     /// its sleeping threads, and starts a new engine (`start_until`) over the same data folder with the same drive
     /// script, ejector, keep-awake, shares, secrets, a new MemoryIpc, host, RecordedTransport, ScriptedSteps (used
     /// entries stay used) and MemorySink list. The queued drive events are handed over once the old engine has stopped,
-    /// so the new engine reads them (R22.9). Def: T22. Use: T22 to T29.
+    /// so the new engine reads them (R22.9). A native harness's restart panics (Ruling T3-23-c). Def: T22. Use: T22 to
+    /// T29.
     pub fn restart(&self) {
+        #[cfg(windows)]
+        if self.pipe.is_some() {
+            panic!("restart is not for a native harness");
+        }
         self.stop();
         self.timers.drop_pending();
         {
@@ -1015,10 +1107,178 @@ impl Harness {
     }
 }
 
+#[cfg(windows)]
+impl Harness {
+    /// A harness whose engine is the Windows binary's own start, `native::run_with`, on a thread (design parts 3.1
+    /// to 3.8; Ruling W27). The stand-ins, scenarios and settings are `new`'s; the data folder is made again through
+    /// `protect_data_folder` with the same settings.json (Ruling T3-23-b). `run_with` gets `["--data", <data>]`, a
+    /// buffer of its own for standard error, and `NativeOptions { mutex: Global\<the pipe's name after
+    /// \\.\pipe\>, pipe, drives: the harness's SharedDrives, ejector: its RecordingEjector with removals, processes:
+    /// its TestGuard, secrets: its MemorySecrets, http: its recorded transport, console: its console buffer,
+    /// console_stop: a closure that keeps the handler, token: None }`. The real WinHost, WinKeepAwake and share
+    /// connector run, so `host()`, `awake()` and `shares()` are not this engine's. It returns once a client through
+    /// `pipe_client()` has read its snapshot line (60 s cap, 240 s under continuous integration, CI), and panics with
+    /// `run_with`'s standard error when `run_with` returned first. `restart`, `run_until` and `run_until_event` are not
+    /// for it. Native harnesses of one test process run one at a time (`NativeSlot`): the real WinHost shows S55 every
+    /// running `makemkvcon64`, another native harness's stand-in included, so it first waits until no other is alive.
+    /// Def: T3-23. Use: T3-23.
+    pub fn new_native(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str) -> Harness {
+        let slot = NativeSlot::take();
+        let mut harness = Harness::prepared(fake_tool, scenarios, settings);
+        harness.native_slot = Some(slot);
+        let name = pipe.strip_prefix(r"\\.\pipe\").unwrap_or_else(|| panic!("{pipe} is not a pipe's name"));
+        let mutex = format!(r"Global\{name}");
+        harness.pipe = Some(pipe.to_string());
+        // Ruling T3-23-b: a folder the test process made need not be owned by Administrators, which
+        // `protect_data_folder` requires, so it makes the folder itself.
+        let settings_file = harness.data.join("settings.json");
+        let written = fs::read(&settings_file).expect("the harness reads data/settings.json");
+        fs::remove_dir_all(&harness.data).expect("the harness removes the data folder it made");
+        let sid = own_token().expect("the harness reads its own token").user_sid;
+        protect_data_folder(&harness.data, &sid).unwrap_or_else(|text| panic!("the harness's data folder: {text}"));
+        fs::write(&settings_file, written).expect("the harness writes data/settings.json again");
+        let drives = SharedDrives { drives: Arc::clone(&harness.drives), script: harness.script.clone() };
+        let kept = Arc::clone(&harness.console_handler);
+        let console_stop = move |handler: Box<dyn Fn() + Send + Sync>| -> io::Result<()> {
+            *lock(&kept) = Some(handler);
+            Ok(())
+        };
+        let options = NativeOptions {
+            mutex,
+            pipe: pipe.to_string(),
+            drives: Some(Box::new(drives)),
+            ejector: Some(Arc::clone(&harness.ejector) as _),
+            processes: Some(Arc::clone(&harness.processes)),
+            secrets: Some(Arc::clone(&harness.secrets) as _),
+            http: Some(Arc::clone(&harness.http) as _),
+            console: Some(Box::new(ConsoleBuffer(Arc::clone(&harness.console)))),
+            console_stop: Some(Box::new(console_stop)),
+            token: None,
+        };
+        let args = vec!["--data".to_string(), harness.data.display().to_string()];
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let mut err = ConsoleBuffer(Arc::clone(&stderr));
+        let run = thread::spawn(move || run_with(&args, &mut err, options));
+        *lock(&harness.native) = Some(run);
+        harness.wait_for_snapshot(&stderr);
+        harness
+    }
+
+    /// The real pipe client of this harness's pipe (design part 3.3). Def: T3-23. Use: T3-23.
+    pub fn pipe_client(&self) -> PipeConnector {
+        self.deliver();
+        PipeConnector::new(self.pipe.as_deref().expect("pipe_client is for a native harness"))
+    }
+
+    /// Calls the console handler `run_with` installed, as Ctrl+C would (design part 3.8; Ruling W19); panics when
+    /// none was installed. Def: T3-23. Use: T3-23.
+    pub fn console_stop_event(&self) {
+        self.deliver();
+        let handler = lock(&self.console_handler);
+        let handler = handler.as_ref().expect("run_with installed a console handler");
+        handler();
+    }
+
+    /// Waits for `run_with` to return (60 s cap, 240 s under CI) and gives its exit code; the drop then has nothing
+    /// to stop (Ruling T3-23-c). Def: T3-23. Use: T3-23.
+    pub fn native_exit(&self) -> i32 {
+        self.deliver();
+        let run = lock(&self.native).take().expect("a native run is left to wait for");
+        match join_native(run) {
+            Ok(Ok(code)) => code,
+            Ok(Err(payload)) => panic::resume_unwind(payload),
+            Err(run) => {
+                *lock(&self.native) = Some(run);
+                panic!("native_exit: run_with did not return within {:?}", RUN_UNTIL_CAP * ci_factor());
+            }
+        }
+    }
+
+    /// `new_native`'s wait: a helper thread connects through `pipe_client()`, sleeping 20 ms after each `NotRunning`,
+    /// and sends the first line it reads; a snapshot ends the wait (60 s cap, 240 s under CI). When `run_with` returns
+    /// first it panics with `stderr`, what `run_with` wrote to its standard error.
+    fn wait_for_snapshot(&self, stderr: &Mutex<Vec<u8>>) {
+        let cap = RUN_UNTIL_CAP * ci_factor();
+        let deadline = Instant::now() + cap;
+        let connector = self.pipe_client();
+        let (send, first) = channel();
+        thread::spawn(move || {
+            let line = loop {
+                match connector.connect() {
+                    Ok(mut stream) => {
+                        let mut line = String::new();
+                        break stream.reader.read_line(&mut line).map(|_| line).map_err(|error| error.to_string());
+                    }
+                    Err(ConnectError::NotRunning) if Instant::now() < deadline => thread::sleep(POLL),
+                    Err(error) => break Err(format!("the client could not connect: {error:?}")),
+                }
+            };
+            let _ = send.send(line);
+        });
+        loop {
+            if let Ok(line) = first.try_recv() {
+                match line {
+                    Ok(line) if line.contains(r#""type":"snapshot""#) => return,
+                    other => panic!("new_native: the pipe's first line is not a snapshot: {other:?}"),
+                }
+            }
+            let returned = lock(&self.native).take_if(|run| run.is_finished());
+            if let Some(run) = returned {
+                let code = run.join().map_err(|payload| panic_text(payload.as_ref()));
+                let text = String::from_utf8_lossy(&lock(stderr)).into_owned();
+                panic!("new_native: run_with returned {code:?} before the pipe answered; its standard error: {text}");
+            }
+            assert!(Instant::now() < deadline, "new_native: no snapshot through the pipe within {cap:?}");
+            thread::sleep(POLL);
+        }
+    }
+
+    /// Ruling T3-23-c: a native run still going gets a forced `shutdown` through the pipe (a connect that finds no
+    /// engine skips it), held open until the run ends, and its thread is joined (60 s cap, 240 s under CI). Its exit
+    /// code, or why there is none; None when no native run is left.
+    fn stop_native(&self) -> Option<Result<i32, String>> {
+        let run = lock(&self.native).take()?;
+        let mut client = None;
+        if !run.is_finished() {
+            if let Ok(mut stream) = self.pipe_client().connect() {
+                let request = json!({"v": PROTOCOL_VERSION, "type": "shutdown", "id": 1, "payload": {"force": true}});
+                let _ = writeln!(stream.writer, "{request}");
+                let _ = stream.writer.flush();
+                client = Some(stream);
+            }
+        }
+        let outcome = match join_native(run) {
+            Ok(Ok(code)) => Ok(code),
+            Ok(Err(payload)) => Err(format!("run_with panicked: {}", panic_text(payload.as_ref()))),
+            Err(_) => Err(format!("run_with did not return within {:?}", RUN_UNTIL_CAP * ci_factor())),
+        };
+        drop(client);
+        Some(outcome)
+    }
+}
+
+/// Polls `run` every 20 ms until it has finished (60 s cap, 240 s under CI) and joins it; past the cap, Err hands it
+/// back unjoined.
+#[cfg(windows)]
+fn join_native(run: JoinHandle<i32>) -> Result<thread::Result<i32>, JoinHandle<i32>> {
+    let deadline = Instant::now() + RUN_UNTIL_CAP * ci_factor();
+    while !run.is_finished() {
+        if Instant::now() >= deadline {
+            return Err(run);
+        }
+        thread::sleep(POLL);
+    }
+    Ok(run.join())
+}
+
 impl Drop for Harness {
     /// Stops a running engine and removes the scratch folder. An engine thread that panicked fails the test here, as
-    /// `run_until` and `restart` do, unless the test is already panicking (ruling at the final review).
+    /// `run_until` and `restart` do, unless the test is already panicking (ruling at the final review). A native run
+    /// still going is stopped first with a forced `shutdown` through its pipe, and an exit code other than 0 fails the
+    /// test the same way (Ruling T3-23-c).
     fn drop(&mut self) {
+        #[cfg(windows)]
+        let native = self.stop_native();
         let engine = lock(&self.engine).take();
         let stopped = engine.map(EngineHandle::stop);
         let _ = fs::remove_dir_all(&self.root);
@@ -1026,6 +1286,10 @@ impl Drop for Harness {
             if !thread::panicking() {
                 panic!("the harness's engine stops: {error}");
             }
+        }
+        #[cfg(windows)]
+        if let Some(outcome) = native.filter(|_| !thread::panicking()) {
+            assert_eq!(outcome, Ok(0), "the harness's native engine stops");
         }
     }
 }
@@ -1111,6 +1375,14 @@ impl Folders {
             faults: Arc::default(),
             engine: Mutex::default(),
             binary_services: AtomicBool::new(false),
+            #[cfg(windows)]
+            native: Mutex::default(),
+            #[cfg(windows)]
+            pipe: None,
+            #[cfg(windows)]
+            console_handler: Arc::default(),
+            #[cfg(windows)]
+            native_slot: None,
         }
     }
 }

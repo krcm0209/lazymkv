@@ -9,6 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 
 mod awake;
 mod client;
+mod console;
 mod creds;
 mod drives;
 mod eject;
@@ -23,6 +24,7 @@ mod token;
 
 pub use awake::WinKeepAwake;
 pub use client::PipeConnector;
+pub use console::on_console_stop;
 pub use creds::CredentialStore;
 pub use drives::WinDrives;
 pub use eject::WinEjector;

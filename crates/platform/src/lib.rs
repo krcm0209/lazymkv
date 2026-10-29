@@ -1,4 +1,6 @@
-//! lazymkv-platform: the operating-system seams of spec 4.3 as traits, with in-memory fakes behind the `fakes` feature (design parts 4.1, 4.2). Pull request 2 holds no Windows API; the Windows implementations arrive in pull request 3.
+//! lazymkv-platform: the operating-system seams of spec 4.3 as traits (design parts 4.1, 4.2), their Windows
+//! implementations in `win` on `windows-sys` (`cfg(windows)`), the pure helpers they use, which every system tests, and
+//! in-memory fakes behind the `fakes` feature.
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -273,8 +275,8 @@ pub trait Host: Send + Sync {
     fn user_writable(&self, path: &Path) -> bool;
 }
 
-/// Everything the engine takes from the operating system, in one bundle (spec 4.3, design part 4.2). Windows fills it
-/// in pull request 3 and the fakes fill it in tests. Def: T8. Use: T22.
+/// Everything the engine takes from the operating system, in one bundle (spec 4.3, design part 4.2). On Windows
+/// `engine::native` fills it from `win`; the fakes fill it in tests. Def: T8. Use: T22, T3-23.
 pub struct Platform {
     /// Disc arrivals and removals.
     pub drives: Box<dyn DriveWatcher>,
