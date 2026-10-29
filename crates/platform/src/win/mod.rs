@@ -9,6 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+use windows_sys::Win32::System::Diagnostics::Debug::{GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY, REG_ROUTINE_FLAGS};
 
 mod awake;
@@ -49,6 +50,15 @@ pub(crate) use token::{read_descriptor, read_handle, read_path, AclEntry};
 pub(crate) const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
 /// winnt.h's `SE_GROUP_INTEGRITY`, marking a token's integrity level (design part 3.6). Def: T3-7. Use: T3-7, T3-11.
 pub(crate) const SE_GROUP_INTEGRITY: u32 = 0x20;
+
+/// Turns Windows' critical-error box off for the whole process (design part 5.4; review round 1 of pull request 3,
+/// V6): with `SEM_FAILCRITICALERRORS` set, a disc removed or swapped mid-read gives the reading thread an error instead
+/// of a "No Disk" box that holds it until someone answers. The mode's other flags are kept, every thread of the
+/// process reads it, and every child started afterwards inherits it. Def: PR #14 review round 1 (V6). Use: T3-23.
+pub fn fail_critical_errors() {
+    // SAFETY: both calls take and return flags only.
+    unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS) };
+}
 
 /// `text` as UTF-16 code units with a terminating NUL, for the wide-string arguments of Win32 calls (design part
 /// 4.3). Def: T3-2. Use: T3-2 to T3-4, T3-7, T3-11 to T3-16.
@@ -94,4 +104,30 @@ pub(crate) fn registry_text(root: HKEY, key: &str, value: &str, flags: REG_ROUTI
         return None;
     }
     Some(until_nul(&data[..units.min(data.len())]).to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The test first takes the flag off, since a process inherits its parent's mode and the SSH session's already
+    /// holds it, so the call under test is what sets it.
+    #[test]
+    fn fail_critical_errors_adds_only_its_flag() {
+        // SAFETY: GetErrorMode takes no argument and returns the process's flags.
+        let inherited = unsafe { GetErrorMode() };
+        println!("inherited error mode: {inherited:#x}");
+        // SAFETY: SetErrorMode takes and returns flags only.
+        unsafe { SetErrorMode(inherited & !SEM_FAILCRITICALERRORS) };
+        // SAFETY: as GetErrorMode above.
+        let before = unsafe { GetErrorMode() };
+        assert_eq!(before & SEM_FAILCRITICALERRORS, 0, "the flag could not be taken off");
+        fail_critical_errors();
+        // SAFETY: as above.
+        let after = unsafe { GetErrorMode() };
+        assert_eq!(after, before | SEM_FAILCRITICALERRORS, "the mode before was {before:#x}");
+        fail_critical_errors();
+        // SAFETY: as above.
+        assert_eq!(unsafe { GetErrorMode() }, after, "a second call changed the mode");
+    }
 }

@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use lazymkv_clients::{HttpTransport, OfflineTransport};
 use lazymkv_platform::security::TokenFacts;
 use lazymkv_platform::win::{
-    on_console_stop, own_token, program_data, protect_data_folder, share_connector, CredentialStore, EngineMutex,
-    MutexRefusal, PipeServer, WinDrives, WinEjector, WinHost, WinKeepAwake,
+    fail_critical_errors, on_console_stop, own_token, program_data, protect_data_folder, share_connector,
+    CredentialStore, EngineMutex, MutexRefusal, PipeServer, WinDrives, WinEjector, WinHost, WinKeepAwake,
 };
 use lazymkv_platform::{
     native_guard, DriveWatcher, Ejector, Platform, ProcessGuard, SecretStore, MUTEX_NAME, PIPE_NAME,
@@ -91,8 +91,9 @@ impl NativeOptions {
 /// Runs the engine on Windows until a `shutdown` request or the console's stop event stops it (design parts 3.1 to
 /// 3.8; Rulings W1 to W5, W19, W26): the arguments, the elevation check, the default data folder's place when no
 /// `--data` is given (whole-branch review F2), the mutex, the data folder, the first pipe instance, the console
-/// handler, then `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a usage error;
-/// every refusal's text goes to `err` (Step 3 lists them). Def: T3-23. Use: T3-23.
+/// handler, the process's critical-error mode (`fail_critical_errors`, review round 1 of pull request 3, V6), then
+/// `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a usage error; every refusal's
+/// text goes to `err` (Step 3 lists them). Def: T3-23. Use: T3-23.
 pub fn run_with(args: &[String], err: &mut dyn Write, options: NativeOptions) -> i32 {
     let data = match data_arg(args) {
         Ok(data) => data,
@@ -157,6 +158,10 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         None => on_console_stop(handler),
     };
     installed.map_err(|error| could_not_start(&error))?;
+    // Review round 1 of pull request 3 (V6): after every start-up refusal, so W3's order is untouched, and before the
+    // drive watcher, start's MakeMKV check and the present discs' arrivals, so no thread or child of the engine meets
+    // Windows' "No Disk" box.
+    fail_critical_errors();
     let drives: Box<dyn DriveWatcher> = match drives {
         Some(drives) => drives,
         None => Box::new(WinDrives::new().map_err(|error| could_not_start(&error))?),
