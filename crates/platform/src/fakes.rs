@@ -264,7 +264,8 @@ impl FakeShares {
         StallGate { gate }
     }
 
-    /// Sets what `access(root)` reports (design part 7.1's job.log line). Def: T3-17. Use: T3-17.
+    /// Sets what `access(root)` reports (design part 7.1's job.log line); while `set_reach(root, Unreachable(..))`
+    /// holds, `access(root)` is None, as after a failed reach of the real connector. Def: T3-17. Use: T3-17.
     pub fn set_access(&self, root: &str, access: &'static str) {
         lock(&self.state).access.insert(root.to_string(), access);
     }
@@ -351,7 +352,12 @@ impl ShareConnector for FakeShares {
     }
 
     fn access(&self, root: &str) -> Option<&'static str> {
-        lock(&self.state).access.get(root).copied()
+        // A failed reach leaves no access, as ShareConnector::access says and Shares::reach does.
+        let state = lock(&self.state);
+        if let Some(Reach::Unreachable(_)) = state.reach.get(root) {
+            return None;
+        }
+        state.access.get(root).copied()
     }
 }
 
@@ -744,6 +750,12 @@ mod tests {
         let shares = FakeShares::new();
         assert_eq!(shares.access("/s"), None);
         shares.set_access("/s", "the session's access");
+        assert_eq!(shares.access("/s"), Some("the session's access"));
+        shares.set_access("/m", "lazymkv's stored credential");
+        shares.set_reach("/s", Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.access("/s"), None);
+        assert_eq!(shares.access("/m"), Some("lazymkv's stored credential"));
+        shares.set_reach("/s", Reach::Reachable);
         assert_eq!(shares.access("/s"), Some("the session's access"));
     }
 
