@@ -54,6 +54,9 @@ pub struct PipeServer {
     closed: AtomicBool,
     /// The instance the next client connects to.
     listening: Mutex<Option<OwnedHandle>>,
+    /// The nMaxInstances every `create_instance` passes: `PIPE_UNLIMITED_INSTANCES`, or a test's cap. Def: PR #14
+    /// review round 1 (R14). Use: PR #14 review round 1 (R14).
+    instances: u32,
 }
 
 impl PipeServer {
@@ -61,19 +64,26 @@ impl PipeServer {
     /// `another process holds the pipe <name>` when `CreateNamedPipeW` refuses `FILE_FLAG_FIRST_PIPE_INSTANCE` with
     /// `ERROR_ACCESS_DENIED` (5); any other failure is that operating-system error. Def: T3-11. Use: T3-12, T3-23.
     pub fn bind(name: &str) -> io::Result<PipeServer> {
-        PipeServer::bind_with(name, own_token()?.user_sid)
+        PipeServer::bind_with(name, own_token()?.user_sid, PIPE_UNLIMITED_INSTANCES)
     }
 
     /// `bind`, but clients are checked against `own_user_sid` instead of this process's user; the descriptor still
     /// grants this process's user, so a test client opens the pipe and meets the check. Def: T3-11. Use: T3-11.
     #[cfg(test)]
     pub(crate) fn bind_as(name: &str, own_user_sid: &str) -> io::Result<PipeServer> {
-        PipeServer::bind_with(name, own_user_sid.to_string())
+        PipeServer::bind_with(name, own_user_sid.to_string(), PIPE_UNLIMITED_INSTANCES)
+    }
+
+    /// `bind`, but every instance passes `instances` as its nMaxInstances, so a test can make the next instance's
+    /// creation fail. Def: PR #14 review round 1 (R14). Use: PR #14 review round 1 (R14).
+    #[cfg(test)]
+    pub(crate) fn bind_capped(name: &str, instances: u32) -> io::Result<PipeServer> {
+        PipeServer::bind_with(name, own_token()?.user_sid, instances)
     }
 
     /// The server of `name` whose descriptor grants this process's user and whose client check compares with
-    /// `own_user_sid`, holding its first instance.
-    fn bind_with(name: &str, own_user_sid: String) -> io::Result<PipeServer> {
+    /// `own_user_sid`, holding its first instance; every instance passes `instances` as its nMaxInstances.
+    fn bind_with(name: &str, own_user_sid: String, instances: u32) -> io::Result<PipeServer> {
         let descriptor = Descriptor::from_sddl(&pipe_sddl(&own_token()?.user_sid))?;
         let server = PipeServer {
             name: wide(name),
@@ -83,6 +93,7 @@ impl PipeServer {
             stop: manual_event()?,
             closed: AtomicBool::new(false),
             listening: Mutex::new(None),
+            instances,
         };
         let first = server.create_instance(true)?;
         *lock(&server.listening) = Some(first);
@@ -101,7 +112,7 @@ impl PipeServer {
                 self.name.as_ptr(),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | claim,
                 PIPE_MODE,
-                PIPE_UNLIMITED_INSTANCES,
+                self.instances,
                 PIPE_BUFFER,
                 PIPE_BUFFER,
                 0,
@@ -180,7 +191,7 @@ impl PipeServer {
         }
         // Made before the listening instance is taken, so a failure here leaves the name held.
         let event = manual_event()?;
-        // 2. The listening instance, or a new one when an earlier accept left none.
+        // 2. The listening instance, or a new one while a concurrent accept holds the taken instance.
         let taken = lock(&self.listening).take();
         let instance = match taken {
             Some(instance) => instance,
@@ -200,7 +211,16 @@ impl PipeServer {
             if self.closed.load(Ordering::SeqCst) {
                 return Err(closed_error());
             }
-            *listening = Some(self.create_instance(false)?);
+            match self.create_instance(false) {
+                Ok(next) => *listening = Some(next),
+                Err(error) => {
+                    // The name stays held (Ruling W10): this instance listens again. The next accept's connect meets
+                    // its client, if still connected, with ERROR_PIPE_CONNECTED (535) and serves it, or one that left
+                    // with ERROR_NO_DATA (232).
+                    *listening = Some(instance);
+                    return Err(error);
+                }
+            }
         }
         // 5. A failed connect drops its instance.
         if let Some(code) = failed {
@@ -805,6 +825,30 @@ mod tests {
         // The next instance exists before accept returns, so a client neither finds the pipe busy (231) nor finds no
         // pipe (2), and needs no wait.
         assert_eq!(open_client(&name).err(), None);
+    }
+
+    #[test]
+    fn a_next_instance_that_cannot_be_created_leaves_the_name_held_and_the_server_serves_on() {
+        // Review round 1 of pull request 3 (R14).
+        let name = pipe_name();
+        let server = PipeServer::bind_capped(&name, 2).unwrap();
+        let first_client = open_client(&name).unwrap();
+        let first = server.accept().unwrap();
+        let second_client = open_client(&name).unwrap();
+        // The cap refuses a third instance with ERROR_PIPE_BUSY (231), which passes `not_closed` unchanged.
+        let Err(busy) = server.accept() else { panic!("a third instance of {name} was created past its cap") };
+        assert_eq!(busy.raw_os_error(), Some(231), "{busy}");
+        drop((first, first_client, second_client));
+        // The instance the failed accept took listens again, so the name is still held.
+        let Err(held) = PipeServer::bind(&name) else { panic!("the name {name} was unheld") };
+        assert_eq!(held.kind(), io::ErrorKind::AddrInUse, "{held}");
+        // Its client left: ERROR_NO_DATA (232).
+        let Err(gone) = server.accept() else { panic!("a client that had left was handed out") };
+        assert_eq!(gone.kind(), io::ErrorKind::ConnectionAborted, "{gone}");
+        let mut client = open_client(&name).unwrap();
+        let mut stream = server.accept().unwrap();
+        stream.writer.write_all(b"served\n").unwrap();
+        assert_eq!(line(&mut *client.reader), "served\n");
     }
 
     #[test]
