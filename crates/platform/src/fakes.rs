@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -541,7 +541,7 @@ impl IpcConnector for MemoryConnector {
     }
 }
 
-/// What a `FakeHost` has been told besides its fixed date and time.
+/// What a `FakeHost` has been told besides its date and its clock.
 #[derive(Default)]
 struct HostState {
     labels: BTreeMap<PathBuf, String>,
@@ -551,13 +551,15 @@ struct HostState {
     writable: BTreeSet<PathBuf>,
 }
 
-/// A host with a fixed date and time, no registration key, no debug log, no running programs and no volume label until
-/// a test sets one (spec 4.3, design part 4.2). It knows no default install path. Its clock in milliseconds is
-/// `now_unix` times 1000, its local time is that clock read as UTC, and no path is user-writable until a test sets one.
+/// A host with a date and a clock fixed until a test moves the clock (`set_now_ms`), and no registration key, no debug
+/// log, no running programs and no volume label until a test sets one (spec 4.3, design part 4.2). It knows no default
+/// install path. Its clock in milliseconds starts at `now_unix` times 1000, its local time is a clock reading read as
+/// UTC, and no path is user-writable until a test sets one. The date is a setting: moving the clock leaves it.
 /// Def: T8. Use: T11, T13, T14, T22 to T29.
 pub struct FakeHost {
     local_date: String,
-    now_unix: u64,
+    /// The clock, in milliseconds since the Unix epoch; only `set_now_ms` moves it.
+    now_ms: AtomicU64,
     state: Mutex<HostState>,
 }
 
@@ -565,7 +567,14 @@ impl FakeHost {
     /// A host whose clock reads `now_unix` and whose calendar date is `local_date` (`yyyy-MM-dd`) (design part 4.2).
     /// Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn new(local_date: &str, now_unix: u64) -> FakeHost {
-        FakeHost { local_date: local_date.to_string(), now_unix, state: Mutex::default() }
+        FakeHost { local_date: local_date.to_string(), now_ms: AtomicU64::new(now_unix * 1000), state: Mutex::default() }
+    }
+
+    /// Moves the clock to `unix_ms`, which `now_ms` then reads, and `now_unix` in whole seconds; nothing else changes,
+    /// so a test can tell one clock read from another (W16, R23.4, R23.7). Def: PR #14 review round 1 (R20).
+    /// Use: PR #14 review round 1 (R20).
+    pub fn set_now_ms(&self, unix_ms: u64) {
+        self.now_ms.store(unix_ms, Ordering::SeqCst);
     }
 
     /// Gives the disc at `root` the volume label `label` (design part 4.2). Def: T8. Use: T11, T13, T14, T22 to T29.
@@ -596,11 +605,11 @@ impl FakeHost {
 
 impl Host for FakeHost {
     fn now_unix(&self) -> u64 {
-        self.now_unix
+        self.now_ms.load(Ordering::SeqCst) / 1000
     }
 
     fn now_ms(&self) -> u64 {
-        self.now_unix * 1000
+        self.now_ms.load(Ordering::SeqCst)
     }
 
     fn local_date(&self) -> String {
@@ -900,6 +909,17 @@ mod tests {
         assert_eq!(host.local_time(host.now_ms()), "2026-10-24 00:00:00.000");
         assert_eq!(host.local_time(1_792_800_000_123), "2026-10-24 00:00:00.123");
         // The date is a setting of the fake, so it differs from its clock's UTC date on purpose.
+        assert_eq!(host.local_date(), "2026-10-23");
+    }
+
+    #[test]
+    fn the_fake_hosts_clock_moves_only_when_set() {
+        let host = FakeHost::new("2026-10-23", 1_792_800_000);
+        assert_eq!(host.now_ms(), 1_792_800_000_000);
+        host.set_now_ms(1_792_800_061_250);
+        assert_eq!(host.now_ms(), 1_792_800_061_250);
+        assert_eq!(host.now_unix(), 1_792_800_061);
+        assert_eq!(host.local_time(host.now_ms()), "2026-10-24 00:01:01.250");
         assert_eq!(host.local_date(), "2026-10-23");
     }
 

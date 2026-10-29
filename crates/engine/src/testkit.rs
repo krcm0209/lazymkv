@@ -475,9 +475,9 @@ impl Harness {
     /// A harness whose steps play `script` (design part 12.1). `data/settings.json` holds the harness defaults
     /// (`staging_root`, `movies_root` and `tuning_root` as the scratch folders, `keep_tuning_evidence` false,
     /// `drive_settle_s` 0, `drive_ready_timeout_s` 1), each key of `settings` replacing its default, and each key
-    /// inside `tool_paths` replacing that one (R22.5). The host is `FakeHost::new("2026-10-23", 1_792_800_000)`, the
-    /// ejector pushes the removal its eject causes (R22.6), and the secrets hold `tmdb_token`. The engine starts at
-    /// once. Def: T22. Use: T22 to T29.
+    /// inside `tool_paths` replacing that one (R22.5). The host is `FakeHost::new("2026-10-23", 1_792_800_000)`, whose
+    /// clock starts there and moves only through `host().set_now_ms`, the ejector pushes the removal its eject causes
+    /// (R22.6), and the secrets hold `tmdb_token`. The engine starts at once. Def: T22. Use: T22 to T29.
     pub fn new_scripted(script: Vec<(&'static str, StepScript)>, settings: Value) -> Harness {
         let folders = Folders::make();
         let defaults = folders.defaults();
@@ -1014,8 +1014,9 @@ impl Harness {
         &self.secrets
     }
 
-    /// The host (design part 4.2). Def: T22. Use: T22 to T29.
-    pub fn host(&self) -> &FakeHost {
+    /// The host, shared by every engine the harness starts (design part 4.2). It comes as its `Arc`, so an `on_spawn`
+    /// action can hold it and move its clock (PR #14 review round 1, R20). Def: T22. Use: T22 to T29.
+    pub fn host(&self) -> &Arc<FakeHost> {
         self.deliver();
         &self.host
     }

@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lazymkv_core::job::{Event, Failure, FailureClass, NotifyEvent, OutputCause, State, Tool, WaitReason};
@@ -13,6 +14,10 @@ use lazymkv_platform::{Host, Reach};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
+
+/// A clock reading a minute and 1.25 s after the harness's start, 1_792_800_000_000 ms: `2026-10-24 00:01:01.250` read
+/// as UTC (PR #14 review round 1, R20).
+const LATER: u64 = 1_792_800_061_250;
 
 fn harness(variants: &[&str], settings: Value) -> Harness {
     let mut scenarios = vec!["movie-direct"];
@@ -81,10 +86,15 @@ fn a_movie_disc_reaches_ejected_with_its_recording() {
 /// R23.7 with Ruling W16 (design parts 4.6, 7.1): `started` is the rip's recorded start in phase 0's local-time form,
 /// between `bytes` and `elapsed_s`. FakeHost's clock, 1_792_800_000 s, read as UTC is 2026-10-24 00:00:00.000; the
 /// harness's `local_date` stays 2026-10-23, since the fake's date is a setting and `started` is its clock read as UTC.
+/// The clock moves to `LATER` as the rip's tool starts (only the rip's arguments hold both `disc:` and the title key),
+/// so a start read after the rip, or a summary that reads the clock at VerifyFile, would say 00:01:01.250.
 #[test]
 fn the_rip_summary_has_started_from_the_rip_start_between_bytes_and_elapsed_s() {
     let h = harness(&[], json!({}));
+    let host = Arc::clone(h.host());
+    h.on_spawn(&["disc:", KEY], move || host.set_now_ms(LATER));
     let id = run_to(&h, "Ejected");
+    assert_eq!(h.host().now_ms(), LATER);
     let summary = json_of(&h.job_dir(&id).join(KEY).join("rip-summary.json"));
     let keys: Vec<&str> = summary.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(keys, ["ok", "result", "slug", "label", "title", "profile", "bytes", "started", "elapsed_s", "exit_code",
@@ -94,8 +104,10 @@ fn the_rip_summary_has_started_from_the_rip_start_between_bytes_and_elapsed_s() 
 }
 
 /// R23.4 with Ruling W16: the rip's start is persisted with TitleRipped, before VerifyFile writes rip-summary.json, so
-/// a restart there finds it in state.json. A restart in Ripping rips the title again (`resume`, core/src/job.rs:742),
-/// and the summary takes the start that rip posted; the first rip, moved aside, never got a summary.
+/// a restart there finds it in state.json, and the record keeps the first start across the restart. A restart in
+/// Ripping rips the title again (`resume`, core/src/job.rs:742), and that rip posts its own start, read from the clock
+/// the test moved to `LATER` while the engine was stopped, which the summary takes; a stale start would say
+/// 00:00:00.000. The first rip, moved aside, never got a summary.
 #[test]
 fn a_restart_between_rip_and_verify_keeps_started() {
     let h = harness(&[], json!({}));
@@ -105,12 +117,13 @@ fn a_restart_between_rip_and_verify_keeps_started() {
     let key_dir = h.job_dir(&id).join(KEY);
     assert!(!key_dir.join("rip-summary.json").exists());
     assert_eq!(h.record(&id).titles[0].rip_started_ms, Some(1_792_800_000_000));
+    h.host().set_now_ms(LATER);
     h.restart();
     h.run_until("Ejected");
-    assert_eq!(json_of(&key_dir.join("rip-summary.json"))["started"], json!("2026-10-24 00:00:00.000"));
+    assert_eq!(json_of(&key_dir.join("rip-summary.json"))["started"], json!("2026-10-24 00:01:01.250"));
     assert!(!key_dir.join("attempt-1").join("rip-summary.json").exists());
     let record = h.record(&id);
-    assert_eq!((record.titles[0].attempts, record.titles[0].rip_started_ms), (2, Some(1_792_800_000_000)));
+    assert_eq!((record.titles[0].attempts, record.titles[0].rip_started_ms), (2, Some(LATER)));
 }
 
 #[test]
