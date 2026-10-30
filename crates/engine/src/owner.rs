@@ -2402,8 +2402,8 @@ impl Owner {
     }
 
     /// `command` (design part 9.5; Rulings W24, W25): refused, in Ruling T3-22-b's order, while a command runs, when
-    /// the engine has no `lazymkvctl`, when a non-elevated process could write its folder, for words `child_words`
-    /// refuses and when the child cannot be started. Otherwise the owner starts the child through
+    /// the engine has no `lazymkvctl`, when a non-elevated process could write `lazymkvctl` or its folder, for words
+    /// `child_words` refuses and when the child cannot be started. Otherwise the owner starts the child through
     /// `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority with no extra
     /// environment (S43), keeps its kill handle, and hands it to the relay thread, whose `Msg::CommandDone` replies
     /// (`on_message`).
@@ -2414,8 +2414,12 @@ impl Owner {
         let Some(ctl) = self.parts.ctl.clone() else {
             return self.reply(client, id, Err(COMMAND_NO_CTL.to_string()));
         };
-        // A path with no folder is refused as one whose folder could be written.
-        if ctl.parent().is_none_or(|folder| self.parts.host.user_writable(folder)) {
+        // A path with no folder is refused as one whose folder could be written. lazymkvctl itself is judged as
+        // find_tool judges a program file (review round 1 of pull request 3, V2, R15), but only when it is a file:
+        // WinHost calls a path it cannot read writable (W17), and a missing lazymkvctl stays the spawn's refusal
+        // (Ruling T3-22-b). A protected folder lets no non-elevated process add one between this check and the spawn.
+        let host = self.parts.host.as_ref();
+        if ctl.parent().is_none_or(|folder| host.user_writable(folder)) || (ctl.is_file() && host.user_writable(&ctl)) {
             return self.reply(client, id, Err(COMMAND_WRITABLE.to_string()));
         }
         let job = |job_id: &str| {

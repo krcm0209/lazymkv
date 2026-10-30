@@ -28,7 +28,7 @@ const NO_CTL: &str = "command needs lazymkvctl beside the engine, and this engin
 const RETUNE: &str = "retune --jobs needs the evidence trees of pull request 5 (design part 9.5)";
 const FORMS: &str = "command needs plan --job, decide --job --title or retune --jobs (design part 9.5)";
 const WRITABLE: &str =
-    "lazymkvctl's folder can be written by a non-elevated process, so the engine will not run it (design part 3.6)";
+    "lazymkvctl or its folder can be written by a non-elevated process, so the engine will not run it (design part 3.6)";
 const STOPPING: &str = "the engine is stopping (design part 3.8)";
 
 fn settings() -> Value { json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1}) }
@@ -266,10 +266,23 @@ fn a_ctl_in_a_writable_folder_is_refused() {
     assert!(ctl_spawns(&h).is_empty());
 }
 
-/// Ruling T3-22-b's last refusal: the spawn's error.
+/// lazymkvctl itself is judged as find_tool judges a program file (review round 1 of pull request 3, R15).
+#[test]
+fn a_writable_lazymkvctl_in_a_protected_folder_is_refused() {
+    let h = stand_in(RELAY);
+    h.host().set_writable(&ctl_path(&h));
+    let mut c = client(&h);
+    assert_eq!(c.err("command", json!({"words": ["plan", "--job", "abc-1"]})), WRITABLE);
+    assert!(ctl_spawns(&h).is_empty());
+}
+
+/// Ruling T3-22-b's last refusal: the spawn's error. lazymkvctl is judged only when it is a file, so a missing one
+/// stays the spawn's refusal even when the host calls its path writable (review round 1 of pull request 3, R15).
 #[test]
 fn a_missing_lazymkvctl_is_refused_as_not_started() {
     let (h, id) = filed();
+    // Stands in for WinHost's answer on a path it cannot read: writable (W17).
+    h.host().set_writable(&ctl_path(&h));
     fs::remove_file(ctl_path(&h)).unwrap();
     let mut c = client(&h);
     let refusal = c.err("command", json!({"words": ["plan", "--job", id]}));

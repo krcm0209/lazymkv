@@ -27,10 +27,10 @@ pub(crate) const NO_EXIT_CODE: &str = "lazymkvctl ended without an exit code";
 /// Words that are none of design part 9.5's three engine forms (Ruling W24). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_FORMS: &str =
     "command needs plan --job, decide --job --title or retune --jobs (design part 9.5)";
-/// A `lazymkvctl` whose folder a non-elevated process could write (design part 3.6; Ruling W24). Def: T3-22.
-/// Use: T3-22.
+/// A `lazymkvctl`, or its folder, that a non-elevated process could write (design part 3.6; Ruling W24; review round
+/// 1 of pull request 3, R15). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_WRITABLE: &str =
-    "lazymkvctl's folder can be written by a non-elevated process, so the engine will not run it (design part 3.6)";
+    "lazymkvctl or its folder can be written by a non-elevated process, so the engine will not run it (design part 3.6)";
 
 /// `job <id> has no title <key>`, for a `decide --job --title` whose key is not one of the job record's titles, so no
 /// key leads out of the job folder (Ruling W24). Def: T3-22. Use: T3-22.
