@@ -53,7 +53,8 @@ pub fn exe_name(tool: Tool) -> String {
 /// 1. the path in `settings.tool_paths`, taken as given even when a non-elevated process could write it; when that
 ///    path is not a file and `EXE_SUFFIX` is not empty, the path with `EXE_SUFFIX` appended, when that is a file
 ///    (engine.md:583);
-/// 2. the tool's file name in `resources`, when that is a file and `host.user_writable(resources)` is false;
+/// 2. the tool's file name in `resources`, when that is a file and `host.user_writable` calls neither `resources` nor
+///    the file writable, as step 4 judges a `PATH` folder and its file (review round 1 of pull request 3, V2);
 /// 3. `host.default_install_path(tool)`, whose install folder is read from the registry on Windows, never from the
 ///    environment (Ruling W18, amended after the whole-branch review (F1)), when that is a file; it is not judged,
 ///    since Windows' own access lists protect the Program Files install folders (design part 3.6);
@@ -91,7 +92,7 @@ pub fn find_tool(
     let name = exe_name(tool);
     if let Some(folder) = resources {
         let path = folder.join(&name);
-        if path.is_file() && !host.user_writable(folder) {
+        if path.is_file() && !host.user_writable(folder) && !host.user_writable(&path) {
             return hit(path, Found::Resources);
         }
     }
@@ -233,6 +234,23 @@ mod tests {
         let found = find_tool(Tool::Mkvmerge, &Settings::default(), Some(&resources), &host, Some(path_var.as_os_str()));
         assert_eq!(found.map(|l| (l.path, l.found)), Some((file, Found::Path)));
         assert_eq!(find_tool(Tool::Mkvmerge, &Settings::default(), Some(&resources), &host, None), None);
+    }
+
+    /// A protected resources folder can hold a program file a non-elevated process can rewrite: it is skipped for the
+    /// install folder, then `PATH`, as a writable resources folder is (review round 1 of pull request 3, V2).
+    #[test]
+    fn a_writable_program_file_in_a_protected_resources_folder_is_skipped() {
+        let root = temp_dir("lookup-writable-resources-file");
+        let (resources, in_resources) = place(&root, "resources");
+        let (_, install) = place(&root, "install");
+        let (on_path, in_path) = place(&root, "path");
+        let path_var = std::env::join_paths([&on_path]).unwrap();
+        let find = |host: &TestHost| {
+            find_tool(Tool::Mkvmerge, &Settings::default(), Some(&resources), host, Some(path_var.as_os_str()))
+                .map(|l| (l.path, l.found))
+        };
+        assert_eq!(find(&TestHost(Some(install.clone()), vec![in_resources.clone()])), Some((install, Found::InstallFolder)));
+        assert_eq!(find(&TestHost(None, vec![in_resources])), Some((in_path, Found::Path)));
     }
 
     #[test]
