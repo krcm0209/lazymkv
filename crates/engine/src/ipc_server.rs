@@ -211,13 +211,7 @@ impl Queue {
 /// Takes one from `queued`, never below 0: the writer's `store(0)` at its end may come between a sender's add and its
 /// take-back.
 fn take_one(queued: &AtomicUsize) {
-    let mut count = queued.load(Ordering::SeqCst);
-    while count > 0 {
-        match queued.compare_exchange(count, count - 1, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => return,
-            Err(now) => count = now,
-        }
-    }
+    let _ = queued.try_update(Ordering::SeqCst, Ordering::SeqCst, |count| count.checked_sub(1));
 }
 
 /// A writer thread's first local: dropped last, after the writer, it counts the thread out of `Clients::writers` and
@@ -652,6 +646,19 @@ mod tests {
             let _ = done.send(serve.join().is_ok());
         });
         assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(true));
+    }
+
+    /// PR #14 review round 1 (R54): `take_one` takes one while the count is above 0 and leaves 0 alone.
+    #[test]
+    fn take_one_takes_one_and_never_goes_below_zero() {
+        let queued = AtomicUsize::new(2);
+        let reads: Vec<usize> = (0..3)
+            .map(|_| {
+                take_one(&queued);
+                queued.load(Ordering::SeqCst)
+            })
+            .collect();
+        assert_eq!(reads, [1, 0, 0]);
     }
 
     #[test]
