@@ -9,18 +9,19 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetDriveTypeW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Ioctl::{
+    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_MEDIA_REMOVAL,
+};
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
 use super::wide;
+use crate::drives::DRIVE_CDROM;
 use crate::eject::{drive_letter, eject_report};
 use crate::Ejector;
 
-// The control codes and the drive type of `crates/capture/src/eject.rs:39-43`, which experiment 7 ran on both drives.
-const DRIVE_CDROM: u32 = 5;
-const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
-const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
-const IOCTL_STORAGE_MEDIA_REMOVAL: u32 = 0x002D_4804;
-const IOCTL_STORAGE_EJECT_MEDIA: u32 = 0x002D_4808;
+// The control codes are windows-sys's; the literals of `every_step_runs_after_an_earlier_one_fails` below pin them to
+// the values experiment 7 ran on both drives (`crates/capture/src/eject.rs:39-43`, unchanged). The drive type is
+// `drives`'s.
 
 /// The four steps in order: the report's name, the control code and its input (a one-byte 0 for allow removal).
 const STEPS: [(&str, u32, &[u8]); 4] = [

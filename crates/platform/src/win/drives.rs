@@ -378,6 +378,7 @@ mod tests {
         CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows_sys::Win32::System::Ioctl::{FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME};
     use windows_sys::Win32::System::IO::DeviceIoControl;
     use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SendMessageW, WM_ENDSESSION, WM_QUERYENDSESSION};
 
@@ -386,10 +387,6 @@ mod tests {
     use crate::testutil::{ci_factor, cue, skip};
     use crate::win::wide;
     use crate::{DriveEvent, DriveWatcher};
-
-    // The volume lock's control codes, as `win::eject` and `crates/capture/src/eject.rs` use them.
-    const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
-    const FSCTL_UNLOCK_VOLUME: u32 = 0x0009_001C;
 
     /// Runs in the SSH session and on the runner: no notification is asserted, since whether a window there receives
     /// any is not measured (design part 3.1). Two watchers at once also prove the window class is shared.

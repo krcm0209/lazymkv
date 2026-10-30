@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use crate::DriveEvent;
 
-/// `GetDriveTypeW`'s answer for an optical drive.
+/// `GetDriveTypeW`'s answer for an optical drive, which the scan's filter and `win::eject` compare with. Def: T3-16.
+/// Use: T3-16, PR #14 review round 1 (R44).
 #[cfg_attr(not(windows), allow(dead_code))]
-const DRIVE_CDROM: u32 = 5;
+pub(crate) const DRIVE_CDROM: u32 = 5;
 
 /// The errors after which a volume keeps the last scan's answer: `ERROR_ACCESS_DENIED` (5) and
 /// `ERROR_SHARING_VIOLATION` (32), what a volume lock gives (Ruling T3-16-a).
