@@ -532,8 +532,49 @@ pub(crate) fn spawn_reader(client: u64, reader: Box<dyn BufRead + Send>, clients
     });
 }
 
+/// The held client writer that this module's tests and relay.rs's share (PR #14 review round 1 (R19)).
+#[cfg(test)]
+pub(crate) mod held_writer {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    use crate::testkit::ci_factor;
+
+    /// A writer that blocks until its gate opens, then keeps every byte.
+    pub(crate) struct Held(pub(crate) Arc<(Mutex<bool>, Condvar)>, pub(crate) Arc<Mutex<Vec<u8>>>);
+    impl Write for Held {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let (lock, cv) = &*self.0;
+            let mut open = lock.lock().unwrap();
+            while !*open { open = cv.wait(open).unwrap(); }
+            self.1.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    /// Opens `gate`, so every `Held` on it writes.
+    pub(crate) fn open(gate: &Arc<(Mutex<bool>, Condvar)>) {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    /// The first `count` lines `kept` holds once it holds them (10 s cap, times `ci_factor`; Ruling PF3-S21-22-1).
+    pub(crate) fn lines_of(kept: &Arc<Mutex<Vec<u8>>>, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
+        loop {
+            let text = String::from_utf8(kept.lock().unwrap().clone()).unwrap();
+            if text.lines().count() >= count { return text.lines().take(count).map(str::to_string).collect(); }
+            assert!(Instant::now() < deadline, "the writer holds {} lines", text.lines().count());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::held_writer::{lines_of, open, Held};
     use super::*;
     use crate::owner::Msg;
     use crate::testkit::ci_factor;
@@ -713,38 +754,9 @@ mod tests {
         gate.1.notify_all();
     }
 
-    /// A writer that blocks until its gate opens, then keeps every byte.
-    struct Held(Arc<(Mutex<bool>, Condvar)>, Arc<Mutex<Vec<u8>>>);
-    impl Write for Held {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let (lock, cv) = &*self.0;
-            let mut open = lock.lock().unwrap();
-            while !*open { open = cv.wait(open).unwrap(); }
-            self.1.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
-    }
-
-    fn open(gate: &Arc<(Mutex<bool>, Condvar)>) {
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
-    }
-
     /// How many lines `client`'s queue holds by `Clients`' count (Ruling T3-22-a); 0 for a client that is gone.
     fn queued(clients: &Clients, client: u64) -> usize {
         lock(&clients.queues).get(&client).map_or(0, |queue| queue.queued.load(Ordering::SeqCst))
-    }
-
-    /// The first `count` lines `kept` holds once it holds them (10 s cap, times `ci_factor`; Ruling PF3-S21-22-1).
-    fn lines_of(kept: &Arc<Mutex<Vec<u8>>>, count: usize) -> Vec<String> {
-        let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
-        loop {
-            let text = String::from_utf8(kept.lock().unwrap().clone()).unwrap();
-            if text.lines().count() >= count { return text.lines().take(count).map(str::to_string).collect(); }
-            assert!(Instant::now() < deadline, "the writer holds {} lines", text.lines().count());
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     /// A client whose writer is held, and a thread sending it 300 numbered lines through `send_waiting`; the thread

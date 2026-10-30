@@ -135,7 +135,11 @@ pub(crate) fn spawn_relay(
             .into_iter()
             .map(|(stream, reader)| {
                 let (clients, kill) = (Arc::clone(&clients), kill.clone());
-                thread::spawn(move || forward(reader, stream, client, id, &clients, &kill))
+                thread::spawn(move || {
+                    forward(reader, stream, client, id, &clients, &|| {
+                        let _ = kill.kill();
+                    })
+                })
             })
             .collect();
         for forwarder in forwarders {
@@ -149,15 +153,17 @@ pub(crate) fn spawn_relay(
 
 /// Sends each line of `reader` to `client` as a `command_output` of `stream` carrying `id`, until the end of the
 /// stream or a read error. Each line loses its `\n` and the `\r` before it and is decoded with any byte that is not
-/// UTF-8 replaced (PIPE-14). The first send that finds the client gone kills the child (Ruling T3-22-c), and the lines
-/// after it are read and dropped, so the child never blocks on a full pipe.
+/// UTF-8 replaced (PIPE-14). The first send that finds the client gone calls `kill`, which kills the child (Ruling
+/// T3-22-c), and the lines after it are read and dropped, so the child never blocks on a full pipe. `kill` is a
+/// closure, not the `KillHandle`, because no engine test can build a `KillHandle` (Ruling T8-d; PR #14 review round 1
+/// (R19)).
 fn forward(
     reader: Box<dyn Read + Send>,
     stream: OutputStream,
     client: u64,
     id: Option<u64>,
     clients: &Clients,
-    kill: &KillHandle,
+    kill: &dyn Fn(),
 ) {
     let mut reader = BufReader::new(reader);
     let mut delivering = true;
@@ -176,7 +182,7 @@ fn forward(
         let push = Push::CommandOutput { stream, line: String::from_utf8_lossy(bytes).into_owned() };
         if !clients.send_waiting(client, push_line(&push, id)) {
             delivering = false;
-            let _ = kill.kill();
+            kill();
         }
     }
 }
@@ -184,8 +190,14 @@ fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc_server::held_writer::{lines_of, open, Held};
+    use crate::ipc_server::{CLIENT_QUEUE, COMMAND_HEADROOM};
+    use crate::testkit::ci_factor;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     fn words(text: &[&str]) -> Vec<String> {
         text.iter().map(|word| word.to_string()).collect()
@@ -231,6 +243,81 @@ mod tests {
         for (given, refusal) in cases {
             assert_eq!(child_words(&words(&given), &job), Err(refusal), "{given:?}");
         }
+    }
+
+    /// The burst's line count.
+    const BURST: usize = 1000;
+
+    /// A reader that hands out one line per `read`, `burst line 0001` to `burst line 1000`, and counts the lines it
+    /// handed out; `BufReader` asks it once per empty buffer, so the count is the lines `forward` has taken.
+    struct Burst {
+        next: usize,
+        taken: Arc<AtomicUsize>,
+    }
+
+    impl Read for Burst {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.next == BURST {
+                return Ok(0);
+            }
+            self.next += 1;
+            let line = format!("burst line {:04}\n", self.next);
+            buf[..line.len()].copy_from_slice(line.as_bytes());
+            self.taken.fetch_add(1, Ordering::SeqCst);
+            Ok(line.len())
+        }
+    }
+
+    /// Ruling T3-22-a: `forward` waits for room in a held client's queue, so the client is kept and every line reaches
+    /// it in order; with the dropping `send`, the 257th line would drop the client and the writer would get at most
+    /// `CLIENT_QUEUE` lines (PR #14 review round 1 (R19)).
+    #[test]
+    fn forward_waits_for_room_in_a_held_clients_queue_and_keeps_every_line() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let clients = Arc::new(Clients::new());
+        let client = clients.add(Box::new(Held(gate.clone(), kept.clone())));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let kills = Arc::new(AtomicUsize::new(0));
+        let forwarder = {
+            let reader = Burst { next: 0, taken: Arc::clone(&taken) };
+            let (clients, kills) = (Arc::clone(&clients), Arc::clone(&kills));
+            thread::spawn(move || {
+                let kill = || {
+                    kills.fetch_add(1, Ordering::SeqCst);
+                };
+                forward(Box::new(reader), OutputStream::Stdout, client, Some(1), &clients, &kill);
+            })
+        };
+        let mark = CLIENT_QUEUE - COMMAND_HEADROOM;
+        let wait = Duration::from_secs(10) * ci_factor();
+        let deadline = Instant::now() + wait;
+        while taken.load(Ordering::SeqCst) < mark {
+            assert!(Instant::now() < deadline, "forward took {} lines in {wait:?}", taken.load(Ordering::SeqCst));
+            thread::sleep(Duration::from_millis(5));
+        }
+        // A forward that dropped instead of waiting would run through the rest of the burst meanwhile.
+        thread::sleep(Duration::from_millis(200));
+        let held = taken.load(Ordering::SeqCst);
+        assert!(held < BURST, "forward took all {held} lines while the client's writer was held");
+        assert!(!forwarder.is_finished(), "forward ended while the client's writer was held");
+        assert_eq!(clients.count(), 1);
+        open(&gate);
+        let deadline = Instant::now() + wait;
+        while !forwarder.is_finished() {
+            assert!(Instant::now() < deadline, "forward did not end within {wait:?} of the gate's opening");
+            thread::sleep(Duration::from_millis(5));
+        }
+        forwarder.join().unwrap();
+        let expected: Vec<String> = (1..=BURST)
+            .map(|n| {
+                let push = Push::CommandOutput { stream: OutputStream::Stdout, line: format!("burst line {n:04}") };
+                push_line(&push, Some(1))
+            })
+            .collect();
+        assert_eq!(lines_of(&kept, BURST), expected);
+        assert_eq!(kills.load(Ordering::SeqCst), 0);
+        assert_eq!(clients.count(), 1);
     }
 
     #[test]

@@ -178,8 +178,10 @@ fn a_watch_client_sees_no_command_output() {
     }
 }
 
-/// Ruling T3-22-a: the relay waits for room in the client's queue, so 1000 lines, four times `CLIENT_QUEUE`, all
-/// arrive in order and the client is kept.
+/// Ruling T3-22-a: a burst of 1000 lines, four times `CLIENT_QUEUE`, crosses the whole stack (stand-in, relay, owner,
+/// memory pipe) in order, with the exit code. The memory pipe's writer never blocks, so the relay's waiting for room
+/// in the client's queue is pinned by relay.rs's `forward_waits_for_room_in_a_held_clients_queue_and_keeps_every_line`
+/// (PR #14 review round 1, R19).
 #[test]
 fn a_burst_of_child_lines_larger_than_the_client_queue_all_reach_the_client() {
     let (h, id) = filed();
