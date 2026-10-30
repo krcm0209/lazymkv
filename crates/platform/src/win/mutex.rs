@@ -2,24 +2,26 @@
 //! grants only SYSTEM and Administrators, never waited on, and, when the name is taken, read for who holds it.
 
 use std::io;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER,
-    ERROR_INVALID_HANDLE, ERROR_SUCCESS, HANDLE,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_HANDLE, ERROR_SUCCESS, HANDLE,
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
 use windows_sys::Win32::Security::{LookupAccountSidW, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 use windows_sys::Win32::System::Threading::{CreateMutexW, OpenMutexW};
 
-use super::{last_error, sid_string, wide, Descriptor};
+use super::{last_error, sid_string, wide, Descriptor, LocalMemory};
 use crate::security::{ADMINISTRATORS_SID, MUTEX_SDDL};
 
 /// The engine's named mutex, held for the engine's life (design parts 3.3, 3.8). Its existence is the lock (Ruling
-/// T3-2-a); `Drop` closes the handle, which releases the name once no process holds one. Def: T3-2. Use: T3-23.
+/// T3-2-a); dropping it closes the handle, which releases the name once no process holds one. Def: T3-2. Use: T3-23.
 pub struct EngineMutex {
-    handle: HANDLE,
+    /// The handle from `CreateMutexW`, closed on drop. The mutex was never owned (Ruling T3-2-a), so there is nothing
+    /// to release first.
+    _held: OwnedHandle,
 }
 
 /// Why the mutex was not taken (design part 3.3; Rulings W4, W5, T3-2-b). Def: T3-2. Use: T3-23.
@@ -51,32 +53,26 @@ impl EngineMutex {
         let handle = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
         let code = last_error();
         if !handle.is_null() && code != ERROR_ALREADY_EXISTS {
-            return Ok(EngineMutex { handle });
+            // SAFETY: `handle` is the open mutex CreateMutexW just returned, which nothing else owns.
+            return Ok(EngineMutex { _held: unsafe { OwnedHandle::from_raw_handle(handle) } });
         }
         let existing = if !handle.is_null() {
-            handle
+            // SAFETY: `handle` is the open handle to the existing mutex that CreateMutexW just returned, which nothing
+            // else owns.
+            unsafe { OwnedHandle::from_raw_handle(handle) }
         } else if code == ERROR_ACCESS_DENIED || code == ERROR_INVALID_HANDLE {
             // SAFETY: the name is NUL-terminated and outlives the call; a null result is checked below.
             let opened = unsafe { OpenMutexW(READ_CONTROL, 0, name.as_ptr()) };
             if opened.is_null() {
                 return Err(MutexRefusal::Squatter { account: UNREADABLE_ACCOUNT.to_string() });
             }
-            opened
+            // SAFETY: `opened` is the open handle OpenMutexW just returned, which nothing else owns.
+            unsafe { OwnedHandle::from_raw_handle(opened) }
         } else {
             return Err(MutexRefusal::Os(io::Error::from_raw_os_error(code as i32)));
         };
-        let refusal = refusal_by_owner(existing);
-        // SAFETY: `existing` came from CreateMutexW or OpenMutexW above and is closed once, here.
-        unsafe { CloseHandle(existing) };
-        Err(refusal)
-    }
-}
-
-impl Drop for EngineMutex {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from CreateMutexW in `take` and is closed once, here. The mutex was never owned
-        // (Ruling T3-2-a), so there is nothing to release first.
-        unsafe { CloseHandle(self.handle) };
+        // `existing` closes as it drops, after its owner is read.
+        Err(refusal_by_owner(existing.as_raw_handle()))
     }
 }
 
@@ -104,16 +100,22 @@ fn refusal_by_owner(handle: HANDLE) -> MutexRefusal {
     if status != ERROR_SUCCESS {
         return unreadable();
     }
+    // The descriptor in a binding whose address is never taken, checked before it is owned. GetSecurityInfo allocated
+    // it with LocalAlloc; `_descriptor` frees it once, as it drops at the end of this function, after the last read of
+    // `owner`, which points into it.
+    let descriptor = descriptor;
+    if descriptor.is_null() {
+        return unreadable();
+    }
+    let _descriptor = LocalMemory(descriptor);
+    // The owner in a binding whose address is never taken, so that the code scanner sees the null check cover its use.
+    let owner = owner;
     let sid = if owner.is_null() { None } else { sid_string(owner).ok() };
-    let refusal = match sid {
+    match sid {
         Some(sid) if sid == ADMINISTRATORS_SID => MutexRefusal::EngineRunning,
         Some(sid) => MutexRefusal::Squatter { account: account_name(owner).unwrap_or(sid) },
         None => unreadable(),
-    };
-    // SAFETY: GetSecurityInfo allocated the descriptor with LocalAlloc; it is freed once, here, after the last read of
-    // `owner`, which points into it.
-    unsafe { LocalFree(descriptor) };
-    refusal
+    }
 }
 
 /// The account `sid` names, as `<domain>\<name>` or `<name>` when the domain is empty, or None when the SID has no
@@ -267,7 +269,7 @@ mod tests {
         let taken = EngineMutex::take(&name);
         assert_eq!(kind(&taken), "Ok");
         let mutex = taken.ok().unwrap();
-        let read = read_handle(mutex.handle, SE_KERNEL_OBJECT).unwrap();
+        let read = read_handle(mutex._held.as_raw_handle(), SE_KERNEL_OBJECT).unwrap();
         assert_eq!(read.owner, ADMINISTRATORS_SID);
         // Type 0 is an allow entry; the flags are 0, since a mutex has nothing below it to inherit.
         let entries: Vec<(u8, u8, u32, &str)> =

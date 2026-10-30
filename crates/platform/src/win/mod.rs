@@ -4,11 +4,11 @@
 //! the drive diff, the local-time text, the eject report) sit in modules that compile and are tested on every system.
 //! Compiled only on Windows.
 
-use std::ffi::OsStr;
+use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_SUCCESS};
 use windows_sys::Win32::System::Diagnostics::Debug::{GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY, REG_ROUTINE_FLAGS};
 
@@ -81,6 +81,18 @@ pub(crate) fn last_error() -> u32 {
     // SAFETY: GetLastError takes nothing and reads the calling thread's last error; every caller calls it first after
     // the call whose error it reads, including CreateMutexW's ERROR_ALREADY_EXISTS on success.
     unsafe { GetLastError() }
+}
+
+/// Memory a Windows call allocated with LocalAlloc, freed with `LocalFree` on drop. Def: T3-7, moved here by PR #14
+/// review round 1 (R47). Use: T3-2, T3-3, T3-7.
+pub(crate) struct LocalMemory(pub(crate) *mut c_void);
+
+impl Drop for LocalMemory {
+    fn drop(&mut self) {
+        // SAFETY: every `LocalMemory` holds a non-null pointer that a call allocated with LocalAlloc; it is freed once,
+        // here.
+        unsafe { LocalFree(self.0) };
+    }
 }
 
 /// The string value `value` of the key `key` below the predefined root `root`, as UTF-16 units up to its first NUL,

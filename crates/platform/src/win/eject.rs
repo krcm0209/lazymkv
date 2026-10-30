@@ -1,9 +1,10 @@
 //! The Windows `Ejector` (spec 4.3; design parts 4.2 and 5.6 step 8; PIPE-16): phase 0's four steps on `windows-sys`.
 //! The drive id's letter and the report's text sit in `eject`, compiled and tested on every system.
 
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetDriveTypeW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -61,31 +62,32 @@ impl Ejector for WinEjector {
         if handle == INVALID_HANDLE_VALUE {
             return Err(format!("cannot open drive {drive} (error {})", last_error()));
         }
-        let drive_handle = OpenDrive(handle);
-        run_steps(|code, input| control(&drive_handle, code, input))
-    }
-}
-
-/// An open drive handle, closed when it goes out of scope, so every path of `eject` closes it once.
-struct OpenDrive(HANDLE);
-
-impl Drop for OpenDrive {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from a successful `CreateFileW` in `WinEjector::eject` and is closed once, here.
-        unsafe { CloseHandle(self.0) };
+        // SAFETY: `handle` is the open drive CreateFileW just returned, which nothing else owns; it closes once, as
+        // `drive` drops, on every path of `eject`.
+        let drive = unsafe { OwnedHandle::from_raw_handle(handle) };
+        run_steps(|code, input| control(&drive, code, input))
     }
 }
 
 /// One `DeviceIoControl` call on `drive` with `code` and `input` as its input buffer (null when empty) and no output
 /// buffer. Err holds the thread's last error when the call returned zero.
-fn control(drive: &OpenDrive, code: u32, input: &[u8]) -> Result<(), u32> {
+fn control(drive: &OwnedHandle, code: u32, input: &[u8]) -> Result<(), u32> {
     let in_buffer = if input.is_empty() { null() } else { input.as_ptr().cast() };
     let mut returned = 0u32;
-    // SAFETY: the handle is open for the guard's life; `in_buffer` is null or points at `input.len()` bytes of
+    // SAFETY: the handle is open while `drive` lives; `in_buffer` is null or points at `input.len()` bytes of
     // `input`, which outlives the call, and the call only reads them; the output buffer and the overlapped structure
     // are null, so the call is synchronous and writes only to `returned`, a local that outlives it.
     let done = unsafe {
-        DeviceIoControl(drive.0, code, in_buffer, input.len() as u32, null_mut(), 0, &mut returned, null_mut())
+        DeviceIoControl(
+            drive.as_raw_handle(),
+            code,
+            in_buffer,
+            input.len() as u32,
+            null_mut(),
+            0,
+            &mut returned,
+            null_mut(),
+        )
     };
     if done != 0 {
         Ok(())

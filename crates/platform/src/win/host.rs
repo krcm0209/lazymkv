@@ -3,7 +3,7 @@
 //! registry names for this process's account, a Toolhelp process snapshot, the volume label, the Program Files install
 //! paths from the registry, and the writable test with the user's filtered token.
 
-use std::ffi::{c_void, OsString};
+use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -12,7 +12,7 @@ use std::ptr::{null, null_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lazymkv_core::job::Tool;
-use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS, FILETIME, HANDLE, INVALID_HANDLE_VALUE, SYSTEMTIME};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE, INVALID_HANDLE_VALUE, SYSTEMTIME};
 use windows_sys::Win32::Security::Authorization::{ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
     AccessCheck, CreateRestrictedToken, DuplicateTokenEx, SecurityIdentification, SetTokenInformation,
@@ -33,8 +33,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime};
 
 use super::{
-    elevation_type, linked_token, own_token, profile_folder, registry_text, until_nul, wide, MAXIMUM_ALLOWED,
-    SE_GROUP_INTEGRITY,
+    elevation_type, linked_token, own_token, profile_folder, registry_text, until_nul, wide, LocalMemory,
+    MAXIMUM_ALLOWED, SE_GROUP_INTEGRITY,
 };
 use crate::localtime::format_local_time;
 use crate::security::ElevationType;
@@ -224,17 +224,6 @@ fn label_of(root: &Path) -> Option<String> {
         )
     };
     (read != 0).then(|| String::from_utf16_lossy(until_nul(&label)))
-}
-
-/// Memory a Windows call allocated with LocalAlloc, freed with `LocalFree` on drop.
-struct LocalMemory(*mut c_void);
-
-impl Drop for LocalMemory {
-    fn drop(&mut self) {
-        // SAFETY: every `LocalMemory` holds a non-null pointer that a call allocated with LocalAlloc; it is freed once,
-        // here.
-        unsafe { LocalFree(self.0) };
-    }
 }
 
 /// `raw`, a handle a call just wrote, owned so that it closes on drop; an error when the call wrote none. Def: T3-7.

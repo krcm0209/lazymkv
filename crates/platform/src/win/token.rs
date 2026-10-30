@@ -3,13 +3,13 @@
 //! also reads an object's owner and access list back as strings.
 
 use std::io;
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 #[cfg(test)]
 use std::path::Path;
 use std::ptr::null_mut;
 
 use windows_sys::core::PWSTR;
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_INSUFFICIENT_BUFFER, HANDLE};
+use windows_sys::Win32::Foundation::{LocalFree, ERROR_INSUFFICIENT_BUFFER, HANDLE};
 #[cfg(test)]
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::Security::Authorization::{
@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use super::wide;
+use super::{wide, LocalMemory};
 use crate::security::{ElevationType, TokenFacts};
 
 /// The facts of this process's token (design part 3.2): the engine's start check, and the confirmation that the mini
@@ -98,10 +98,9 @@ pub(crate) fn token_of_process(pid: u32) -> io::Result<TokenFacts> {
     if process.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let facts = facts_of_process(process);
-    // SAFETY: `process` came from OpenProcess above and is closed once, here.
-    unsafe { CloseHandle(process) };
-    facts
+    // SAFETY: `process` is the open handle OpenProcess just returned, which nothing else owns; it closes as it drops.
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    facts_of_process(process.as_raw_handle())
 }
 
 /// The facts of the token of `process`, a handle open with at least `PROCESS_QUERY_LIMITED_INFORMATION`; the token is
@@ -112,10 +111,14 @@ fn facts_of_process(process: HANDLE) -> io::Result<TokenFacts> {
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let facts = token_facts(token);
-    // SAFETY: `token` came from OpenProcessToken above and is closed once, here.
-    unsafe { CloseHandle(token) };
-    facts
+    // The handle in a binding whose address is never taken, checked before it is owned.
+    let token = token;
+    if token.is_null() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Windows returned no token"));
+    }
+    // SAFETY: `token` is the token OpenProcessToken just opened, which nothing else owns; it closes as it drops.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    token_facts(token.as_raw_handle())
 }
 
 /// The variable-size information `class` of `token`, read with two calls, the first for the size, into a buffer of
@@ -157,12 +160,18 @@ pub(crate) fn sid_string(sid: PSID) -> io::Result<String> {
     if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `text` is the NUL-terminated string the call allocated; it is read up to its NUL, copied, and freed once.
+    // The string in a binding whose address is never taken, checked before it is read. The call allocated it with
+    // LocalAlloc; `_text` frees it once, as it drops at the end of this function, after the read below.
+    let text = text;
+    if text.is_null() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Windows returned no SID string"));
+    }
+    let _text = LocalMemory(text.cast());
+    // SAFETY: `text` is the NUL-terminated string the call allocated, alive until `_text` drops; it is read up to its
+    // NUL and copied.
     let string = unsafe {
         let length = (0..).take_while(|&index| *text.add(index) != 0).count();
-        let string = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
-        LocalFree(text.cast());
-        string
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, length))
     };
     Ok(string)
 }

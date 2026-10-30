@@ -16,7 +16,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{LocalFree, ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
 use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
@@ -26,7 +26,7 @@ use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_R
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 
-use super::{registry_text, sid_string, wide, Descriptor};
+use super::{registry_text, sid_string, wide, Descriptor, LocalMemory};
 use crate::security::{folder_sddl, owner_allowed};
 
 /// The key below `HKEY_LOCAL_MACHINE` whose value `ProgramData` names the machine's ProgramData folder, as
@@ -228,17 +228,21 @@ fn owner_of(path: &Path) -> io::Result<String> {
     if status != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
+    // The descriptor in a binding whose address is never taken, checked before it is owned. GetNamedSecurityInfoW
+    // allocated it with LocalAlloc; `_descriptor` frees it once, as it drops at the end of this function, after the
+    // last read of `owner`, which points into it.
+    let descriptor = descriptor;
+    if descriptor.is_null() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Windows returned no security descriptor"));
+    }
+    let _descriptor = LocalMemory(descriptor);
     // The owner in a binding whose address is never taken, so that the code scanner sees the null check cover its use.
     let owner = owner;
-    let sid = if owner.is_null() {
+    if owner.is_null() {
         Err(io::Error::new(io::ErrorKind::InvalidData, "Windows returned no owner"))
     } else {
         sid_string(owner)
-    };
-    // SAFETY: GetNamedSecurityInfoW allocated the descriptor with LocalAlloc; it is freed once, here, after the last
-    // read of `owner`, which points into it.
-    unsafe { LocalFree(descriptor) };
-    sid
+    }
 }
 
 /// Sets `folder_sddl(reader_sid)` on `path` as a protected list, which Windows propagates to everything below. The
