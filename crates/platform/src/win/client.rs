@@ -5,16 +5,14 @@
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-};
+use windows_sys::Win32::Foundation::{ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
 
 use super::pipe::pipe_stream;
-use super::{own_token, token_of_process, wide};
+use super::{last_error, own_token, token_of_process, wide};
 use crate::security::{connect_error, token_verdict};
 use crate::{ConnectError, IpcConnector, IpcStream};
 
@@ -64,9 +62,8 @@ impl PipeConnector {
             )
         };
         if raw == INVALID_HANDLE_VALUE {
-            // SAFETY: GetLastError takes nothing; it is read at once, before any other call. Windows' error codes are
-            // far below i32::MAX, so the cast keeps the code.
-            return Err(unsafe { GetLastError() } as i32);
+            // Windows' error codes are far below i32::MAX, so the cast keeps the code.
+            return Err(last_error() as i32);
         }
         // SAFETY: `raw` is the open handle CreateFileW just returned, which nothing else owns.
         Ok(unsafe { OwnedHandle::from_raw_handle(raw) })

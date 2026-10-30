@@ -3,9 +3,7 @@
 
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetDriveTypeW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -14,7 +12,7 @@ use windows_sys::Win32::System::Ioctl::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
-use super::wide;
+use super::{last_error, wide};
 use crate::drives::DRIVE_CDROM;
 use crate::eject::{drive_letter, eject_report};
 use crate::Ejector;
@@ -61,8 +59,7 @@ impl Ejector for WinEjector {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            // SAFETY: GetLastError takes no argument and reads this thread's last error, which the failed call set.
-            return Err(format!("cannot open drive {drive} (error {})", unsafe { GetLastError() }));
+            return Err(format!("cannot open drive {drive} (error {})", last_error()));
         }
         let drive_handle = OpenDrive(handle);
         run_steps(|code, input| control(&drive_handle, code, input))
@@ -93,8 +90,7 @@ fn control(drive: &OpenDrive, code: u32, input: &[u8]) -> Result<(), u32> {
     if done != 0 {
         Ok(())
     } else {
-        // SAFETY: GetLastError takes no argument and reads this thread's last error, which the failed call set.
-        Err(unsafe { GetLastError() })
+        Err(last_error())
     }
 }
 

@@ -11,9 +11,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
-};
+use windows_sys::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
 use windows_sys::Win32::System::Diagnostics::Debug::{SetThreadErrorMode, SEM_FAILCRITICALERRORS};
 use windows_sys::Win32::System::Ioctl::GUID_DEVINTERFACE_CDROM;
@@ -26,7 +24,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW,
 };
 
-use super::wide;
+use super::{last_error, wide};
 use crate::drives::{drive_id, ready_drives, volume_answers, DriveQueue, DRIVE_POLL_EVERY};
 use crate::{DriveEvent, DriveWatcher};
 
@@ -149,8 +147,7 @@ fn volume_information(letter: char) -> Result<(), u32> {
     if read != 0 {
         Ok(())
     } else {
-        // SAFETY: GetLastError takes no argument and reads this thread's last error, which the failed call set.
-        Err(unsafe { GetLastError() })
+        Err(last_error())
     }
 }
 
@@ -374,9 +371,7 @@ mod tests {
     use std::ptr::{null, null_mut};
     use std::time::{Duration, Instant};
 
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-    };
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
     use windows_sys::Win32::System::Ioctl::{FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME};
     use windows_sys::Win32::System::IO::DeviceIoControl;
@@ -385,7 +380,7 @@ mod tests {
     use super::*;
     use crate::drives::DRIVE_POLL_EVERY;
     use crate::testutil::{ci_factor, cue, skip};
-    use crate::win::wide;
+    use crate::win::{last_error, wide};
     use crate::{DriveEvent, DriveWatcher};
 
     /// Runs in the SSH session and on the runner: no notification is asserted, since whether a window there receives
@@ -502,8 +497,7 @@ mod tests {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            // SAFETY: GetLastError takes no argument and reads this thread's last error, which the failed call set.
-            return Err(unsafe { GetLastError() });
+            return Err(last_error());
         }
         let mut returned = 0u32;
         // SAFETY: the handle is open; the input and output buffers and the overlapped structure are null, so the call
@@ -511,8 +505,8 @@ mod tests {
         let locked =
             unsafe { DeviceIoControl(handle, FSCTL_LOCK_VOLUME, null(), 0, null_mut(), 0, &mut returned, null_mut()) };
         if locked == 0 {
-            // SAFETY: as above; read before CloseHandle can set another last error.
-            let code = unsafe { GetLastError() };
+            // Read before CloseHandle can set another last error.
+            let code = last_error();
             // SAFETY: the handle came from the CreateFileW above and is closed once, here.
             unsafe { CloseHandle(handle) };
             return Err(code);

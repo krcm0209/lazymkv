@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_SUCCESS};
 use windows_sys::Win32::System::Diagnostics::Debug::{GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY, REG_ROUTINE_FLAGS};
 
@@ -71,6 +71,14 @@ pub(crate) fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
 pub(crate) fn until_nul(units: &[u16]) -> &[u16] {
     let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
     &units[..end]
+}
+
+/// The calling thread's last error code. Def: PR #14 review round 1 (R45). Use: the pipe, client, mutex, eject, drives
+/// and shares modules (T3-2, T3-11, T3-12, T3-14 to T3-16).
+pub(crate) fn last_error() -> u32 {
+    // SAFETY: GetLastError takes nothing and reads the calling thread's last error; every caller calls it first after
+    // the call whose error it reads, including CreateMutexW's ERROR_ALREADY_EXISTS on success.
+    unsafe { GetLastError() }
 }
 
 /// The string value `value` of the key `key` below the predefined root `root`, as UTF-16 units up to its first NUL,

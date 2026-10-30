@@ -7,13 +7,13 @@ use std::ptr::{self, null_mut};
 use std::sync::atomic::{compiler_fence, Ordering};
 use std::sync::Arc;
 
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_DIRECTORY};
+use windows_sys::Win32::Foundation::ERROR_DIRECTORY;
 use windows_sys::Win32::NetworkManagement::WNet::{WNetAddConnection2W, NETRESOURCEW, RESOURCETYPE_DISK};
 use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, INVALID_FILE_ATTRIBUTES,
 };
 
-use super::wide;
+use super::{last_error, wide};
 use crate::shares::{ShareApi, Shares};
 use crate::{SecretStore, ShareConnector};
 
@@ -26,8 +26,7 @@ impl ShareApi for Win32Shares {
         // SAFETY: `path` is NUL-terminated and outlives the call, which only reads it.
         let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
         if attributes == INVALID_FILE_ATTRIBUTES {
-            // SAFETY: GetLastError takes no argument and reads this thread's last error, which the failed call set.
-            return Err(unsafe { GetLastError() });
+            return Err(last_error());
         }
         if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
             return Err(ERROR_DIRECTORY);
@@ -65,8 +64,7 @@ impl ShareApi for Win32Shares {
         // SAFETY: `path` is NUL-terminated and outlives the call; `available` is a u64 the call writes; the total and
         // total-free out-pointers may be null.
         if unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut available, null_mut(), null_mut()) } == 0 {
-            // SAFETY: GetLastError takes no argument and reads this thread's last error, which the failed call set.
-            return Err(unsafe { GetLastError() });
+            return Err(last_error());
         }
         Ok(available)
     }

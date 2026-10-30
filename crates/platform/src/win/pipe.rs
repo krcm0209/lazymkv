@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_EVENT,
     WAIT_OBJECT_0,
 };
@@ -27,7 +27,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
-use super::{own_token, token_of_process, wide, Descriptor};
+use super::{last_error, own_token, token_of_process, wide, Descriptor};
 use crate::security::{pipe_sddl, token_verdict};
 use crate::{IpcStream, IpcTransport};
 
@@ -432,12 +432,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `handle` as Win32 calls take it.
 fn raw(handle: &OwnedHandle) -> HANDLE {
     handle.as_raw_handle() as HANDLE
-}
-
-/// The calling thread's last error code.
-fn last_error() -> u32 {
-    // SAFETY: GetLastError takes nothing; every caller reads it at once, before any other call.
-    unsafe { GetLastError() }
 }
 
 /// A new manual-reset event, not set.

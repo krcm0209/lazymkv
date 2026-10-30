@@ -5,7 +5,7 @@ use std::io;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER,
+    CloseHandle, LocalFree, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER,
     ERROR_INVALID_HANDLE, ERROR_SUCCESS, HANDLE,
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
@@ -13,7 +13,7 @@ use windows_sys::Win32::Security::{LookupAccountSidW, OWNER_SECURITY_INFORMATION
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 use windows_sys::Win32::System::Threading::{CreateMutexW, OpenMutexW};
 
-use super::{sid_string, wide, Descriptor};
+use super::{last_error, sid_string, wide, Descriptor};
 use crate::security::{ADMINISTRATORS_SID, MUTEX_SDDL};
 
 /// The engine's named mutex, held for the engine's life (design parts 3.3, 3.8). Its existence is the lock (Ruling
@@ -49,8 +49,7 @@ impl EngineMutex {
         // SAFETY: the attributes point at `descriptor`, which outlives the call; the name is NUL-terminated and
         // outlives it too. The mutex is not owned on creation (Ruling T3-2-a).
         let handle = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
-        // SAFETY: GetLastError takes nothing; it is read at once, before any other call.
-        let code = unsafe { GetLastError() };
+        let code = last_error();
         if !handle.is_null() && code != ERROR_ALREADY_EXISTS {
             return Ok(EngineMutex { handle });
         }
@@ -125,8 +124,7 @@ fn account_name(sid: PSID) -> Option<String> {
     let sized = unsafe {
         LookupAccountSidW(null(), sid, null_mut(), &mut name_length, null_mut(), &mut domain_length, &mut kind)
     };
-    // SAFETY: GetLastError takes nothing; it is read at once, before any other call.
-    if sized != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+    if sized != 0 || last_error() != ERROR_INSUFFICIENT_BUFFER {
         return None;
     }
     let mut name = vec![0u16; name_length.max(1) as usize];
