@@ -12,7 +12,7 @@ use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -63,7 +63,7 @@ use crate::EngineConfig;
 
 /// How long the drive thread waits for each drive event before it looks at its stop flag again.
 const DRIVE_POLL: Duration = Duration::from_millis(50);
-/// How often `EngineHandle::wait_until` looks at the jobs, and `EngineHandle::wait_for_exit` at the owner thread.
+/// How often `EngineHandle::wait_until` looks at the jobs.
 const WAIT_POLL: Duration = Duration::from_millis(20);
 /// The minutes after which an event `unpersisted` kept is fed again (Ruling W23).
 const REFEED_MINUTES: u32 = 1;
@@ -298,7 +298,12 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         present,
         selftest,
     );
-    let owner = thread::spawn(move || owner.run(inbox));
+    // Review round 1 of pull request 3 (R35): the thread's end, a panic included, drops `owner_exit`.
+    let (owner_exit, owner_done) = channel::<()>();
+    let owner = thread::spawn(move || {
+        let _exit = owner_exit;
+        owner.run(inbox)
+    });
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
     let serve_stop = Arc::new(AtomicBool::new(false));
     let transport = Arc::clone(&ipc);
@@ -306,6 +311,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     Ok(EngineHandle {
         sender,
         owner,
+        owner_done,
         drive,
         drive_stop,
         notifier_done,
@@ -325,6 +331,8 @@ pub struct EngineHandle {
     sender: Sender<Msg>,
     /// The owner thread.
     owner: JoinHandle<()>,
+    /// Closes when the owner thread has left its loop, a panic included (review round 1 of pull request 3, R35).
+    owner_done: Receiver<()>,
     /// The drive thread.
     drive: JoinHandle<()>,
     /// Raised to end the drive thread.
@@ -382,18 +390,16 @@ impl EngineHandle {
     }
 
     /// True once the owner thread has left its loop, after a `shutdown` request or a stop; false when `timeout` passed
-    /// first; None waits without a limit. It polls `JoinHandle::is_finished` every `WAIT_POLL` (engine.md:581 (b)).
-    /// Def: T3-10. Use: T3-10, T3-23.
+    /// first; None waits without a limit (engine.md:581 (b)). It waits on `owner_done`, which the owner thread's end
+    /// closes, a panic included, so it wakes once, when the thread ends, and never polls (review round 1 of pull
+    /// request 3, R35). Def: T3-10, PR #14 review round 1 (R35). Use: T3-10, T3-23.
     pub fn wait_for_exit(&self, timeout: Option<Duration>) -> bool {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
-        loop {
-            if self.owner.is_finished() {
-                return true;
+        match timeout {
+            None => {
+                let _ = self.owner_done.recv();
+                true
             }
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                return false;
-            }
-            thread::sleep(WAIT_POLL);
+            Some(timeout) => !matches!(self.owner_done.recv_timeout(timeout), Err(RecvTimeoutError::Timeout)),
         }
     }
 
