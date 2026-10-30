@@ -1,11 +1,12 @@
 //! lazymkv-ctl: lazymkvctl's commands. plan, decide and retune run locally through lazymkv_dev::dispatch; the rest go to the engine over IPC (design parts 4.1, 9.5, 9.6).
 
+use lazymkv_dev::cmd::{decide, plan};
 use lazymkv_dev::evidence::{default_spec, Ctx};
 use lazymkv_dev::forms::read_forms;
 use lazymkv_dev::{Args, COMMANDS};
 use lazymkv_platform::IpcConnector;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod engine_cmds;
 
@@ -135,6 +136,45 @@ pub(crate) fn retune_spec(ctx: &Ctx, words: &[String]) -> Result<PathBuf, String
         Some(given) => Ok(ctx.abs(&given)),
         None => default_spec(ctx).ok_or_else(|| "the following arguments are required: --spec".to_string()),
     }
+}
+
+/// decide's path flags: `decide::FLAGS` without `--selection`, whose value is a choice, not a path (V10's ruling).
+/// plan's path flags are all of `plan::FLAGS`. Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
+pub(crate) const DECIDE_PATH_FLAGS: [&str; 7] =
+    ["--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"];
+
+/// The words of a relayed plan or decide (`argv[0]`), with each path flag whose value is relative sent again, made
+/// absolute with `ctx.abs` against lazymkvctl's working folder (V10's ruling), since the child runs in the engine's.
+/// The words after the name are read with the child's own declared flags (`plan::FLAGS`, `decide::FLAGS`), so a
+/// prefix, the `=` form and a repeat resolve as they do in the child; the added words go at the first `--`, else at the
+/// end, in the path list's order (`plan::FLAGS`, `DECIDE_PATH_FLAGS`), after the values they override, which the
+/// child's last-wins reads. An absolute value, or a path flag not given, adds nothing. Any other name, or a path flag
+/// with no value, gives `argv` unchanged, and the child prints dev's own error and exits 2. `--job` and `--title`
+/// cannot confuse the reading: `read_forms` accepted them, their values never start with `-`, and `--t` is ambiguous
+/// in decide's list, so `Args::flag` skips it. A drive-relative value such as `D:alt.json` stays drive-relative.
+/// Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
+pub(crate) fn relayed_paths(ctx: &Ctx, argv: &[String]) -> Vec<String> {
+    let (declared, paths): (&[&str], &[&str]) = match argv.first().map(String::as_str) {
+        Some("plan") => (&plan::FLAGS[..], &plan::FLAGS[..]),
+        Some("decide") => (&decide::FLAGS[..], &DECIDE_PATH_FLAGS[..]),
+        _ => return argv.to_vec(),
+    };
+    let mut args = Args::new(&argv[1..], declared);
+    let mut added = Vec::new();
+    for flag in paths {
+        match args.flag(flag) {
+            Ok(Some(value)) if !Path::new(&value).is_absolute() => {
+                added.extend([flag.to_string(), ctx.abs(&value).to_string_lossy().into_owned()]);
+            }
+            Ok(_) => {}
+            Err(_) => return argv.to_vec(),
+        }
+    }
+    let at = argv.iter().position(|word| word == "--").unwrap_or(argv.len());
+    let mut words = argv[..at].to_vec();
+    words.extend(added);
+    words.extend_from_slice(&argv[at..]);
+    words
 }
 
 #[cfg(test)]

@@ -50,8 +50,9 @@ fn word(path: &Path) -> String {
 
 /// The child's words for a `command`'s `words` (design part 9.5's table; Rulings W24, W25), or the refusal's text.
 /// `job` gives a job's folder and its title keys, None for an unknown job. Built words come first and the client's
-/// remaining words after them, unchanged, so `Args`' last-wins rule lets a flag the client gave win. Def: T3-22.
-/// Use: T3-22.
+/// remaining words after them, unchanged, so `Args`' last-wins rule lets a flag the client gave win. lazymkvctl sends a
+/// relative path flag's value again, made absolute (V10's ruling); the engine resolves nothing and passes the words
+/// unchanged. Def: T3-22. Use: T3-22.
 pub(crate) fn child_words(
     words: &[String],
     job: &dyn Fn(&str) -> Option<(PathBuf, Vec<String>)>,

@@ -545,8 +545,9 @@ const NAME: &str = "plan";
 /// command takes (port spec 3.4).
 const USAGE: &str = "plan <slug|recording dir|scan file> [--evidence DIR] [--settings FILE] [--tmdb-search FILE] \
                      [--tmdb-record FILE] [--remembered FILE]";
-/// The flags the command declares.
-const FLAGS: [&str; 5] = ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered"];
+/// plan's long flags, as parse_args declares them; lazymkvctl reads a relayed plan's words with them (V10's ruling).
+/// Def: T15, PR #14 review round 1 (V10). Use: T15, PR #14 review round 1 (V10).
+pub const FLAGS: [&str; 5] = ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered"];
 /// What -h prints after the usage line.
 const HELP: &str = "
 The disc phase's plan (design spec 6.1 step 5) as one JSON document: the identity (8.1), the kind (8.2), the titles

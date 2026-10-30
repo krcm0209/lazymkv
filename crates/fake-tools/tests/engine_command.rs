@@ -361,3 +361,25 @@ fn ctl_plan_job_prints_the_childs_lines_and_exits_with_its_code() {
     let printed = (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap());
     assert_eq!(printed, (3, "relay plan line 1\nrelay plan line 2\n".to_string(), "relay plan warning\n".to_string()));
 }
+
+/// V10's ruling, end to end: lazymkvctl sends a relative `--settings` again, made absolute against its own working
+/// folder, and the engine passes both words through unchanged and in order, so the child's last-wins reads the
+/// absolute path (PR #14 review round 1, V10).
+#[test]
+fn ctl_plan_job_sends_a_relative_settings_path_made_absolute_against_its_own_folder() {
+    let (h, id) = filed();
+    let job = h.job_dir(&id);
+    replay_files(&job, &REPLAY);
+    let scratch = Scratch::new("ctl-relay-relative");
+    let ctx = Ctx::for_test(&scratch.0);
+    let connector = h.client();
+    let argv: Vec<String> = ["plan", "--job", id.as_str(), "--settings", "alt.json"].map(str::to_string).into();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code =
+        run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out, err: &mut err });
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let mut expected = built(&["plan".to_string(), text(job.clone())], &job, &REPLAY);
+    expected.extend(["--settings", "alt.json", "--settings"].map(str::to_string));
+    expected.push(text(scratch.0.join("alt.json")));
+    assert_eq!(ctl_spawns(&h).pop().unwrap().args, expected);
+}

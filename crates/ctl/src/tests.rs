@@ -146,3 +146,17 @@ fn the_local_commands_are_the_three_of_design_part_9_5() {
         assert!(lazymkv_dev::COMMANDS.iter().any(|(command, _, _)| *command == name), "{name}");
     }
 }
+
+/// V10's drift guard: the relay reads a relayed plan's and decide's words with the flag lists the children declare,
+/// so a flag added to dev fails here until `relayed_paths` classes it as a path or not.
+#[test]
+fn the_relay_reads_plans_and_decides_own_flag_lists() {
+    assert_eq!(
+        lazymkv_dev::cmd::plan::FLAGS,
+        ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered"]
+    );
+    assert_eq!(
+        lazymkv_dev::cmd::decide::FLAGS,
+        ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"]
+    );
+}
