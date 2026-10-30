@@ -44,6 +44,8 @@ pub use shares::share_connector;
 pub use token::own_token;
 pub(crate) use token::{elevation_type, linked_token, sid_string, token_of_process, Descriptor};
 #[cfg(test)]
+pub(crate) use host::{owned, set_medium_integrity};
+#[cfg(test)]
 pub(crate) use token::{read_descriptor, read_handle, read_path, AclEntry};
 
 /// winnt.h's `MAXIMUM_ALLOWED`: an access check returns every right granted (design part 3.6). Def: T3-7. Use: T3-7.

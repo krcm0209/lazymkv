@@ -237,8 +237,9 @@ impl Drop for LocalMemory {
     }
 }
 
-/// `raw`, a handle a call just wrote, owned so that it closes on drop; an error when the call wrote none.
-fn owned(raw: HANDLE) -> io::Result<OwnedHandle> {
+/// `raw`, a handle a call just wrote, owned so that it closes on drop; an error when the call wrote none. Def: T3-7.
+/// Use: T3-7, PR #14 review round 1 (R43).
+pub(crate) fn owned(raw: HANDLE) -> io::Result<OwnedHandle> {
     if raw.is_null() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Windows returned no handle"));
     }
@@ -345,8 +346,9 @@ fn limited_token(token: &OwnedHandle) -> io::Result<OwnedHandle> {
     Ok(limited)
 }
 
-/// Sets `token`'s integrity level, open with `TOKEN_ADJUST_DEFAULT`, to medium.
-fn set_medium_integrity(token: &OwnedHandle) -> io::Result<()> {
+/// Sets `token`'s integrity level, open with `TOKEN_ADJUST_DEFAULT`, to medium. Def: T3-7. Use: T3-7, PR #14 review
+/// round 1 (R43).
+pub(crate) fn set_medium_integrity(token: &OwnedHandle) -> io::Result<()> {
     let text = wide(MEDIUM_INTEGRITY_SID);
     let mut sid: PSID = null_mut();
     // SAFETY: `text` is NUL-terminated and outlives the call; the call writes the SID it allocates with LocalAlloc to

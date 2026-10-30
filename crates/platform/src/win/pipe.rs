@@ -493,7 +493,7 @@ mod tests {
     use super::*;
     use crate::security::{test_name, HIGH_INTEGRITY_SID, SYSTEM_SID};
     use crate::testutil::{ci_factor, line, within};
-    use crate::win::{own_token, read_handle, sid_string, token_of_process, wide, SE_GROUP_INTEGRITY};
+    use crate::win::{own_token, owned, read_handle, set_medium_integrity, sid_string, token_of_process, wide};
     use crate::{IpcStream, IpcTransport};
     use std::io::{self, BufRead, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -505,12 +505,11 @@ mod tests {
     use windows_sys::Win32::Foundation::{
         LocalFree, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
-    use windows_sys::Win32::Security::Authorization::{ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
     use windows_sys::Win32::Security::{
-        DuplicateTokenEx, GetAce, MapGenericMask, RevertToSelf, SecurityImpersonation, SetTokenInformation,
-        TokenImpersonation, TokenIntegrityLevel, ACL, GENERIC_MAPPING, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        PSID, SID_AND_ATTRIBUTES, SYSTEM_MANDATORY_LABEL_ACE, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL,
-        TOKEN_QUERY,
+        DuplicateTokenEx, GetAce, MapGenericMask, RevertToSelf, SecurityImpersonation, TokenImpersonation, ACL,
+        GENERIC_MAPPING, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SYSTEM_MANDATORY_LABEL_ACE, TOKEN_ALL_ACCESS,
+        TOKEN_DUPLICATE, TOKEN_QUERY,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ALL_ACCESS, FILE_FLAG_OVERLAPPED, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -533,8 +532,6 @@ mod tests {
     /// winnt.h's SYSTEM_MANDATORY_LABEL_ACE_TYPE, which windows-sys declares only under a feature Task 1 does not
     /// enable.
     const LABEL_ACE: u8 = 0x11;
-    /// The SID of the medium mandatory integrity level, a non-elevated process's level.
-    const MEDIUM_INTEGRITY_SID: &str = "S-1-16-8192";
 
     fn pipe_name() -> String {
         format!(r"\\.\pipe\{}", test_name("pipe"))
@@ -647,25 +644,21 @@ mod tests {
         }
     }
 
-    /// `raw`, a handle a call just wrote, owned so that it closes on drop.
-    fn owned(raw: HANDLE) -> OwnedHandle {
-        assert!(!raw.is_null(), "Windows returned no handle");
-        // SAFETY: `raw` is an open handle that nothing else owns.
-        unsafe { OwnedHandle::from_raw_handle(raw) }
-    }
-
     /// Runs `work` on the calling thread while it impersonates a copy of the process token lowered to medium
     /// integrity: `OpenProcessToken(TOKEN_DUPLICATE | TOKEN_QUERY)`, `DuplicateTokenEx(TOKEN_ALL_ACCESS,
-    /// SecurityImpersonation, TokenImpersonation)`, `SetTokenInformation(TokenIntegrityLevel)` with the SID
-    /// `S-1-16-8192` and `crate::win::SE_GROUP_INTEGRITY`, `SetThreadToken(null, copy)`. `RevertToSelf` runs in a drop
-    /// guard, so a failing `work` leaves no impersonation behind.
+    /// SecurityImpersonation, TokenImpersonation)`, host.rs's `set_medium_integrity` on the copy (TOKEN_ALL_ACCESS
+    /// holds the TOKEN_ADJUST_DEFAULT it needs), `SetThreadToken(null, copy)`. `RevertToSelf` runs in a drop guard, so
+    /// a failing `work` leaves no impersonation behind.
     fn as_medium_integrity<T>(work: impl FnOnce() -> T) -> T {
         let mut raw: HANDLE = null_mut();
         // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing; the call writes the token's handle
         // to `raw`.
         let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &mut raw) };
         assert_ne!(opened, 0, "OpenProcessToken: {}", io::Error::last_os_error());
-        let token = owned(raw);
+        // The handle in a binding whose address is never taken, checked before it is owned.
+        let raw = raw;
+        assert!(!raw.is_null(), "OpenProcessToken wrote no handle");
+        let token = owned(raw).expect("the process token");
         let mut raw: HANDLE = null_mut();
         // SAFETY: the token is open with TOKEN_DUPLICATE; the attributes pointer may be null, for a default descriptor
         // and a handle no child inherits; the call writes the copy's handle to `raw`.
@@ -680,32 +673,11 @@ mod tests {
             )
         };
         assert_ne!(copied, 0, "DuplicateTokenEx: {}", io::Error::last_os_error());
-        let copy = owned(raw);
-        let text = wide(MEDIUM_INTEGRITY_SID);
-        let mut sid: PSID = null_mut();
-        // SAFETY: `text` is NUL-terminated and outlives the call; the call writes the SID it allocates with LocalAlloc
-        // to `sid`.
-        let converted = unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) };
-        assert_ne!(converted, 0, "ConvertStringSidToSidW: {}", io::Error::last_os_error());
-        // The SID in a binding whose address is never taken, checked before it is used.
-        let sid = sid;
-        assert!(!sid.is_null(), "Windows returned no SID");
-        let label = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: sid, Attributes: SE_GROUP_INTEGRITY } };
-        // SAFETY: the copy is open with TOKEN_ALL_ACCESS, TOKEN_ADJUST_DEFAULT among it; `label` is the
-        // TOKEN_MANDATORY_LABEL that TokenIntegrityLevel reads, the length passed is its size, and the SID it points
-        // at stays allocated until after the call.
-        let set = unsafe {
-            SetTokenInformation(
-                copy.as_raw_handle() as HANDLE,
-                TokenIntegrityLevel,
-                (&label as *const TOKEN_MANDATORY_LABEL).cast(),
-                size_of::<TOKEN_MANDATORY_LABEL>() as u32,
-            )
-        };
-        let error = io::Error::last_os_error();
-        // SAFETY: ConvertStringSidToSidW allocated the SID with LocalAlloc; it is freed once, here, after its last use.
-        unsafe { LocalFree(sid) };
-        assert_ne!(set, 0, "SetTokenInformation: {error}");
+        // The copy's handle in a binding whose address is never taken, checked before it is owned.
+        let raw = raw;
+        assert!(!raw.is_null(), "DuplicateTokenEx wrote no handle");
+        let copy = owned(raw).expect("the token's copy");
+        set_medium_integrity(&copy).expect("the copy's integrity level");
         // SAFETY: a null thread pointer names the calling thread; the copy is an impersonation token open with
         // TOKEN_IMPERSONATE, and the thread keeps its own reference to it.
         let impersonating = unsafe { SetThreadToken(null(), copy.as_raw_handle() as HANDLE) };
