@@ -376,6 +376,31 @@ fn the_remux_creates_the_partial_folder_when_the_library_root_has_none() {
     assert_eq!(fs::read_dir(partial).unwrap().count(), 0);
 }
 
+/// Review round 1 of pull request 3 (R25; Rulings W15, M12): Remux makes only the partial folder inside an existing
+/// library root and never the root, so a missing root fails the remux naming it, the staged file stays, and a retry
+/// once the folder exists files the title. On Windows the partial folder's create_dir under the missing root gives os
+/// error 3.
+#[test]
+fn a_missing_library_root_fails_the_remux_and_is_never_created() {
+    let h = harness(&[], json!({}));
+    fs::remove_dir(h.library()).unwrap();
+    let id = run_to(&h, "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::RemuxFailed { .. })));
+    let message = record.message.unwrap_or_default();
+    let head = format!("{KEY}: the library root {} is not a folder (", h.library().display());
+    let tail = "); the engine never creates a library root, so the remux was not started, and a retry once the folder \
+                exists runs it";
+    assert!(message.starts_with(&head) && message.ends_with(tail), "{message}");
+    assert!(!h.library().exists());
+    assert!(h.staging().join(&id).join("rip").join(KEY).join("title_t00.mkv").is_file());
+    fs::create_dir(h.library()).unwrap();
+    Client::open(&h).ok("retry", json!({"job": id}));
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    assert!(final_path(&h).is_file());
+}
+
 #[test]
 fn a_probe_error_fails_probe_failed_unknown() {
     let h = harness(&["movie-direct-probe-error"], json!({}));

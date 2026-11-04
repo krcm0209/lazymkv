@@ -1576,11 +1576,11 @@ impl Step<'_> {
         Ok(self.space_result(checked))
     }
 
-    /// Remux (design part 5.7 step 13): for each planned title in plan order, the partial folder of its library root
-    /// made when missing (Review Focus 3), then `mkvmerge --gui-mode -o <partial>` of its staged file with the
-    /// decision's layout, recorded as `<key>/remux-mkvmerge.txt`, its progress forwarded with the title key. No
-    /// mkvmerge gives ToolMissing { Mkvmerge }; a remux that cannot be built or fails gives RemuxFailed { Unknown }
-    /// with its sentence, and the staged file stays.
+    /// Remux (design part 5.7 step 13): for each planned title in plan order, the partial folder made inside its
+    /// library root when missing, never the root itself (Review Focus 3; Rulings W15, M12), then `mkvmerge --gui-mode
+    /// -o <partial>` of its staged file with the decision's layout, recorded as `<key>/remux-mkvmerge.txt`, its
+    /// progress forwarded with the title key. No mkvmerge gives ToolMissing { Mkvmerge }; a remux that cannot be built
+    /// or fails gives RemuxFailed { Unknown } with its sentence, and the staged file stays.
     ///
     /// Once mkvmerge is found, the job's Remux promise becomes `remux_promise` of the staged sizes, read here on the
     /// step's thread (`refine_remux_promise`; engine.md:585, Ruling T3-17-a), when `staging_root` and the plan kind's
@@ -1589,6 +1589,13 @@ impl Step<'_> {
     /// { Unknown } with `<key>: the library share holding <root> does not answer (<why>); the remux was not started,
     /// and a retry once the share answers runs it`, so a restart into Remuxing writes nothing to a share it has not
     /// reached (engine.md:590, as File does since review round 1's V7).
+    ///
+    /// The partial folder is made with `fs::create_dir`, whose error is ignored when the folder is then a folder
+    /// (std's own `create_dir_all` test, covering AlreadyExists and a race). Otherwise, when the library root is a
+    /// folder, it gives RemuxFailed { Unknown } with `<folder>: <error>`; when it is not, RemuxFailed { Unknown } with
+    /// `<key>: the library root <root> is not a folder (<error>); the engine never creates a library root, so the remux
+    /// was not started, and a retry once the folder exists runs it`, keeping the OS error, so a dropped share (53, 67)
+    /// is told apart from a missing folder (3) (review round 1 of pull request 3, R25).
     fn remux(&self) -> Outcome {
         let failed = |failure| Event::RemuxFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1615,8 +1622,23 @@ impl Step<'_> {
             }
             let partial = partial_path(&path.root, self.id, key);
             if let Some(folder) = partial.parent() {
-                let made = fs::create_dir_all(folder);
-                made.map_err(|error| unknown(failed, format!("{}: {error}", folder.display())))?;
+                match fs::create_dir(folder) {
+                    Err(_) if folder.is_dir() => {}
+                    Err(error) if Path::new(&path.root).is_dir() => {
+                        return Ok(unknown(failed, format!("{}: {error}", folder.display())));
+                    }
+                    Err(error) => {
+                        let root = &path.root;
+                        return Ok(unknown(
+                            failed,
+                            format!(
+                                "{key}: the library root {root} is not a folder ({error}); the engine never creates a \
+                                 library root, so the remux was not started, and a retry once the folder exists runs it"
+                            ),
+                        ));
+                    }
+                    Ok(()) => {}
+                }
             }
             let staged = self.staged_report(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
             let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
