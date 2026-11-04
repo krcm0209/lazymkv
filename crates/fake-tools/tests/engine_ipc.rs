@@ -2381,6 +2381,30 @@ fn a_retry_while_the_staging_parent_is_missing_feeds_nothing() {
     c.until_state(Some(&id), "Filed");
 }
 
+/// Review round 1 of pull request 3 (V11): a staging root that is a file sends the job to AwaitingShare naming it, and
+/// a retry feeds nothing until the file is gone, so it never cycles through ShareBack.
+#[test]
+fn a_staging_root_that_is_a_file_waits_and_a_retry_feeds_nothing() {
+    let h = stand_in(&[DISC_A], settings());
+    let file = h.staging().join("engine");
+    fs::write(&file, "x").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("settings_set", json!({"staging_root": file.to_str().unwrap()}));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert_eq!(h.record(&id).message, Some(format!("{} is not a folder", file.display())));
+    assert!(!h.job_dir(&id).join("t00-00800").join("rip.txt").exists());
+    c.ok("retry", json!({"job": id}));
+    h.settle();
+    assert_eq!(h.state_of(&id), "AwaitingShare");
+    assert!(!h.transitions(&id).iter().any(|t| t.event == Some(Event::ShareBack)));
+    fs::remove_file(&file).unwrap();
+    c.ok("retry", json!({"job": id}));
+    c.until_state(Some(&id), "Filed");
+}
+
 /// Spec 13 ("each root reachable"), Ruling W15: the self-test asks `reach` of each root before its probe.
 #[test]
 fn the_self_test_reports_an_unreachable_root_from_reach_before_its_probe() {

@@ -716,6 +716,20 @@ mod tests {
         assert!(!engine.exists(), "the re-check created the root");
     }
 
+    /// Review round 1 of pull request 3 (V11): a staging root that exists and is not a folder keeps the job waiting.
+    #[test]
+    fn a_share_recheck_waits_while_the_staging_root_is_a_file() {
+        use lazymkv_core::job::State;
+        use lazymkv_core::testsupport::ScratchExt;
+        let s = Scratch::new("recheck-root-file");
+        let engine = s.write_path("engine", "x");
+        let settings = Settings { staging_root: Some(engine.to_str().unwrap().to_string()), ..Settings::default() };
+        let shares = FakeShares::new();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
+        std::fs::remove_file(&engine).unwrap();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+    }
+
     /// A listing that printed no version says nothing about MakeMKV's version (a makemkvcon that started and died),
     /// so it is not observed: no change is raised and the recorded check stays (ruling at the final review).
     #[test]

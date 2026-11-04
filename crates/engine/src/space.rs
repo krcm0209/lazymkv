@@ -88,29 +88,41 @@ fn free_space_unread(root: &str, error: &io::Error) -> String {
 
 /// Design part 6.2, Ruling W15: a missing `staging_root` or `tuning_root` is created with `fs::create_dir` when its
 /// parent is a folder, never deeper; a library root is never passed. Ok when `root` is a folder or was made
-/// (`AlreadyExists` counts as made). Err: `<root> does not exist and could not be created: <parent> is not a folder`;
-/// `<root> does not exist and could not be created: <error>`; `<root> is not a folder` for a root with no parent.
-/// It calls `root_ready` before `fs::create_dir`. Def: T3-17. Use: T3-17.
+/// (`AlreadyExists` counts as made when `root` is then a folder, made by another process in between). Err:
+/// `<root> does not exist and could not be created: <parent> is not a folder`;
+/// `<root> does not exist and could not be created: <error>`; `<root> is not a folder` for a root that exists and is
+/// not a folder (review round 1 of pull request 3, V11) or has no parent. It calls `root_ready` before
+/// `fs::create_dir`. Def: T3-17, PR #14 review round 1 (V11). Use: T3-17.
 pub(crate) fn make_root(root: &str) -> Result<(), String> {
     root_ready(root)?;
     if Path::new(root).is_dir() {
         return Ok(());
     }
     match fs::create_dir(root) {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
-            Err(format!("{root} does not exist and could not be created: {error}"))
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if Path::new(root).is_dir() {
+                Ok(())
+            } else {
+                Err(format!("{root} is not a folder"))
+            }
         }
-        _ => Ok(()),
+        Err(error) => Err(format!("{root} does not exist and could not be created: {error}")),
     }
 }
 
-/// Whether `make_root` could succeed, creating nothing: Ok when `root` is a folder or its parent is; Err `make_root`'s
-/// text otherwise (engine.md:589, Ruling W21: AwaitingShare's re-check asks it of `staging_root`, so a missing parent
-/// keeps the job waiting instead of cycling). Def: T3-17. Use: T3-17.
+/// Whether `make_root` could succeed, creating nothing: Ok when `root` is a folder, or is absent and its parent is a
+/// folder; Err `make_root`'s text otherwise, `<root> is not a folder` for a root that exists and is not a folder
+/// (review round 1 of pull request 3, V11; a root whose metadata cannot be read keeps the parent rule) (engine.md:589,
+/// Ruling W21: AwaitingShare's re-check asks it of `staging_root`, so a missing parent keeps the job waiting instead
+/// of cycling). Def: T3-17, PR #14 review round 1 (V11). Use: T3-17.
 pub(crate) fn root_ready(root: &str) -> Result<(), String> {
     let path = Path::new(root);
     if path.is_dir() {
         return Ok(());
+    }
+    if path.exists() {
+        return Err(format!("{root} is not a folder"));
     }
     match path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         Some(parent) if parent.is_dir() => Ok(()),
@@ -615,6 +627,19 @@ mod tests {
             format!("{} does not exist and could not be created: {} is not a folder", deeper.display(), parent.display());
         assert_eq!(refused, expected);
         assert!(!parent.exists());
+    }
+
+    /// Review round 1 of pull request 3 (V11): a root that exists and is not a folder is refused by `make_root` and
+    /// `root_ready` alike, and is left as it was.
+    #[test]
+    fn a_root_that_is_a_file_is_not_a_folder_and_is_left_alone() {
+        let s = Scratch::new("root-file");
+        let file = s.write_path("engine", "x");
+        let root = file.to_str().unwrap();
+        let expected = format!("{root} is not a folder");
+        assert_eq!(make_root(root), Err(expected.clone()));
+        assert_eq!(root_ready(root), Err(expected));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "x");
     }
 
     /// engine.md:585: a Remuxing job's rebuilt Remux promise is the plan's estimate on the library's volume whatever
