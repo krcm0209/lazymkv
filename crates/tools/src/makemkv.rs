@@ -314,9 +314,10 @@ const KEY_REMOVED: &[u8] = b"[app_Key removed]";
 /// Saves MakeMKV's debug log as `<out>.makemkv-debug.txt` with every occurrence of the registration key replaced by
 /// `[app_Key removed]` (design part 7.2, PIPE-9). The log is copied as bytes, because it need not be UTF-8 (S61), and
 /// it is copied unchanged when the host has no key. `started_unix` is the call's start: a log last modified before it
-/// belongs to an earlier call and is not saved. The log is opened once (review round 1 of pull request 3 (V14)): a log
-/// that is a link is not saved, and the age check and the read use that one open, so no link swapped in between can
-/// redirect the read. The `Err` text says why nothing was saved and never holds the key. Def: T14. Use: T23.
+/// belongs to an earlier call and is not saved. The log is opened once (review round 1 of pull request 3 (V14)): on
+/// Windows, a log that is a link is not saved, while elsewhere the open follows a link to its target (the round's final
+/// review (W7)); the age check and the read use that one open, so no link swapped in between can redirect the read. The
+/// `Err` text says why nothing was saved and never holds the key. Def: T14. Use: T23.
 pub fn save_debug_log(host: &dyn Host, started_unix: u64, out: &Path) -> Result<(), String> {
     let log = host.makemkv_debug_log().ok_or_else(|| "MakeMKV's debug log path is not known".to_string())?;
     let failed = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
@@ -346,7 +347,8 @@ pub fn save_debug_log(host: &dyn Host, started_unix: u64, out: &Path) -> Result<
 
 /// `log` opened for reading, once, for `save_debug_log` (review round 1 of pull request 3 (V14)). On Windows the open
 /// passes `FILE_FLAG_OPEN_REPARSE_POINT`, so a link is opened itself rather than followed, and the handle's metadata
-/// says it is a link; elsewhere it is a plain open.
+/// says it is a link, which `save_debug_log` refuses; elsewhere it is a plain open, which follows a link, so the
+/// handle's metadata is the target's and a link log is saved (the round's final review (W7)).
 fn open_log(log: &Path) -> io::Result<fs::File> {
     #[cfg(windows)]
     {
