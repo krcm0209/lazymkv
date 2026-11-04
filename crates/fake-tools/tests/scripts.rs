@@ -254,3 +254,25 @@ fn the_task_scripts_data_folder_is_the_engines() {
     assert!(lines[0].eq_ignore_ascii_case(&engines.to_string_lossy()), "{} is not {}", lines[0], engines.display());
     assert_eq!(lines[1], r"C:\x");
 }
+
+/// Review round 1 of pull request 3 (R4): the run folder's read-back compares with the access list as Windows writes it
+/// back, where the built-in Administrator's SID becomes LA. The SIDs are built at run time from the current account's
+/// domain, and PowerShell compares them, so none is written here or printed (RP21).
+#[cfg(windows)]
+#[test]
+fn the_task_scripts_read_back_expects_aliases_as_windows_writes_them() {
+    let (path, _) = script();
+    let reader = folder_sddl("$d-1999");
+    let administrator = folder_sddl("$d-500");
+    let call = format!(
+        "$d = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.AccountDomainSid.Value\r\n\
+         $written = Get-WrittenAces \"{reader}\"\r\n\
+         if ($written -ceq \"{aces}\") {{ 'same' }} else {{ 'differs' }}\r\n\
+         $written = Get-WrittenAces \"{administrator}\"\r\n\
+         if ($written.EndsWith('(A;OICI;FR;;;LA)')) {{ 'LA' }} elseif ($written.EndsWith(\"(A;OICI;FR;;;$d-500)\")) {{ 'literal' }} else {{ 'other' }}",
+        aces = &reader[5..],
+    );
+    let output = define_and_call(&path, &["Get-WrittenAces"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines, ["same", "LA"], "{output}");
+}

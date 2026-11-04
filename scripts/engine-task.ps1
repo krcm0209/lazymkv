@@ -86,6 +86,15 @@ function Get-NoAnswerText([string]$state, [long]$result, [string]$folder, [strin
     "the task did not run the engine (its last result is 0x{0:X8}); it runs only while the owner is logged on at the mini PC's own monitor, a locked session being enough (design part 3.1)" -f $result
 }
 
+# The entries of an access list as Windows writes them back, where some SIDs become aliases, the built-in
+# Administrator's LA, so the read-back compares like with like (review round 1 of pull request 3, R4).
+function Get-WrittenAces([string]$dacl) {
+    $security = New-Object System.Security.AccessControl.DirectorySecurity
+    $security.SetSecurityDescriptorSddlForm($dacl, [System.Security.AccessControl.AccessControlSections]::Access)
+    $written = $security.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+    $written.Substring($written.IndexOf('('))
+}
+
 $status = 'error'
 try {
     if ($Data) { $problem = Get-DataProblem $Data $run; if ($problem) { throw $problem } }
@@ -123,7 +132,7 @@ try {
     $protected = New-Object System.Security.AccessControl.DirectorySecurity
     $protected.SetSecurityDescriptorSddlForm("O:BA$dacl", [System.Security.AccessControl.AccessControlSections]'Owner, Access')
     [System.IO.Directory]::SetAccessControl($run, $protected)
-    $aces = $dacl.Substring(5)
+    $aces = Get-WrittenAces $dacl
     $read = (Get-Acl -LiteralPath $run).Sddl
     if (-not ($read.StartsWith('O:BA') -and ($read.EndsWith("D:PAI$aces") -or $read.EndsWith("D:P$aces")))) {
         throw "$run's access list did not read back as the protected list of design part 3.5"
