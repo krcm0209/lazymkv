@@ -97,8 +97,13 @@ pub const PIPE_NAME: &str = r"\\.\pipe\lazymkv";
 /// it. Def: T3-2. Use: T3-23.
 pub const MUTEX_NAME: &str = r"Global\lazymkv-engine";
 
-/// The variables Windows itself defines for a logon session: the only ones of the engine's environment a guarded child
-/// inherits (review round 1 of pull request 3 (V1)). Def: PR #14 review round 1 (V1). Use: PR #14 review round 1 (V1).
+/// The names Windows defines for a logon session: the only ones of the engine's environment a guarded child inherits
+/// (review round 1 of pull request 3 (V1)). Their values come from the engine's own environment, which
+/// `HKCU\Environment` and `Volatile Environment` shape (`USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and
+/// PATH's user part), so a non-elevated process of the owner can still choose where an elevated child that follows
+/// one of them reads or writes; building the values from HKLM and the token is left for later, the deferred item V1
+/// extends in docs/phase2/engine.md (the round's final review (W1)). Def: PR #14 review round 1 (V1). Use: PR #14
+/// review round 1 (V1).
 pub const CHILD_ENV_NAMES: [&str; 31] = [
     "SystemRoot",
     "windir",

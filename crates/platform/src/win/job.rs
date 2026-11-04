@@ -5,8 +5,10 @@
 //! round 1 of pull request 3 (R1)). Each child has a console of its own with no window, so the stop events of the
 //! engine's console reach the engine alone, whose handler cancels the steps through the Job Objects (design part 3.8;
 //! Ruling W19; review round 1 of pull request 3 (V9)). A child inherits only the variables `security::CHILD_ENV_NAMES`
-//! names, then gets `Spawn::env`, so a variable a non-elevated process set reaches no tool (review round 1 of pull
-//! request 3 (V1)).
+//! names, then gets `Spawn::env`, so a variable of another name a non-elevated process set reaches no tool (review
+//! round 1 of pull request 3 (V1)). The kept names' values are the engine's own, which `HKCU\Environment` and
+//! `Volatile Environment` shape, so a non-elevated process of the owner can still set those; building them from HKLM
+//! and the token is deferred (the round's final review (W1)).
 
 use std::io::{self, Read};
 use std::mem::size_of;
