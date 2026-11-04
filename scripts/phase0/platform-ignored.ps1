@@ -19,9 +19,10 @@ $env:CARGO_TARGET_DIR = 'C:\lazymkv\target'
 # "skipped: <reason>" and passes (design part 12.1's convention); the notes record that as not run.
 $env:LAZYMKV_TEST_DRIVE = $Drive
 $env:LAZYMKV_TEST_SHARE_ROOT = $ShareRoot
-# The vault tests write the owner's Credential Manager only in their own job (Owner decision 8).
-$env:LAZYMKV_TEST_VAULT = if ($Filter -like 'win::creds::*') { '1' } else { '' }
-"platform-ignored: filter $Filter, drive '$Drive', share root '$ShareRoot'"
+# The vault tests write the owner's Credential Manager only in their own job (Owner decision 8): a filter that is
+# win::creds, win::creds:: or a path inside it (review round 1 of pull request 3, R3).
+$env:LAZYMKV_TEST_VAULT = if ($Filter -match '^win::creds(::|$)') { '1' } else { '' }
+"platform-ignored: filter $Filter, drive '$Drive', share root '$ShareRoot', vault '$env:LAZYMKV_TEST_VAULT'"
 Set-Location 'C:\lazymkv\src'
 # cmd joins the test binary's standard error to its standard output, so each "CUE:" line reaches the log when it is
 # written, and Windows PowerShell 5.1 never turns a native standard-error line into an error record.

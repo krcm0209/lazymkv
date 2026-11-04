@@ -158,7 +158,9 @@ fn the_platform_ignored_script_parses_and_runs_one_session_of_platform_tests() {
         r"$env:CARGO_TARGET_DIR = 'C:\lazymkv\target'",
         "$env:LAZYMKV_TEST_DRIVE = $Drive",
         "$env:LAZYMKV_TEST_SHARE_ROOT = $ShareRoot",
-        "$env:LAZYMKV_TEST_VAULT = if ($Filter -like 'win::creds::*') { '1' } else { '' }",
+        // Review round 1 of pull request 3 (R3): win::creds itself, as Owner decision 8's job passes it, sets the vault.
+        "$env:LAZYMKV_TEST_VAULT = if ($Filter -match '^win::creds(::|$)') { '1' } else { '' }",
+        "\"platform-ignored: filter $Filter, drive '$Drive', share root '$ShareRoot', vault '$env:LAZYMKV_TEST_VAULT'\"",
         r"Set-Location 'C:\lazymkv\src'",
         r#"cmd /c "cargo test -p lazymkv-platform --locked -- --include-ignored --test-threads=1 --nocapture $Filter 2>&1""#,
     ] {
