@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 
 use crate::file_phase::PARTIAL_FOLDER;
 use crate::space::{
-    make_root, planned_remux_promise, rip_check, rip_promise, root_ready, staged_bytes, staged_remux_check, Promises,
+    make_root, planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises,
 };
 use crate::steps::version_of;
 
@@ -534,12 +534,14 @@ fn library_root<'a>(record: &JobRecord, settings: &'a Settings) -> Option<&'a st
 }
 
 /// AwaitingShare's re-check (Ruling S81, amended by Ruling W21): ShareBack when each root the return state uses
-/// answers `reach` and then `free_bytes`, and `staging_root` passes `root_ready`, so a share whose free space cannot be
-/// read, or a staging root that is not a folder and whose parent is not one, keeps the job waiting instead of cycling
-/// through ShareBack (engine.md:589); the re-check creates nothing. A Planned return's CheckSpace reads staging and the
-/// plan kind's library root, so it waits on both (review round 1, V15: a library that does not answer no longer sends
-/// the job back to a CheckSpace that feeds ShareLost again); any other disc-phase return, a rip, uses staging alone
-/// (the final review's Minor 5); a file-phase return uses staging and the plan kind's library root.
+/// answers `reach` and then `free_bytes`, and `staging_root` passes `make_root`, which makes a missing last folder as
+/// CheckSpace would next (Ruling W15 as amended; review round 1 of pull request 3, R26), so a share whose free space
+/// cannot be read, or a staging root that is not a folder or cannot be made, keeps the job waiting instead of cycling
+/// through ShareBack (engine.md:589). `make_root` runs only once every root answered. A Planned return's CheckSpace
+/// reads staging and the plan kind's library root, so it waits on both (review round 1, V15: a library that does not
+/// answer no longer sends the job back to a CheckSpace that feeds ShareLost again); any other disc-phase return, a
+/// rip, uses staging alone (the final review's Minor 5); a file-phase return uses staging and the plan kind's library
+/// root.
 fn share_back(record: &JobRecord, settings: &Settings, shares: &dyn ShareConnector) -> Option<Event> {
     let staging = settings.staging_root.as_deref()?;
     let staging_only = matches!(
@@ -549,7 +551,7 @@ fn share_back(record: &JobRecord, settings: &Settings, shares: &dyn ShareConnect
     let library = if staging_only { None } else { library_root(record, settings) };
     let mut roots = std::iter::once(staging).chain(library);
     let answer = roots.all(|root| shares.reach(root) == Reach::Reachable && shares.free_bytes(root).is_ok());
-    (answer && root_ready(staging).is_ok()).then_some(Event::ShareBack)
+    (answer && make_root(staging).is_ok()).then_some(Event::ShareBack)
 }
 
 /// AwaitingSpace's re-check (Ruling S81): the CheckSpace computation of the return, `rip_check` before a rip and
@@ -669,8 +671,10 @@ mod tests {
     fn a_share_recheck_reaches_the_roots_its_return_uses() {
         use lazymkv_core::job::State;
         use lazymkv_platform::fakes::FakeShares;
+        // A real folder: the re-check makes the staging root (review round 1 of pull request 3, R26).
+        let s = Scratch::new("recheck-roots");
         let settings = Settings {
-            staging_root: Some("/staging".to_string()),
+            staging_root: Some(s.0.to_str().unwrap().to_string()),
             movies_root: Some("/movies".to_string()),
             ..Settings::default()
         };
@@ -692,16 +696,19 @@ mod tests {
     fn a_share_recheck_waits_while_the_free_space_cannot_be_read() {
         use lazymkv_core::job::State;
         use lazymkv_platform::fakes::FakeShares;
-        let settings = Settings { staging_root: Some("/staging".to_string()), ..Settings::default() };
+        // A real folder: the re-check makes the staging root (review round 1 of pull request 3, R26).
+        let s = Scratch::new("recheck-free");
+        let staging = s.0.to_str().unwrap().to_string();
+        let settings = Settings { staging_root: Some(staging.clone()), ..Settings::default() };
         let shares = FakeShares::new();
-        shares.set_free_error("/staging", "access is denied");
+        shares.set_free_error(&staging, "access is denied");
         assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
-        shares.set_free("/staging", 1);
+        shares.set_free(&staging, 1);
         assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
     }
 
-    /// engine.md:589, Ruling W21: a staging root `make_root` could not make keeps the job waiting, and the re-check
-    /// creates nothing.
+    /// engine.md:589, Ruling W21: a staging root `make_root` could not make keeps the job waiting; once its parent
+    /// exists, the re-check makes it as CheckSpace would next (review round 1 of pull request 3, R26).
     #[test]
     fn a_share_recheck_waits_while_the_staging_root_cannot_be_made() {
         use lazymkv_core::job::State;
@@ -713,7 +720,43 @@ mod tests {
         assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
         std::fs::create_dir(s.0.join("absent")).unwrap();
         assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
-        assert!(!engine.exists(), "the re-check created the root");
+        assert!(engine.is_dir(), "the re-check did not make the root");
+    }
+
+    /// Review round 1 of pull request 3 (R26): a staging root whose parent is a folder but which cannot be created
+    /// keeps the job waiting, and the re-check makes it once it can. Unix only (mode 0o555 on the parent); skipped as
+    /// root, which the mode does not stop. Not on Windows: a deny entry on the parent is not reliable against the
+    /// elevated runners.
+    #[cfg(unix)]
+    #[test]
+    fn a_share_recheck_waits_while_the_staging_root_cannot_be_created() {
+        use lazymkv_core::job::State;
+        use std::os::unix::fs::PermissionsExt;
+        /// Restores the parent's mode when the test ends, so the scratch folder can be removed.
+        struct RestoreMode(PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let s = Scratch::new("recheck-root-mode");
+        let parent = s.0.join("parent");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+        let restore = RestoreMode(parent.clone());
+        let probe = parent.join("probe");
+        if fs::create_dir(&probe).is_ok() {
+            let _ = fs::remove_dir(&probe);
+            return; // root writes through mode 0o555
+        }
+        let engine = parent.join("engine");
+        let settings = Settings { staging_root: Some(engine.to_str().unwrap().to_string()), ..Settings::default() };
+        let shares = FakeShares::new();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
+        assert!(!engine.exists());
+        drop(restore);
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert!(engine.is_dir());
     }
 
     /// Review round 1 of pull request 3 (V11): a staging root that exists and is not a folder keeps the job waiting.
@@ -728,6 +771,7 @@ mod tests {
         assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
         std::fs::remove_file(&engine).unwrap();
         assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert!(engine.is_dir(), "the re-check did not make the root (R26)");
     }
 
     /// A listing that printed no version says nothing about MakeMKV's version (a makemkvcon that started and died),

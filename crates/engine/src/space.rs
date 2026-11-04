@@ -113,10 +113,10 @@ pub(crate) fn make_root(root: &str) -> Result<(), String> {
 
 /// Whether `make_root` could succeed, creating nothing: Ok when `root` is a folder, or is absent and its parent is a
 /// folder; Err `make_root`'s text otherwise, `<root> is not a folder` for a root that exists and is not a folder
-/// (review round 1 of pull request 3, V11; a root whose metadata cannot be read keeps the parent rule) (engine.md:589,
-/// Ruling W21: AwaitingShare's re-check asks it of `staging_root`, so a missing parent keeps the job waiting instead
-/// of cycling). Def: T3-17, PR #14 review round 1 (V11). Use: T3-17.
-pub(crate) fn root_ready(root: &str) -> Result<(), String> {
+/// (review round 1 of pull request 3, V11; a root whose metadata cannot be read keeps the parent rule). It is
+/// `make_root`'s first step (review round 1 of pull request 3, R26). Def: T3-17, PR #14 review round 1 (V11, R26).
+/// Use: `make_root`.
+fn root_ready(root: &str) -> Result<(), String> {
     let path = Path::new(root);
     if path.is_dir() {
         return Ok(());
