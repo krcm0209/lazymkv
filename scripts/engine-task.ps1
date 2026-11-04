@@ -62,6 +62,30 @@ function Get-DataProblem([string]$data, [string]$run) {
     ''
 }
 
+# The data folder the task's engine uses: -Data, or the registry's ProgramData folder joined with lazymkv, read as the
+# engine's win::program_data reads it, never from the environment (whole-branch review F2; review round 1 of pull
+# request 3, V15).
+function Get-DataFolder([string]$data) {
+    if ($data) { return $data }
+    $key = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    $value = $key.GetValue('ProgramData', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $drive = [System.IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\')
+    ($value -ireplace '^%SystemDrive%', $drive) + '\lazymkv'
+}
+
+# What the script says when lazymkvctl status never answered (review round 1 of pull request 3, V15). A start-up
+# refusal reaches only the task's console window at the mini PC's monitor, never engine.log, whose first line start
+# writes (design part 3.5).
+function Get-NoAnswerText([string]$state, [long]$result, [string]$folder, [string]$command) {
+    if ($state -eq 'Running') {
+        return "the task's engine is running, but lazymkvctl status did not answer within 60 s; run lazymkvctl status again, and read $folder\engine.log"
+    }
+    if ($result -eq 1 -or $result -eq 2) {
+        return "the task's engine exited with $result before lazymkvctl status answered; a start-up refusal goes only to the task's console window at the mini PC's monitor, not to engine.log, so run $command in this elevated console to read it, and stop it with lazymkvctl stop if it starts; a failure after its start is in $folder\engine.log (design parts 3.1, 3.5)"
+    }
+    "the task did not run the engine (its last result is 0x{0:X8}); it runs only while the owner is logged on at the mini PC's own monitor, a locked session being enough (design part 3.1)" -f $result
+}
+
 $status = 'error'
 try {
     if ($Data) { $problem = Get-DataProblem $Data $run; if ($problem) { throw $problem } }
@@ -145,9 +169,10 @@ try {
         $answered = $LASTEXITCODE -eq 0
     }
     if (-not $answered) {
-        $folder = if ($Data) { $Data } else { Join-Path $env:ProgramData 'lazymkv' }
+        $state = [string](Get-ScheduledTask -TaskName $name).State
         $result = (Get-ScheduledTaskInfo -TaskName $name).LastTaskResult
-        throw "the task started, but lazymkvctl status did not answer within 60 s; the task's last result is $result; read $folder\engine.log"
+        $command = if ($Data) { "$engine --data $Data" } else { $engine }
+        throw (Get-NoAnswerText $state $result (Get-DataFolder $Data) $command)
     }
     $status = 'ok'
 } catch {

@@ -212,3 +212,45 @@ fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplac
         assert!(line.starts_with("refused: -Data "), "-Data {data}: {line}");
     }
 }
+
+/// Review round 1 of pull request 3 (V15): when lazymkvctl status never answered, the text follows the task's state
+/// and last result: a running engine sends the reader to engine.log, an exit with 1 or 2 to the printed command, since
+/// a start-up refusal reaches only the task's console window, and any other result to the owner's logon.
+#[cfg(windows)]
+#[test]
+fn the_task_scripts_no_answer_text_follows_the_tasks_state_and_result() {
+    let (path, _) = script();
+    let command = r"C:\lazymkv\run\lazymkv-engine.exe --data C:\x";
+    let call = format!(
+        "Get-NoAnswerText 'Running' 267009 'C:\\x' '{command}'\r\n\
+         Get-NoAnswerText 'Ready' 1 'C:\\x' '{command}'\r\n\
+         Get-NoAnswerText 'Ready' 267011 'C:\\x' '{command}'"
+    );
+    let output = define_and_call(&path, &["Get-NoAnswerText"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3, "{output}");
+    for (line, needles) in lines.iter().zip([
+        [r"C:\x\engine.log", r"C:\x"],
+        [command, "console window"],
+        ["0x00041303", "logged on"],
+    ]) {
+        for needle in needles {
+            assert!(line.contains(needle), "{line} lacks {needle}");
+        }
+    }
+}
+
+/// Review round 1 of pull request 3 (V15): with no -Data, the script names the data folder the engine's
+/// `win::program_data` reads from the registry (whole-branch review F2), never `$env:ProgramData`.
+#[cfg(windows)]
+#[test]
+fn the_task_scripts_data_folder_is_the_engines() {
+    let (path, text) = script();
+    assert!(!text.contains("$env:ProgramData"), "the script reads ProgramData from the environment");
+    let output = define_and_call(&path, &["Get-DataFolder"], &[], "Get-DataFolder ''\r\nGet-DataFolder 'C:\\x'");
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{output}");
+    let engines = lazymkv_platform::win::program_data().expect("the registry names ProgramData");
+    assert!(lines[0].eq_ignore_ascii_case(&engines.to_string_lossy()), "{} is not {}", lines[0], engines.display());
+    assert_eq!(lines[1], r"C:\x");
+}
