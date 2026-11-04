@@ -13,4 +13,4 @@ pub use lookups::{
 };
 pub use recorded::{Gate, RecordedTransport};
 pub use saved::{slim_record, slim_search, slim_tmdb, status_text, SavedFile};
-pub use transport::{user_agent, HttpTransport, Response, TransportError, TIMEOUT_S};
+pub use transport::{user_agent, HttpTransport, OfflineTransport, Response, TransportError, OFFLINE, TIMEOUT_S};

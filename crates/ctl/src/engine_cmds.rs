@@ -13,7 +13,7 @@ use lazymkv_dev::Args;
 use lazymkv_platform::{ConnectError, IpcConnector, IpcStream};
 use serde_json::{json, Value};
 
-use crate::{argument_error, retune_spec, Env, NOT_ELEVATED, NOT_RUNNING, NO_TRANSPORT, REFUSED};
+use crate::{argument_error, relayed_paths, retune_spec, Env, NOT_ELEVATED, NOT_RUNNING, NO_TRANSPORT, REFUSED};
 
 /// Design part 9.6's engine commands as (name, synopsis after "usage: lazymkvctl "), in its table order.
 /// Def: T28. Use: T28.
@@ -48,9 +48,12 @@ pub(crate) fn run(argv: &[String], env: Env) -> i32 {
 }
 
 /// Sends the engine form of `plan --job`, `decide --job --title` or `retune --jobs` as `command` (design part 9.5),
-/// prints the relayed lines and exits with the child's code; an `error` reply exits 2 (RP24). Def: T28. Use: T28.
+/// prints the relayed lines and exits with the child's code; an `error` reply exits 2 (RP24). The child runs in the
+/// engine's working folder, so a relayed plan's or decide's path flag whose value is relative is sent again, made
+/// absolute against lazymkvctl's own (`relayed_paths`, V10's ruling), as retune's `--spec` is (K7). Def: T28.
+/// Use: T28.
 pub(crate) fn relay(argv: &[String], env: Env) -> i32 {
-    let mut words = argv.to_vec();
+    let mut words = relayed_paths(env.ctx, argv);
     if argv[0] == "retune" {
         match retune_spec(env.ctx, &argv[1..]) {
             Ok(spec) => words.extend(["--spec".to_string(), spec.to_string_lossy().into_owned()]),
@@ -629,6 +632,74 @@ mod tests {
         assert_eq!((code, out.as_str(), err.as_str()), (3, "{\n", "warning: x\n"));
     }
 
+    /// The words a relayed command's `argv` sends, with `scratch` as lazymkvctl's working folder, and the exit code
+    /// when the engine answers `exit_code` 5.
+    fn relayed_words(argv: &[&str], scratch: &Scratch) -> (Value, i32) {
+        let (ipc, connector) = MemoryIpc::new();
+        let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![reply_ok(Some(1), json!({"exit_code": 5}))]));
+        let (code, _, err) = call(argv, Some(&connector), b"", &scratch.0);
+        let request = request_of(&finish(server, connector));
+        assert_eq!(err, "", "{argv:?}");
+        (request["payload"]["words"].clone(), code)
+    }
+
+    /// `name` made absolute against `scratch`, as a word.
+    fn under(scratch: &Scratch, name: &str) -> String {
+        scratch.0.join(name).to_str().unwrap().to_string()
+    }
+
+    /// V10's ruling: a relayed plan's path flags whose value is relative go again, made absolute, in plan's flag order,
+    /// after the words as typed; a prefix and the `=` form resolve as in plan, and an absolute value adds nothing.
+    #[test]
+    fn a_relayed_plan_sends_its_relative_path_flags_again_made_absolute() {
+        let scratch = Scratch::new("ctl-relay-plan-paths");
+        let absolute = under(&scratch, "abs.json");
+        let argv = ["plan", "--job", "a-1", "--settings", "alt.json", "--tmdb-s", "s.json", "--remembered=r.json",
+                    "--tmdb-record", absolute.as_str(), "--evidence", "e"];
+        let mut expected: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+        expected.extend([
+            "--evidence".to_string(), under(&scratch, "e"),
+            "--settings".to_string(), under(&scratch, "alt.json"),
+            "--tmdb-search".to_string(), under(&scratch, "s.json"),
+            "--remembered".to_string(), under(&scratch, "r.json"),
+        ]);
+        assert_eq!(relayed_words(&argv, &scratch), (json!(expected), 5));
+    }
+
+    /// V10's ruling: decide's `--rec` and `--text` are paths too; `--selection` is not.
+    #[test]
+    fn a_relayed_decide_makes_rec_and_text_absolute_and_leaves_selection_alone() {
+        let scratch = Scratch::new("ctl-relay-decide-paths");
+        let argv = ["decide", "--job", "a-1", "--title", "t00-00800", "--rec", "other", "--text", "ocr", "--selection",
+                    "eng"];
+        let mut expected: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+        expected.extend(["--rec".to_string(), under(&scratch, "other"), "--text".to_string(), under(&scratch, "ocr")]);
+        assert_eq!(relayed_words(&argv, &scratch), (json!(expected), 5));
+    }
+
+    /// V10's ruling: the added words go before a `--`, so the child never reads them as positionals.
+    #[test]
+    fn the_absolute_flags_go_before_a_double_dash() {
+        let scratch = Scratch::new("ctl-relay-dashes");
+        let argv = ["plan", "--job", "a-1", "--settings", "alt.json", "--"];
+        let absolute = under(&scratch, "alt.json");
+        let expected = json!(["plan", "--job", "a-1", "--settings", "alt.json", "--settings", absolute, "--"]);
+        assert_eq!(relayed_words(&argv, &scratch), (expected, 5));
+    }
+
+    /// V10's ruling: with no relative path nothing is added, and a flag with no value leaves the words as typed, so the
+    /// child prints dev's own argument error.
+    #[test]
+    fn relayed_words_with_no_relative_path_or_a_flag_missing_its_value_go_unchanged() {
+        let scratch = Scratch::new("ctl-relay-unchanged");
+        let absolute = under(&scratch, "abs.json");
+        let given: [&[&str]; 2] =
+            [&["plan", "--job", "a-1", "--settings", absolute.as_str()], &["plan", "--job", "a-1", "--settings"]];
+        for argv in given {
+            assert_eq!(relayed_words(argv, &scratch), (json!(argv), 5), "{argv:?}");
+        }
+    }
+
     #[test]
     fn a_refused_relayed_command_exits_2() {
         let scratch = Scratch::new("ctl-relay-refused");
@@ -653,5 +724,39 @@ mod tests {
         let absolute = scratch.0.join("spec.md").to_str().unwrap().to_string();
         assert_eq!(request["payload"]["words"], json!(["retune", "--jobs", "--spec", "spec.md", "--spec", absolute]));
         assert_eq!((code, err.as_str()), (0, ""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctl_status_over_a_test_pipe_prints_the_engines_reply() {
+        use lazymkv_platform::security::test_name;
+        use lazymkv_platform::win::{PipeConnector, PipeServer};
+        use std::io::Read;
+        let scratch = Scratch::new("ctl-pipe");
+        let name = format!(r"\\.\pipe\{}", test_name("ctl"));
+        let server = PipeServer::bind(&name).unwrap();
+        let peer = thread::spawn(move || {
+            let mut stream = server.accept().unwrap();
+            writeln!(stream.writer, "{SNAPSHOT}").unwrap();
+            let mut sent = Vec::new();
+            stream.reader.read_to_end(&mut sent).unwrap();
+            sent
+        });
+        let connector = PipeConnector::new(&name);
+        let (code, out, err) = call(&["status"], Some(&connector), b"", &scratch.0);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "{\n \"jobs\": []\n}\n", ""));
+        // status sends nothing (T28-c): the peer reads the end at once.
+        assert_eq!(peer.join().unwrap(), Vec::<u8>::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctl_status_with_no_engine_on_a_test_pipe_exits_4_saying_none_is_running() {
+        use lazymkv_platform::security::test_name;
+        use lazymkv_platform::win::PipeConnector;
+        let scratch = Scratch::new("ctl-pipe-none");
+        let connector = PipeConnector::new(&format!(r"\\.\pipe\{}", test_name("ctl-none")));
+        let (code, out, err) = call(&["status"], Some(&connector), b"", &scratch.0);
+        assert_eq!((code, out.as_str(), err), (4, "", format!("{NOT_RUNNING}\n")));
     }
 }

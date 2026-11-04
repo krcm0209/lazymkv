@@ -1,16 +1,18 @@
-//! In-memory fakes of the platform traits (design part 4.2), behind the `fakes` feature: a scripted drive watcher, a
-//! recording ejector, a counting keep-awake, fake shares, in-memory secrets, an in-memory pipe and a fake host. Every
-//! engine and client test builds its `Platform` from these (Tasks 22 to 29).
+//! In-memory fakes of the platform traits (design part 4.2), behind the `fakes` feature and in this crate's own tests:
+//! a scripted drive watcher, a recording ejector, a counting keep-awake, fake shares, in-memory secrets, an in-memory
+//! pipe and a fake host. Every engine and client test builds its `Platform` from these (Tasks 22 to 29).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use lazymkv_core::job::Tool;
 
+use crate::localtime::format_local_time;
 use crate::{ConnectError, DriveEvent, DriveWatcher, Ejector, Host, IpcConnector, IpcStream, IpcTransport, KeepAwake,
     Reach, SecretStore, ShareConnector};
 
@@ -192,17 +194,42 @@ impl KeepAwake for CountingKeepAwake {
     }
 }
 
-/// What a `FakeShares` has been told, keyed by the exact root string (Ruling T8-a).
+/// What a `FakeShares` has been told, keyed by the exact root string (Ruling T8-a): the free bytes, the reach, the
+/// volumes, each stalled root's gate (the same `Arc` its `StallGate` holds), the access `access` reports and the free
+/// space errors; and what it counted: the calls of `reach` and `free_bytes`, and the delayed reach answers.
 #[derive(Default)]
 struct SharesState {
     free: BTreeMap<String, u64>,
     reach: BTreeMap<String, Reach>,
     volumes: BTreeMap<String, String>,
+    stalls: BTreeMap<String, Gate>,
+    access: BTreeMap<String, &'static str>,
+    free_errors: BTreeMap<String, String>,
+    /// The `reach` calls of each root, counted at entry, before a stall. Def: PR #14 review round 1 (R33).
+    /// Use: PR #14 review round 1 (R33, R34, R11).
+    reaches: BTreeMap<String, usize>,
+    /// The `free_bytes` calls of each root, counted at entry, before a stall. Def: PR #14 review round 1 (R33).
+    /// Use: PR #14 review round 1 (R33, R34, R11).
+    free_reads: BTreeMap<String, usize>,
+    /// Per root, `set_reach_after`'s countdown: how many more `reach` calls answer as before, and the answer that
+    /// takes over after them. Def: PR #14 review round 1 (R28). Use: PR #14 review round 1 (R28).
+    reach_after: BTreeMap<String, (usize, Reach)>,
 }
 
-/// Fake shares (spec 4.3, design part 4.2, Ruling T8-a): every root is reachable, has `u64::MAX` free bytes and is its
-/// own volume until a test says otherwise. Roots are matched by their exact string, so no path rule runs.
-/// Def: T8. Use: T22 to T29.
+/// One stall's state: whether it was released, and how many calls wait on it (engine.md:584).
+#[derive(Default)]
+struct GateState {
+    open: bool,
+    waiting: usize,
+}
+
+/// A stall's state and the condition its callers and `StallGate::wait_for_caller` wait on.
+type Gate = Arc<(Mutex<GateState>, Condvar)>;
+
+/// Fake shares (spec 4.3, design part 4.2, Ruling T8-a): every root is reachable, has `u64::MAX` free bytes, is its
+/// own volume, reports no access and answers at once until a test says otherwise. Roots are matched by their exact
+/// string, so no path rule runs. It counts each root's `reach` and `free_bytes` calls (`reaches`, `free_reads`).
+/// Def: T8, T3-17. Use: T22 to T29, T3-17.
 pub struct FakeShares {
     state: Mutex<SharesState>,
 }
@@ -214,9 +241,12 @@ impl FakeShares {
         FakeShares { state: Mutex::default() }
     }
 
-    /// Sets the free bytes `free_bytes(root)` reports (Ruling T8-a). Def: T8. Use: T22 to T29.
+    /// Sets the free bytes `free_bytes(root)` reports (Ruling T8-a), and clears a free space error `set_free_error`
+    /// gave `root` (Ruling W21). Def: T8, T3-17. Use: T22 to T29, T3-17.
     pub fn set_free(&self, root: &str, bytes: u64) {
-        lock(&self.state).free.insert(root.to_string(), bytes);
+        let mut state = lock(&self.state);
+        state.free.insert(root.to_string(), bytes);
+        state.free_errors.remove(root);
     }
 
     /// Sets what `reach(root)` reports. While it is `Unreachable`, `free_bytes(root)` fails with the same text (Ruling
@@ -234,6 +264,93 @@ impl FakeShares {
         let volume = state.volumes.get(a).cloned().unwrap_or_else(|| a.to_string());
         state.volumes.insert(b.to_string(), volume);
     }
+
+    /// Makes `reach` and `free_bytes` of `root` block until the returned gate is released or dropped (engine.md:584).
+    /// No lock of the fake is held while a call waits, so other roots answer. A later `stall` of the same root puts a
+    /// new gate in place. Def: T3-17. Use: T3-17.
+    pub fn stall(&self, root: &str) -> StallGate {
+        let gate = Gate::default();
+        lock(&self.state).stalls.insert(root.to_string(), Arc::clone(&gate));
+        StallGate { gate }
+    }
+
+    /// Sets what `access(root)` reports (design part 7.1's job.log line); while `set_reach(root, Unreachable(..))`
+    /// holds, `access(root)` is None, as after a failed reach of the real connector. Def: T3-17. Use: T3-17.
+    pub fn set_access(&self, root: &str, access: &'static str) {
+        lock(&self.state).access.insert(root.to_string(), access);
+    }
+
+    /// Makes `free_bytes(root)` Err(io::Error::other(message)) while `reach` still answers (Ruling W21); a later
+    /// `set_free(root, ..)` clears it. Def: T3-17. Use: T3-17.
+    pub fn set_free_error(&self, root: &str, message: &str) {
+        lock(&self.state).free_errors.insert(root.to_string(), message.to_string());
+    }
+
+    /// How many times `reach(root)` was called, each counted as the call came in, before a stall held it.
+    /// Def: PR #14 review round 1 (R33). Use: PR #14 review round 1 (R33, R34, R11).
+    pub fn reaches(&self, root: &str) -> usize {
+        lock(&self.state).reaches.get(root).copied().unwrap_or(0)
+    }
+
+    /// How many times `free_bytes(root)` was called, answered or failed, each counted as the call came in, before a
+    /// stall held it. Def: PR #14 review round 1 (R33). Use: PR #14 review round 1 (R33, R34, R11).
+    pub fn free_reads(&self, root: &str) -> usize {
+        lock(&self.state).free_reads.get(root).copied().unwrap_or(0)
+    }
+
+    /// Lets the next `calls` calls of `reach(root)` answer as before; the call after them, and every later one, answers
+    /// `reach`, as if `set_reach(root, reach)` had run just before it, so `free_bytes` and `access` follow from then
+    /// on. A later `set_reach_after` of the same root replaces the countdown. Def: PR #14 review round 1 (R28).
+    /// Use: PR #14 review round 1 (R28).
+    pub fn set_reach_after(&self, root: &str, calls: usize, reach: Reach) {
+        lock(&self.state).reach_after.insert(root.to_string(), (calls, reach));
+    }
+
+    /// Waits while `root`'s stall is closed, with no lock of the fake held, so other roots answer (engine.md:584).
+    fn pass(&self, root: &str) {
+        let Some(gate) = lock(&self.state).stalls.get(root).cloned() else {
+            return;
+        };
+        let (state, opened) = &*gate;
+        let mut state = lock(state);
+        if state.open {
+            return;
+        }
+        state.waiting += 1;
+        opened.notify_all();
+        let mut state = opened.wait_while(state, |state| !state.open).unwrap_or_else(PoisonError::into_inner);
+        state.waiting -= 1;
+    }
+}
+
+/// A stall `FakeShares::stall` made (engine.md:584). Dropping it releases it. Def: T3-17. Use: T3-17.
+pub struct StallGate {
+    gate: Gate,
+}
+
+impl StallGate {
+    /// Lets every waiting and later call through. Def: T3-17. Use: T3-17.
+    pub fn release(&self) {
+        let (state, opened) = &*self.gate;
+        lock(state).open = true;
+        opened.notify_all();
+    }
+
+    /// Whether a call waits on the gate within `timeout`, so a test knows the step has reached the share.
+    /// Def: T3-17. Use: T3-17.
+    pub fn wait_for_caller(&self, timeout: Duration) -> bool {
+        let (state, called) = &*self.gate;
+        let state = lock(state);
+        let waited = called.wait_timeout_while(state, timeout, |state| state.waiting == 0);
+        let (state, _) = waited.unwrap_or_else(PoisonError::into_inner);
+        state.waiting > 0
+    }
+}
+
+impl Drop for StallGate {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl Default for FakeShares {
@@ -244,12 +361,30 @@ impl Default for FakeShares {
 
 impl ShareConnector for FakeShares {
     fn reach(&self, root: &str) -> Reach {
-        lock(&self.state).reach.get(root).cloned().unwrap_or(Reach::Reachable)
+        *lock(&self.state).reaches.entry(root.to_string()).or_default() += 1;
+        self.pass(root);
+        let mut state = lock(&self.state);
+        // `set_reach_after`'s countdown: answer as before while calls are left, then take the new answer for good.
+        match state.reach_after.remove(root) {
+            Some((left, reach)) if left > 0 => {
+                state.reach_after.insert(root.to_string(), (left - 1, reach));
+            }
+            Some((_, reach)) => {
+                state.reach.insert(root.to_string(), reach);
+            }
+            None => {}
+        }
+        state.reach.get(root).cloned().unwrap_or(Reach::Reachable)
     }
 
     fn free_bytes(&self, root: &str) -> io::Result<u64> {
+        *lock(&self.state).free_reads.entry(root.to_string()).or_default() += 1;
+        self.pass(root);
         let state = lock(&self.state);
         if let Some(Reach::Unreachable(message)) = state.reach.get(root) {
+            return Err(io::Error::other(message.clone()));
+        }
+        if let Some(message) = state.free_errors.get(root) {
             return Err(io::Error::other(message.clone()));
         }
         Ok(state.free.get(root).copied().unwrap_or(u64::MAX))
@@ -258,23 +393,41 @@ impl ShareConnector for FakeShares {
     fn volume(&self, root: &str) -> Option<String> {
         Some(lock(&self.state).volumes.get(root).cloned().unwrap_or_else(|| root.to_string()))
     }
+
+    fn access(&self, root: &str) -> Option<&'static str> {
+        // A failed reach leaves no access, as ShareConnector::access says and Shares::reach does.
+        let state = lock(&self.state);
+        if let Some(Reach::Unreachable(_)) = state.reach.get(root) {
+            return None;
+        }
+        state.access.get(root).copied()
+    }
 }
 
 /// A secret store that keeps its secrets in memory (spec 4.3, design part 4.2). Def: T8. Use: T22 to T29.
 pub struct MemorySecrets {
     secrets: Mutex<BTreeMap<String, String>>,
+    /// What every `set` fails with after `refuse_sets`; None until then.
+    refusal: Mutex<Option<String>>,
 }
 
 impl MemorySecrets {
     /// An empty store (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn new() -> MemorySecrets {
-        MemorySecrets { secrets: Mutex::default() }
+        MemorySecrets { secrets: Mutex::default(), refusal: Mutex::new(None) }
     }
 
     /// The store with `name` already set to `value` (design part 4.2). Def: T8. Use: T22 to T29.
     pub fn with(self, name: &str, value: &str) -> MemorySecrets {
         lock(&self.secrets).insert(name.to_string(), value.to_string());
         self
+    }
+
+    /// Makes every later `set` fail with Err(reason), storing nothing, as Credential Manager's `set` can: a value over
+    /// 2560 bytes, or a logon session with no vault (Ruling W13). Def: PR #14 review round 1 (R24).
+    /// Use: PR #14 review round 1 (R24).
+    pub fn refuse_sets(&self, reason: &str) {
+        *lock(&self.refusal) = Some(reason.to_string());
     }
 }
 
@@ -290,6 +443,9 @@ impl SecretStore for MemorySecrets {
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        if let Some(reason) = lock(&self.refusal).as_ref() {
+            return Err(reason.clone());
+        }
         lock(&self.secrets).insert(name.to_string(), value.to_string());
         Ok(())
     }
@@ -353,7 +509,12 @@ fn stream_end(incoming: Receiver<Vec<u8>>, outgoing: Sender<Vec<u8>>) -> IpcStre
 /// each connection a `MemoryConnector` makes. Def: T8. Use: T22 to T29.
 pub struct MemoryIpc {
     incoming: Mutex<Receiver<IpcStream>>,
+    /// Set by `close` (Ruling W10).
+    closed: AtomicBool,
 }
+
+/// How often a waiting `MemoryIpc::accept` looks at `closed`.
+const MEMORY_ACCEPT_POLL: Duration = Duration::from_millis(10);
 
 /// The client's end of an in-memory pipe, or a connector that always fails (spec 4.3, design part 4.2, Ruling T8-e).
 /// Clones connect to the same `MemoryIpc`. Def: T8. Use: T22 to T29.
@@ -370,16 +531,38 @@ impl MemoryIpc {
     pub fn new() -> (MemoryIpc, MemoryConnector) {
         let (to_server, incoming) = channel();
         let connector = MemoryConnector { to_server: Some(to_server), error: ConnectError::NotRunning };
-        (MemoryIpc { incoming: Mutex::new(incoming) }, connector)
+        (MemoryIpc { incoming: Mutex::new(incoming), closed: AtomicBool::new(false) }, connector)
     }
 }
 
 impl IpcTransport for MemoryIpc {
-    /// Waits for a client. Fails with BrokenPipe once every connector is dropped (Ruling T8-e).
+    /// Waits for a client. Fails with BrokenPipe after `close`, which wakes a waiting accept within
+    /// `MEMORY_ACCEPT_POLL`, and once every connector is dropped, which leaves no way in (Ruling T8-e; ctl's scripted
+    /// peer relies on it, `crates/ctl/src/engine_cmds.rs:428-432`).
     fn accept(&self) -> io::Result<IpcStream> {
-        lock(&self.incoming)
-            .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "every connector to the pipe is gone"))
+        let incoming = lock(&self.incoming);
+        loop {
+            // Read before each wait and after it, so no stream is handed out once `close` ran.
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the transport is closed"));
+            }
+            match incoming.recv_timeout(MEMORY_ACCEPT_POLL) {
+                // The stream drops, so its client reads end of file, as the real server drops its instance.
+                Ok(_) if self.closed.load(Ordering::SeqCst) => {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the transport is closed"));
+                }
+                Ok(stream) => return Ok(stream),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "every connector to the pipe is gone"));
+                }
+            }
+        }
+    }
+
+    /// Sets `closed` (Ruling W10).
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -401,21 +584,25 @@ impl IpcConnector for MemoryConnector {
     }
 }
 
-/// What a `FakeHost` has been told besides its fixed date and time.
+/// What a `FakeHost` has been told besides its date and its clock.
 #[derive(Default)]
 struct HostState {
     labels: BTreeMap<PathBuf, String>,
     running: Vec<String>,
     app_key: Option<String>,
     debug_log: Option<PathBuf>,
+    writable: BTreeSet<PathBuf>,
 }
 
-/// A host with a fixed date and time, no registration key, no debug log, no running programs and no volume label until
-/// a test sets one (spec 4.3, design part 4.2). It knows no default install path.
+/// A host with a date and a clock fixed until a test moves the clock (`set_now_ms`), and no registration key, no debug
+/// log, no running programs and no volume label until a test sets one (spec 4.3, design part 4.2). It knows no default
+/// install path. Its clock in milliseconds starts at `now_unix` times 1000, its local time is a clock reading read as
+/// UTC, and no path is user-writable until a test sets one. The date is a setting: moving the clock leaves it.
 /// Def: T8. Use: T11, T13, T14, T22 to T29.
 pub struct FakeHost {
     local_date: String,
-    now_unix: u64,
+    /// The clock, in milliseconds since the Unix epoch; only `set_now_ms` moves it.
+    now_ms: AtomicU64,
     state: Mutex<HostState>,
 }
 
@@ -423,7 +610,14 @@ impl FakeHost {
     /// A host whose clock reads `now_unix` and whose calendar date is `local_date` (`yyyy-MM-dd`) (design part 4.2).
     /// Def: T8. Use: T11, T13, T14, T22 to T29.
     pub fn new(local_date: &str, now_unix: u64) -> FakeHost {
-        FakeHost { local_date: local_date.to_string(), now_unix, state: Mutex::default() }
+        FakeHost { local_date: local_date.to_string(), now_ms: AtomicU64::new(now_unix * 1000), state: Mutex::default() }
+    }
+
+    /// Moves the clock to `unix_ms`, which `now_ms` then reads, and `now_unix` in whole seconds; nothing else changes,
+    /// so a test can tell one clock read from another (W16, R23.4, R23.7). Def: PR #14 review round 1 (R20).
+    /// Use: PR #14 review round 1 (R20).
+    pub fn set_now_ms(&self, unix_ms: u64) {
+        self.now_ms.store(unix_ms, Ordering::SeqCst);
     }
 
     /// Gives the disc at `root` the volume label `label` (design part 4.2). Def: T8. Use: T11, T13, T14, T22 to T29.
@@ -445,15 +639,28 @@ impl FakeHost {
     pub fn set_debug_log(&self, path: &Path) {
         lock(&self.state).debug_log = Some(path.to_path_buf());
     }
+
+    /// Makes `user_writable` answer true for exactly `path` (design part 3.6). Def: T3-7. Use: T3-22.
+    pub fn set_writable(&self, path: &Path) {
+        lock(&self.state).writable.insert(path.to_path_buf());
+    }
 }
 
 impl Host for FakeHost {
     fn now_unix(&self) -> u64 {
-        self.now_unix
+        self.now_ms.load(Ordering::SeqCst) / 1000
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.now_ms.load(Ordering::SeqCst)
     }
 
     fn local_date(&self) -> String {
         self.local_date.clone()
+    }
+
+    fn local_time(&self, unix_ms: u64) -> String {
+        format_local_time(unix_ms, 0)
     }
 
     fn makemkv_app_key(&self) -> Option<String> {
@@ -474,6 +681,10 @@ impl Host for FakeHost {
 
     fn default_install_path(&self, _tool: Tool) -> Option<PathBuf> {
         None
+    }
+
+    fn user_writable(&self, path: &Path) -> bool {
+        lock(&self.state).writable.contains(path)
     }
 }
 
@@ -572,6 +783,94 @@ mod tests {
     }
 
     #[test]
+    fn a_stalled_root_blocks_reach_and_free_bytes_until_released() {
+        let shares = Arc::new(FakeShares::new());
+        let gate = shares.stall("/s");
+        let (sent, got) = std::sync::mpsc::channel();
+        let caller = Arc::clone(&shares);
+        std::thread::spawn(move || sent.send((caller.reach("/s"), caller.free_bytes("/s").ok())).unwrap());
+        assert!(gate.wait_for_caller(Duration::from_secs(5) * crate::testutil::ci_factor()));
+        assert!(got.recv_timeout(Duration::from_millis(100)).is_err(), "reach went through a closed gate");
+        assert_eq!(shares.reach("/m"), Reach::Reachable);
+        gate.release();
+        let answered = got.recv_timeout(Duration::from_secs(5) * crate::testutil::ci_factor()).unwrap();
+        assert_eq!(answered, (Reach::Reachable, Some(u64::MAX)));
+        drop(shares.stall("/s"));
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+    }
+
+    #[test]
+    fn a_free_space_error_leaves_reach_and_set_free_clears_it() {
+        let shares = FakeShares::new();
+        shares.set_free_error("/s", "access is denied");
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.free_bytes("/s").unwrap_err().to_string(), "access is denied");
+        shares.set_free("/s", 7);
+        assert_eq!(shares.free_bytes("/s").unwrap(), 7);
+    }
+
+    #[test]
+    fn the_fake_reports_the_access_it_was_given() {
+        let shares = FakeShares::new();
+        assert_eq!(shares.access("/s"), None);
+        shares.set_access("/s", "the session's access");
+        assert_eq!(shares.access("/s"), Some("the session's access"));
+        shares.set_access("/m", "lazymkv's stored credential");
+        shares.set_reach("/s", Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.access("/s"), None);
+        assert_eq!(shares.access("/m"), Some("lazymkv's stored credential"));
+        shares.set_reach("/s", Reach::Reachable);
+        assert_eq!(shares.access("/s"), Some("the session's access"));
+    }
+
+    #[test]
+    fn the_fake_counts_reaches_and_free_space_reads() {
+        let shares = Arc::new(FakeShares::new());
+        assert_eq!((shares.reaches("/s"), shares.free_reads("/s")), (0, 0));
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.free_bytes("/s").unwrap(), u64::MAX);
+        shares.set_reach("/m", Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.reach("/m"), Reach::Unreachable("cable out".to_string()));
+        assert!(shares.free_bytes("/m").is_err());
+        shares.set_free_error("/m", "access is denied");
+        assert!(shares.free_bytes("/m").is_err());
+        assert_eq!((shares.reaches("/s"), shares.free_reads("/s")), (2, 1));
+        assert_eq!((shares.reaches("/m"), shares.free_reads("/m")), (1, 2));
+        assert_eq!((shares.reaches("/t"), shares.free_reads("/t")), (0, 0));
+        // A call is counted as it comes in, while a stall still holds it.
+        let gate = shares.stall("/t");
+        let caller = Arc::clone(&shares);
+        let stalled = std::thread::spawn(move || caller.reach("/t"));
+        assert!(gate.wait_for_caller(Duration::from_secs(5) * crate::testutil::ci_factor()));
+        assert_eq!(shares.reaches("/t"), 1);
+        gate.release();
+        assert_eq!(stalled.join().unwrap(), Reach::Reachable);
+        assert_eq!(shares.reaches("/t"), 1);
+    }
+
+    #[test]
+    fn set_reach_after_answers_as_before_then_the_new_answer() {
+        let shares = FakeShares::new();
+        shares.set_free("/s", 7);
+        shares.set_access("/s", "the session's access");
+        shares.set_reach_after("/s", 2, Reach::Unreachable("cable out".to_string()));
+        for _ in 0..2 {
+            assert_eq!(shares.reach("/s"), Reach::Reachable);
+            assert_eq!(shares.free_bytes("/s").unwrap(), 7);
+            assert_eq!(shares.access("/s"), Some("the session's access"));
+        }
+        assert_eq!(shares.reach("/s"), Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.free_bytes("/s").unwrap_err().to_string(), "cable out");
+        assert_eq!(shares.access("/s"), None);
+        assert_eq!(shares.reach("/s"), Reach::Unreachable("cable out".to_string()));
+        assert_eq!(shares.reach("/m"), Reach::Reachable);
+        shares.set_reach("/s", Reach::Reachable);
+        assert_eq!(shares.reach("/s"), Reach::Reachable);
+        assert_eq!(shares.free_bytes("/s").unwrap(), 7);
+    }
+
+    #[test]
     fn roots_are_on_separate_volumes_until_joined() {
         let shares = FakeShares::new();
         assert_eq!(shares.volume("/staging"), Some("/staging".to_string()));
@@ -588,6 +887,23 @@ mod tests {
         assert_eq!(secrets.get("webhook_url"), None);
         secrets.set("webhook_url", "http://ha.local/api/webhook/x").unwrap();
         assert_eq!(secrets.get("webhook_url").as_deref(), Some("http://ha.local/api/webhook/x"));
+    }
+
+    #[test]
+    fn memory_secrets_compare_names_exactly() {
+        let secrets = MemorySecrets::new().with(r"share:\\server\share", "user-sentinel-7c1e\npass-sentinel-4b9d");
+        assert_eq!(secrets.get(r"share:\\server\share").as_deref(), Some("user-sentinel-7c1e\npass-sentinel-4b9d"));
+        assert_eq!(secrets.get(r"share:\\SERVER\Share"), None);
+        secrets.set("tmdb_token", "token-sentinel-2f6a").unwrap();
+        assert_eq!(secrets.get("TMDB_TOKEN"), None);
+    }
+
+    #[test]
+    fn memory_secrets_can_refuse_every_set() {
+        let secrets = MemorySecrets::new();
+        secrets.refuse_sets("no vault");
+        assert_eq!(secrets.set("tmdb_token", "token-sentinel-2f6a"), Err("no vault".to_string()));
+        assert_eq!(secrets.get("tmdb_token"), None);
     }
 
     #[test]
@@ -610,6 +926,37 @@ mod tests {
         assert_eq!(server.writer.write_all(b"late\n").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         drop(connector);
         assert_eq!(ipc.accept().err().map(|e| e.kind()), Some(io::ErrorKind::BrokenPipe));
+    }
+
+    #[test]
+    fn a_closed_memory_ipc_wakes_a_waiting_accept_with_broken_pipe() {
+        let (ipc, _connector) = MemoryIpc::new();
+        let ipc = Arc::new(ipc);
+        let waiting = Arc::clone(&ipc);
+        let (done, result) = channel();
+        std::thread::spawn(move || {
+            let _ = done.send(waiting.accept().err().map(|error| error.kind()));
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(result.try_recv().is_err(), "accept returned while a connector lived and nothing closed the fake");
+        ipc.close();
+        assert_eq!(result.recv_timeout(Duration::from_secs(5)).unwrap(), Some(io::ErrorKind::BrokenPipe));
+        assert_eq!(ipc.accept().err().map(|error| error.kind()), Some(io::ErrorKind::BrokenPipe));
+    }
+
+    #[test]
+    fn a_stream_that_comes_while_close_runs_is_not_handed_out() {
+        let (ipc, connector) = MemoryIpc::new();
+        let ipc = Arc::new(ipc);
+        let waiting = Arc::clone(&ipc);
+        let (done, result) = channel();
+        std::thread::spawn(move || {
+            let _ = done.send(waiting.accept().err().map(|error| error.kind()));
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        ipc.close();
+        let _client = connector.connect().unwrap();
+        assert_eq!(result.recv_timeout(Duration::from_secs(5)).unwrap(), Some(io::ErrorKind::BrokenPipe));
     }
 
     #[test]
@@ -643,6 +990,37 @@ mod tests {
         let host = FakeHost::new("2026-10-23", 1_800_000_000);
         assert_eq!(host.local_date(), "2026-10-23");
         assert_eq!(host.local_date(), "2026-10-23");
+    }
+
+    #[test]
+    fn the_fake_hosts_local_time_is_utc_of_its_clock() {
+        let host = FakeHost::new("2026-10-23", 1_792_800_000);
+        assert_eq!(host.now_ms(), 1_792_800_000_000);
+        assert_eq!(host.local_time(host.now_ms()), "2026-10-24 00:00:00.000");
+        assert_eq!(host.local_time(1_792_800_000_123), "2026-10-24 00:00:00.123");
+        // The date is a setting of the fake, so it differs from its clock's UTC date on purpose.
+        assert_eq!(host.local_date(), "2026-10-23");
+    }
+
+    #[test]
+    fn the_fake_hosts_clock_moves_only_when_set() {
+        let host = FakeHost::new("2026-10-23", 1_792_800_000);
+        assert_eq!(host.now_ms(), 1_792_800_000_000);
+        host.set_now_ms(1_792_800_061_250);
+        assert_eq!(host.now_ms(), 1_792_800_061_250);
+        assert_eq!(host.now_unix(), 1_792_800_061);
+        assert_eq!(host.local_time(host.now_ms()), "2026-10-24 00:01:01.250");
+        assert_eq!(host.local_date(), "2026-10-23");
+    }
+
+    #[test]
+    fn a_path_is_writable_only_when_set() {
+        let host = FakeHost::new("2026-10-23", 1_800_000_000);
+        assert!(!host.user_writable(Path::new("/tools")));
+        host.set_writable(Path::new("/tools"));
+        assert!(host.user_writable(Path::new("/tools")));
+        assert!(!host.user_writable(Path::new("/tools/mkvmerge")));
+        assert!(!host.user_writable(Path::new("/other")));
     }
 
     struct NoProcesses;

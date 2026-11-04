@@ -1,7 +1,7 @@
 //! The transport the clients reach the network through (design part 8.1). The trait takes a URL and its headers and
-//! returns the status and the body bytes, so the lookups, the transport that replays recorded answers and the live
-//! transport of pull request 4 (`ureq`) meet at one signature. Nothing here opens a socket. Used by Tasks 16, 22, 23
-//! and 26.
+//! returns the status and the body bytes, so the lookups, the transport that replays recorded answers, the live
+//! transport of pull request 4 (`ureq`) and pull request 3's `OfflineTransport` meet at one signature. Nothing here
+//! opens a socket. Used by Tasks 16, 22, 23 and 26.
 
 /// One HTTP answer, whatever its status: the status code and the body bytes. Design part 8.1. Def: T15. Use: T16.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +38,20 @@ pub fn user_agent() -> String {
     format!("lazymkv/{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// The reason `OfflineTransport` gives for every request (Ruling W26). Def: T3-21. Use: T3-21, T3-23.
+pub const OFFLINE: &str = "no live transport in this build; it arrives in pull request 4";
+
+/// The transport of pull request 3's engine binary (Ruling W26): it opens no socket and answers every URL
+/// `Unreachable(OFFLINE)`, so every lookup stays pending and a job waits in AwaitingLookup until pull request 4's
+/// `ureq` transport (design parts 8.1, 8.3, 12.6 item 4). Def: T3-21. Use: T3-21, T3-23.
+pub struct OfflineTransport;
+
+impl HttpTransport for OfflineTransport {
+    fn get(&self, _url: &str, _headers: &[(&str, &str)]) -> Result<Response, TransportError> {
+        Err(TransportError::Unreachable(OFFLINE.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,5 +60,17 @@ mod tests {
     fn the_user_agent_names_lazymkv_and_its_version() {
         assert_eq!(user_agent(), format!("lazymkv/{}", env!("CARGO_PKG_VERSION")));
         assert_eq!(TIMEOUT_S, 10);
+    }
+
+    /// Ruling W26: the binary's transport answers every request unreachable with one sentence, whatever its URL or
+    /// headers, so a lookup reads it as pending (design part 8.3).
+    #[test]
+    fn the_offline_transport_answers_every_url_unreachable() {
+        assert_eq!(OFFLINE, "no live transport in this build; it arrives in pull request 4");
+        let urls = ["https://thediscdb.com/api/dischash/ABC", "https://api.themoviedb.org/3/movie/900001", "http://x", ""];
+        for url in urls {
+            let answer = OfflineTransport.get(url, &[("User-Agent", "lazymkv/test")]);
+            assert_eq!(answer, Err(TransportError::Unreachable(OFFLINE.to_string())), "{url}");
+        }
     }
 }

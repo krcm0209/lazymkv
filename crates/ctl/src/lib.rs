@@ -1,19 +1,22 @@
 //! lazymkv-ctl: lazymkvctl's commands. plan, decide and retune run locally through lazymkv_dev::dispatch; the rest go to the engine over IPC (design parts 4.1, 9.5, 9.6).
 
+use lazymkv_dev::cmd::{decide, plan};
 use lazymkv_dev::evidence::{default_spec, Ctx};
+use lazymkv_dev::forms::read_forms;
 use lazymkv_dev::{Args, COMMANDS};
 use lazymkv_platform::IpcConnector;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod engine_cmds;
 
-/// What lazymkvctl reads and writes: the dev context, the engine connector (None in PR 2's binary, S38), and the
-/// three streams (design parts 9.5, 9.6). Def: T27. Use: T27, T28.
+/// What lazymkvctl reads and writes: the dev context, the engine connector (the named pipe's client on Windows, design
+/// part 3.3; None on Linux and macOS, S38), and the three streams (design parts 9.5, 9.6). Def: T27, T3-12.
+/// Use: T27, T28, T3-12.
 pub struct Env<'a> {
     /// The working folder, environment and runner that the local commands run over.
     pub ctx: &'a Ctx,
-    /// The way to the engine; None when the build has no transport, which is every build in PR 2.
+    /// The way to the engine; None when the build has no transport, as on Linux and macOS (S38).
     pub connector: Option<&'a dyn IpcConnector>,
     /// Standard input, which `secret set` reads its value from.
     pub stdin: &'a mut dyn Read,
@@ -104,43 +107,6 @@ pub(crate) fn argument_error(err: &mut dyn Write, name: &str, message: &str) -> 
     2
 }
 
-/// What `--job` and `--jobs` took out of a local command's words, and the words left for dev's parser; `--title`
-/// is only checked, since the engine form sends the words unchanged (T28-g).
-struct Forms {
-    job: Option<String>,
-    jobs: bool,
-    words: Vec<String>,
-}
-
-/// Takes `--job`, `--jobs` and `--title` out of `rest` and checks which of them `name` allows (Ruling S87). Err is the
-/// text of an argument error.
-fn read_forms(name: &str, rest: &[String]) -> Result<Forms, String> {
-    let mut args = Args::new(rest, &["--job", "--jobs", "--title"]);
-    let job = args.flag("--job")?;
-    let jobs = args.switch("--jobs");
-    let title = args.flag("--title")?;
-    let words = args.rest()?;
-    if name == "retune" {
-        if job.is_some() {
-            return Err("argument --job: not allowed with retune; use --jobs".to_string());
-        }
-    } else if jobs {
-        return Err("argument --jobs: only with retune".to_string());
-    }
-    if title.is_some() && job.is_none() {
-        return Err("argument --title: only with --job".to_string());
-    }
-    if job.is_some() {
-        match (name, &title) {
-            ("decide", None) => return Err("argument --title: required with decide --job".to_string()),
-            ("decide", Some(_)) => {}
-            (_, Some(_)) => return Err(format!("argument --title: not allowed with {name}")),
-            (_, None) => {}
-        }
-    }
-    Ok(Forms { job, jobs, words })
-}
-
 /// A command of `LOCAL_COMMANDS` (`argv[0]`): with no `--job` and no `--jobs` it runs through lazymkv-dev's
 /// dispatcher, so the documents, the exit codes and dev's stderr are identical (design part 9.5, P23, S37); otherwise
 /// the engine form (`--job ID`, `--job ID --title KEY`, `--jobs`) goes to the engine through `engine_cmds::relay`.
@@ -170,6 +136,45 @@ pub(crate) fn retune_spec(ctx: &Ctx, words: &[String]) -> Result<PathBuf, String
         Some(given) => Ok(ctx.abs(&given)),
         None => default_spec(ctx).ok_or_else(|| "the following arguments are required: --spec".to_string()),
     }
+}
+
+/// decide's path flags: `decide::FLAGS` without `--selection`, whose value is a choice, not a path (V10's ruling).
+/// plan's path flags are all of `plan::FLAGS`. Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
+pub(crate) const DECIDE_PATH_FLAGS: [&str; 7] =
+    ["--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"];
+
+/// The words of a relayed plan or decide (`argv[0]`), with each path flag whose value is relative sent again, made
+/// absolute with `ctx.abs` against lazymkvctl's working folder (V10's ruling), since the child runs in the engine's.
+/// The words after the name are read with the child's own declared flags (`plan::FLAGS`, `decide::FLAGS`), so a
+/// prefix, the `=` form and a repeat resolve as they do in the child; the added words go at the first `--`, else at the
+/// end, in the path list's order (`plan::FLAGS`, `DECIDE_PATH_FLAGS`), after the values they override, which the
+/// child's last-wins reads. An absolute value, or a path flag not given, adds nothing. Any other name, or a path flag
+/// with no value, gives `argv` unchanged, and the child prints dev's own error and exits 2. `--job` and `--title`
+/// cannot confuse the reading: `read_forms` accepted them, their values never start with `-`, and `--t` is ambiguous
+/// in decide's list, so `Args::flag` skips it. A drive-relative value such as `D:alt.json` stays drive-relative.
+/// Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
+pub(crate) fn relayed_paths(ctx: &Ctx, argv: &[String]) -> Vec<String> {
+    let (declared, paths): (&[&str], &[&str]) = match argv.first().map(String::as_str) {
+        Some("plan") => (&plan::FLAGS[..], &plan::FLAGS[..]),
+        Some("decide") => (&decide::FLAGS[..], &DECIDE_PATH_FLAGS[..]),
+        _ => return argv.to_vec(),
+    };
+    let mut args = Args::new(&argv[1..], declared);
+    let mut added = Vec::new();
+    for flag in paths {
+        match args.flag(flag) {
+            Ok(Some(value)) if !Path::new(&value).is_absolute() => {
+                added.extend([flag.to_string(), ctx.abs(&value).to_string_lossy().into_owned()]);
+            }
+            Ok(_) => {}
+            Err(_) => return argv.to_vec(),
+        }
+    }
+    let at = argv.iter().position(|word| word == "--").unwrap_or(argv.len());
+    let mut words = argv[..at].to_vec();
+    words.extend(added);
+    words.extend_from_slice(&argv[at..]);
+    words
 }
 
 #[cfg(test)]

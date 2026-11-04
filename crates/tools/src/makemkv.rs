@@ -5,6 +5,7 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -84,8 +85,9 @@ pub fn drive_index(drives: &[robot::Drive], drive: &str) -> Option<u32> {
     })
 }
 
-/// One drive listing: the index for the drive id, the reducer's summary and the run (design parts 3.7, 5.4).
-/// Def: T13. Use: T23, T26.
+/// One drive listing: the index for the drive id, the reducer's summary, the run and which kill ended it (design parts
+/// 3.7, 5.4; Ruling W20). Def: T13; T3-19 adds `past_limit`, which PR #14 review round 1 (R31) replaces with `kill`.
+/// Use: T23, T26, T3-19.
 #[derive(Clone, Debug)]
 pub struct DriveListing {
     /// The `disc:` index of the drive id, or None when no DRV line names it.
@@ -94,14 +96,29 @@ pub struct DriveListing {
     pub summary: RunSummary,
     /// How the run ended.
     pub run: RunResult,
+    /// Which kill ended the run: `Kill::Limit` when `list_drives`' `limit` killed it before its final `MSG:5010`
+    /// (Ruling W20), `Kill::ExitWait` when the exit wait did (S57), `Kill::Cancel` for the cancel, `Kill::None` when it
+    /// ended by itself (review round 1 of pull request 3, R31).
+    pub kill: Kill,
 }
 
 /// Runs and records the drive listing into `out` (design part 5.4 step 1). Another MakeMKV process running gives `Err`
-/// of kind `ResourceBusy` naming it (S55). The run has no time limit; it is killed only by the exit wait after its
-/// `MSG:5010` (`run.timed_out`) or by the cancel (`run.cancelled`) (S57). Def: T13. Use: T23, T26.
-pub fn list_drives(ctx: &ToolCtx, program: &Path, debug: bool, drive: &str, out: &Path) -> io::Result<DriveListing> {
-    let (run, summary, _) = run_makemkv(ctx, program, &drive_list_args(debug), out, None, Call::DriveList)?;
-    Ok(DriveListing { index: drive_index(&summary.drives, drive), summary, run })
+/// of kind `ResourceBusy` naming it (S55). With `limit` None, as a job's listing passes (S57), the run is killed only
+/// by the exit wait after its `MSG:5010` (`run.timed_out`) or by the cancel (`run.cancelled`). With `Some(limit)`, as
+/// the MakeMKV check at engine start and the self-test pass `limits.header` (Ruling W20, amending S57 for the listings
+/// outside a job), it is also killed once `limit` has passed since the call started with no `MSG:5010` yet, which
+/// sets `kill` to `Kill::Limit` and `run.timed_out`. `kill` is what `run_makemkv` reports. Def: T13; T3-19 adds
+/// `limit`. Use: T23, T26, T3-19.
+pub fn list_drives(
+    ctx: &ToolCtx,
+    program: &Path,
+    debug: bool,
+    drive: &str,
+    out: &Path,
+    limit: Option<Duration>,
+) -> io::Result<DriveListing> {
+    let (run, summary, kill) = run_makemkv(ctx, program, &drive_list_args(debug), out, limit, Call::DriveList)?;
+    Ok(DriveListing { index: drive_index(&summary.drives, drive), summary, run, kill })
 }
 
 /// How a scan ended (design part 5.4 step 4, L5). Def: T13. Use: T23.
@@ -297,28 +314,53 @@ const KEY_REMOVED: &[u8] = b"[app_Key removed]";
 /// Saves MakeMKV's debug log as `<out>.makemkv-debug.txt` with every occurrence of the registration key replaced by
 /// `[app_Key removed]` (design part 7.2, PIPE-9). The log is copied as bytes, because it need not be UTF-8 (S61), and
 /// it is copied unchanged when the host has no key. `started_unix` is the call's start: a log last modified before it
-/// belongs to an earlier call and is not saved. The `Err` text says why nothing was saved and never holds the key.
-/// Def: T14. Use: T23.
+/// belongs to an earlier call and is not saved. The log is opened once (review round 1 of pull request 3 (V14)): on
+/// Windows, a log that is a link is not saved, while elsewhere the open follows a link to its target (the round's final
+/// review (W7)); the age check and the read use that one open, so no link swapped in between can redirect the read. The
+/// `Err` text says why nothing was saved and never holds the key. Def: T14. Use: T23.
 pub fn save_debug_log(host: &dyn Host, started_unix: u64, out: &Path) -> Result<(), String> {
     let log = host.makemkv_debug_log().ok_or_else(|| "MakeMKV's debug log path is not known".to_string())?;
     let failed = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
-    let metadata = match fs::metadata(&log) {
-        Ok(metadata) => metadata,
+    let mut file = match open_log(&log) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(format!("{}: no debug log was written", log.display()));
         }
         Err(error) => return Err(failed(&log, error)),
     };
+    let metadata = file.metadata().map_err(|error| failed(&log, error))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!("{}: the debug log is a link, not a file", log.display()));
+    }
     let modified = metadata.modified().map_err(|error| failed(&log, error))?;
     if modified.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()) < started_unix {
         return Err(format!("{}: the debug log is older than the call", log.display()));
     }
-    let mut bytes = fs::read(&log).map_err(|error| failed(&log, error))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| failed(&log, error))?;
     if let Some(key) = host.makemkv_app_key().filter(|key| !key.is_empty()) {
         bytes = replace_bytes(&bytes, key.as_bytes(), KEY_REMOVED);
     }
     let target = with_suffix(out, ".makemkv-debug.txt");
     fs::write(&target, bytes).map_err(|error| failed(&target, error))
+}
+
+/// `log` opened for reading, once, for `save_debug_log` (review round 1 of pull request 3 (V14)). On Windows the open
+/// passes `FILE_FLAG_OPEN_REPARSE_POINT`, so a link is opened itself rather than followed, and the handle's metadata
+/// says it is a link, which `save_debug_log` refuses; elsewhere it is a plain open, which follows a link, so the
+/// handle's metadata is the target's and a link log is saved (the round's final review (W7)).
+fn open_log(log: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // winbase.h's FILE_FLAG_OPEN_REPARSE_POINT.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(log)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::File::open(log)
+    }
 }
 
 /// `data` with each non-overlapping occurrence of the non-empty `key`, found from the left, replaced by `with`.
@@ -344,6 +386,11 @@ const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
 /// design part 5.3). Def: T13. Use: T13, T23.
 pub const SCAN_PAST_LIMIT: &str = "the scan did not finish within scan_timeout_min and was killed";
 
+/// The detail of a MakeMKV check whose drive listing `limits.header` killed before its final message (Ruling W20;
+/// engine.md:581 (c), :586). Def: T3-19. Use: T3-19.
+pub const LISTING_PAST_LIMIT: &str =
+    "makemkvcon did not finish the drive listing within the header limit and was killed";
+
 /// The message of a run killed by the exit wait (S57), also the engine's for a drive listing it killed (design part
 /// 5.3). Def: T13. Use: T13, T23.
 pub const EXIT_WAIT_PASSED: &str = "makemkvcon did not exit within exit_wait_min of its final message and was killed";
@@ -358,9 +405,11 @@ const RIP_ENDINGS: [&str; 4] = ["MSG:5004,", "MSG:5005,", "MSG:5036,", "MSG:5037
 /// How often the watcher of `run_makemkv` copies the cancel and checks the exit wait.
 const WATCH_EVERY: Duration = Duration::from_millis(20);
 
-/// Which kill ended a run (S56, S57).
+/// Which kill ended a run (S56, S57). `LineKill` only ever ends a rip. Public for the drive listings, whose callers
+/// tell the kills apart by it (review round 1 of pull request 3, R31). Def: T13, public PR #14 review round 1 (R31).
+/// Use: T13, T23, T26.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kill {
+pub enum Kill {
     /// No kill: the tool ended by itself.
     None,
     /// The run passed its limit before its final message.
@@ -626,12 +675,15 @@ mod tests {
 
     impl Host for KeyHost {
         fn now_unix(&self) -> u64 { 0 }
+        fn now_ms(&self) -> u64 { 0 }
         fn local_date(&self) -> String { String::new() }
+        fn local_time(&self, _: u64) -> String { String::new() }
         fn makemkv_app_key(&self) -> Option<String> { self.key.clone() }
         fn makemkv_debug_log(&self) -> Option<PathBuf> { self.log.clone() }
         fn running_processes(&self) -> Vec<String> { Vec::new() }
         fn volume_label(&self, _: &Path) -> Option<String> { None }
         fn default_install_path(&self, _: Tool) -> Option<PathBuf> { None }
+        fn user_writable(&self, _: &Path) -> bool { false }
     }
 
     fn now() -> u64 {
@@ -672,6 +724,33 @@ mod tests {
         let none = KeyHost { log: None, key: None };
         assert_eq!(save_debug_log(&none, now(), &dir.join("scan.txt")),
             Err("MakeMKV's debug log path is not known".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review round 1 of pull request 3 (V14): a debug log that is a link is refused, not followed, so a link planted
+    /// where MakeMKV writes its log makes the elevated engine copy no other file into the data folder (S61, design part
+    /// 7.2).
+    #[cfg(windows)]
+    #[test]
+    fn a_debug_log_that_is_a_link_is_not_saved() {
+        use std::io::Write;
+
+        let dir = crate::testutil::temp_dir("debug-link");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"not a debug log").unwrap();
+        let log = dir.join("MakeMKV_log.txt");
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &log) {
+            let line = format!("skipped: a file symlink could not be created: {error}\n");
+            let _ = std::io::stderr().write_all(line.as_bytes());
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let host = KeyHost { log: Some(log.clone()), key: None };
+        let saved = save_debug_log(&host, now() - 60, &dir.join("scan.txt"));
+        // assert!, not assert_eq!: a failure would print the temporary folder's path, which holds the account name.
+        assert!(saved == Err(format!("{}: the debug log is a link, not a file", log.display())),
+            "the link was not refused as a link; saved: {}", saved.is_ok());
+        assert!(!dir.join("scan.txt.makemkv-debug.txt").exists(), "a copy was written through the link");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

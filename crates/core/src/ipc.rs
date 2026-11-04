@@ -42,6 +42,24 @@ pub fn is_secret_name(name: &str) -> bool {
         .is_some_and(|(server, share)| !server.is_empty() && !share.is_empty() && !share.contains('\\'))
 }
 
+/// The text `secret_set` refuses a share credential's value with when it is not two lines (design parts 6.1, 9.4;
+/// Ruling W12). It never holds the value. Def: T3-13. Use: T3-13.
+pub const SHARE_VALUE_SHAPE: &str = "the value must be a user name and a password on two lines";
+
+/// A share credential's value as (user name, password) (design parts 6.1, 9.4; Ruling W12): the text before the first
+/// `\n`, with one `\r` before that `\n` dropped (a Windows console's line end, Review Focus 4), and the text after it.
+/// Err(SHARE_VALUE_SHAPE) when there is no `\n`, a second `\n`, or an empty half. Pure (RP19). Def: T3-13.
+/// Use: T3-13, T3-14.
+pub fn share_credential(value: &str) -> Result<(&str, &str), String> {
+    let refused = || SHARE_VALUE_SHAPE.to_string();
+    let (user, password) = value.split_once('\n').ok_or_else(refused)?;
+    let user = user.strip_suffix('\r').unwrap_or(user);
+    if user.is_empty() || password.is_empty() || password.contains('\n') {
+        return Err(refused());
+    }
+    Ok((user, password))
+}
+
 /// One line of the pipe (design part 9.1): the protocol version, the message type, the request's id (None for a push
 /// that answers no request) and the payload. A missing `id` or `payload` reads as None or `null`; unknown keys are
 /// ignored. Def: T7. Use: T26, T28.
@@ -558,7 +576,7 @@ mod tests {
 
     fn title(key: &str, rip_reviews: Vec<ReviewReason>) -> TitleRecord {
         TitleRecord { key: key.to_string(), scan_title: 0, rip_index: Some(0), attempts: 2, verified: true,
-            verify_failures: 0, read_errors: vec![], rip_reviews, decision: None, filed: None }
+            verify_failures: 0, read_errors: vec![], rip_reviews, decision: None, filed: None, rip_started_ms: None }
     }
 
     /// The error reply `parse_request` refused `line` with, read back.
@@ -766,6 +784,31 @@ mod tests {
         assert!(is_secret_name(r"share:\\nas\media"));
         for name in ["tmdb", "", r"share:\\nas", r"share:\\\media", r"share:\\nas\", r"share:\\nas\media\films", r"share:nas\media"] {
             assert!(!is_secret_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_credential_typed_in_a_windows_console_splits_into_user_and_password() {
+        let parts = Ok(("user-sentinel-7c1e", "pass-sentinel-4b9d"));
+        assert_eq!(share_credential("user-sentinel-7c1e\r\npass-sentinel-4b9d"), parts);
+        assert_eq!(share_credential("user-sentinel-7c1e\npass-sentinel-4b9d"), parts);
+    }
+
+    #[test]
+    fn one_line_three_lines_and_an_empty_half_are_refused_without_the_value() {
+        for value in [
+            "",
+            "user-sentinel-7c1e",
+            "user-sentinel-7c1e\npass-sentinel-4b9d\nthird",
+            "user-sentinel-7c1e\r\npass-sentinel-4b9d\r\n",
+            "\npass-sentinel-4b9d",
+            "\r\npass-sentinel-4b9d",
+            "user-sentinel-7c1e\n",
+            "user-sentinel-7c1e\r\n",
+        ] {
+            let refused = share_credential(value).unwrap_err();
+            assert_eq!(refused, SHARE_VALUE_SHAPE, "{value:?}");
+            assert!(!refused.contains("sentinel"), "{value:?}");
         }
     }
 }

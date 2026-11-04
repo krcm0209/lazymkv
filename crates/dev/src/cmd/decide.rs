@@ -74,6 +74,10 @@ const NAME: &str = "decide";
 /// The usage line, under the command's name: spec 3.4's synopsis with the --evidence flag every slug command takes.
 const USAGE: &str = "decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] \
                      [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--evidence DIR]";
+/// decide's long flags, as `run` declares them; lazymkvctl reads a relayed decide's words with them (V10's ruling).
+/// Def: PR #14 review round 1 (V10). Use: T19, PR #14 review round 1 (V10).
+pub const FLAGS: [&str; 8] =
+    ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"];
 /// What -h prints after the usage line.
 const HELP: &str = "
 One JSON document for one rip label (port spec 3.4): reconcile (the scan's streams against mkvmerge.json, with
@@ -589,10 +593,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         let _ = write!(out, "{}", HELP);
         return 0;
     }
-    let mut parsed = Args::new(
-        args,
-        &["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"],
-    );
+    let mut parsed = Args::new(args, &FLAGS);
     let rec_dir = match parsed.flag("--rec") {
         Ok(value) => value,
         Err(message) => return usage_error(err, NAME, USAGE, &message),

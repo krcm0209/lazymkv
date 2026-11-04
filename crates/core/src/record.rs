@@ -126,6 +126,12 @@ pub struct TitleRecord {
     pub decision: Option<FileDecision>,
     /// The filed file, once filed.
     pub filed: Option<FiledFile>,
+    /// When the title's last rip started, in Unix milliseconds: RipTitle posts it before `makemkvcon` runs, and
+    /// VerifyFile writes rip-summary.json's `started` from it, so the start lives in state.json, not in memory (R23.4,
+    /// R23.7; Ruling W16). A record written before the key existed reads as None and writes back unchanged (design
+    /// part 7.4). Def: T3-9. Use: T3-9.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rip_started_ms: Option<u64>,
 }
 
 /// A filed file's exact path, size and modification time (design part 7.3). Def: T6. Use: T24.
@@ -243,6 +249,7 @@ mod tests {
             rip_reviews: vec![],
             decision: None,
             filed: None,
+            rip_started_ms: None,
         }
     }
 
@@ -274,6 +281,26 @@ mod tests {
         let mut value = serde_json::to_value(title("t00-00800")).unwrap();
         value.as_object_mut().unwrap().remove("verify_failures");
         assert_eq!(serde_json::from_value::<TitleRecord>(value).unwrap(), title("t00-00800"));
+    }
+
+    /// Ruling W16 (design part 7.4): a title written before `rip_started_ms` existed reads as None and writes back
+    /// byte for byte, so the format stays `lazymkv job v1`.
+    #[test]
+    fn a_title_record_without_rip_started_reads_and_writes_back_unchanged() {
+        let text = serde_json::to_string(&title("t00-00800")).unwrap();
+        assert!(!text.contains("rip_started_ms"), "{text}");
+        let read: TitleRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.rip_started_ms, None);
+        assert_eq!(serde_json::to_string(&read).unwrap(), text);
+    }
+
+    #[test]
+    fn rip_started_ms_round_trips() {
+        let mut record = title("t00-00800");
+        record.rip_started_ms = Some(1_792_800_000_123);
+        let text = serde_json::to_string(&record).unwrap();
+        assert!(text.contains(r#""rip_started_ms":1792800000123"#), "{text}");
+        assert_eq!(serde_json::from_str::<TitleRecord>(&text).unwrap(), record);
     }
 
     #[test]

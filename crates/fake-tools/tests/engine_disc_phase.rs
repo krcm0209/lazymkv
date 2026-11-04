@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lazymkv_core::job::{Event, Failure, FailureClass, NotifyEvent, OutputCause, State, Tool, WaitReason};
@@ -13,6 +14,10 @@ use lazymkv_platform::{Host, Reach};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
+
+/// A clock reading a minute and 1.25 s after the harness's start, 1_792_800_000_000 ms: `2026-10-24 00:01:01.250` read
+/// as UTC (PR #14 review round 1, R20).
+const LATER: u64 = 1_792_800_061_250;
 
 fn harness(variants: &[&str], settings: Value) -> Harness {
     let mut scenarios = vec!["movie-direct"];
@@ -76,6 +81,49 @@ fn a_movie_disc_reaches_ejected_with_its_recording() {
     let title = &record.titles[0];
     assert_eq!((title.key.as_str(), title.scan_title, title.attempts, title.verified), (KEY, 0, 1, true));
     assert!(title.rip_reviews.is_empty());
+}
+
+/// R23.7 with Ruling W16 (design parts 4.6, 7.1): `started` is the rip's recorded start in phase 0's local-time form,
+/// between `bytes` and `elapsed_s`. FakeHost's clock, 1_792_800_000 s, read as UTC is 2026-10-24 00:00:00.000; the
+/// harness's `local_date` stays 2026-10-23, since the fake's date is a setting and `started` is its clock read as UTC.
+/// The clock moves to `LATER` as the rip's tool starts (only the rip's arguments hold both `disc:` and the title key),
+/// so a start read after the rip, or a summary that reads the clock at VerifyFile, would say 00:01:01.250.
+#[test]
+fn the_rip_summary_has_started_from_the_rip_start_between_bytes_and_elapsed_s() {
+    let h = harness(&[], json!({}));
+    let host = Arc::clone(h.host());
+    h.on_spawn(&["disc:", KEY], move || host.set_now_ms(LATER));
+    let id = run_to(&h, "Ejected");
+    assert_eq!(h.host().now_ms(), LATER);
+    let summary = json_of(&h.job_dir(&id).join(KEY).join("rip-summary.json"));
+    let keys: Vec<&str> = summary.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["ok", "result", "slug", "label", "title", "profile", "bytes", "started", "elapsed_s", "exit_code",
+        "files", "dest", "cache_mb"]);
+    assert_eq!(summary["started"], json!("2026-10-24 00:00:00.000"));
+    assert_eq!(h.record(&id).titles[0].rip_started_ms, Some(1_792_800_000_000));
+}
+
+/// R23.4 with Ruling W16: the rip's start is persisted with TitleRipped, before VerifyFile writes rip-summary.json, so
+/// a restart there finds it in state.json, and the record keeps the first start across the restart. A restart in
+/// Ripping rips the title again (`resume`, core/src/job.rs:742), and that rip posts its own start, read from the clock
+/// the test moved to `LATER` while the engine was stopped, which the summary takes; a stale start would say
+/// 00:00:00.000. The first rip, moved aside, never got a summary.
+#[test]
+fn a_restart_between_rip_and_verify_keeps_started() {
+    let h = harness(&[], json!({}));
+    h.insert("tok0", "movie-direct");
+    h.run_until_event("TitleRipped", |event| matches!(event, Event::TitleRipped));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    let key_dir = h.job_dir(&id).join(KEY);
+    assert!(!key_dir.join("rip-summary.json").exists());
+    assert_eq!(h.record(&id).titles[0].rip_started_ms, Some(1_792_800_000_000));
+    h.host().set_now_ms(LATER);
+    h.restart();
+    h.run_until("Ejected");
+    assert_eq!(json_of(&key_dir.join("rip-summary.json"))["started"], json!("2026-10-24 00:01:01.250"));
+    assert!(!key_dir.join("attempt-1").join("rip-summary.json").exists());
+    let record = h.record(&id);
+    assert_eq!((record.titles[0].attempts, record.titles[0].rip_started_ms), (2, Some(LATER)));
 }
 
 #[test]
@@ -280,6 +328,35 @@ fn an_unreachable_library_at_check_space_names_it_in_the_waiting_message() {
     assert!(log.contains(&format!("check space: {why}")), "{log}");
 }
 
+/// Review round 1 of pull request 3 (R33, R11): CheckSpace reaches a staging share that does not answer once, never
+/// reaches the library after it, and writes no access line for a root it did not use.
+#[test]
+fn an_unreachable_staging_is_reached_once_and_logs_no_stale_access() {
+    let h = harness(&[], json!({}));
+    let (staging, library) = (root(h.staging()), root(h.library()));
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".into()));
+    h.shares().set_access(&library, "the session's access");
+    let id = run_to(&h, "AwaitingShare");
+    h.settle();
+    assert_eq!(h.shares().reaches(&staging), 1);
+    assert_eq!(h.shares().reaches(&library), 0);
+    assert_eq!(h.record(&id).message, Some(format!("{staging} is unreachable: gone")));
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("share access for"), "{log}");
+}
+
+/// Review round 1 of pull request 3 (R33): CheckSpace reaches each root once, staging included.
+#[test]
+fn a_reachable_staging_is_reached_once_at_check_space() {
+    let h = harness(&[], json!({}));
+    let (staging, library) = (root(h.staging()), root(h.library()));
+    h.shares().set_free(&staging, 100);
+    run_to(&h, "AwaitingSpace");
+    h.settle();
+    assert_eq!(h.shares().reaches(&staging), 1);
+    assert_eq!(h.shares().reaches(&library), 1);
+}
+
 /// Review round 1, V5 (spec 7, 10.1, 10.2; RR1-8): a title staging folder that cannot be emptied or made is a write
 /// error on staging, classed by the share check, so the job waits in AwaitingShare to return to Ripping instead of
 /// failing; makemkvcon never runs.
@@ -302,6 +379,63 @@ fn a_title_folder_that_cannot_be_made_waits_in_awaiting_share() {
     assert!(sent.contains(&NotifyEvent::Waiting { reason: WaitReason::Share }), "{sent:?}");
     assert!(!sent.iter().any(|e| matches!(e, NotifyEvent::Failed { .. })), "{sent:?}");
     assert!(!h.job_dir(&id).join(KEY).join("rip.txt").exists());
+}
+
+/// Writes `root` as `key` into data/settings.json and restarts, so the next job starts with it (design part 6.2).
+fn with_root(h: &Harness, key: &str, root: &Path) {
+    let path = h.data().join("settings.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    stored[key] = json!(root.to_str().unwrap());
+    fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    h.restart();
+}
+
+/// Design part 6.2, Ruling W15: CheckSpace itself creates a missing staging_root whose parent is a folder, before its
+/// space check: with too little space the job stops in AwaitingSpace, before any rip could make a folder, and the root
+/// is there and empty (review round 1 of pull request 3, R18).
+#[test]
+fn a_missing_staging_root_under_an_existing_parent_is_created_at_check_space() {
+    let h = harness(&[], json!({}));
+    let engine = h.staging().join("engine");
+    with_root(&h, "staging_root", &engine);
+    h.shares().set_free(&root(&engine), 100);
+    let id = run_to(&h, "AwaitingSpace");
+    h.settle();
+    assert!(engine.is_dir(), "CheckSpace did not make the staging root");
+    assert_eq!(fs::read_dir(&engine).unwrap().count(), 0);
+    assert_eq!(h.record(&id).state, State::AwaitingSpace { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
+}
+
+/// Ruling W15: only the last folder is ever created; a staging root whose parent is missing is ShareLost naming both.
+#[test]
+fn a_missing_parent_is_not_created() {
+    let h = harness(&[], json!({}));
+    let parent = h.staging().join("absent");
+    let engine = parent.join("engine");
+    with_root(&h, "staging_root", &engine);
+    let id = run_to(&h, "AwaitingShare");
+    h.settle();
+    let why = format!("{} does not exist and could not be created: {} is not a folder", engine.display(), parent.display());
+    assert_eq!(h.record(&id).message.as_deref(), Some(why.as_str()));
+    assert!(!parent.exists());
+}
+
+/// Design part 7.1: job.log names the share access CheckSpace used, for each root the connector reports one for, and
+/// nothing with the default fake, so `whole_job`'s job.log is unchanged.
+#[test]
+fn the_share_access_line_is_written_when_the_connector_reports_one() {
+    let h = harness(&[], json!({}));
+    let (staging, library) = (root(h.staging()), root(h.library()));
+    h.shares().set_access(&staging, "the session's access");
+    h.shares().set_access(&library, "lazymkv's stored credential");
+    let id = run_to(&h, "Ripping");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(&format!("share access for {staging}: the session's access")), "{log}");
+    assert!(log.contains(&format!("share access for {library}: lazymkv's stored credential")), "{log}");
+    let plain = harness(&[], json!({}));
+    let id = run_to(&plain, "Ripping");
+    let log = fs::read_to_string(plain.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("share access for"), "{log}");
 }
 
 #[test]

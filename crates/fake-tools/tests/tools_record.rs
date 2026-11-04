@@ -179,6 +179,37 @@ fn a_program_that_cannot_start_is_an_error_and_writes_no_files() {
     assert!(!with_suffix(&out, ".exit.json").exists());
 }
 
+/// engine.md:579 (design part 4.2): on Windows the engine's runner kills a tool's whole tree, so a grandchild that
+/// inherited the tool's standard output cannot hold `run_recorded`'s reader open after the time limit's kill. The tool
+/// is `cmd.exe` and the grandchild the `ping` it starts, which would hold the pipe for about 60 s. The 15 s bound
+/// catches a hang, so it does not scale.
+#[cfg(windows)]
+#[test]
+fn a_time_limit_ends_a_tool_whose_grandchild_holds_its_output() {
+    let dir = Scratch::new("rec-tree");
+    let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set")).join(r"System32\cmd.exe");
+    let out = dir.0.join("tree.txt");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let guard = lazymkv_platform::native_guard();
+        let host = FakeHost::new("2026-10-23", NOW);
+        let limits = Limits::from_settings(&Settings::default());
+        let ctx = ToolCtx {
+            guard: &*guard,
+            host: &host,
+            limits: &limits,
+            cancel: CancelToken::default(),
+            on_output: &|_: OutputStream, _: &str| {},
+            on_progress: &|_: f64| {},
+        };
+        let args = ["/c", "ping", "-n", "60", "127.0.0.1"].map(String::from);
+        let run = run_recorded(&ctx, &cmd, &args, &out, Some(Duration::from_secs(1)), false, &mut |_| LineAction::Continue);
+        tx.send(run.map(|run| run.timed_out).map_err(|error| error.to_string())).unwrap();
+    });
+    let timed_out = rx.recv_timeout(Duration::from_secs(15)).expect("run_recorded did not return within 15 s of a 1 s limit");
+    assert_eq!(timed_out, Ok(true));
+}
+
 /// A process runner that notes when the child it started has been waited for, so a test can tell that it is gone.
 struct Reaping(Arc<AtomicBool>);
 

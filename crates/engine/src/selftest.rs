@@ -4,6 +4,7 @@
 //! is recorded capture-style under `<data>/selftest/` (design part 7.2). The owner thread runs none of this itself: it
 //! hands each self-test and re-check to a thread of its own (design part 4.4).
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -18,6 +19,7 @@ use lazymkv_core::plan::Kind;
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::{version_triple, Settings};
 use lazymkv_platform::{rename_no_replace, write_atomic, Host, ProcessGuard, Reach, SecretStore, ShareConnector};
+use lazymkv_tools::makemkv::{Kill, EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use lazymkv_tools::{
     find_tool, list_drives, run_recorded, save_debug_log, with_suffix, CancelToken, Found, LineAction, Limits, ToolCtx,
     ToolLocation,
@@ -25,7 +27,9 @@ use lazymkv_tools::{
 use serde_json::{json, Value};
 
 use crate::file_phase::PARTIAL_FOLDER;
-use crate::space::{planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises};
+use crate::space::{
+    make_root, planned_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check, Promises,
+};
 use crate::steps::version_of;
 
 /// The folder of the data folder the self-test records into (design part 7.2, S79).
@@ -222,17 +226,40 @@ fn probe(dir: &Path) -> Result<(), String> {
     fs::remove_file(&renamed).map_err(|error| at(&renamed, error))
 }
 
-/// The write, rename and delete probe of spec 7 in `root` (in `<root>/.lazymkv-partial` when `library`). A library
-/// root that is not a folder fails with `<root> is not a folder`, and only the partial folder inside an existing root
-/// is made, so a mistyped or unmounted root never passes or leaves a folder behind (ruling at the final review).
-/// Def: T26. Use: T26.
-pub(crate) fn root_check(name: &str, root: Option<&str>, library: bool) -> SelfTestCheck {
+/// The write, rename and delete probe of spec 7 in `root` (in `<root>/.lazymkv-partial` when `library`). Changed:
+/// `reach` first (spec 13, "each root reachable"; Ruling W15), then `make_root` for staging and tuning, then the probe.
+/// `down` maps a volume key to why its share did not answer earlier in the same self-test: a root on a volume that
+/// already did not answer takes that answer without asking again (review round 1 of pull request 3, R36), and a
+/// root whose share does not answer adds its volume. Only failures are kept, so a volume that answered is asked again
+/// for each root and a share that drops between two checks is still seen; a root with no volume is always asked.
+/// A root that does not answer fails with `<root> is unreachable: <why>`, `space.rs`' wording. A staging or tuning
+/// root is made when only its last folder is missing (design part 6.2), and fails with `make_root`'s text otherwise.
+/// A library root that is not a folder fails with `<root> is not a folder`, and only the partial folder inside an
+/// existing root is made, so a mistyped or unmounted root never passes or leaves a folder behind (ruling at the final
+/// review). Def: T26, T3-17, its `down` PR #14 review round 1 (R36). Use: T26, T3-17.
+pub(crate) fn root_check(
+    name: &str,
+    root: Option<&str>,
+    library: bool,
+    shares: &dyn ShareConnector,
+    down: &mut BTreeMap<String, String>,
+) -> SelfTestCheck {
     let Some(root) = root else {
         return check(name, false, format!("{name} is unset"));
     };
     let dir = if library { Path::new(root).join(PARTIAL_FOLDER) } else { PathBuf::from(root) };
-    let made = if !library {
-        Ok(())
+    let volume = shares.volume(root);
+    let reach = match volume.as_ref().and_then(|key| down.get(key)) {
+        Some(why) => Reach::Unreachable(why.clone()),
+        None => shares.reach(root),
+    };
+    if let (Reach::Unreachable(why), Some(key)) = (&reach, volume) {
+        down.entry(key).or_insert_with(|| why.clone());
+    }
+    let made = if let Reach::Unreachable(why) = reach {
+        Err(format!("{root} is unreachable: {why}"))
+    } else if !library {
+        make_root(root)
     } else if !Path::new(root).is_dir() {
         Err(format!("{root} is not a folder"))
     } else {
@@ -283,8 +310,8 @@ pub(crate) struct RecheckJob {
 }
 
 /// What the self-test and the re-checks run with (design parts 3.6, 3.7, 9.4): the tool lookup's places, the limits,
-/// the platform parts, the transport, the secrets, the last scan's Java use and the shared MakeMKV state. Def: T26.
-/// Use: T26.
+/// the platform parts, the transport, the secrets, the last scan's Java use, the shared MakeMKV state and the shares
+/// (Ruling W15). Def: T26, T3-17. Use: T26, T3-17.
 #[derive(Clone)]
 pub(crate) struct CheckEnv {
     /// The data folder; the self-test records into `<data>/selftest/`.
@@ -308,8 +335,11 @@ pub(crate) struct CheckEnv {
     /// The shared MakeMKV state (S79).
     pub(crate) makemkv: Arc<MakeMkv>,
     /// Stops the check's tool runs: the owner gives each check a token of its own and raises it at a stop or a forced
-    /// shutdown, because a drive listing has no time limit (design parts 3.8, 5.3; S57).
+    /// shutdown (design parts 3.8, 5.3). The drive listing is also bounded by `limits.header` (Ruling W20).
     pub(crate) cancel: CancelToken,
+    /// The shares: each root check asks `reach` before its probe (spec 13, Ruling W15), and a retry's re-check
+    /// (`recheck`: share_back, space_freed) reads them (review round 1 of pull request 3, R53).
+    pub(crate) shares: Arc<dyn ShareConnector>,
 }
 
 impl CheckEnv {
@@ -347,7 +377,10 @@ impl CheckEnv {
     /// listing finds running) the last check marked busy, with no run; otherwise the drive listing recorded at
     /// `<data>/selftest/drive-list.txt`, its (version, licence code) observed. It is ok when `makemkvcon` is found,
     /// prints a version of at least `makemkv_min_version` and no licence message. The check becomes the last one. A
-    /// listing the check's cancel token ended is not observed and does not become the last check. Def: T26. Use: T26.
+    /// listing the check's cancel token ended is not observed and does not become the last check. The listing runs
+    /// under `limits.header` (Ruling W20): one that limit killed is not ok with `LISTING_PAST_LIMIT`, reports no
+    /// version and is not observed; one the exit wait killed is not ok with `EXIT_WAIT_PASSED` (M2), with its version
+    /// reported and observed (S79). Def: T26. Use: T26.
     pub(crate) fn makemkv_check(&self, settings: &Settings, busy: bool) -> SelfTestCheck {
         let name = Tool::Makemkvcon.as_str();
         if busy {
@@ -360,7 +393,9 @@ impl CheckEnv {
         };
         let debug = settings.keep_tuning_evidence;
         let listed = self.record_path(DRIVE_LIST_FILE).and_then(|out| {
-            let listing = self.with_ctx(settings, |ctx| list_drives(ctx, &location.path, debug, "", &out))?;
+            let listing = self.with_ctx(settings, |ctx| {
+                list_drives(ctx, &location.path, debug, "", &out, Some(ctx.limits.header))
+            })?;
             if debug {
                 let _ = save_debug_log(self.host.as_ref(), listing.run.started_unix, &out);
             }
@@ -373,11 +408,15 @@ impl CheckEnv {
                 let cancelled = check(name, false, "the drive listing was cancelled".to_string());
                 return SelfTestCheck { path: Some(location.path.display().to_string()), ..cancelled };
             }
+            // A listing the header limit killed is partial and may have stopped before a licence message (Ruling W20).
+            Ok(listing) if listing.kill == Kill::Limit => (false, LISTING_PAST_LIMIT.to_string(), None),
             Ok(listing) => {
                 let summary = listing.summary;
                 self.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
                 let minimum = &settings.makemkv_min_version;
                 let (ok, detail) = match (&summary.version, &summary.licence) {
+                    // The listing printed its final message, so its summary is whole (M2; as steps.rs reads a job's).
+                    _ if listing.kill == Kill::ExitWait => (false, EXIT_WAIT_PASSED.to_string()),
                     (_, Some(message)) => {
                         (false, format!("MakeMKV printed licence message {}: {}", message.code, message.text))
                     }
@@ -439,15 +478,19 @@ impl CheckEnv {
     /// Every check of spec 13's self-test that needs no disc, in S80's order: the MakeMKV check (`busy` while a
     /// `makemkvcon` runs), mkvmerge, ffprobe, ffmpeg, java, the three roots and the TMDb token (design part 9.4, S53).
     /// `listed` runs once the MakeMKV check has ended, so the owner can free the disc-phase token the check holds
-    /// (Ruling R26.c1). Def: T26. Use: T26.
+    /// (Ruling R26.c1). The three root checks share one `down` map, made here, so a share that did not answer is asked
+    /// once in this self-test; nothing is kept across self-tests or shared with jobs and re-checks (review round 1 of
+    /// pull request 3, R36). Def: T26. Use: T26.
     pub(crate) fn selftest(&self, settings: &Settings, busy: bool, listed: &dyn Fn()) -> SelfTest {
         let mut checks = vec![self.makemkv_check(settings, busy)];
         listed();
         let tools = [Tool::Mkvmerge, Tool::Ffprobe, Tool::Ffmpeg, Tool::Java];
         checks.extend(tools.map(|tool| self.tool_check(settings, tool)));
-        checks.push(root_check("staging_root", settings.staging_root.as_deref(), false));
-        checks.push(root_check("tuning_root", settings.tuning_root.as_deref(), false));
-        checks.push(root_check("movies_root", settings.movies_root.as_deref(), true));
+        let shares = self.shares.as_ref();
+        let mut down = BTreeMap::new();
+        checks.push(root_check("staging_root", settings.staging_root.as_deref(), false, shares, &mut down));
+        checks.push(root_check("tuning_root", settings.tuning_root.as_deref(), false, shares, &mut down));
+        checks.push(root_check("movies_root", settings.movies_root.as_deref(), true, shares, &mut down));
         checks.push(token_check(self.http.as_ref(), self.secrets.get("tmdb_token").as_deref()));
         SelfTest { checks }
     }
@@ -480,16 +523,11 @@ impl CheckEnv {
     /// What a `retry` in a waiting state re-checks (Ruling S81), as the event its cleared condition gives, or None:
     /// AwaitingShare reaches the roots the return uses (ShareBack); AwaitingSpace runs the CheckSpace computation
     /// (SpaceFreed); AwaitingMakeMkv runs a fresh MakeMKV check, whose observed change the owner delivers (None here);
-    /// AwaitingTool runs `tool_found` with a fresh MakeMKV check. `busy` says a `makemkvcon` runs for a job. Def: T26.
-    /// Use: T26.
-    pub(crate) fn recheck(
-        &self,
-        job: &RecheckJob,
-        busy: bool,
-        shares: &dyn ShareConnector,
-        promises: &Mutex<Promises>,
-    ) -> Option<Event> {
+    /// AwaitingTool runs `tool_found` with a fresh MakeMKV check. `busy` says a `makemkvcon` runs for a job. The shares
+    /// are the environment's own (review round 1 of pull request 3, R53). Def: T26. Use: T26.
+    pub(crate) fn recheck(&self, job: &RecheckJob, busy: bool, promises: &Mutex<Promises>) -> Option<Event> {
         let settings = &job.settings;
+        let shares = self.shares.as_ref();
         match &job.record.state {
             State::AwaitingShare { .. } => share_back(&job.record, settings, shares),
             State::AwaitingSpace { return_to } => space_freed(job, return_to, shares, promises),
@@ -513,11 +551,15 @@ fn library_root<'a>(record: &JobRecord, settings: &'a Settings) -> Option<&'a st
     }
 }
 
-/// AwaitingShare's re-check (Ruling S81): the roots the return state uses all reachable give ShareBack. A Planned
-/// return's CheckSpace reads staging and the plan kind's library root, so it waits on both (review round 1, V15: a
-/// library that does not answer no longer sends the job back to a CheckSpace that feeds ShareLost again); any other
-/// disc-phase return, a rip, uses staging alone (the final review's Minor 5); a file-phase return uses staging and the
-/// plan kind's library root.
+/// AwaitingShare's re-check (Ruling S81, amended by Ruling W21): ShareBack when each root the return state uses
+/// answers `reach` and then `free_bytes`, and `staging_root` passes `make_root`, which makes a missing last folder as
+/// CheckSpace would next (Ruling W15 as amended; review round 1 of pull request 3, R26), so a share whose free space
+/// cannot be read, or a staging root that is not a folder or cannot be made, keeps the job waiting instead of cycling
+/// through ShareBack (engine.md:589). `make_root` runs only once every root answered. A Planned return's CheckSpace
+/// reads staging and the plan kind's library root, so it waits on both (review round 1, V15: a library that does not
+/// answer no longer sends the job back to a CheckSpace that feeds ShareLost again); any other disc-phase return, a
+/// rip, uses staging alone (the final review's Minor 5); a file-phase return uses staging and the plan kind's library
+/// root.
 fn share_back(record: &JobRecord, settings: &Settings, shares: &dyn ShareConnector) -> Option<Event> {
     let staging = settings.staging_root.as_deref()?;
     let staging_only = matches!(
@@ -526,13 +568,15 @@ fn share_back(record: &JobRecord, settings: &Settings, shares: &dyn ShareConnect
     );
     let library = if staging_only { None } else { library_root(record, settings) };
     let mut roots = std::iter::once(staging).chain(library);
-    roots.all(|root| shares.reach(root) == Reach::Reachable).then_some(Event::ShareBack)
+    let answer = roots.all(|root| shares.reach(root) == Reach::Reachable && shares.free_bytes(root).is_ok());
+    (answer && make_root(staging).is_ok()).then_some(Event::ShareBack)
 }
 
 /// AwaitingSpace's re-check (Ruling S81): the CheckSpace computation of the return, `rip_check` before a rip and
 /// `staged_remux_check` of the staged files' sizes before a remux (the plan's estimate when they cannot be read; review
 /// round 1, V3), giving SpaceFreed where it gives SpaceOk. Its event is not fed, so a condition not cleared feeds
-/// nothing, ShareLost included. The job folder and staging are read before the `Promises` lock is taken.
+/// nothing, ShareLost included. It takes no lock of its own: the job folder and staging are read first, and each check
+/// reads the shares before it locks the `Promises` (engine.md:584).
 fn space_freed(
     job: &RecheckJob,
     return_to: &State,
@@ -548,13 +592,11 @@ fn space_freed(
         let meta = meta.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         let disc_size = meta.and_then(|meta| meta["total_bytes"].as_u64()).unwrap_or(0);
         let (rip, remux) = (rip_promise(plan, disc_size), planned_remux_promise(plan));
-        let mut promises = lock(promises);
-        rip_check(rip, remux, staging, library, shares, &mut promises, &record.id)
+        rip_check(rip, remux, staging, library, shares, promises, &record.id)
     } else {
         let library = library?;
         let staged = staged_bytes(staging, &record.id, plan);
-        let mut promises = lock(promises);
-        staged_remux_check(staged, plan, staging, library, shares, &mut promises, &record.id)
+        staged_remux_check(staged, plan, staging, library, shares, promises, &record.id)
     };
     (event == Event::SpaceOk).then_some(Event::SpaceFreed)
 }
@@ -564,11 +606,24 @@ mod tests {
     use super::*;
     use lazymkv_clients::RecordedTransport;
     use lazymkv_core::testsupport::Scratch;
+    use lazymkv_platform::fakes::FakeShares;
+
+    /// A job waiting in AwaitingShare to return to `return_to`, with no plan (Ruling S81).
+    fn waiting_for_share(return_to: State) -> JobRecord {
+        JobRecord {
+            format: lazymkv_core::record::JOB_FORMAT.to_string(), id: "abc-1".to_string(),
+            fingerprint: "ABC".to_string(), disc_id: None, drive: "tok0".to_string(), created_unix: 1, updated_unix: 1,
+            state: State::AwaitingShare { return_to: Box::new(return_to) }, message: None, rip_again: false,
+            profile: "job.mmcp.xml".to_string(), plan: None, titles: vec![], filed_unix: None, collisions: vec![],
+            notes: vec![],
+        }
+    }
 
     #[test]
     fn a_library_root_is_probed_inside_lazymkv_partial_and_left_clean() {
         let s = Scratch::new("probe");
-        let check = root_check("movies_root", Some(s.0.to_str().unwrap()), true);
+        let root = Some(s.0.to_str().unwrap());
+        let check = root_check("movies_root", root, true, &FakeShares::new(), &mut BTreeMap::new());
         assert!(check.ok, "{}", check.detail);
         assert_eq!(check.name, "movies_root");
         let partial = s.0.join(".lazymkv-partial");
@@ -583,7 +638,8 @@ mod tests {
     fn a_missing_library_root_fails_its_check_and_is_not_created() {
         let s = Scratch::new("probe-missing");
         let missing = s.0.join("Moives");
-        let check = root_check("movies_root", Some(missing.to_str().unwrap()), true);
+        let root = Some(missing.to_str().unwrap());
+        let check = root_check("movies_root", root, true, &FakeShares::new(), &mut BTreeMap::new());
         assert!(!check.ok);
         assert_eq!(check.detail, format!("{} is not a folder", missing.display()));
         assert_eq!(check.path.as_deref(), missing.to_str());
@@ -592,7 +648,62 @@ mod tests {
 
     #[test]
     fn an_unset_root_fails_its_check() {
-        assert!(!root_check("tuning_root", None, false).ok);
+        assert!(!root_check("tuning_root", None, false, &FakeShares::new(), &mut BTreeMap::new()).ok);
+    }
+
+    /// Review round 1 of pull request 3 (R36): within one self-test, a root on a volume whose share did not answer
+    /// takes that answer without asking again, and nothing is made for it.
+    #[test]
+    fn a_share_that_does_not_answer_is_asked_once_per_selftest() {
+        let s = Scratch::new("down-once");
+        let (staging, tuning) = (s.0.join("staging"), s.0.join("tuning"));
+        let (staging, tuning) = (staging.to_str().unwrap(), tuning.to_str().unwrap());
+        let shares = FakeShares::new();
+        shares.same_volume(staging, tuning);
+        shares.set_reach(staging, Reach::Unreachable("share down".to_string()));
+        let mut down = BTreeMap::new();
+        assert!(!root_check("staging_root", Some(staging), false, &shares, &mut down).ok);
+        let check = root_check("tuning_root", Some(tuning), false, &shares, &mut down);
+        assert!(!check.ok);
+        assert_eq!(check.detail, format!("{tuning} is unreachable: share down"));
+        assert_eq!(shares.reaches(tuning), 0);
+        assert!(!Path::new(tuning).exists());
+    }
+
+    /// Review round 1 of pull request 3 (R36): a volume that answered is asked again for each root, so a share that
+    /// drops between two checks is still seen.
+    #[test]
+    fn a_share_that_answers_is_asked_again_for_each_root() {
+        let s = Scratch::new("answered-again");
+        let (staging, tuning) = (s.0.join("staging"), s.0.join("tuning"));
+        let (staging, tuning) = (staging.to_str().unwrap(), tuning.to_str().unwrap());
+        let shares = FakeShares::new();
+        shares.same_volume(staging, tuning);
+        shares.set_reach(tuning, Reach::Unreachable("dropped".to_string()));
+        let mut down = BTreeMap::new();
+        let first = root_check("staging_root", Some(staging), false, &shares, &mut down);
+        assert!(first.ok, "{}", first.detail);
+        let check = root_check("tuning_root", Some(tuning), false, &shares, &mut down);
+        assert!(!check.ok);
+        assert_eq!(check.detail, format!("{tuning} is unreachable: dropped"));
+    }
+
+    /// Review round 1 of pull request 3 (R36): a root on another volume is still asked after one did not answer.
+    #[test]
+    fn another_volume_is_still_asked_after_one_did_not_answer() {
+        let s = Scratch::new("other-volume");
+        let staging = s.0.join("staging");
+        let staging = staging.to_str().unwrap();
+        let movies = s.0.join("movies");
+        fs::create_dir(&movies).unwrap();
+        let movies = movies.to_str().unwrap();
+        let shares = FakeShares::new();
+        shares.set_reach(staging, Reach::Unreachable("share down".to_string()));
+        let mut down = BTreeMap::new();
+        assert!(!root_check("staging_root", Some(staging), false, &shares, &mut down).ok);
+        let check = root_check("movies_root", Some(movies), true, &shares, &mut down);
+        assert!(check.ok, "{}", check.detail);
+        assert_eq!(shares.reaches(movies), 1);
     }
 
     #[test]
@@ -635,28 +746,112 @@ mod tests {
     fn a_share_recheck_reaches_the_roots_its_return_uses() {
         use lazymkv_core::job::State;
         use lazymkv_platform::fakes::FakeShares;
+        // A real folder: the re-check makes the staging root (review round 1 of pull request 3, R26).
+        let s = Scratch::new("recheck-roots");
         let settings = Settings {
-            staging_root: Some("/staging".to_string()),
+            staging_root: Some(s.0.to_str().unwrap().to_string()),
             movies_root: Some("/movies".to_string()),
             ..Settings::default()
         };
         let shares = FakeShares::new();
         shares.set_reach("/movies", Reach::Unreachable("cable out".to_string()));
-        let waiting = |return_to: State| JobRecord {
-            format: lazymkv_core::record::JOB_FORMAT.to_string(), id: "abc-1".to_string(),
-            fingerprint: "ABC".to_string(), disc_id: None, drive: "tok0".to_string(), created_unix: 1, updated_unix: 1,
-            state: State::AwaitingShare { return_to: Box::new(return_to) }, message: None, rip_again: false,
-            profile: "job.mmcp.xml".to_string(), plan: None, titles: vec![], filed_unix: None, collisions: vec![],
-            notes: vec![],
-        };
-        assert_eq!(share_back(&waiting(State::Ripping), &settings, &shares), Some(Event::ShareBack));
-        assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), None);
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert_eq!(share_back(&waiting_for_share(State::Remuxing), &settings, &shares), None);
         // Review round 1, V15: a Planned return's CheckSpace reads the library root too.
-        let planned = || waiting(State::Planned { mode: lazymkv_core::plan::Mode::Direct });
+        let planned = || waiting_for_share(State::Planned { mode: lazymkv_core::plan::Mode::Direct });
         assert_eq!(share_back(&planned(), &settings, &shares), None);
         shares.set_reach("/movies", Reach::Reachable);
-        assert_eq!(share_back(&waiting(State::Remuxing), &settings, &shares), Some(Event::ShareBack));
+        assert_eq!(share_back(&waiting_for_share(State::Remuxing), &settings, &shares), Some(Event::ShareBack));
         assert_eq!(share_back(&planned(), &settings, &shares), Some(Event::ShareBack));
+    }
+
+    /// Ruling W21 (S81 amended): AwaitingShare's re-check also reads free space, and an error there keeps the job
+    /// waiting.
+    #[test]
+    fn a_share_recheck_waits_while_the_free_space_cannot_be_read() {
+        use lazymkv_core::job::State;
+        use lazymkv_platform::fakes::FakeShares;
+        // A real folder: the re-check makes the staging root (review round 1 of pull request 3, R26).
+        let s = Scratch::new("recheck-free");
+        let staging = s.0.to_str().unwrap().to_string();
+        let settings = Settings { staging_root: Some(staging.clone()), ..Settings::default() };
+        let shares = FakeShares::new();
+        shares.set_free_error(&staging, "access is denied");
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
+        shares.set_free(&staging, 1);
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+    }
+
+    /// engine.md:589, Ruling W21: a staging root `make_root` could not make keeps the job waiting; once its parent
+    /// exists, the re-check makes it as CheckSpace would next (review round 1 of pull request 3, R26).
+    #[test]
+    fn a_share_recheck_waits_while_the_staging_root_cannot_be_made() {
+        use lazymkv_core::job::State;
+        use lazymkv_platform::fakes::FakeShares;
+        let s = Scratch::new("recheck-root");
+        let engine = s.0.join("absent").join("engine");
+        let settings = Settings { staging_root: Some(engine.to_str().unwrap().to_string()), ..Settings::default() };
+        let shares = FakeShares::new();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
+        std::fs::create_dir(s.0.join("absent")).unwrap();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert!(engine.is_dir(), "the re-check did not make the root");
+    }
+
+    /// Review round 1 of pull request 3 (R26): a staging root whose parent is a folder but which cannot be created
+    /// keeps the job waiting, and the re-check makes it once it can. Unix only (mode 0o555 on the parent); skipped as
+    /// root, which the mode does not stop, with a `skipped:` line written past the test capture (a direct stderr write,
+    /// not `eprintln!`, which the harness captures; the round's final review, W16). Not on Windows: a deny entry on the
+    /// parent is not reliable against the elevated runners.
+    #[cfg(unix)]
+    #[test]
+    fn a_share_recheck_waits_while_the_staging_root_cannot_be_created() {
+        use lazymkv_core::job::State;
+        use std::os::unix::fs::PermissionsExt;
+        /// Restores the parent's mode when the test ends, so the scratch folder can be removed.
+        struct RestoreMode(PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let s = Scratch::new("recheck-root-mode");
+        let parent = s.0.join("parent");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+        let restore = RestoreMode(parent.clone());
+        let probe = parent.join("probe");
+        if fs::create_dir(&probe).is_ok() {
+            let _ = fs::remove_dir(&probe);
+            // Root writes through mode 0o555: say so past the test capture, so a pass without R26 checked is visible.
+            let line = "skipped: the process writes through mode 0o555 (root), so \
+                        a_share_recheck_waits_while_the_staging_root_cannot_be_created did not run\n";
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            return;
+        }
+        let engine = parent.join("engine");
+        let settings = Settings { staging_root: Some(engine.to_str().unwrap().to_string()), ..Settings::default() };
+        let shares = FakeShares::new();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
+        assert!(!engine.exists());
+        drop(restore);
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert!(engine.is_dir());
+    }
+
+    /// Review round 1 of pull request 3 (V11): a staging root that exists and is not a folder keeps the job waiting.
+    #[test]
+    fn a_share_recheck_waits_while_the_staging_root_is_a_file() {
+        use lazymkv_core::job::State;
+        use lazymkv_core::testsupport::ScratchExt;
+        let s = Scratch::new("recheck-root-file");
+        let engine = s.write_path("engine", "x");
+        let settings = Settings { staging_root: Some(engine.to_str().unwrap().to_string()), ..Settings::default() };
+        let shares = FakeShares::new();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), None);
+        std::fs::remove_file(&engine).unwrap();
+        assert_eq!(share_back(&waiting_for_share(State::Ripping), &settings, &shares), Some(Event::ShareBack));
+        assert!(engine.is_dir(), "the re-check did not make the root (R26)");
     }
 
     /// A listing that printed no version says nothing about MakeMKV's version (a makemkvcon that started and died),

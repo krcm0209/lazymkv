@@ -3,9 +3,12 @@ name: CI
 # Every push to main and every pull request builds and tests the workspace on Linux, macOS and Windows with the
 # toolchain rust-toolchain.toml pins. The private evidence repository is not cloned here, so the tests that need it
 # print their "skipped: ..." reason and the rest run; docs/phase2/engine.md has the count. Among them, the stand-in
-# tools of crates/fake-tools run a whole engine job, from a disc's arrival to a filed placeholder file, with no disc,
-# no network and no Windows API (design part 12.6, item 2). ffmpeg is installed for the one test that builds its own
-# proxy with lavfi; without it that test skips too.
+# tools of crates/fake-tools run a whole engine job, from a disc's arrival to a filed placeholder file, on every
+# system (design part 12.6, item 2), and on Windows the platform's Windows implementations run too: the named pipe,
+# the mutex, the Job Object runner, Credential Manager under a test name, and a native whole job through the real
+# pipe (design parts 12.4 and 12.6, item 3). Tests that need the drive, the share or the owner's desktop session are
+# ignored here and run on the mini PC. ffmpeg is installed for the one test that builds its own proxy with lavfi;
+# without it that test skips too.
 
 on:
   push:
