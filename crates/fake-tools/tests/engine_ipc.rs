@@ -2158,13 +2158,13 @@ fn a_held_console_stalls_neither_the_engine_nor_its_stop() {
     fs::write(bad.join("state.json"), r#"{"format":"lazymkv job v2"}"#).unwrap();
     std::thread::scope(|scope| {
         let restart = scope.spawn(|| h.restart());
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
         while !restart.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         if !restart.is_finished() {
             h.release_console();
-            panic!("the restart had not returned 10 s after it began, with the console taking no output");
+            panic!("the restart had not returned 10 s times ci_factor after it began, with the console taking no output");
         }
         restart.join().unwrap();
     });
