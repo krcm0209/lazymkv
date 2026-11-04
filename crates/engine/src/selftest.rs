@@ -800,8 +800,9 @@ mod tests {
 
     /// Review round 1 of pull request 3 (R26): a staging root whose parent is a folder but which cannot be created
     /// keeps the job waiting, and the re-check makes it once it can. Unix only (mode 0o555 on the parent); skipped as
-    /// root, which the mode does not stop. Not on Windows: a deny entry on the parent is not reliable against the
-    /// elevated runners.
+    /// root, which the mode does not stop, with a `skipped:` line written past the test capture (a direct stderr write,
+    /// not `eprintln!`, which the harness captures; the round's final review, W16). Not on Windows: a deny entry on the
+    /// parent is not reliable against the elevated runners.
     #[cfg(unix)]
     #[test]
     fn a_share_recheck_waits_while_the_staging_root_cannot_be_created() {
@@ -822,7 +823,11 @@ mod tests {
         let probe = parent.join("probe");
         if fs::create_dir(&probe).is_ok() {
             let _ = fs::remove_dir(&probe);
-            return; // root writes through mode 0o555
+            // Root writes through mode 0o555: say so past the test capture, so a pass without R26 checked is visible.
+            let line = "skipped: the process writes through mode 0o555 (root), so \
+                        a_share_recheck_waits_while_the_staging_root_cannot_be_created did not run\n";
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            return;
         }
         let engine = parent.join("engine");
         let settings = Settings { staging_root: Some(engine.to_str().unwrap().to_string()), ..Settings::default() };
