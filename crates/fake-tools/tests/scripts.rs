@@ -204,8 +204,9 @@ fn the_platform_ignored_script_parses_and_runs_one_session_of_platform_tests() {
 /// sign in it, and the engine reads a relative folder against the run folder, protects whatever folder it is given and
 /// creates only the last component, so `Get-DataProblem` refuses every `-Data` but a full local folder path below a
 /// drive's root, outside the run folder, whose parent exists. It refuses too a folder that holds the run folder or a
-/// build tree, or lies in a build tree, which scripts/box.sh or cargo clean recreates (the round's final review (W12));
-/// the trees are the script's own. C: paths only, since the runner may have no D:.
+/// build tree, or lies in a build tree, which scripts/box.sh or cargo clean recreates, or elsewhere under their parent,
+/// which a non-elevated process may write (the round's final review (W12)); the trees are the script's own. C: paths
+/// only, since the runner may have no D:.
 #[cfg(windows)]
 #[test]
 fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplace() {
@@ -232,14 +233,16 @@ fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplac
         missing.as_str(),
         r"'C:\lazymkv'",
         r"'C:\lazymkv\'",
+        r"'C:\lazymkv\other'",
         r"'C:\lazymkv\src\data'",
         r"'C:\LAZYMKV\TARGET\x'",
         r"('C:\lazymkv-data' + [char]10)",
     ];
-    // What the last five refusals say: the folder the value holds or lies in, or the first check's text.
+    // What the last six refusals say: the folder the value holds or lies in, or the first check's text.
     let texts = [
         r"holds C:\lazymkv\run",
         r"holds C:\lazymkv\run",
+        r"is in C:\lazymkv, the run folder's parent",
         r"is in C:\lazymkv\src,",
         r"is in C:\lazymkv\target,",
         "is not a full local folder path",

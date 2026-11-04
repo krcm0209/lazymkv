@@ -46,8 +46,9 @@ function Get-Writers([string]$path) {
 # task's argument line is not quoted, Task Scheduler may expand a percent sign in it, the engine reads a relative
 # folder against the run folder and protects whatever folder it is given, a drive's root included, and creates
 # only the last component. A folder that holds the run folder or a build tree would put them in the engine's protected
-# list, and one in a build tree is removed when scripts/box.sh or cargo clean recreates it (the round's final review,
-# W12). $trees are the script's; the comparisons end each folder in a backslash, so C:\lazymkv-data passes.
+# list, one in a build tree is removed when scripts/box.sh or cargo clean recreates it, and one elsewhere under the run
+# folder's parent sits where a non-elevated process may write (the round's final review, W12). $trees are the script's;
+# the comparisons end each folder in a backslash, so C:\lazymkv-data passes.
 function Get-DataProblem([string]$data, [string]$run, [string[]]$trees) {
     if ($data -notmatch '^[A-Za-z]:\\[^:<>|?*"%\s]*\z') {
         return "-Data $data is not a full local folder path with no space, quote or percent sign, such as D:\lazymkv-data; the task's argument line is not quoted, and the engine reads a relative folder inside $run (design part 3.1)"
@@ -68,6 +69,9 @@ function Get-DataProblem([string]$data, [string]$run, [string[]]$trees) {
     # The deepest tree the folder is in, so C:\lazymkv\src\data names C:\lazymkv\src rather than its parent.
     $tree = @($trees | Where-Object { $full -eq $_ -or $full.StartsWith("$_\", $ignoreCase) } | Sort-Object Length -Descending)
     if ($tree.Count -gt 0) {
+        if ($tree[0] -eq (Split-Path $run)) {
+            return "-Data $data is in $($tree[0]), the run folder's parent, which a non-elevated process may write on this machine (Owner decision 13, Ruling T3-24-c); give a folder outside it (design part 3.5)"
+        }
         return "-Data $data is in $($tree[0]), which scripts/box.sh or cargo clean recreates; give a folder outside C:\lazymkv (design part 3.5)"
     }
     if (-not (Test-Path -LiteralPath (Split-Path $full) -PathType Container)) {
