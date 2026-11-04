@@ -390,15 +390,20 @@ fn with_root(h: &Harness, key: &str, root: &Path) {
     h.restart();
 }
 
-/// Design part 6.2, Ruling W15: CheckSpace creates a missing staging_root whose parent is a folder before the rip
-/// writes into it.
+/// Design part 6.2, Ruling W15: CheckSpace itself creates a missing staging_root whose parent is a folder, before its
+/// space check: with too little space the job stops in AwaitingSpace, before any rip could make a folder, and the root
+/// is there and empty (review round 1 of pull request 3, R18).
 #[test]
 fn a_missing_staging_root_under_an_existing_parent_is_created_at_check_space() {
     let h = harness(&[], json!({}));
     let engine = h.staging().join("engine");
     with_root(&h, "staging_root", &engine);
-    let id = run_to(&h, "Ejected");
-    assert!(engine.join(&id).join("rip").join(KEY).join("title_t00.mkv").is_file());
+    h.shares().set_free(&root(&engine), 100);
+    let id = run_to(&h, "AwaitingSpace");
+    h.settle();
+    assert!(engine.is_dir(), "CheckSpace did not make the staging root");
+    assert_eq!(fs::read_dir(&engine).unwrap().count(), 0);
+    assert_eq!(h.record(&id).state, State::AwaitingSpace { return_to: Box::new(State::Planned { mode: Mode::Direct }) });
 }
 
 /// Ruling W15: only the last folder is ever created; a staging root whose parent is missing is ShareLost naming both.
