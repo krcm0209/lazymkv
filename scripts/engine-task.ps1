@@ -75,7 +75,9 @@ function Get-DataFolder([string]$data) {
 
 # What the script says when lazymkvctl status never answered (review round 1 of pull request 3, V15). A start-up
 # refusal reaches only the task's console window at the mini PC's monitor, never engine.log, whose first line start
-# writes (design part 3.5).
+# writes (design part 3.5). The last result is Task Scheduler's own code (0x0004xxxx, such as 0x41303 "has not yet
+# run", 0x8004xxxx, or a 0x8007xxxx launch failure) when the task did not start the engine, and the engine's exit code
+# otherwise: 0, 101 for a panic, or a crash code such as 0xC0000005 (the round's final review, W11).
 function Get-NoAnswerText([string]$state, [long]$result, [string]$folder, [string]$command) {
     if ($state -eq 'Running') {
         return "the task's engine is running, but lazymkvctl status did not answer within 60 s; run lazymkvctl status again, and read $folder\engine.log"
@@ -83,7 +85,13 @@ function Get-NoAnswerText([string]$state, [long]$result, [string]$folder, [strin
     if ($result -eq 1 -or $result -eq 2) {
         return "the task's engine exited with $result before lazymkvctl status answered; a start-up refusal goes only to the task's console window at the mini PC's monitor, not to engine.log, so run $command in this elevated console to read it, and stop it with lazymkvctl stop if it starts; a failure after its start is in $folder\engine.log (design parts 3.1, 3.5)"
     }
-    "the task did not run the engine (its last result is 0x{0:X8}); it runs only while the owner is logged on at the mini PC's own monitor, a locked session being enough (design part 3.1)" -f $result
+    $facility = ($result -shr 16) -band 0xFFFF
+    if ($facility -in 0x0004, 0x8004, 0x8007) {
+        return "the task did not run the engine (its last result is 0x{0:X8}); it runs only while the owner is logged on at the mini PC's own monitor, a locked session being enough (design part 3.1)" -f $result
+    }
+    # The code is formatted alone, so a brace in -Data's folder or command never reaches -f.
+    $code = '{0:X8}' -f $result
+    "the task's engine exited with 0x$code before lazymkvctl status answered; a failure after its start is in $folder\engine.log, and a start-up refusal goes only to the task's console window at the mini PC's monitor, so run $command in this elevated console to see it, and stop it with lazymkvctl stop if it starts (design parts 3.1, 3.5)"
 }
 
 # The entries of an access list as Windows writes them back, where some SIDs become aliases, the built-in

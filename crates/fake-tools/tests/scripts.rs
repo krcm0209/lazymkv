@@ -219,24 +219,40 @@ fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplac
 
 /// Review round 1 of pull request 3 (V15): when lazymkvctl status never answered, the text follows the task's state
 /// and last result: a running engine sends the reader to engine.log, an exit with 1 or 2 to the printed command, since
-/// a start-up refusal reaches only the task's console window, and any other result to the owner's logon.
+/// a start-up refusal reaches only the task's console window, Task Scheduler's own codes (0x0004xxxx, 0x8004xxxx,
+/// 0x8007xxxx) to the owner's logon, and any other result, the engine's own exit code, to engine.log and the printed
+/// command (the round's final review (W11)). The results are given in decimal, since PowerShell reads 0xC0000005 as a
+/// negative Int32 and Task Scheduler's LastTaskResult is unsigned.
 #[cfg(windows)]
 #[test]
 fn the_task_scripts_no_answer_text_follows_the_tasks_state_and_result() {
     let (path, _) = script();
     let command = r"C:\lazymkv\run\lazymkv-engine.exe --data C:\x";
-    let call = format!(
-        "Get-NoAnswerText 'Running' 267009 'C:\\x' '{command}'\r\n\
-         Get-NoAnswerText 'Ready' 1 'C:\\x' '{command}'\r\n\
-         Get-NoAnswerText 'Ready' 267011 'C:\\x' '{command}'"
-    );
+    // 0x41301 running, 1, 0x41303 not yet run, 0, 0xC0000005, 0x80070002.
+    let results = [
+        ("Running", 267_009_u64),
+        ("Ready", 1),
+        ("Ready", 267_011),
+        ("Ready", 0),
+        ("Ready", 3_221_225_477),
+        ("Ready", 2_147_942_402),
+    ];
+    let call = results
+        .iter()
+        .map(|(state, result)| format!("Get-NoAnswerText '{state}' {result} 'C:\\x' '{command}'"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
     let output = define_and_call(&path, &["Get-NoAnswerText"], &[], &call);
     let lines = output.lines().map(str::trim).collect::<Vec<_>>();
-    assert_eq!(lines.len(), 3, "{output}");
+    assert_eq!(lines.len(), results.len(), "{output}");
+    let exited = |code: &'static str| vec![code, r"C:\x\engine.log", command, "console window"];
     for (line, needles) in lines.iter().zip([
-        [r"C:\x\engine.log", r"C:\x"],
-        [command, "console window"],
-        ["0x00041303", "logged on"],
+        vec![r"C:\x\engine.log", r"C:\x"],
+        vec![command, "console window"],
+        vec!["0x00041303", "logged on"],
+        exited("exited with 0x00000000"),
+        exited("exited with 0xC0000005"),
+        vec!["0x80070002", "logged on"],
     ]) {
         for needle in needles {
             assert!(line.contains(needle), "{line} lacks {needle}");
