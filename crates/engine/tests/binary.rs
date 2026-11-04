@@ -1,7 +1,8 @@
-//! The engine binary (design parts 3.1, 4.2; S28; Rulings W1, W2, M7). Outside Windows it creates nothing and exits 1
-//! with S28's sentence. On Windows only its refusals before a start run here, its usage errors and an argument that is
-//! not Unicode: a start would take the engine's mutex and pipe, so Task T3-23 tests the start through
-//! `native::run_with` with names of its own (`engine_native.rs`).
+//! The engine binary (design parts 3.1, 4.2; S28; Rulings W1, W2, M7). Outside Windows it creates nothing and exits 1,
+//! with S28's sentence, or with M7's refusal for an argument that is not Unicode (review round 1 of pull request 3,
+//! R5), which every system tests. On Windows only its refusals before a start run here, and its usage errors: a start
+//! would take the engine's mutex and pipe, so Task T3-23 tests the start through `native::run_with` with names of its
+//! own (`engine_native.rs`).
 
 use std::ffi::OsString;
 use std::io::Read;
