@@ -328,6 +328,35 @@ fn an_unreachable_library_at_check_space_names_it_in_the_waiting_message() {
     assert!(log.contains(&format!("check space: {why}")), "{log}");
 }
 
+/// Review round 1 of pull request 3 (R33, R11): CheckSpace reaches a staging share that does not answer once, never
+/// reaches the library after it, and writes no access line for a root it did not use.
+#[test]
+fn an_unreachable_staging_is_reached_once_and_logs_no_stale_access() {
+    let h = harness(&[], json!({}));
+    let (staging, library) = (root(h.staging()), root(h.library()));
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".into()));
+    h.shares().set_access(&library, "the session's access");
+    let id = run_to(&h, "AwaitingShare");
+    h.settle();
+    assert_eq!(h.shares().reaches(&staging), 1);
+    assert_eq!(h.shares().reaches(&library), 0);
+    assert_eq!(h.record(&id).message, Some(format!("{staging} is unreachable: gone")));
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("share access for"), "{log}");
+}
+
+/// Review round 1 of pull request 3 (R33): CheckSpace reaches each root once, staging included.
+#[test]
+fn a_reachable_staging_is_reached_once_at_check_space() {
+    let h = harness(&[], json!({}));
+    let (staging, library) = (root(h.staging()), root(h.library()));
+    h.shares().set_free(&staging, 100);
+    run_to(&h, "AwaitingSpace");
+    h.settle();
+    assert_eq!(h.shares().reaches(&staging), 1);
+    assert_eq!(h.shares().reaches(&library), 1);
+}
+
 /// Review round 1, V5 (spec 7, 10.1, 10.2; RR1-8): a title staging folder that cannot be emptied or made is a write
 /// error on staging, classed by the share check, so the job waits in AwaitingShare to return to Ripping instead of
 /// failing; makemkvcon never runs.

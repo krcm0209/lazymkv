@@ -61,8 +61,8 @@ use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepR
 use crate::restart::READ_BACK_LINE;
 use crate::selftest::MakeMkv;
 use crate::space::{
-    library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check, rip_promise, staged_bytes,
-    staged_remux_check, Promises,
+    library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
+    staged_remux_check, unreachable, Promises,
 };
 use crate::store::Store;
 use crate::EngineConfig;
@@ -1001,13 +1001,15 @@ impl Step<'_> {
         }
     }
 
-    /// CheckSpace in Planned (design part 5.8): `rip_check` of the plan's rip and remux promises, staging against the
-    /// library root of the plan's kind, its result through `space_result`. An unset `staging_root` gives ShareLost
-    /// saying so. A staging root that answers `reach` is made first when only its last folder is missing (`make_root`,
-    /// design part 6.2, Ruling W15), and one that cannot be made gives ShareLost with `make_root`'s sentence; one that
-    /// does not answer is named by `rip_check`'s own `reach`. Every share read runs here, on the step's thread, before
-    /// `rip_check` locks the promises (engine.md:584). Then job.log gets `share access for <root>: <access>` for
-    /// staging and the library root whose `access` reports one (design parts 6.1, 7.1).
+    /// CheckSpace in Planned (design part 5.8): `rip_check_reached` of the plan's rip and remux promises, staging
+    /// against the library root of the plan's kind, its result through `space_result`. An unset `staging_root` gives
+    /// ShareLost saying so. Each root is reached once (review round 1 of pull request 3, R33): staging first, then
+    /// `make_root` of staging, which makes it when only its last folder is missing (design part 6.2, Ruling W15), then
+    /// the library root. A root that does not answer gives ShareLost with `<root> is unreachable: <why>`, and a staging
+    /// root that cannot be made ShareLost with `make_root`'s sentence; nothing after it is reached. Each root's job.log
+    /// line `share access for <root>: <access>`, when `access` reports one, follows its own root's reach, so job.log
+    /// names only accesses this check used (design parts 6.1, 7.1; review round 1 of pull request 3, R11). Every share
+    /// read runs here, on the step's thread, before `rip_check_reached` locks the promises (engine.md:584).
     fn check_space(&self) -> Outcome {
         let record = &self.job.record;
         let Some(plan) = &record.plan else {
@@ -1023,17 +1025,22 @@ impl Step<'_> {
         self.check_cancel()?;
         let (rip_bytes, remux_bytes) = (rip_promise(plan, disc_size), planned_remux_promise(plan));
         let shares = self.steps.shares.as_ref();
-        if shares.reach(staging) == Reach::Reachable {
-            if let Err(sentence) = make_root(staging) {
-                return Ok(self.space_result((Event::ShareLost, Some(sentence))));
+        let reached = |root: &str| match shares.reach(root) {
+            Reach::Unreachable(why) => Err(unreachable(root, &why)),
+            Reach::Reachable => {
+                if let Some(access) = shares.access(root) {
+                    self.log(&format!("share access for {root}: {access}"));
+                }
+                Ok(())
             }
-        }
-        let checked = rip_check(rip_bytes, remux_bytes, staging, library, shares, &self.steps.promises, self.id);
-        for root in std::iter::once(staging).chain(library) {
-            if let Some(access) = shares.access(root) {
-                self.log(&format!("share access for {root}: {access}"));
+        };
+        let ready = reached(staging).and_then(|()| make_root(staging)).and_then(|()| library.map_or(Ok(()), reached));
+        let checked = match ready {
+            Err(sentence) => (Event::ShareLost, Some(sentence)),
+            Ok(()) => {
+                rip_check_reached(rip_bytes, remux_bytes, staging, library, shares, &self.steps.promises, self.id)
             }
-        }
+        };
         Ok(self.space_result(checked))
     }
 

@@ -75,8 +75,8 @@ pub(crate) fn volume_of(shares: &dyn ShareConnector, root: &str) -> String {
 }
 
 /// ShareLost's sentence for a root that does not answer: `<root> is unreachable: <why>` (design part 6.1, "the error
-/// says which"; review round 1, V15).
-fn unreachable(root: &str, why: &str) -> String {
+/// says which"; review round 1, V15). CheckSpace words its own reach with it (review round 1 of pull request 3, R33).
+pub(crate) fn unreachable(root: &str, why: &str) -> String {
     format!("{root} is unreachable: {why}")
 }
 
@@ -158,8 +158,8 @@ pub(crate) fn released_steps(transition: &Transition) -> Vec<PromisedStep> {
 /// read: <error>`; design part 6.1, review round 1's V15); every other event comes with none. It reads `reach`,
 /// `volume` and `free_bytes` (staging's, and the library's when on its own volume) before it locks `promises`, and
 /// holds the lock only to add the promised amounts, compare and promise, so a share that stalls never holds the lock
-/// the owner thread takes (engine.md:584). Def: T23, its sentence PR #6 review (V15), its lock T3-17. Use: T23, T26,
-/// T3-17.
+/// the owner thread takes (engine.md:584). It reaches the roots and then runs `rip_check_reached`. Def: T23, its
+/// sentence PR #6 review (V15), its lock T3-17, its split PR #14 review round 1 (R33). Use: T23, T26, T3-17.
 pub(crate) fn rip_check(
     rip_bytes: u64,
     remux_bytes: u64,
@@ -174,6 +174,22 @@ pub(crate) fn rip_check(
             return (Event::ShareLost, Some(unreachable(root, &why)));
         }
     }
+    rip_check_reached(rip_bytes, remux_bytes, staging, library, shares, promises, job)
+}
+
+/// `rip_check` past its `reach`, for a caller that reached staging and the library root this time: CheckSpace, which
+/// makes the staging root between the two (review round 1 of pull request 3, R33). It reads `volume` and `free_bytes`
+/// before it locks `promises` (engine.md:584), and gives what `rip_check` gives after its reach. Def: PR #14 review
+/// round 1 (R33). Use: `rip_check`, `check_space`.
+pub(crate) fn rip_check_reached(
+    rip_bytes: u64,
+    remux_bytes: u64,
+    staging: &str,
+    library: Option<&str>,
+    shares: &dyn ShareConnector,
+    promises: &Mutex<Promises>,
+    job: &str,
+) -> (Event, Option<String>) {
     let staging_volume = volume_of(shares, staging);
     let library_volume = library.map(|root| volume_of(shares, root));
     let shared = library_volume.as_deref().is_none_or(|volume| volume == staging_volume);
