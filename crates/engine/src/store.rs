@@ -4,8 +4,11 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use lazymkv_core::record::{
     check_format, DrivesFile, JobRecord, Transition, DRIVES_FORMAT, JOB_FORMAT, REMEMBERED_FORMAT,
@@ -36,6 +39,14 @@ const JOB_LOG: &str = "job.log";
 /// two tries (RR1-2): 5 on Windows; elsewhere no other process's handle stops a read or a rename, so one try.
 const REPLACE_TRIES: u32 = if cfg!(windows) { 5 } else { 1 };
 const REPLACE_PAUSE: Duration = Duration::from_millis(100);
+/// How many engine.log lines the console mirror's queue holds before it drops the console copy (review round 1 of pull
+/// request 3, V5). Def: PR #14 review round 1 (V5). Use: owner.rs.
+pub(crate) const CONSOLE_QUEUE: usize = 1024;
+/// How long `EngineHandle::stop` waits for the console mirror's queue to empty (review round 1 of pull request 3, V5).
+/// Def: PR #14 review round 1 (V5). Use: owner.rs.
+pub(crate) const CONSOLE_DRAIN: Duration = Duration::from_secs(1);
+/// How often `MirrorDrain::drain` looks at the mirror.
+const DRAIN_POLL: Duration = Duration::from_millis(20);
 
 /// What `Store::persist` wrote (design part 7.3; review round 1, V1, RR1-3). Def: PR #6 review (V1). Use: owner.rs.
 #[derive(Debug)]
@@ -72,7 +83,8 @@ pub(crate) struct Store {
     data: PathBuf,
     /// The Unix seconds of engine.log lines.
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
-    /// Standard error in a console run. Its lock also keeps engine.log's lines whole and in order.
+    /// Standard error in a console run, a ConsoleMirror in an engine, so the lock is never held across a console write
+    /// (review round 1 of pull request 3, V5). Its lock also keeps engine.log's lines whole and in order.
     console: Mutex<Option<Box<dyn Write + Send>>>,
     /// Held across every write of a persisted file (design part 7.4), so the store is the one writer per path.
     writing: Mutex<()>,
@@ -280,6 +292,137 @@ impl Store {
     }
 }
 
+/// The writing end of a console mirror (`console_mirror`): it queues each write for the mirror thread and never
+/// blocks (review round 1 of pull request 3, V5). Def: PR #14 review round 1 (V5). Use: owner.rs.
+pub(crate) struct ConsoleMirror {
+    /// The mirror thread's bounded queue.
+    queue: SyncSender<Vec<u8>>,
+    /// The writes queued and not yet written, and a notice while it is written.
+    pending: Arc<AtomicUsize>,
+    /// The writes a full queue dropped since the last notice.
+    dropped: Arc<AtomicUsize>,
+}
+
+/// What waits for a console mirror's queue to empty (`console_mirror`; review round 1 of pull request 3, V5).
+/// Def: PR #14 review round 1 (V5). Use: owner.rs.
+pub(crate) struct MirrorDrain {
+    /// `ConsoleMirror::pending`.
+    pending: Arc<AtomicUsize>,
+    /// The mirror thread.
+    thread: JoinHandle<()>,
+}
+
+/// A console mirror over `writer` (review round 1 of pull request 3, V5): a thread named `console-mirror` owns
+/// `writer` and writes, then flushes, each buffer the ConsoleMirror queued, ignoring errors, from a queue of
+/// `capacity` buffers. A write the full queue cannot take is dropped from the console only, and counted; once the queue
+/// is empty the thread first writes one notice of how many it dropped. A console that takes no output, as a conhost
+/// selection, mark, scroll-thumb hold or Pause makes it, so blocks only this thread, never a writer. The thread ends
+/// once every ConsoleMirror is gone. Def: PR #14 review round 1 (V5). Use: owner.rs.
+pub(crate) fn console_mirror(writer: Box<dyn Write + Send>, capacity: usize) -> (ConsoleMirror, MirrorDrain) {
+    let (queue, lines) = sync_channel::<Vec<u8>>(capacity);
+    let pending = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let thread = {
+        let (pending, dropped) = (Arc::clone(&pending), Arc::clone(&dropped));
+        thread::Builder::new()
+            .name("console-mirror".to_string())
+            .spawn(move || run_mirror(writer, &lines, &pending, &dropped))
+            .expect("the console mirror thread starts")
+    };
+    (ConsoleMirror { queue, pending: Arc::clone(&pending), dropped }, MirrorDrain { pending, thread })
+}
+
+/// The console mirror thread's loop (`console_mirror`). The count of the last line or notice written stays in
+/// `pending` until the next one is counted or the queue is found empty, so `pending` never reads 0 between a last line
+/// and the notice that follows it.
+fn run_mirror(
+    mut writer: Box<dyn Write + Send>,
+    lines: &Receiver<Vec<u8>>,
+    pending: &AtomicUsize,
+    dropped: &AtomicUsize,
+) {
+    let mut show = |bytes: &[u8]| {
+        let _ = writer.write_all(bytes);
+        let _ = writer.flush();
+    };
+    let mut held = 0;
+    loop {
+        let line = match lines.try_recv() {
+            Ok(line) => Some(line),
+            Err(empty) => {
+                let missed = dropped.swap(0, Ordering::SeqCst);
+                if missed > 0 {
+                    pending.fetch_add(1, Ordering::SeqCst);
+                    pending.fetch_sub(held, Ordering::SeqCst);
+                    show(format!("{}\n", mirror_notice(missed)).as_bytes());
+                    held = 1;
+                    continue;
+                }
+                pending.fetch_sub(held, Ordering::SeqCst);
+                held = 0;
+                if empty == TryRecvError::Disconnected {
+                    return;
+                }
+                lines.recv().ok()
+            }
+        };
+        if let Some(line) = line {
+            pending.fetch_sub(held, Ordering::SeqCst);
+            show(&line);
+            held = 1;
+        }
+    }
+}
+
+/// The console mirror's notice of `missed` lines a full queue dropped (review round 1 of pull request 3, V5).
+fn mirror_notice(missed: usize) -> String {
+    format!(
+        "lazymkv-engine: {missed} engine.log lines were not shown here because the console took no output; engine.log \
+         holds them"
+    )
+}
+
+impl Write for ConsoleMirror {
+    /// Queues a copy of `buf` for the mirror thread and gives `Ok(buf.len())` at once: a full queue drops it and
+    /// counts it, and a mirror thread that is gone drops it (review round 1 of pull request 3, V5).
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        match self.queue.try_send(buf.to_vec()) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.pending.fetch_sub(1, Ordering::SeqCst);
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.pending.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    /// Nothing: the mirror thread flushes after each write.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl MirrorDrain {
+    /// Looks every 20 ms until nothing queued is left to write or the mirror thread has ended, and gives true; false
+    /// once `limit` has passed (review round 1 of pull request 3, V5). Def: PR #14 review round 1 (V5). Use: owner.rs.
+    pub(crate) fn drain(&self, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if self.pending.load(Ordering::SeqCst) == 0 || self.thread.is_finished() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(DRAIN_POLL);
+        }
+    }
+}
+
 /// A job's state.json at `path` replaced with `bytes` (design parts 7.3, 7.4): `refuse_foreign`'s check, the job folder
 /// made, then `write_atomic`. Each error names its file, `<path>: <reason>`, with its `ErrorKind` kept (the final
 /// review of review round 1, C3). On Windows the whole is tried again while another process holds state.json (RR1-2,
@@ -425,7 +568,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
 
     use lazymkv_core::job::{Action, Event, State};
     use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
@@ -464,6 +607,58 @@ mod tests {
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// A console that takes no output while closed, as a conhost selection or Pause makes it (review round 1 of pull
+    /// request 3, V5): `write` signals it was entered, waits on the Condvar without holding the buffer's lock, and
+    /// appends once the gate is open.
+    #[derive(Clone, Default)]
+    struct Gate {
+        /// (open, entered) and the Condvar both wait on.
+        state: Arc<(Mutex<(bool, bool)>, Condvar)>,
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+    impl Gate {
+        fn open(&self) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().0 = true;
+            changed.notify_all();
+        }
+        fn wait_entered(&self) {
+            let (state, changed) = &*self.state;
+            let (entered, waited) =
+                changed.wait_timeout_while(state.lock().unwrap(), Duration::from_secs(5), |state| !state.1).unwrap();
+            drop(entered);
+            assert!(!waited.timed_out(), "the console mirror never wrote to the gate");
+        }
+        fn text(&self) -> String {
+            String::from_utf8(self.buffer.lock().unwrap().clone()).unwrap()
+        }
+    }
+    impl Write for Gate {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let (state, changed) = &*self.state;
+            let mut entered = state.lock().unwrap();
+            entered.1 = true;
+            changed.notify_all();
+            drop(changed.wait_while(entered, |state| !state.0).unwrap());
+            self.buffer.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A console that is gone: every write gives BrokenPipe.
+    struct Gone;
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
         }
     }
 
@@ -778,5 +973,69 @@ mod tests {
         let quiet = Temp::new("log-quiet");
         Store::new(quiet.0.clone(), Arc::new(|| 8), None).log("x");
         assert_eq!(fs::read_to_string(quiet.0.join("engine.log")).unwrap(), "8 x\n");
+    }
+
+    /// Review round 1 of pull request 3 (V5).
+    #[test]
+    fn a_console_that_takes_no_output_never_holds_up_engine_log() {
+        let tmp = Temp::new("mirror-held");
+        let gate = Gate::default();
+        let (mirror, drain) = console_mirror(Box::new(gate.clone()), CONSOLE_QUEUE);
+        let store = Arc::new(Store::new(tmp.0.clone(), Arc::new(|| 7), Some(Box::new(mirror))));
+        let (done, finished) = mpsc::channel();
+        for writer in 0..2 {
+            let (store, done) = (Arc::clone(&store), done.clone());
+            thread::spawn(move || {
+                for n in 0..50 {
+                    store.log(&format!("writer {writer} line {n}"));
+                }
+                let _ = done.send(());
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for _ in 0..2 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(finished.recv_timeout(left).is_ok(), "50 log calls had not returned within 2 s");
+        }
+        let log = fs::read_to_string(tmp.0.join("engine.log")).unwrap();
+        assert_eq!(log.lines().count(), 100, "{log}");
+        assert!(!drain.drain(Duration::from_millis(100)), "the held console took the lines");
+        gate.open();
+        assert!(drain.drain(Duration::from_secs(5)), "the console mirror did not drain");
+        assert_eq!(gate.text(), log);
+    }
+
+    /// Review round 1 of pull request 3 (V5).
+    #[test]
+    fn a_full_console_queue_drops_only_the_console_copy_and_says_so() {
+        let tmp = Temp::new("mirror-full");
+        let gate = Gate::default();
+        let (mirror, drain) = console_mirror(Box::new(gate.clone()), 2);
+        let store = Store::new(tmp.0.clone(), Arc::new(|| 7), Some(Box::new(mirror)));
+        store.log("line 1");
+        gate.wait_entered();
+        for n in 2..=5 {
+            store.log(&format!("line {n}"));
+        }
+        gate.open();
+        assert!(drain.drain(Duration::from_secs(5)), "the console mirror did not drain");
+        let notice = "lazymkv-engine: 2 engine.log lines were not shown here because the console took no output; \
+                      engine.log holds them\n";
+        assert_eq!(gate.text(), format!("7 line 1\n7 line 2\n7 line 3\n{notice}"));
+        let log = fs::read_to_string(tmp.0.join("engine.log")).unwrap();
+        assert_eq!(log, "7 line 1\n7 line 2\n7 line 3\n7 line 4\n7 line 5\n");
+    }
+
+    /// Review round 1 of pull request 3 (V5).
+    #[test]
+    fn a_console_that_is_gone_drains_at_once() {
+        let tmp = Temp::new("mirror-gone");
+        let (mirror, drain) = console_mirror(Box::new(Gone), CONSOLE_QUEUE);
+        let store = Store::new(tmp.0.clone(), Arc::new(|| 7), Some(Box::new(mirror)));
+        let started = Instant::now();
+        store.log("engine started");
+        assert!(drain.drain(Duration::from_secs(1)), "the console mirror did not drain");
+        assert!(started.elapsed() < Duration::from_millis(500), "the drain took {:?}", started.elapsed());
+        assert_eq!(fs::read_to_string(tmp.0.join("engine.log")).unwrap(), "7 engine started\n");
     }
 }

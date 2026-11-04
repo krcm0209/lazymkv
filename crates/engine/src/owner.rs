@@ -57,7 +57,7 @@ use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
 use crate::steps::{spawn_round, RealSteps};
 #[cfg(any(test, feature = "testkit"))]
 use crate::store::PersistFaults;
-use crate::store::{Persisted, Store};
+use crate::store::{console_mirror, MirrorDrain, Persisted, Store, CONSOLE_DRAIN, CONSOLE_QUEUE};
 use crate::timers::Timers;
 use crate::EngineConfig;
 
@@ -226,7 +226,15 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
 pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
     let Services { platform, http, notify, timers, steps } = services;
     let clock = Arc::clone(&platform.host);
-    let console = config.console.take();
+    // Review round 1 of pull request 3 (V5): the console is written by a mirror thread of its own, so no engine
+    // thread waits on a console that takes no output.
+    let (console, mirror) = match config.console.take() {
+        Some(writer) => {
+            let (mirror, drain) = console_mirror(writer, CONSOLE_QUEUE);
+            (Some(Box::new(mirror) as Box<dyn io::Write + Send>), Some(drain))
+        }
+        None => (None, None),
+    };
     let store = Store::new(config.data.clone(), Arc::new(move || clock.now_unix()), console);
     #[cfg(any(test, feature = "testkit"))]
     let store = match hooks.persist_faults {
@@ -322,6 +330,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         serve_stop,
         ipc: transport,
         clients,
+        mirror,
     })
 }
 
@@ -353,6 +362,9 @@ pub struct EngineHandle {
     ipc: Arc<dyn IpcTransport>,
     /// The owner's clients; `stop` drains their writers.
     clients: Arc<Clients>,
+    /// The console mirror's drain, when the engine has a console; `stop` waits for it (review round 1 of pull request
+    /// 3, V5).
+    mirror: Option<MirrorDrain>,
 }
 
 impl EngineHandle {
@@ -410,13 +422,14 @@ impl EngineHandle {
     /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops; the
     /// owner then waits for every step, recording, eject and check it started, closes every client, and the notifier
     /// delivers what was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
-    /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4). An arrival still waiting for its volume is
-    /// not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that panics still
-    /// reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked. Def: T22,
-    /// T3-10. Use: T22 to T29, T3-23.
+    /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at
+    /// most CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for
+    /// its volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
+    /// panics still reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked.
+    /// Def: T22, T3-10, PR #14 review round 1 (V5). Use: T22 to T29, T3-23.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
-            sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, ipc, clients, ..
+            sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, ipc, clients, mirror, ..
         } = self;
         serve_stop.store(true, Ordering::SeqCst);
         ipc.close();
@@ -429,6 +442,9 @@ impl EngineHandle {
         let _ = notifier_done.recv();
         clients.drain(CLIENT_DRAIN);
         store.log("engine stopped");
+        if let Some(mirror) = &mirror {
+            let _ = mirror.drain(CONSOLE_DRAIN);
+        }
         if served.is_err() || drive.is_err() || owner.is_err() {
             return Err(io::Error::other("lazymkv-engine: an engine thread panicked"));
         }

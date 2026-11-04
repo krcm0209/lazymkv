@@ -2065,6 +2065,41 @@ fn a_console_engine_mirrors_its_log_lines_to_its_console_writer() {
     assert!(log.contains(" engine started (lazymkv ") && log.contains(" engine stopped\n"), "{log}");
 }
 
+/// Review round 1 of pull request 3 (V5): a console that takes no output, as a conhost selection or Pause makes it,
+/// holds up neither engine.log nor the engine's stop, and gets every line once it takes output again.
+#[test]
+fn a_held_console_stalls_neither_the_engine_nor_its_stop() {
+    let h = scripted(vec![]);
+    h.hold_console();
+    let bad = h.data().join("jobs").join("bad");
+    fs::create_dir_all(&bad).unwrap();
+    fs::write(bad.join("state.json"), r#"{"format":"lazymkv job v2"}"#).unwrap();
+    std::thread::scope(|scope| {
+        let restart = scope.spawn(|| h.restart());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !restart.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !restart.is_finished() {
+            h.release_console();
+            panic!("the restart had not returned 10 s after it began, with the console taking no output");
+        }
+        restart.join().unwrap();
+    });
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let log = h.engine_log();
+    assert!(log.contains(" engine stopped\n"), "{log}");
+    assert!(log.contains(" a job is refused and left alone: "), "{log}");
+    h.release_console();
+    let sorted = |text: String| {
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        lines.sort();
+        lines
+    };
+    h.wait("the console to hold every engine.log line", |h| sorted(h.console_text()) == sorted(h.engine_log()));
+}
+
 #[test]
 fn progress_pushes_name_the_action_and_the_title() {
     let h = stand_in(&["movie-direct"], settings());

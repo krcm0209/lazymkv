@@ -58,7 +58,8 @@ pub struct NativeOptions {
     pub secrets: Option<Arc<dyn SecretStore>>,
     /// None: `OfflineTransport` (Ruling W26).
     pub http: Option<Arc<dyn HttpTransport>>,
-    /// None: standard error (design part 3.5; Ruling W26).
+    /// None: standard error, written through the engine's console mirror (design part 3.5; Ruling W26; review round 1
+    /// of pull request 3, V5).
     pub console: Option<Box<dyn Write + Send>>,
     /// None: `win::on_console_stop`.
     pub console_stop: Option<Box<dyn FnOnce(Box<dyn Fn() + Send + Sync>) -> io::Result<()> + Send>>,

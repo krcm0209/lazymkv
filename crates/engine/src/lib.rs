@@ -45,7 +45,9 @@ pub struct EngineConfig {
     /// `COMMAND_NO_CTL`. Def: T3-10. Use: T3-22, T3-23.
     pub ctl: Option<PathBuf>,
     /// Where every engine.log line is also written: standard error in a console run (design part 3.5), the harness's
-    /// buffer in tests; None writes engine.log only. Def: T3-10. Use: T3-10, T3-23.
+    /// buffer in tests; None writes engine.log only. It is written by a thread of its own from a bounded queue, so no
+    /// engine thread waits on it; a full queue drops the console copy only (review round 1 of pull request 3, V5).
+    /// Def: T3-10. Use: T3-10, T3-23, PR #14 review round 1 (V5).
     pub console: Option<Box<dyn Write + Send>>,
 }
 

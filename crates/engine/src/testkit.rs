@@ -22,7 +22,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,8 +49,6 @@ use std::io::BufRead;
 use std::panic;
 #[cfg(windows)]
 use std::sync::mpsc::channel;
-#[cfg(windows)]
-use std::sync::Condvar;
 #[cfg(windows)]
 use std::thread::JoinHandle;
 
@@ -202,13 +200,23 @@ impl NotifySink for MemorySink {
     }
 }
 
+/// Whether a harness's console takes no output, as a conhost selection or Pause makes it (`Harness::hold_console`),
+/// and the Condvar its writers wait on (review round 1 of pull request 3, V5).
+type ConsoleHold = Arc<(Mutex<bool>, Condvar)>;
+
 /// The console writer every engine of a harness gets (`EngineConfig.console`, design part 3.5): it keeps what it is
-/// given in the harness's buffer.
-struct ConsoleBuffer(Arc<Mutex<Vec<u8>>>);
+/// given in the harness's buffer. While `hold` is raised its `write` waits, without holding the buffer's lock, as a
+/// console that takes no output does (review round 1 of pull request 3, V5).
+struct ConsoleBuffer {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    hold: ConsoleHold,
+}
 
 impl Write for ConsoleBuffer {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        lock(&self.0).extend_from_slice(buf);
+        let (held, released) = &*self.hold;
+        drop(released.wait_while(lock(held), |held| *held).unwrap_or_else(PoisonError::into_inner));
+        lock(&self.buffer).extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -444,6 +452,9 @@ pub struct Harness {
     ipc: Mutex<(Arc<MemoryIpc>, MemoryConnector)>,
     /// Everything every engine of this harness wrote to its console writer (`EngineConfig.console`).
     console: Arc<Mutex<Vec<u8>>>,
+    /// Raised by `hold_console`: the console writer of every engine of this harness then waits (review round 1 of
+    /// pull request 3, V5).
+    console_hold: ConsoleHold,
     host: Arc<FakeHost>,
     http: Arc<RecordedTransport>,
     timers: Arc<ManualTimers>,
@@ -611,7 +622,7 @@ impl Harness {
             }),
             path_var: Some(OsString::new()),
             ctl: self.ctl.clone(),
-            console: Some(Box::new(ConsoleBuffer(Arc::clone(&self.console)))),
+            console: Some(Box::new(self.console_buffer())),
         };
         let hook = Arc::clone(&self.hook);
         let stop_after: StopAfter = Arc::new(move |transition: &Transition| {
@@ -1085,6 +1096,33 @@ impl Harness {
         String::from_utf8_lossy(&lock(&self.console)).into_owned()
     }
 
+    /// Makes the console writer of every engine of this harness, the running one's included, take no output until
+    /// `release_console`: each `write` waits, as on a conhost console with a selection, a mark or Pause (review round
+    /// 1 of pull request 3, V5). Def: PR #14 review round 1 (V5). Use: PR #14 review round 1 (V5).
+    pub fn hold_console(&self) {
+        self.deliver();
+        *lock(&self.console_hold.0) = true;
+    }
+
+    /// Lets every console writer `hold_console` stopped write again (review round 1 of pull request 3, V5). The drop
+    /// calls it before it stops the engine. Def: PR #14 review round 1 (V5). Use: PR #14 review round 1 (V5).
+    pub fn release_console(&self) {
+        self.deliver();
+        self.unhold_console();
+    }
+
+    /// `release_console` without its `deliver`, for the drop.
+    fn unhold_console(&self) {
+        let (held, released) = &*self.console_hold;
+        *lock(held) = false;
+        released.notify_all();
+    }
+
+    /// A console writer over this harness's console buffer and hold (`EngineConfig.console`).
+    fn console_buffer(&self) -> ConsoleBuffer {
+        ConsoleBuffer { buffer: Arc::clone(&self.console), hold: Arc::clone(&self.console_hold) }
+    }
+
     /// The running engine's `EngineHandle::shutdown_handle`. Def: T3-10. Use: T3-10.
     pub fn shutdown_handle(&self) -> ShutdownHandle {
         self.deliver();
@@ -1160,14 +1198,14 @@ impl Harness {
             processes: Some(Arc::clone(&harness.processes)),
             secrets: Some(Arc::clone(&harness.secrets) as _),
             http: Some(Arc::clone(&harness.http) as _),
-            console: Some(Box::new(ConsoleBuffer(Arc::clone(&harness.console)))),
+            console: Some(Box::new(harness.console_buffer())),
             console_stop: Some(Box::new(console_stop)),
             token: None,
             program_data_var: None,
         };
         let args = vec!["--data".to_string(), harness.data.display().to_string()];
         let stderr = Arc::new(Mutex::new(Vec::new()));
-        let mut err = ConsoleBuffer(Arc::clone(&stderr));
+        let mut err = ConsoleBuffer { buffer: Arc::clone(&stderr), hold: ConsoleHold::default() };
         let run = thread::spawn(move || run_with(&args, &mut err, options));
         *lock(&harness.native) = Some(run);
         harness.wait_for_snapshot(&stderr);
@@ -1285,8 +1323,10 @@ impl Drop for Harness {
     /// Stops a running engine and removes the scratch folder. An engine thread that panicked fails the test here, as
     /// `run_until` and `restart` do, unless the test is already panicking (ruling at the final review). A native run
     /// still going is stopped first with a forced `shutdown` through its pipe, and an exit code other than 0 fails the
-    /// test the same way (Ruling T3-23-c).
+    /// test the same way (Ruling T3-23-c). A held console is released first (`release_console`), so no console mirror
+    /// is left waiting (review round 1 of pull request 3, V5).
     fn drop(&mut self) {
+        self.unhold_console();
         #[cfg(windows)]
         let native = self.stop_native();
         let engine = lock(&self.engine).take();
@@ -1376,6 +1416,7 @@ impl Folders {
             secrets: Arc::new(MemorySecrets::new().with("tmdb_token", "test-token")),
             ipc: Mutex::new((Arc::new(ipc), connector)),
             console: Arc::default(),
+            console_hold: ConsoleHold::default(),
             host: Arc::new(FakeHost::new("2026-10-23", 1_792_800_000)),
             http: Arc::new(runner.http),
             timers: Arc::new(ManualTimers::new()),
