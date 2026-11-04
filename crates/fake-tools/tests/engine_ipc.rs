@@ -1375,6 +1375,62 @@ fn a_lost_second_verify_failure_is_not_counted_and_retry_rips_again() {
     assert_eq!((title.attempts, title.verify_failures), (3, 2));
 }
 
+/// Review round 1 of pull request 3 (V7): a `rip_again` on an Ejected job whose refused LookupPending is kept persists
+/// a transition that leaves the state as it was and only runs ArmRipAgain, so the kept event stays for its refeed
+/// timer, which feeds it and takes the job to AwaitingLookup with its hourly timer. Before the fix the rip_again took
+/// the entry out, and the job sat in Ejected with no timer until a restart.
+#[test]
+fn a_rip_again_beside_a_kept_lookup_pending_leaves_it_to_its_refeed_timer() {
+    let h = stand_in(&[DISC_A, "movie-direct-lookup-later"], settings());
+    h.scan_waits_for_lookups(false);
+    h.refuse_persists(|_, transition| transition.event == Some(Event::LookupPending));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    let kept = format!("{id}: keeps its persisted state Ejected; LookupPending is fed again in 1 minute");
+    h.wait("LookupPending kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(c.ok("rip_again", json!({"job": id})), Value::Null);
+    let record = h.record(&id);
+    assert_eq!((record.state, record.rip_again), (State::Ejected { after_copy: false }, true));
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupPending)).unwrap();
+    assert_eq!(fed.old, Some(State::Ejected { after_copy: false }));
+    let record = h.record(&id);
+    assert!(record.message.is_some(), "the waiting message is fed again with the kept event");
+    assert!(record.rip_again);
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![60]);
+}
+
+/// Review round 1 of pull request 3 (V7): the same for a refused FilePhaseSlot grant: the `rip_again` leaves the kept
+/// grant to its refeed timer, which asks for the slot again, and the job files.
+#[test]
+fn a_rip_again_beside_a_kept_slot_grant_leaves_it_to_its_refeed_timer() {
+    let h = scripted(main_line());
+    h.refuse_persists(|_, transition| transition.event == Some(Event::FilePhaseSlot));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = id_of(&h, DISC_A);
+    let kept = format!("{a}: keeps its persisted state Ejected; FilePhaseSlot is fed again in 1 minute");
+    h.wait("FilePhaseSlot kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(c.ok("rip_again", json!({"job": a})), Value::Null);
+    assert!(h.record(&a).rip_again);
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    c.until_state(Some(&a), "Filed");
+    let granted = h.transitions(&a).into_iter().find(|line| line.event == Some(Event::FilePhaseSlot)).unwrap();
+    assert_eq!((granted.old, granted.new), (Some(State::Ejected { after_copy: false }), State::Inspecting));
+}
+
 // ---- Review actions (design part 9.4, P25, R-A8) ----
 
 fn held_script() -> Vec<(&'static str, StepScript)> {

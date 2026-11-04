@@ -886,7 +886,9 @@ struct Owner {
     kept: BTreeSet<String>,
     /// The event, with its message, that each job in Planned or RipVerified, or an Ejected job's FilePhaseSlot or
     /// LookupPending, was fed when its transition could not be persisted, fed again at its `REFEED_MINUTES` timer until
-    /// it persists (review round 1, V1; Rulings W23, T3-20-b). A persisted transition of the job takes its entry out.
+    /// it persists (review round 1, V1; Rulings W23, T3-20-b). A persisted transition of the job takes its entry out,
+    /// except one that leaves the state as it was and runs only ArmRipAgain or a RecordNote, which leaves it to its
+    /// refeed timer (review round 1 of pull request 3, V7).
     refeed: BTreeMap<String, (Event, Option<String>)>,
     /// The jobs whose refeed timer is pending (Ruling T3-20-a): a job gets a new refeed timer only when it has none, so
     /// its kept events are fed again by one chain of timers whatever entries `refeed` gains or loses meanwhile.
@@ -1553,7 +1555,9 @@ impl Owner {
     /// whose state.json was replaced but whose transitions line was lost counts as persisted, with the engine.log line
     /// `<id>: the transitions line of <event> into <state> was lost: <error>` (review round 1, V1, RR1-3). One that
     /// could not be persisted writes its engine.log line and gives the token back; a new job is then removed (S29), and
-    /// an existing one goes to `unpersisted`.
+    /// an existing one goes to `unpersisted`. A persisted transition takes the job's kept event out of `refeed`, unless
+    /// it leaves the state as it was and runs only ArmRipAgain or a RecordNote (review round 1 of pull request 3, V7):
+    /// a `rip_again` on an Ejected job whose FilePhaseSlot or LookupPending is kept leaves that event to its timer.
     fn persist_transition(
         &mut self,
         id: &str,
@@ -1622,7 +1626,16 @@ impl Owner {
             }
         }
         self.kept.remove(id);
-        self.refeed.remove(id);
+        // V7 (review round 1 of pull request 3): a transition that leaves the state as it was and starts nothing,
+        // RipAgain's ArmRipAgain or a RecordNote, leaves the kept event to its refeed timer; any other takes it out.
+        let record_only = transition.old.as_ref() == Some(&transition.new)
+            && transition
+                .actions
+                .iter()
+                .all(|action| matches!(action, Action::ArmRipAgain | Action::RecordNote { .. }));
+        if !record_only {
+            self.refeed.remove(id);
+        }
         lock(&self.shown).insert(id.to_string(), record.clone());
         if let Some(job) = self.jobs.get_mut(id) {
             job.record = record;
@@ -2286,7 +2299,8 @@ impl Owner {
 
     /// A refeed timer ran out (Rulings W23, T3-20-a): the job's timer is no longer pending (`refeed_armed`), and its
     /// kept event, if it still has one, is fed again (`feed_again`). An entry a persisted transition took out leaves
-    /// nothing to do, whatever state the job is in now.
+    /// nothing to do, whatever state the job is in now; a transition that left the state as it was and ran only
+    /// ArmRipAgain or a RecordNote left the entry in place (review round 1 of pull request 3, V7).
     fn on_refeed(&mut self, id: &str) {
         self.refeed_armed.remove(id);
         if let Some((event, message)) = self.refeed.remove(id) {
