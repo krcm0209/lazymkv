@@ -1051,14 +1051,11 @@ impl Step<'_> {
     }
 
     /// The staging share's health as `classify_title_failure` reads it (design part 5.6 step 6): whether `reach` finds
-    /// the staging root reachable, and whether its free space reads as below `OUT_OF_SPACE` (R23.6).
+    /// the staging root reachable, and whether its free space reads as below `OUT_OF_SPACE` (R23.6), read only from a
+    /// share that answered (`staging_health_of`; review round 1 of pull request 3, R34).
     fn staging_health(&self) -> StagingHealth {
         let staging = self.job.settings.staging_root.as_deref().unwrap_or_default();
-        let shares = self.steps.shares.as_ref();
-        StagingHealth {
-            share_healthy: shares.reach(staging) == Reach::Reachable,
-            out_of_space: shares.free_bytes(staging).is_ok_and(|free| free < OUT_OF_SPACE),
-        }
+        staging_health_of(self.steps.shares.as_ref(), staging)
     }
 
     /// RipTitle (design part 5.6 step 6): the first title not done, its earlier attempt moved aside, its staging folder
@@ -1986,10 +1983,34 @@ impl Step<'_> {
     }
 }
 
+/// The staging share's health of `Step::staging_health`: whether `reach` finds `staging` reachable, and whether its
+/// free space reads as below `OUT_OF_SPACE` (R23.6). Free space is read only from a share that answered, since
+/// `classify_title_failure` ignores it otherwise (review round 1 of pull request 3, R34). Def: PR #14 review round 1
+/// (R34). Use: `Step::staging_health`.
+fn staging_health_of(shares: &dyn ShareConnector, staging: &str) -> StagingHealth {
+    let share_healthy = shares.reach(staging) == Reach::Reachable;
+    let out_of_space = share_healthy && shares.free_bytes(staging).is_ok_and(|free| free < OUT_OF_SPACE);
+    StagingHealth { share_healthy, out_of_space }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lazymkv_core::testsupport::{default_profile_xml, ustar_build, Scratch, ScratchExt};
+
+    /// Review round 1 of pull request 3 (R34): free space is read only from a staging share that answered.
+    #[test]
+    fn a_staging_share_that_does_not_answer_reads_no_free_space() {
+        use lazymkv_platform::fakes::FakeShares;
+        let down = FakeShares::new();
+        down.set_reach("/s", Reach::Unreachable("gone".to_string()));
+        assert_eq!(staging_health_of(&down, "/s"), StagingHealth { share_healthy: false, out_of_space: false });
+        assert_eq!(down.free_reads("/s"), 0);
+        let full = FakeShares::new();
+        full.set_free("/s", 0);
+        assert_eq!(staging_health_of(&full, "/s"), StagingHealth { share_healthy: true, out_of_space: true });
+        assert_eq!(full.free_reads("/s"), 1);
+    }
 
     #[test]
     fn version_of_reads_the_banner_or_a_bare_version() {
