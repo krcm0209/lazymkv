@@ -640,6 +640,31 @@ fn decide_asks_the_library_share_before_reading_it() {
     assert_eq!(record.message.as_deref(), Some(why.as_str()));
 }
 
+/// Review round 1 of pull request 3 (R28; Ruling W22): a library share that answers Decide's first `reach` and stops
+/// answering before its reads are done fails Decide naming the share, and nothing is written: no decide.json and no
+/// decision in the record, so a share that drops during the reads never reads as an empty library. If an earlier
+/// caller used up the count, the first reach's message appears instead and the test fails.
+#[test]
+fn a_library_share_that_stops_answering_during_decide_fails_it_and_writes_nothing() {
+    let h = harness(&[], json!({}));
+    h.insert("tok0", "movie-direct");
+    h.run_until("Inspecting");
+    let id = h.job_ids().pop().unwrap();
+    let library = h.library().to_str().unwrap().to_string();
+    h.shares().set_reach_after(&library, 1, Reach::Unreachable("cable out".into()));
+    h.restart();
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    let why = format!(
+        "the library share holding {library} does not answer (cable out); what was read of the library was not used, \
+         and a retry once the share answers decides again"
+    );
+    assert_eq!(record.message.as_deref(), Some(why.as_str()));
+    assert!(!h.job_dir(&id).join(KEY).join("decide.json").exists());
+    assert_eq!(record.titles[0].decision, None);
+}
+
 /// L7 (design parts 2.10, 6.5; Ruling W28): the title's folder is present but cannot be opened, so File fails as
 /// Unknown naming that folder (never the library root, so LIB-7 stands), the partial file stays in
 /// `.lazymkv-partial`, and nothing is renamed.

@@ -1459,9 +1459,14 @@ impl Step<'_> {
     /// Before anything else it asks `reach` of the plan kind's library root, when that root is set, as File does
     /// (Ruling W22, review round 1's V7): a root that does not answer gives DecisionFailed { Unknown } with `the
     /// library share holding <root> does not answer (<why>); the library was not read, and a retry once the share
-    /// answers decides again`, so a share that does not answer never reads as an empty library. An unset root asks
-    /// nothing, as the namer then gives no path. A library read that fails is DecisionFailed { Unknown } with
-    /// `library_facts`' error.
+    /// answers decides again`. Once its title documents are built, and before any decision is collected, written or
+    /// posted, it asks `reach` of that root again, as File's second `reach` does, made unconditional because every new
+    /// film's folder reads NotFound anyway (std reads Windows' 53 and 67 as NotFound): a root that no longer answers
+    /// gives DecisionFailed { Unknown } with `the library share holding <root> does not answer (<why>); what was read
+    /// of the library was not used, and a retry once the share answers decides again`, and no decide.json is written
+    /// and no decision or collision recorded (review round 1 of pull request 3, R28). So a share that does not answer
+    /// before or after Decide's reads never reads as an empty library. An unset root asks nothing, as the namer then
+    /// gives no path. A library read that fails is DecisionFailed { Unknown } with `library_facts`' error.
     fn decide(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let mut plan = self.job_plan(failed)?.clone();
@@ -1493,6 +1498,18 @@ impl Step<'_> {
                 return Ok(unknown(failed, STEP10_NOT_BUILT));
             }
             docs.push(self.title_doc(&ctx, &plan, &planned.key).map_err(|error| unknown(failed, error))?);
+        }
+        if let Some(root) = library {
+            if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                let head = library_unanswered(root, &why);
+                return Ok(unknown(
+                    failed,
+                    format!(
+                        "{head}; what was read of the library was not used, and a retry once the share answers \
+                         decides again"
+                    ),
+                ));
+            }
         }
         let mut decisions = Vec::new();
         for doc in &docs {
