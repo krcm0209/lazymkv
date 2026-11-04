@@ -112,6 +112,8 @@ fn the_task_script_names_the_task_the_run_folder_and_no_trigger() {
         "-ExecutionTimeLimit ([TimeSpan]::Zero)",
         "-WorkingDirectory $run",
         "ENGINE-TASK-DONE status=",
+        // Review round 1 of pull request 3 (G1): Owner decision 13's check meets the release folder and each program.
+        "foreach ($path in @($trees) + @($release) + $programs)",
     ] {
         assert!(text.contains(needle), "the script lacks {needle}");
     }
@@ -275,4 +277,52 @@ fn the_task_scripts_read_back_expects_aliases_as_windows_writes_them() {
     let output = define_and_call(&path, &["Get-WrittenAces"], &[], &call);
     let lines = output.lines().map(str::trim).collect::<Vec<_>>();
     assert_eq!(lines, ["same", "LA"], "{output}");
+}
+
+/// Runs icacls with `args` and panics when it fails.
+#[cfg(windows)]
+fn icacls(args: &[&std::ffi::OsStr]) {
+    let output = std::process::Command::new("icacls").args(args).output().expect("icacls starts");
+    assert!(output.status.success(), "icacls {}: {}", output.status, String::from_utf8_lossy(&output.stdout).trim());
+}
+
+/// A scratch folder below the temp folder, its access list reset and the folder removed on drop.
+#[cfg(windows)]
+struct Scratch(PathBuf);
+
+#[cfg(windows)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("icacls").arg(&self.0).args(["/reset", "/T", "/Q"]).output();
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Review round 1 of pull request 3 (G1): an entry set on a program file alone never shows in its folder's list, so
+/// `Get-Writers` reads the file's own list, which is why the script checks each program copied from the release folder.
+#[cfg(windows)]
+#[test]
+fn the_writers_check_sees_an_entry_a_program_file_alone_carries() {
+    let (path, _) = script();
+    let scratch = Scratch(std::env::temp_dir().join(unique("lazymkv-writers")));
+    fs::create_dir(&scratch.0).expect("the scratch folder is made");
+    let folder = scratch.0.as_os_str();
+    let grants = ["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"];
+    icacls(&[&[folder][..], &grants.map(std::ffi::OsStr::new)[..]].concat());
+    let program = scratch.0.join("lazymkv-engine.exe");
+    fs::write(&program, b"").expect("the program file is made");
+    icacls(&[program.as_os_str(), "/grant".as_ref(), "*S-1-5-11:(W)".as_ref()]);
+    let call = format!(
+        "'folder: ' + ((Get-Writers '{}') -join ',')\r\n'program: ' + ((Get-Writers '{}') -join ',')",
+        scratch.0.display(),
+        program.display()
+    );
+    let output = define_and_call(&path, &["Get-Writers"], &["trusted", "writeMask"], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{output}");
+    let authenticated = "S-1-5-11";
+    let folder = lines[0].strip_prefix("folder:").expect("the folder's line");
+    let program = lines[1].strip_prefix("program:").expect("the program's line");
+    assert!(!folder.trim().split(',').any(|sid| sid == authenticated), "the folder's writers hold {authenticated}");
+    assert!(program.trim().split(',').any(|sid| sid == authenticated), "the program's writers lack {authenticated}");
 }

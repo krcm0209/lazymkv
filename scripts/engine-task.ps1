@@ -26,9 +26,9 @@ $trusted = 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0'
 # access list, take ownership), with GENERIC_WRITE and GENERIC_ALL, which entries for what is created below carry.
 $writeMask = 0x500D0046
 
-# The SIDs other than $trusted that own $folder, or that its access list lets write it or anything in it.
-function Get-Writers([string]$folder) {
-    $acl = Get-Acl -LiteralPath $folder
+# The SIDs other than $trusted that own $path, or that its access list lets write it or, for a folder, anything in it.
+function Get-Writers([string]$path) {
+    $acl = Get-Acl -LiteralPath $path
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $writers = @()
     $owner = $acl.GetOwner($sidType).Value
@@ -107,19 +107,22 @@ try {
     if ($task -and $task.State -in 'Running', 'Queued') {
         throw "the task $name is $($task.State); stop its engine with lazymkvctl stop before deploying again (design part 3.1)"
     }
-    foreach ($tree in $trees) {
-        $writers = @(Get-Writers $tree)
-        if ($writers.Count -eq 0) { continue }
-        $list = $writers -join ', '
-        if (-not $AcceptWritableBuild) {
-            throw "$tree lets $list write, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program before it is copied or replace the run folder itself (Owner decision 13); give -AcceptWritableBuild to accept that on this development machine (scripts/box.sh recreates C:\lazymkv\src at every sync, so a list set on it does not last)"
-        }
-        "accepted: $tree lets $list write (-AcceptWritableBuild, Owner decision 13)"
-    }
     foreach ($program in $required) {
         if (-not (Test-Path -LiteralPath (Join-Path $release $program) -PathType Leaf)) {
             throw "$release\$program is missing; build it first with scripts/box.sh cargo build --workspace --locked --release"
         }
+    }
+    # Owner decision 13's check meets the trees, the release folder and each program copied from it, since an entry set
+    # on the folder or on a program alone never shows in a tree's own list (review round 1 of pull request 3, G1).
+    $programs = @($required + $optional | ForEach-Object { Join-Path $release $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    foreach ($path in @($trees) + @($release) + $programs) {
+        $writers = @(Get-Writers $path)
+        if ($writers.Count -eq 0) { continue }
+        $list = $writers -join ', '
+        if (-not $AcceptWritableBuild) {
+            throw "$path lets $list write, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program before it is copied or replace the run folder itself (Owner decision 13); give -AcceptWritableBuild to accept that on this development machine (scripts/box.sh recreates C:\lazymkv\src at every sync, so a list set on it does not last)"
+        }
+        "accepted: $path lets $list write (-AcceptWritableBuild, Owner decision 13)"
     }
     # Design part 3.5's list, folder_sddl's string, set before anything is copied (Ruling T3-24-a).
     $sid = $identity.User.Value
