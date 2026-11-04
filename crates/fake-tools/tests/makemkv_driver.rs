@@ -7,6 +7,7 @@ use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use lazymkv_platform::fakes::FakeHost;
 use lazymkv_engine::testkit::BusyRetry;
 use lazymkv_platform::StdProcessGuard;
+use lazymkv_tools::makemkv::Kill;
 use lazymkv_tools::{
     list_drives, rip, scan, CancelToken, Limits, MakemkvFlags, RipOutcome, RipRun, ScanOutcome, StagingHealth, ToolCtx,
 };
@@ -141,13 +142,14 @@ fn a_drive_listing_finds_the_index_and_ignores_msg_5010() {
     assert_eq!(listing.index, Some(0));
     assert_eq!(listing.summary.drives.len(), 2);
     assert_eq!(listing.run.exit_code, Some(0));
+    assert_eq!(listing.kill, Kill::None);
     assert_eq!(fs::read(&out).unwrap(), DRIVES.as_bytes());
     let other = env.run(|ctx| list_drives(ctx, &program, false, "tok1", &out, None)).unwrap();
     assert_eq!(other.index, None);
 }
 
 /// Ruling W20 (S57 amended for the listings outside a job): a listing given a limit is killed once the limit passes
-/// with no final `MSG:5010`, and `past_limit` tells that kill from the exit wait's. The limit is 5 s, long enough for a
+/// with no final `MSG:5010`, and `kill` tells that kill from the exit wait's. The limit is 5 s, long enough for a
 /// freshly copied stand-in to start while the other tests run, as in `a_scan_past_its_limit_is_killed_and_fails_as_unknown`.
 #[test]
 fn a_listing_with_a_limit_is_killed_when_it_hangs() {
@@ -164,7 +166,7 @@ fn a_listing_with_a_limit_is_killed_when_it_hangs() {
         env.run(|ctx| list_drives(ctx, &program, false, "tok0", &out, Some(Duration::from_secs(5)))).unwrap();
     assert!(started.elapsed() >= Duration::from_secs(5), "{:?}", started.elapsed());
     assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
-    assert!(listing.past_limit);
+    assert_eq!(listing.kill, Kill::Limit);
     assert!(listing.run.timed_out);
     assert!(!listing.run.cancelled);
     assert_eq!(listing.index, Some(0));
@@ -193,7 +195,7 @@ fn a_listing_without_a_limit_still_waits_for_its_final_message() {
     assert!(started.elapsed() >= Duration::from_secs(3), "{:?}", started.elapsed());
     assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
     assert!(listing.run.cancelled);
-    assert!(!listing.run.timed_out && !listing.past_limit);
+    assert_eq!(listing.kill, Kill::Cancel);
 }
 
 #[test]

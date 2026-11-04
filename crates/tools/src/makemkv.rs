@@ -85,8 +85,9 @@ pub fn drive_index(drives: &[robot::Drive], drive: &str) -> Option<u32> {
     })
 }
 
-/// One drive listing: the index for the drive id, the reducer's summary, the run and whether its limit killed it
-/// (design parts 3.7, 5.4; Ruling W20). Def: T13; T3-19 adds `past_limit`. Use: T23, T26, T3-19.
+/// One drive listing: the index for the drive id, the reducer's summary, the run and which kill ended it (design parts
+/// 3.7, 5.4; Ruling W20). Def: T13; T3-19 adds `past_limit`, which PR #14 review round 1 (R31) replaces with `kill`.
+/// Use: T23, T26, T3-19.
 #[derive(Clone, Debug)]
 pub struct DriveListing {
     /// The `disc:` index of the drive id, or None when no DRV line names it.
@@ -95,9 +96,10 @@ pub struct DriveListing {
     pub summary: RunSummary,
     /// How the run ended.
     pub run: RunResult,
-    /// Whether `list_drives`' `limit` killed the run before its final `MSG:5010` (Ruling W20). `run.timed_out` without
-    /// it is the exit wait's kill (S57).
-    pub past_limit: bool,
+    /// Which kill ended the run: `Kill::Limit` when `list_drives`' `limit` killed it before its final `MSG:5010`
+    /// (Ruling W20), `Kill::ExitWait` when the exit wait did (S57), `Kill::Cancel` for the cancel, `Kill::None` when it
+    /// ended by itself (review round 1 of pull request 3, R31).
+    pub kill: Kill,
 }
 
 /// Runs and records the drive listing into `out` (design part 5.4 step 1). Another MakeMKV process running gives `Err`
@@ -105,7 +107,8 @@ pub struct DriveListing {
 /// by the exit wait after its `MSG:5010` (`run.timed_out`) or by the cancel (`run.cancelled`). With `Some(limit)`, as
 /// the MakeMKV check at engine start and the self-test pass `limits.header` (Ruling W20, amending S57 for the listings
 /// outside a job), it is also killed once `limit` has passed since the call started with no `MSG:5010` yet, which
-/// sets `past_limit` and `run.timed_out`. Def: T13; T3-19 adds `limit`. Use: T23, T26, T3-19.
+/// sets `kill` to `Kill::Limit` and `run.timed_out`. `kill` is what `run_makemkv` reports. Def: T13; T3-19 adds
+/// `limit`. Use: T23, T26, T3-19.
 pub fn list_drives(
     ctx: &ToolCtx,
     program: &Path,
@@ -115,7 +118,7 @@ pub fn list_drives(
     limit: Option<Duration>,
 ) -> io::Result<DriveListing> {
     let (run, summary, kill) = run_makemkv(ctx, program, &drive_list_args(debug), out, limit, Call::DriveList)?;
-    Ok(DriveListing { index: drive_index(&summary.drives, drive), summary, run, past_limit: kill == Kill::Limit })
+    Ok(DriveListing { index: drive_index(&summary.drives, drive), summary, run, kill })
 }
 
 /// How a scan ended (design part 5.4 step 4, L5). Def: T13. Use: T23.
@@ -400,9 +403,11 @@ const RIP_ENDINGS: [&str; 4] = ["MSG:5004,", "MSG:5005,", "MSG:5036,", "MSG:5037
 /// How often the watcher of `run_makemkv` copies the cancel and checks the exit wait.
 const WATCH_EVERY: Duration = Duration::from_millis(20);
 
-/// Which kill ended a run (S56, S57).
+/// Which kill ended a run (S56, S57). `LineKill` only ever ends a rip. Public for the drive listings, whose callers
+/// tell the kills apart by it (review round 1 of pull request 3, R31). Def: T13, public PR #14 review round 1 (R31).
+/// Use: T13, T23, T26.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kill {
+pub enum Kill {
     /// No kill: the tool ended by itself.
     None,
     /// The run passed its limit before its final message.

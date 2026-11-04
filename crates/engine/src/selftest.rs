@@ -19,7 +19,7 @@ use lazymkv_core::plan::Kind;
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::{version_triple, Settings};
 use lazymkv_platform::{rename_no_replace, write_atomic, Host, ProcessGuard, Reach, SecretStore, ShareConnector};
-use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
+use lazymkv_tools::makemkv::{Kill, EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use lazymkv_tools::{
     find_tool, list_drives, run_recorded, save_debug_log, with_suffix, CancelToken, Found, LineAction, Limits, ToolCtx,
     ToolLocation,
@@ -408,14 +408,14 @@ impl CheckEnv {
                 return SelfTestCheck { path: Some(location.path.display().to_string()), ..cancelled };
             }
             // A listing the header limit killed is partial and may have stopped before a licence message (Ruling W20).
-            Ok(listing) if listing.past_limit => (false, LISTING_PAST_LIMIT.to_string(), None),
+            Ok(listing) if listing.kill == Kill::Limit => (false, LISTING_PAST_LIMIT.to_string(), None),
             Ok(listing) => {
                 let summary = listing.summary;
                 self.makemkv.observe(summary.version.clone(), summary.licence.as_ref().map(|message| message.code));
                 let minimum = &settings.makemkv_min_version;
                 let (ok, detail) = match (&summary.version, &summary.licence) {
                     // The listing printed its final message, so its summary is whole (M2; as steps.rs reads a job's).
-                    _ if listing.run.timed_out => (false, EXIT_WAIT_PASSED.to_string()),
+                    _ if listing.kill == Kill::ExitWait => (false, EXIT_WAIT_PASSED.to_string()),
                     (_, Some(message)) => {
                         (false, format!("MakeMKV printed licence message {}: {}", message.code, message.text))
                     }
