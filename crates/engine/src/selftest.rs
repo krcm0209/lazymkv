@@ -337,7 +337,8 @@ pub(crate) struct CheckEnv {
     /// Stops the check's tool runs: the owner gives each check a token of its own and raises it at a stop or a forced
     /// shutdown (design parts 3.8, 5.3). The drive listing is also bounded by `limits.header` (Ruling W20).
     pub(crate) cancel: CancelToken,
-    /// The shares, whose `reach` each root check asks before its probe (spec 13, Ruling W15).
+    /// The shares: each root check asks `reach` before its probe (spec 13, Ruling W15), and a retry's re-check
+    /// (`recheck`: share_back, space_freed) reads them (review round 1 of pull request 3, R53).
     pub(crate) shares: Arc<dyn ShareConnector>,
 }
 
