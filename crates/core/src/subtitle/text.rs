@@ -494,7 +494,7 @@ pub fn corrections() -> &'static [(&'static str, fancy_regex::Regex, &'static st
 fn subn(rx: &fancy_regex::Regex, rep: &str, text: &str) -> (String, usize) {
     let mut k = 0usize;
     let out = rx
-        .replace_all(text, |_: &fancy_regex::Captures<'_>| {
+        .replace_all(text, |_: &fancy_regex::Captures<'_, str>| {
             k += 1;
             rep
         })
