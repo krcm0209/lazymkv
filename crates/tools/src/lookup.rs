@@ -251,6 +251,8 @@ mod tests {
         };
         assert_eq!(find(&TestHost(Some(install.clone()), vec![in_resources.clone()])), Some((install, Found::InstallFolder)));
         assert_eq!(find(&TestHost(None, vec![in_resources])), Some((in_path, Found::Path)));
+        // The folder is removed, as the V14 test's is (the round's final review (W13)).
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
