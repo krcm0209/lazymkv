@@ -384,8 +384,10 @@ fn swap_in(
 /// The swap (`swap_in`; review round 1 of pull request 3, V12): the job's own entries are moved into `OLD_SNAPSHOT`
 /// before the fresh ones are moved in, and removed after. A move that fails puts every moved entry back, so the job
 /// folder keeps its own snapshot whole, and the step fails "could not be put in place", leaving `FRESH_SNAPSHOT` to the
-/// next run's first removal. An entry left aside by a crash, or by a rollback that could not finish, is put back by the
-/// next run before anything else (`restore_old`). Err is the step's message: `the disc's recording could not be
+/// next run's first removal. A crash between two moves, or a rollback whose own move back fails, can leave the folder
+/// mixed between two snapshots of one fingerprint (the fingerprint compared equal before the swap started), and the
+/// next successful Fingerprint rewrites it; "put back by the next run" holds for an entry left aside whose name the job
+/// folder lacks (`restore_old`, which runs before anything else). Err is the step's message: `the disc's recording could not be
 /// written: <error>` (the snapshot, or a leftover that cannot be put back or removed), `the disc's fingerprint <found
 /// or "none"> differs from the job's <fingerprint>`, or `the disc's recording could not be put in place: <error>`
 /// (the swap). Def: T3-18, its swap PR #14 review round 1 (V12). Use: T3-18.
@@ -2189,7 +2191,10 @@ mod tests {
     }
 
     /// Review round 1 of pull request 3 (V12): whichever of the swap's six moves fails, every entry moved goes back, so
-    /// the job folder keeps its own snapshot whole, and OLD_SNAPSHOT is gone.
+    /// the job folder keeps its own snapshot whole, and OLD_SNAPSHOT is gone. Only because each failure here is one
+    /// move and the rollback's own moves succeed: a crash between two moves, or a rollback whose own move back fails,
+    /// can leave the folder mixed between two snapshots of one fingerprint, and the next successful Fingerprint
+    /// rewrites it (the round's final review, W2).
     #[test]
     fn a_swap_that_fails_at_any_move_leaves_the_jobs_own_snapshot_whole() {
         for fail_at in 1..=6 {
