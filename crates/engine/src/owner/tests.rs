@@ -114,6 +114,47 @@ fn a_second_drives_disc_queues_and_starts_at_the_first_jobs_ejected() {
     assert!(!keeps_token(&State::AwaitingSpace { return_to: Box::new(State::Planned { mode: Mode::Direct }) }, &[]));
 }
 
+/// Review round 1 of pull request 3 (R27; Rulings W23, T3-20-b): the events kept after a refused persist are those
+/// nothing else feeds again. An AwaitingLookup job's LookupPending, LookupAnswered or EngineRestart ends its hourly
+/// timer chain when lost, and an AwaitingMakeMkv job's MakeMkvChanged is lost for good; a re-check's return, a slot
+/// delivery `grant_next` undoes, and a RipAgain are not kept.
+#[test]
+fn the_events_kept_after_a_refused_persist_are_those_nothing_else_feeds_again() {
+    let ejected = State::Ejected { after_copy: false };
+    let waiting = |make: fn(Box<State>) -> State, back: State| make(Box::new(back));
+    let lookup = waiting(|return_to| State::AwaitingLookup { return_to }, ejected.clone());
+    let makemkv = waiting(|return_to| State::AwaitingMakeMkv { return_to }, State::Scanned);
+    let kept = [
+        (State::Planned { mode: Mode::Direct }, Event::SpaceOk),
+        (State::RipVerified { after_copy: false }, Event::Ejected),
+        (ejected.clone(), Event::FilePhaseSlot),
+        (ejected.clone(), Event::LookupPending),
+        (lookup.clone(), Event::LookupPending),
+        (lookup.clone(), Event::LookupAnswered),
+        (lookup.clone(), Event::EngineRestart { disc_present: false }),
+        (makemkv, Event::MakeMkvChanged),
+    ];
+    for (state, event) in &kept {
+        assert!(kept_on_refusal(state, event), "{state:?} {event:?} is not kept");
+    }
+    let tool = lazymkv_core::job::Tool::Makemkvcon;
+    let not_kept = [
+        (waiting(|return_to| State::AwaitingShare { return_to }, State::Ripping), Event::ShareBack),
+        (waiting(|return_to| State::AwaitingSpace { return_to }, State::Ripping), Event::SpaceFreed),
+        (waiting(|return_to| State::AwaitingTool { return_to }, State::Fingerprinted), Event::ToolFound { tool }),
+        (State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) }, Event::Retry),
+        (
+            State::NeedsReview { held: lazymkv_core::job::Held::DispositionGate },
+            Event::ReviewApproved { overrides: Overrides::default(), approved_reasons: vec![] },
+        ),
+        (lookup, Event::RipAgain),
+        (ejected, Event::RipAgain),
+    ];
+    for (state, event) in &not_kept {
+        assert!(!kept_on_refusal(state, event), "{state:?} {event:?} is kept");
+    }
+}
+
 #[test]
 fn a_queued_disc_that_is_removed_leaves_the_queue() {
     let h = Harness::new_scripted(vec![("RunScan", StepScript::Hang)], json!({}));

@@ -801,3 +801,103 @@ fn an_ejected_jobs_refused_lookup_pending_is_kept_and_fed_again_at_the_retry_tim
     h.fire_timers();
     h.wait("Filed", |h| h.state_of(&id) == "Filed");
 }
+
+/// Review round 1 of pull request 3 (R27): an AwaitingLookup job's hourly round that finds the lookup still pending
+/// feeds LookupPending; when that transition cannot be persisted, the event is kept and fed again at the one-minute
+/// refeed timer, which restarts the hourly timer. Before the fix the event was lost and the hourly chain ended.
+#[test]
+fn an_awaiting_lookup_jobs_refused_lookup_pending_is_kept_and_its_hourly_timer_restarts() {
+    let h = harness(&["movie-direct", "movie-direct-lookup-down"], settings());
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.settle();
+    h.refuse_persists(|_, transition| {
+        transition.event == Some(Event::LookupPending) && matches!(transition.old, Some(State::AwaitingLookup { .. }))
+    });
+    h.fire_timers();
+    let kept = format!("{id}: keeps its persisted state AwaitingLookup; LookupPending is fed again in 1 minute");
+    h.wait("LookupPending kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![1]);
+    let before = h.transitions(&id).len();
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("LookupPending persisted", |h| h.transitions(&id).len() > before);
+    let fed = h.transitions(&id).pop().unwrap();
+    assert_eq!(fed.event, Some(Event::LookupPending));
+    assert!(matches!(fed.old, Some(State::AwaitingLookup { .. })), "{:?}", fed.old);
+    assert!(matches!(fed.new, State::AwaitingLookup { .. }), "{:?}", fed.new);
+    assert_eq!(fed.actions, vec![Action::StartTimer { minutes: 60 }]);
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![60]);
+}
+
+/// Review round 1 of pull request 3 (R27): an AwaitingLookup job's LookupAnswered whose transition cannot be persisted
+/// is kept and fed again at the one-minute refeed timer, and the job files.
+#[test]
+fn an_awaiting_lookup_jobs_refused_lookup_answered_is_kept_and_the_job_files() {
+    let h = harness(&["movie-direct", "movie-direct-lookup-later"], settings());
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC);
+    let id = first_job(&h);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.settle();
+    h.refuse_persists(|_, transition| transition.event == Some(Event::LookupAnswered));
+    h.fire_timers();
+    let kept = format!("{id}: keeps its persisted state AwaitingLookup; LookupAnswered is fed again in 1 minute");
+    h.wait("LookupAnswered kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    let answered = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupAnswered)).unwrap();
+    assert_eq!(answered.actions, vec![Action::RefreshIdentity, Action::Notify { event: NotifyEvent::Resumed }]);
+}
+
+/// Review round 1 of pull request 3 (R27): a restart whose EngineRestart cannot be persisted for an AwaitingLookup job
+/// keeps the event and feeds it again at the one-minute refeed timer, which starts the hourly timer the lost
+/// transition would have started.
+#[test]
+fn a_refused_engine_restart_in_awaiting_lookup_is_kept_and_starts_the_hourly_timer() {
+    use lazymkv_engine::testkit::StepScript;
+    use lazymkv_engine::StepResult;
+    fn ok(event: Event) -> StepScript {
+        StepScript::Result(StepResult { event: Some(event), message: None })
+    }
+    let steps = vec![
+        ("RunScan", ok(Event::ScanDone)),
+        ("Plan", ok(Event::PlanDone { mode: lazymkv_core::plan::Mode::Direct })),
+        ("CheckSpace", ok(Event::SpaceOk)),
+        ("RipTitle", ok(Event::TitleRipped)),
+        ("VerifyFile", ok(Event::TitleVerified { last: true })),
+        ("Eject", ok(Event::Ejected)),
+        ("Probe", ok(Event::ProbeDone)),
+        ("ExtractSubtitleEvidence", StepScript::Result(StepResult { event: None, message: None })),
+        ("Decide", ok(Event::LookupPending)),
+    ];
+    let h = Harness::new_scripted(steps, settings());
+    h.insert("tok0", DISC);
+    h.run_until("AwaitingLookup");
+    let id = only_job(&h);
+    // PF-4: the scripted Eject never calls the ejector, so this stands for the removal a real eject causes (R22.6).
+    h.remove("tok0");
+    h.refuse_persists(|_, transition| matches!(transition.event, Some(Event::EngineRestart { .. })));
+    h.restart();
+    let kept = format!("{id}: keeps its persisted state AwaitingLookup; EngineRestart is fed again in 1 minute");
+    h.wait("EngineRestart kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    h.wait("EngineRestart persisted", |h| {
+        h.transitions(&id).iter().any(|line| matches!(line.event, Some(Event::EngineRestart { .. })))
+    });
+    let restarted = h.transitions(&id).pop().unwrap();
+    assert_eq!(restarted.event, Some(Event::EngineRestart { disc_present: false }));
+    assert_eq!(restarted.actions, vec![Action::StartTimer { minutes: 60 }]);
+    h.settle();
+    assert_eq!(h.timers().pending(), vec![60]);
+}

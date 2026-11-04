@@ -603,6 +603,26 @@ pub(crate) fn keeps_token(state: &State, actions: &[Action]) -> bool {
     state.is_disc_phase() && !actions.contains(&Action::WaitForDisc)
 }
 
+/// Whether an event whose transition from `state` could not be persisted is kept and fed again at the refeed timer
+/// (Rulings W23, T3-20-b; review round 1 of pull request 3, R27): any event of Planned or RipVerified; a
+/// FilePhaseSlot; an Ejected job's LookupPending; an AwaitingLookup job's LookupPending, LookupAnswered or
+/// EngineRestart, whose loss ends the hourly timer chain; an AwaitingMakeMkv job's MakeMkvChanged, whose change
+/// MakeMKV's state has already recorded, so neither a retry nor a restart sees it again. Not kept: a return a
+/// `retry` re-check gives (ShareBack, SpaceFreed, ToolFound), which the next retry checks afresh; a Retry or
+/// approval delivered with the slot, which `grant_next` undoes (V1 of pull request 2's round); a RipAgain, which
+/// would replace a kept LookupPending in `refeed`'s one entry per job.
+fn kept_on_refusal(state: &State, event: &Event) -> bool {
+    match (state, event) {
+        (State::Planned { .. } | State::RipVerified { .. }, _) | (_, Event::FilePhaseSlot) => true,
+        (State::Ejected { after_copy: false }, Event::LookupPending) => true,
+        (State::AwaitingLookup { .. }, Event::LookupPending | Event::LookupAnswered | Event::EngineRestart { .. }) => {
+            true
+        }
+        (State::AwaitingMakeMkv { .. }, Event::MakeMkvChanged) => true,
+        _ => false,
+    }
+}
+
 /// The serde tag of `action`, the name `transitions.jsonl` writes (design part 7.3). Def: T22. Use: T22, T26.
 pub(crate) fn action_tag(action: &Action) -> String {
     serde_json::to_value(action)
@@ -884,11 +904,13 @@ struct Owner {
     /// persisted (review round 1, V1, RR1-1): each left its file-phase place, so the restart sequence seeds none of
     /// them as a holder. A later persisted transition of the job takes it out.
     kept: BTreeSet<String>,
-    /// The event, with its message, that each job in Planned or RipVerified, or an Ejected job's FilePhaseSlot or
-    /// LookupPending, was fed when its transition could not be persisted, fed again at its `REFEED_MINUTES` timer until
-    /// it persists (review round 1, V1; Rulings W23, T3-20-b). A persisted transition of the job takes its entry out,
-    /// except one that leaves the state as it was and runs only ArmRipAgain or a RecordNote, which leaves it to its
-    /// refeed timer (review round 1 of pull request 3, V7).
+    /// The event, with its message, that each job in Planned or RipVerified, an Ejected job's FilePhaseSlot or
+    /// LookupPending, an AwaitingLookup job's LookupPending, LookupAnswered or EngineRestart, or an AwaitingMakeMkv
+    /// job's MakeMkvChanged (`kept_on_refusal`), was fed when its transition could not be persisted, fed again at its
+    /// `REFEED_MINUTES` timer until it persists (review round 1, V1; Rulings W23, T3-20-b; review round 1 of pull
+    /// request 3, R27). A persisted transition of the job takes its entry out, except one that leaves the state as it
+    /// was and runs only ArmRipAgain or a RecordNote, which leaves it to its refeed timer (review round 1 of pull
+    /// request 3, V7).
     refeed: BTreeMap<String, (Event, Option<String>)>,
     /// The jobs whose refeed timer is pending (Ruling T3-20-a): a job gets a new refeed timer only when it has none, so
     /// its kept events are fed again by one chain of timers whatever entries `refeed` gains or loses meanwhile.
@@ -1659,12 +1681,15 @@ impl Owner {
     ///   so the job fails as Unknown, releases its promises, the token and its file-phase place, is notified, and can
     ///   be retried. The failure is written over the job's persisted record, since the lost transition's posted edits
     ///   went with it (RR1-16): a Retry resumes from what state.json held, so a title whose verification was lost is
-    ///   ripped again. In a state with no failure row, Planned and RipVerified keep the event in `refeed`, and so does
-    ///   an Ejected job its FilePhaseSlot, whose grant `grant_next` also undoes, and its LookupPending, fed after a
-    ///   lookup round's end took the job out of the slot's queue (Ruling T3-20-b); each is fed again at its refeed
-    ///   timer (`on_refeed`) after `REFEED_MINUTES` until it persists (Ruling W23), and a job whose refeed timer is
-    ///   pending (`refeed_armed`) gets no second one (Ruling T3-20-a). A waiting, failed or held job gets nothing: it
-    ///   can be retried or approved again.
+    ///   ripped again. In a state with no failure row, the events `kept_on_refusal` names are kept in `refeed`:
+    ///   Planned's and RipVerified's, an Ejected job's FilePhaseSlot, whose grant `grant_next` also undoes, and its
+    ///   LookupPending, fed after a lookup round's end took the job out of the slot's queue (Ruling T3-20-b); each is
+    ///   fed again at its refeed timer (`on_refeed`) after `REFEED_MINUTES` until it persists (Ruling W23), and a job
+    ///   whose refeed timer is pending (`refeed_armed`) gets no second one (Ruling T3-20-a). A waiting, failed or held
+    ///   job gets nothing, since it can be retried or approved again, except an AwaitingLookup job's LookupPending,
+    ///   LookupAnswered or EngineRestart, whose loss would end its hourly timer chain, and an AwaitingMakeMkv job's
+    ///   MakeMkvChanged, whose change MakeMKV's state has already recorded (review round 1 of pull request 3, R27):
+    ///   those are kept as well.
     /// - A transition into Failed, the failure itself (also the guard against feeding again), follows RR1-1: no state
     ///   is changed in memory and nothing is notified or published; the job keeps its persisted state, its promises are
     ///   released, it leaves its file-phase place, which is granted again, and engine.log says `<id>: keeps its
@@ -1692,10 +1717,7 @@ impl Owner {
             let Some(event) = transition.event.clone() else {
                 return;
             };
-            let keeps = matches!(state, State::Planned { .. } | State::RipVerified { .. })
-                || event == Event::FilePhaseSlot
-                || (event == Event::LookupPending && state == State::Ejected { after_copy: false });
-            if keeps {
+            if kept_on_refusal(&state, &event) {
                 // Ruling W23: the timer before the line, so a test that sees the line finds the timer.
                 let tag = event_tag(&event);
                 self.refeed.insert(id.to_string(), (event, message));
@@ -2310,9 +2332,12 @@ impl Owner {
 
     /// A kept event's timer ran out (Ruling W23). A FilePhaseSlot asks for the slot again, so the queue's order holds;
     /// an event whose transition keeps the disc-phase token, SpaceOk into Ripping or Copying, goes through `deliver`,
-    /// which waits for the token (L2) and carries no message, as SpaceOk has none; any other event is fed with its
-    /// message, an Ejected job's LookupPending among them, a plain event and no slot grant (Ruling T3-20-b). A refusal
-    /// again keeps it for another timer through `unpersisted`.
+    /// which waits for the token (L2) and carries no message, as SpaceOk has none, and so does an AwaitingMakeMkv job's
+    /// MakeMkvChanged, whose return is a disc-phase state (review round 1 of pull request 3, R27); any other event is
+    /// fed with its message, an Ejected job's LookupPending among them, a plain event and no slot grant (Ruling
+    /// T3-20-b), and an AwaitingLookup job's LookupPending, LookupAnswered or EngineRestart, which never keep the
+    /// token, as AwaitingLookup's return is Ejected or Inspecting (R27). A refusal again keeps it for another timer
+    /// through `unpersisted`.
     fn feed_again(&mut self, id: &str, event: Event, message: Option<String>) {
         if event == Event::FilePhaseSlot {
             return self.grant_next();

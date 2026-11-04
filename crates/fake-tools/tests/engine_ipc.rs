@@ -1431,6 +1431,32 @@ fn a_rip_again_beside_a_kept_slot_grant_leaves_it_to_its_refeed_timer() {
     assert_eq!((granted.old, granted.new), (Some(State::Ejected { after_copy: false }), State::Inspecting));
 }
 
+/// Review round 1 of pull request 3 (R27): a retry in AwaitingMakeMkv whose check finds the new version records it in
+/// `makemkv-check.json` and feeds MakeMkvChanged; when that transition cannot be persisted, the event is kept and fed
+/// again at the one-minute refeed timer, since neither a second retry nor a restart would see the change again.
+#[test]
+fn a_refused_makemkv_changed_is_kept_and_fed_again_after_makemkv_recorded_the_change() {
+    let h = stand_in(&[DISC_A, "movie-direct-licence-update"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingMakeMkv")["id"].as_str().unwrap().to_string();
+    h.refuse_persists(|_, transition| transition.event == Some(Event::MakeMkvChanged));
+    c.ok("retry", json!({"job": id}));
+    let kept = format!("{id}: keeps its persisted state AwaitingMakeMkv; MakeMkvChanged is fed again in 1 minute");
+    h.wait("MakeMkvChanged kept", |h| h.engine_log().contains(&kept));
+    h.settle();
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(h.data().join("selftest/makemkv-check.json")).unwrap()).unwrap();
+    assert_eq!(recorded["version"], json!("2.0.1"), "{recorded}");
+    assert_eq!(h.timers().pending(), vec![1]);
+    h.allow_persists();
+    h.fire_timers();
+    c.until_state(Some(&id), "Fingerprinted");
+    assert!(h.transitions(&id).iter().any(|t| t.event == Some(Event::MakeMkvChanged)));
+}
+
 // ---- Review actions (design part 9.4, P25, R-A8) ----
 
 fn held_script() -> Vec<(&'static str, StepScript)> {
