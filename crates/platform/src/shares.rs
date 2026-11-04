@@ -61,15 +61,19 @@ pub const SESSION_CONFLICT: &str = "ERROR_SESSION_CREDENTIAL_CONFLICT";
 const SESSION_CONFLICT_CODE: u32 = 1219;
 
 /// The errors that are Windows refusing a credential, not a share that does not answer (design part 6.1, amended by
-/// review round 1 of pull request 3, R8): ERROR_ACCESS_DENIED (5), ERROR_INVALID_PASSWORD (86),
-/// ERROR_SMB_GUEST_LOGON_BLOCKED (1272: the server took the identity for a guest and Windows refuses guest logons),
-/// ERROR_LOGON_FAILURE (1326), ERROR_ACCOUNT_RESTRICTION (1327), ERROR_PASSWORD_EXPIRED (1330),
-/// ERROR_ACCOUNT_DISABLED (1331) and ERROR_ACCOUNT_LOCKED_OUT (1909). After the first probe: the session holds no
-/// credential the server accepts, so the stored credential is tried. From `connect`: Windows refused the stored
-/// credential, so it is remembered and not tried again until its value changes, and a wrong password cannot lock the
-/// owner's account (Review Focus 5). After the probe that follows a connection: the share refused access again (R2).
-/// Any other error is the share not answering.
-const REFUSED: [u32; 8] = [5, 86, 1272, 1326, 1327, 1330, 1331, 1909];
+/// review round 1 of pull request 3, R8, and by the round's final review, W10): ERROR_ACCESS_DENIED (5),
+/// ERROR_INVALID_PASSWORD (86), ERROR_SMB_GUEST_LOGON_BLOCKED (1272: the server took the identity for a guest and
+/// Windows refuses guest logons), ERROR_LOGON_FAILURE (1326), and the account's state: ERROR_ACCOUNT_RESTRICTION
+/// (1327), ERROR_INVALID_LOGON_HOURS (1328: outside the account's logon hours), ERROR_INVALID_WORKSTATION (1329: not
+/// from this computer), ERROR_PASSWORD_EXPIRED (1330), ERROR_ACCOUNT_DISABLED (1331), ERROR_LOGON_TYPE_NOT_GRANTED
+/// (1385: the logon type is not granted), ERROR_ACCOUNT_EXPIRED (1793), ERROR_PASSWORD_MUST_CHANGE (1907) and
+/// ERROR_ACCOUNT_LOCKED_OUT (1909). Each is how Windows reports that the session holds no credential the server
+/// accepts; none of the five W10 adds is a wrong-password code, so no lockout path is added. After the first probe: the
+/// session holds no credential the server accepts, so the stored credential is tried. From `connect`: Windows refused
+/// the stored credential, so it is remembered and not tried again until its value changes, and a wrong password cannot
+/// lock the owner's account (Review Focus 5). After the probe that follows a connection: the share refused access again
+/// (R2). Any other error is the share not answering.
+const REFUSED: [u32; 13] = [5, 86, 1272, 1326, 1327, 1328, 1329, 1330, 1331, 1385, 1793, 1907, 1909];
 
 /// What `access` reports after a `reach` that got in to a drive root, through the session's own access, and through
 /// lazymkv's stored credential (design parts 6.1, 7.1).
@@ -382,7 +386,7 @@ mod tests {
 
     #[test]
     fn a_refused_session_access_falls_back_to_the_stored_credential_once() {
-        for code in [5, 86, 1272, 1326, 1327, 1330, 1331, 1909] {
+        for code in [5, 86, 1272, 1326, 1327, 1328, 1329, 1330, 1331, 1385, 1793, 1907, 1909] {
             let (api, secrets) = (api(&[Err(code), Ok(())], Ok(())), counted(&[(NAME, CREDENTIAL)]));
             assert_eq!(connector(&api, &secrets).reach(ROOT), Reach::Reachable, "{code}");
             // assert!, not assert_eq!: a failure prints no recorded half of the credential.
@@ -490,7 +494,7 @@ mod tests {
     /// Review Focus 5.
     #[test]
     fn a_refused_stored_credential_is_not_tried_again_until_it_changes() {
-        for code in [1326, 1272] {
+        for code in [1326, 1272, 1328, 1329, 1385, 1793, 1907] {
             let (api, secrets) = (api(&[Err(5)], Err(code)), counted(&[(NAME, CREDENTIAL)]));
             let shares = connector(&api, &secrets);
             let first = shares.reach(ROOT);
