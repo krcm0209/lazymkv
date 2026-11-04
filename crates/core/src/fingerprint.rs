@@ -1,7 +1,7 @@
 //! Disc fingerprints computed from a file listing and file bytes handed in (spec 5), and the listing a TheDiscDB scan
 //! log carries in its `HSH:` lines (`hashed_files`), so a pinned log is fingerprinted the way a disc is.
 
-use md5::{Digest, Md5};
+use md5::Md5;
 use sha1::Sha1;
 
 /// One file on a disc: its path relative to the disc root, and its size in bytes.
@@ -44,6 +44,7 @@ pub fn disc_format(files: &[DiscFile]) -> Option<DiscFormat> {
 /// 64-bit integer, of `BDMV/STREAM/*.m2ts` (Blu-ray, UHD) or of every file in
 /// `VIDEO_TS` (DVD), sorted by file name. Returned as uppercase hex.
 pub fn content_hash(files: &[DiscFile]) -> Option<String> {
+    use md5::Digest as _;
     let format = disc_format(files)?;
     let mut hashed: Vec<(String, u64)> = files
         .iter()
@@ -78,6 +79,7 @@ pub fn content_hash(files: &[DiscFile]) -> Option<String> {
 
 /// The AACS disc ID: the SHA-1 of the bytes of `AACS/Unit_Key_RO.inf`, as uppercase hex.
 pub fn aacs_disc_id(unit_key_ro: &[u8]) -> String {
+    use sha1::Digest as _;
     hex_upper(Sha1::digest(unit_key_ro).as_slice())
 }
 
