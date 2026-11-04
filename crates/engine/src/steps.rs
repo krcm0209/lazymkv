@@ -61,8 +61,8 @@ use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepR
 use crate::restart::READ_BACK_LINE;
 use crate::selftest::MakeMkv;
 use crate::space::{
-    make_root, planned_remux_promise, refine_remux_promise, rip_check, rip_promise, staged_bytes, staged_remux_check,
-    Promises,
+    library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check, rip_promise, staged_bytes,
+    staged_remux_check, Promises,
 };
 use crate::store::Store;
 use crate::EngineConfig;
@@ -103,6 +103,13 @@ fn with(event: Event, message: impl Into<String>) -> StepResult {
 /// A result feeding `failed(Unknown)` with `message`.
 fn unknown(failed: fn(Failure) -> Event, message: impl Into<String>) -> StepResult {
     with(failed(UNKNOWN), message)
+}
+
+/// The head of every sentence about a library share that does not answer: `the library share holding <root> does not
+/// answer (<why>)` (design part 6.1; review round 1's V7, the round of pull request 2). Each site adds its own tail.
+/// Def: PR #14 review round 1 (R52). Use: decide, remux, file, delete_partial_file.
+fn library_unanswered(root: &str, why: &str) -> String {
+    format!("the library share holding {root} does not answer ({why})")
 }
 
 /// The progress callback of a run that reports none to the owner.
@@ -944,10 +951,7 @@ impl Step<'_> {
         let Some(staging) = settings.staging_root.as_deref() else {
             return Ok(self.space_result((Event::ShareLost, Some("staging_root is unset".to_string()))));
         };
-        let library = match plan.kind {
-            Kind::Movie => settings.movies_root.as_deref(),
-            Kind::Tv => settings.tv_root.as_deref(),
-        };
+        let library = library_root(plan, settings);
         let meta = read_json(&self.job.job_dir.join("meta.json"));
         let disc_size = meta.and_then(|meta| meta["total_bytes"].as_u64()).unwrap_or(0);
         self.check_cancel()?;
@@ -1462,18 +1466,13 @@ impl Step<'_> {
         let failed = |failure| Event::DecisionFailed { failure };
         let mut plan = self.job_plan(failed)?.clone();
         let settings = &self.job.settings;
-        let library = match plan.kind {
-            Kind::Movie => settings.movies_root.as_deref(),
-            Kind::Tv => settings.tv_root.as_deref(),
-        };
+        let library = library_root(&plan, settings);
         if let Some(root) = library {
             if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                let head = library_unanswered(root, &why);
                 return Ok(unknown(
                     failed,
-                    format!(
-                        "the library share holding {root} does not answer ({why}); the library was not read, and a \
-                         retry once the share answers decides again"
-                    ),
+                    format!("{head}; the library was not read, and a retry once the share answers decides again"),
                 ));
             }
         }
@@ -1580,10 +1579,7 @@ impl Step<'_> {
             return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
         };
         let settings = &self.job.settings;
-        let library = match plan.kind {
-            Kind::Movie => settings.movies_root.as_deref(),
-            Kind::Tv => settings.tv_root.as_deref(),
-        };
+        let library = library_root(plan, settings);
         if let (Some(staging), Some(library)) = (settings.staging_root.as_deref(), library) {
             let staged = staged_bytes(staging, self.id, plan);
             let (shares, promises) = (self.steps.shares.as_ref(), &self.steps.promises);
@@ -1594,13 +1590,10 @@ impl Step<'_> {
             let key = planned.key.as_str();
             let (decision, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
             if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
-                let root = &path.root;
+                let head = library_unanswered(&path.root, &why);
                 return Ok(unknown(
                     failed,
-                    format!(
-                        "{key}: the library share holding {root} does not answer ({why}); the remux was not started, \
-                         and a retry once the share answers runs it"
-                    ),
+                    format!("{key}: {head}; the remux was not started, and a retry once the share answers runs it"),
                 ));
             }
             let partial = partial_path(&path.root, self.id, key);
@@ -1722,10 +1715,10 @@ impl Step<'_> {
             let partial = partial_path(&path.root, self.id, key);
             let target = Path::new(&path.path);
             let unanswered = |why: &str| {
-                let (root, stays) = (&path.root, partial.display());
+                let (head, stays) = (library_unanswered(&path.root, why), partial.display());
                 format!(
-                    "{key}: the library share holding {root} does not answer ({why}); the partial file {stays} was not \
-                     checked or renamed, and a retry once the share answers files it"
+                    "{key}: {head}; the partial file {stays} was not checked or renamed, and a retry once the share \
+                     answers files it"
                 )
             };
             if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
@@ -1866,11 +1859,8 @@ impl Step<'_> {
             };
             let partial = partial_path(&path.root, self.id, key);
             if let Reach::Unreachable(why) = self.steps.shares.reach(&path.root) {
-                let (root, kept) = (&path.root, partial.display());
-                self.log(&format!(
-                    "{key}: the library share holding {root} does not answer ({why}); the partial file {kept} was not \
-                     deleted"
-                ));
+                let (head, kept) = (library_unanswered(&path.root, &why), partial.display());
+                self.log(&format!("{key}: {head}; the partial file {kept} was not deleted"));
                 continue;
             }
             match fs::remove_file(&partial) {

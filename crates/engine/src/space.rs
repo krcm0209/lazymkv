@@ -314,8 +314,9 @@ fn rebuild_promise(
     }
 }
 
-/// The library root of the plan's kind: `movies_root` or `tv_root`.
-fn library_root<'a>(plan: &Plan, settings: &'a Settings) -> Option<&'a str> {
+/// The library root of the plan's kind: `movies_root` or `tv_root`. Def: T25. Use: T25; PR #14 review round 1 (R51):
+/// check_space, decide, remux.
+pub(crate) fn library_root<'a>(plan: &Plan, settings: &'a Settings) -> Option<&'a str> {
     match plan.kind {
         Kind::Movie => settings.movies_root.as_deref(),
         Kind::Tv => settings.tv_root.as_deref(),
