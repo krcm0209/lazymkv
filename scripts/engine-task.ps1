@@ -2,9 +2,10 @@
 # through scripts/box.sh, after a release build:
 #   scripts/box.sh cargo build --workspace --locked --release
 #   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 [-Data DIR] [-AcceptWritableBuild]'
-# It registers a task and sets an access list, which are standing changes: run it only after the owner's yes. DIR may
-# hold no space or quote. The last line is "ENGINE-TASK-DONE status=ok|error" and the exit code 0 or 1. It writes no
-# account name.
+# It registers a task and sets an access list, which are standing changes: run it only after the owner's yes. DIR is a
+# full local folder path below a drive's root, such as D:\lazymkv-data, with no space, quote or percent sign, outside
+# C:\lazymkv\run and in a folder that exists; the script refuses any other before it changes anything. The last line is
+# "ENGINE-TASK-DONE status=ok|error" and the exit code 0 or 1. It writes no account name.
 param(
     [string]$Data = '',
     [switch]$AcceptWritableBuild
@@ -40,8 +41,30 @@ function Get-Writers([string]$folder) {
     $writers | Sort-Object -Unique
 }
 
+# Why -Data cannot name the task's data folder, or '' when it can (review round 1 of pull request 3, V13): the
+# task's argument line is not quoted, Task Scheduler may expand a percent sign in it, the engine reads a relative
+# folder against the run folder and protects whatever folder it is given, a drive's root included, and creates
+# only the last component.
+function Get-DataProblem([string]$data, [string]$run) {
+    if ($data -notmatch '^[A-Za-z]:\\[^:<>|?*"%\s]*$') {
+        return "-Data $data is not a full local folder path with no space, quote or percent sign, such as D:\lazymkv-data; the task's argument line is not quoted, and the engine reads a relative folder inside $run (design part 3.1)"
+    }
+    $full = [System.IO.Path]::GetFullPath($data).TrimEnd('\')
+    if ($full.Length -le 2) {
+        return "-Data $data is a drive's root, which the engine's protected list would reach whole; give a folder below it, such as D:\lazymkv-data (design part 3.5)"
+    }
+    if ($full -eq $run -or $full.StartsWith("$run\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return "-Data $data is in $run, which holds only the programs this script copies there (design part 3.5)"
+    }
+    if (-not (Test-Path -LiteralPath (Split-Path $full) -PathType Container)) {
+        return "-Data $data has no parent folder; the engine creates only the data folder itself (design part 3.5)"
+    }
+    ''
+}
+
 $status = 'error'
 try {
+    if ($Data) { $problem = Get-DataProblem $Data $run; if ($problem) { throw $problem } }
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $administrator = [System.Security.Principal.WindowsBuiltInRole]::Administrator
     if (-not (New-Object System.Security.Principal.WindowsPrincipal($identity)).IsInRole($administrator)) {

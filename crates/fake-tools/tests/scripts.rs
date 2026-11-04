@@ -1,5 +1,6 @@
-//! `scripts/engine-task.ps1`, the desktop task's script (P5; design parts 3.1, 3.5; Task T3-24), read and parsed here,
-//! never run: running it registers a task, which needs the owner's yes (Owner decision 3). On Windows,
+//! `scripts/engine-task.ps1`, the desktop task's script (P5; design parts 3.1, 3.5; Task T3-24), read and parsed here;
+//! on Windows its functions are called alone from its syntax tree; the script itself never runs, since running it
+//! registers a task, which needs the owner's yes (Owner decision 3). On Windows,
 //! `scripts/phase0/platform-ignored.ps1`, the desktop-session run of the platform's ignored tests (design part 12.4;
 //! Task T3-25), is read and parsed here too, never run.
 
@@ -7,6 +8,8 @@ use std::fs;
 #[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lazymkv_platform::security::folder_sddl;
 
@@ -35,6 +38,67 @@ fn parse_errors(path: &Path) -> String {
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("powershell {} and printed no parse error: {}", output.status, stderr.trim())
+}
+
+/// `stem` followed by a suffix no other call of this test binary gives, for a temporary file or folder.
+#[cfg(windows)]
+fn unique(stem: &str) -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_nanos());
+    format!("{stem}-{}-{nanos}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// What `call` prints, trimmed, after the functions named `functions` and the top-level assignments to the variables
+/// named `variables` of the script at `path` are dot-sourced alone from its syntax tree (review round 1 of pull request
+/// 3, V13): nothing else in the script runs (Owner decision 3). The snippet goes to a temporary .ps1 that Windows
+/// PowerShell 5.1 runs with `-File`; a call that fails panics with what PowerShell printed.
+#[cfg(windows)]
+fn define_and_call(path: &Path, functions: &[&str], variables: &[&str], call: &str) -> String {
+    let quote = |items: &[&str]| {
+        items.iter().map(|item| format!("'{}'", item.replace('\'', "''"))).collect::<Vec<_>>().join(", ")
+    };
+    let snippet = format!(
+        "$ErrorActionPreference = 'Stop'\r\n\
+         $tokens = $null; $errors = $null\r\n\
+         $ast = [System.Management.Automation.Language.Parser]::ParseFile('{script}', [ref]$tokens, [ref]$errors)\r\n\
+         if ($errors.Count -gt 0) {{ throw \"the script does not parse: $($errors -join '; ')\" }}\r\n\
+         $functionNames = @({functions})\r\n\
+         $variableNames = @({variables})\r\n\
+         $texts = @()\r\n\
+         foreach ($statement in $ast.EndBlock.Statements) {{\r\n\
+             $left = $statement.Left\r\n\
+             if ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and \
+                 $left -is [System.Management.Automation.Language.VariableExpressionAst] -and \
+                 $variableNames -contains $left.VariablePath.UserPath) {{ $texts += $statement.Extent.Text }}\r\n\
+         }}\r\n\
+         $isFunction = {{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $functionNames -contains $node.Name }}\r\n\
+         foreach ($definition in $ast.FindAll($isFunction, $true)) {{ $texts += $definition.Extent.Text }}\r\n\
+         if ($texts.Count -ne $functionNames.Count + $variableNames.Count) {{\r\n\
+             throw \"the script holds $($texts.Count) of the $($functionNames.Count + $variableNames.Count) definitions asked for\"\r\n\
+         }}\r\n\
+         . ([scriptblock]::Create($texts -join \"`r`n\"))\r\n\
+         {call}\r\n",
+        script = path.display().to_string().replace('\'', "''"),
+        functions = quote(functions),
+        variables = quote(variables),
+    );
+    let file = std::env::temp_dir().join(format!("{}.ps1", unique("lazymkv-scripts")));
+    // A byte order mark, so Windows PowerShell 5.1 reads the snippet as UTF-8 rather than in the system code page.
+    fs::write(&file, format!("\u{feff}{snippet}")).expect("the snippet is written");
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&file)
+        .output()
+        .expect("powershell starts");
+    let _ = fs::remove_file(&file);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    assert!(
+        output.status.success(),
+        "powershell {}: {stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    stdout
 }
 
 #[test]
@@ -69,7 +133,8 @@ fn the_run_folders_list_is_the_data_folders() {
 #[cfg(windows)]
 #[test]
 fn the_task_script_parses_without_errors() {
-    let (path, _) = script();
+    let (path, text) = script();
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
     let errors = parse_errors(&path);
     assert!(errors.is_empty(), "{errors}");
 }
@@ -98,4 +163,52 @@ fn the_platform_ignored_script_parses_and_runs_one_session_of_platform_tests() {
         assert!(text.contains(line), "platform-ignored.ps1 lacks: {line}");
     }
     assert!(!text.contains("ScheduledTask"), "the script registers nothing; run-interactive.ps1 does");
+}
+
+/// Review round 1 of pull request 3 (V13): the task's argument line is not quoted, Task Scheduler may expand a percent
+/// sign in it, and the engine reads a relative folder against the run folder, protects whatever folder it is given and
+/// creates only the last component, so `Get-DataProblem` refuses every `-Data` but a full local folder path below a
+/// drive's root, outside the run folder, whose parent exists. C: paths only, since the runner may have no D:.
+#[cfg(windows)]
+#[test]
+fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplace() {
+    let (path, _) = script();
+    let missing = format!(r"'C:\{}\data'", unique("no-such-parent"));
+    let run = r"'C:\lazymkv\run'";
+    let accepted = [
+        (r"'C:\lazymkv-data'", run),
+        (r"'C:\lazymkv-data\'", run),
+        (r"'C:\lazymkv-running'", r"'C:\lazymkv-run'"),
+    ];
+    let refused = [
+        r"'C:\lazymkv data'",
+        r"('C:\a' + [char]34 + 'b')",
+        r"'C:\a%TEMP%'",
+        "'data'",
+        r"'\data'",
+        "'C:data'",
+        r"'C:\'",
+        r"'C:\x\..'",
+        r"'C:\lazymkv\run'",
+        r"'C:\LAZYMKV\RUN\data'",
+        r"'C:\lazymkv\run\..\run\data'",
+        missing.as_str(),
+    ];
+    let cases = accepted.iter().copied().chain(refused.iter().map(|data| (*data, run))).collect::<Vec<_>>();
+    let call = cases
+        .iter()
+        .map(|(data, run)| {
+            format!("$problem = Get-DataProblem {data} {run}; if ($problem) {{ \"refused: $problem\" }} else {{ 'accepted' }}")
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let output = define_and_call(&path, &["Get-DataProblem"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), cases.len(), "{output}");
+    for ((data, run), line) in cases.iter().zip(&lines).take(accepted.len()) {
+        assert_eq!(*line, "accepted", "-Data {data} with the run folder {run}");
+    }
+    for ((data, _), line) in cases.iter().zip(&lines).skip(accepted.len()) {
+        assert!(line.starts_with("refused: -Data "), "-Data {data}: {line}");
+    }
 }
