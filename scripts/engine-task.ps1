@@ -4,8 +4,9 @@
 #   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 [-Data DIR] [-AcceptWritableBuild]'
 # It registers a task and sets an access list, which are standing changes: run it only after the owner's yes. DIR is a
 # full local folder path below a drive's root, such as D:\lazymkv-data, with no space, quote or percent sign, outside
-# C:\lazymkv\run and in a folder that exists; the script refuses any other before it changes anything. The last line is
-# "ENGINE-TASK-DONE status=ok|error" and the exit code 0 or 1. It writes no account name.
+# C:\lazymkv (neither in the run folder or a build tree nor holding one) and in a folder that exists; the script refuses
+# any other before it changes anything. The last line is "ENGINE-TASK-DONE status=ok|error" and the exit code 0 or 1. It
+# writes no account name.
 param(
     [string]$Data = '',
     [switch]$AcceptWritableBuild
@@ -44,17 +45,30 @@ function Get-Writers([string]$path) {
 # Why -Data cannot name the task's data folder, or '' when it can (review round 1 of pull request 3, V13): the
 # task's argument line is not quoted, Task Scheduler may expand a percent sign in it, the engine reads a relative
 # folder against the run folder and protects whatever folder it is given, a drive's root included, and creates
-# only the last component.
-function Get-DataProblem([string]$data, [string]$run) {
-    if ($data -notmatch '^[A-Za-z]:\\[^:<>|?*"%\s]*$') {
+# only the last component. A folder that holds the run folder or a build tree would put them in the engine's protected
+# list, and one in a build tree is removed when scripts/box.sh or cargo clean recreates it (the round's final review,
+# W12). $trees are the script's; the comparisons end each folder in a backslash, so C:\lazymkv-data passes.
+function Get-DataProblem([string]$data, [string]$run, [string[]]$trees) {
+    if ($data -notmatch '^[A-Za-z]:\\[^:<>|?*"%\s]*\z') {
         return "-Data $data is not a full local folder path with no space, quote or percent sign, such as D:\lazymkv-data; the task's argument line is not quoted, and the engine reads a relative folder inside $run (design part 3.1)"
     }
     $full = [System.IO.Path]::GetFullPath($data).TrimEnd('\')
     if ($full.Length -le 2) {
         return "-Data $data is a drive's root, which the engine's protected list would reach whole; give a folder below it, such as D:\lazymkv-data (design part 3.5)"
     }
-    if ($full -eq $run -or $full.StartsWith("$run\", [System.StringComparison]::OrdinalIgnoreCase)) {
+    $ignoreCase = [System.StringComparison]::OrdinalIgnoreCase
+    if ($full -eq $run -or $full.StartsWith("$run\", $ignoreCase)) {
         return "-Data $data is in $run, which holds only the programs this script copies there (design part 3.5)"
+    }
+    foreach ($folder in @($run) + @($trees)) {
+        if ($folder.StartsWith("$full\", $ignoreCase)) {
+            return "-Data $data holds $folder, so the engine's protected list would reach the programs and the build trees; give a folder outside C:\lazymkv (design part 3.5)"
+        }
+    }
+    # The deepest tree the folder is in, so C:\lazymkv\src\data names C:\lazymkv\src rather than its parent.
+    $tree = @($trees | Where-Object { $full -eq $_ -or $full.StartsWith("$_\", $ignoreCase) } | Sort-Object Length -Descending)
+    if ($tree.Count -gt 0) {
+        return "-Data $data is in $($tree[0]), which scripts/box.sh or cargo clean recreates; give a folder outside C:\lazymkv (design part 3.5)"
     }
     if (-not (Test-Path -LiteralPath (Split-Path $full) -PathType Container)) {
         return "-Data $data has no parent folder; the engine creates only the data folder itself (design part 3.5)"
@@ -105,7 +119,7 @@ function Get-WrittenAces([string]$dacl) {
 
 $status = 'error'
 try {
-    if ($Data) { $problem = Get-DataProblem $Data $run; if ($problem) { throw $problem } }
+    if ($Data) { $problem = Get-DataProblem $Data $run $trees; if ($problem) { throw $problem } }
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $administrator = [System.Security.Principal.WindowsBuiltInRole]::Administrator
     if (-not (New-Object System.Security.Principal.WindowsPrincipal($identity)).IsInRole($administrator)) {

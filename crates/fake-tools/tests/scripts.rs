@@ -172,7 +172,9 @@ fn the_platform_ignored_script_parses_and_runs_one_session_of_platform_tests() {
 /// Review round 1 of pull request 3 (V13): the task's argument line is not quoted, Task Scheduler may expand a percent
 /// sign in it, and the engine reads a relative folder against the run folder, protects whatever folder it is given and
 /// creates only the last component, so `Get-DataProblem` refuses every `-Data` but a full local folder path below a
-/// drive's root, outside the run folder, whose parent exists. C: paths only, since the runner may have no D:.
+/// drive's root, outside the run folder, whose parent exists. It refuses too a folder that holds the run folder or a
+/// build tree, or lies in a build tree, which scripts/box.sh or cargo clean recreates (the round's final review (W12));
+/// the trees are the script's own. C: paths only, since the runner may have no D:.
 #[cfg(windows)]
 #[test]
 fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplace() {
@@ -197,16 +199,33 @@ fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplac
         r"'C:\LAZYMKV\RUN\data'",
         r"'C:\lazymkv\run\..\run\data'",
         missing.as_str(),
+        r"'C:\lazymkv'",
+        r"'C:\lazymkv\'",
+        r"'C:\lazymkv\src\data'",
+        r"'C:\LAZYMKV\TARGET\x'",
+        r"('C:\lazymkv-data' + [char]10)",
+    ];
+    // What the last five refusals say: the folder the value holds or lies in, or the first check's text.
+    let texts = [
+        r"holds C:\lazymkv\run",
+        r"holds C:\lazymkv\run",
+        r"is in C:\lazymkv\src,",
+        r"is in C:\lazymkv\target,",
+        "is not a full local folder path",
     ];
     let cases = accepted.iter().copied().chain(refused.iter().map(|data| (*data, run))).collect::<Vec<_>>();
+    // A refusal's text is printed on one line, since a value with a newline puts one in it.
     let call = cases
         .iter()
         .map(|(data, run)| {
-            format!("$problem = Get-DataProblem {data} {run}; if ($problem) {{ \"refused: $problem\" }} else {{ 'accepted' }}")
+            format!(
+                "$problem = Get-DataProblem {data} {run} $trees; \
+                 if ($problem) {{ \"refused: $($problem -replace '\\r?\\n', '<newline>')\" }} else {{ 'accepted' }}"
+            )
         })
         .collect::<Vec<_>>()
         .join("\r\n");
-    let output = define_and_call(&path, &["Get-DataProblem"], &[], &call);
+    let output = define_and_call(&path, &["Get-DataProblem"], &["run", "trees"], &call);
     let lines = output.lines().map(str::trim).collect::<Vec<_>>();
     assert_eq!(lines.len(), cases.len(), "{output}");
     for ((data, run), line) in cases.iter().zip(&lines).take(accepted.len()) {
@@ -214,6 +233,9 @@ fn the_task_scripts_data_check_refuses_what_the_task_line_would_split_or_misplac
     }
     for ((data, _), line) in cases.iter().zip(&lines).skip(accepted.len()) {
         assert!(line.starts_with("refused: -Data "), "-Data {data}: {line}");
+    }
+    for ((data, line), text) in refused.iter().zip(&lines[accepted.len()..]).skip(refused.len() - texts.len()).zip(texts) {
+        assert!(line.contains(text), "-Data {data}: {line} lacks {text}");
     }
 }
 
