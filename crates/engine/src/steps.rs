@@ -297,6 +297,15 @@ pub(crate) fn next_attempt_dir(title_dir: &Path) -> PathBuf {
 /// review round 1's V10). Def: T3-18. Use: T3-18.
 pub(crate) const FRESH_SNAPSHOT: &str = "fingerprint.lazymkv-new";
 
+/// The folder of the job folder the Fingerprint step moves the job's own snapshot entries into before it moves the
+/// fresh ones in, and removes once they are in; a crash, or a rollback that could not finish, may leave it, and the
+/// next run puts its entries back first (review round 1 of pull request 3, V12). Def: PR #14 review round 1 (V12).
+/// Use: snapshot_aside, swap_in, restore_old.
+pub(crate) const OLD_SNAPSHOT: &str = "fingerprint.lazymkv-old";
+
+/// The job folder's snapshot entries the swap moves, in its order (review round 1 of pull request 3, V12).
+const SNAPSHOT_ENTRIES: [&str; 3] = ["files.json", "nav", "meta.json"];
+
 /// `path` removed, a folder with everything in it and anything else as a file; a missing one is not an error.
 fn remove_entry(path: &Path) -> io::Result<()> {
     let removed = match fs::symlink_metadata(path) {
@@ -310,13 +319,76 @@ fn remove_entry(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Whether an entry is at `path`, read with `symlink_metadata`: NotFound is false, any other error Err. Def: PR #14
+/// review round 1 (V12). Use: restore_old, swap_in.
+fn entry_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// The job's own snapshot entries a crash or an unfinished rollback left in `old` put back: each `SNAPSHOT_ENTRIES`
+/// entry in `old` whose name the job folder lacks is renamed back, then `old` is removed with whatever it still holds
+/// (review round 1 of pull request 3, V12). Def: PR #14 review round 1 (V12). Use: snapshot_aside.
+fn restore_old(job_dir: &Path, old: &Path) -> io::Result<()> {
+    for name in SNAPSHOT_ENTRIES {
+        let (aside, own) = (old.join(name), job_dir.join(name));
+        if entry_exists(&aside)? && !entry_exists(&own)? {
+            fs::rename(&aside, &own)?;
+        }
+    }
+    remove_entry(old)
+}
+
+/// The swap of `snapshot_aside` (review round 1 of pull request 3, V12): `old` is made, each job entry of
+/// `SNAPSHOT_ENTRIES` that exists is moved into it, in that order, then each fresh entry that exists is moved into
+/// `job_dir`, every move through `rename` and recorded. On a metadata or move failure the moves made are undone, last
+/// first (`rename(to, from)`), their errors ignored, so an entry that cannot go back stays in `old` for the next run's
+/// `restore_old`; then `old` is removed only when empty, and the first error is returned. On Ok, `old` holds the job's
+/// former entries for the caller to remove. Def: PR #14 review round 1 (V12). Use: snapshot_aside.
+fn swap_in(
+    job_dir: &Path,
+    fresh: &Path,
+    old: &Path,
+    rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    fs::create_dir(old)?;
+    let aside = SNAPSHOT_ENTRIES.iter().map(|name| (job_dir.join(name), old.join(name)));
+    let placed = SNAPSHOT_ENTRIES.iter().map(|name| (fresh.join(name), job_dir.join(name)));
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (from, to) in aside.chain(placed) {
+        let made = match entry_exists(&from) {
+            Ok(false) => continue,
+            Ok(true) => rename(&from, &to),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = made {
+            for (from, to) in moved.iter().rev() {
+                let _ = rename(to, from);
+            }
+            let _ = fs::remove_dir(old);
+            return Err(error);
+        }
+        moved.push((from, to));
+    }
+    Ok(())
+}
+
 /// The Fingerprint step's recording (design part 5.4 step 2; engine.md:587): `tools::snapshot` of the disc at `root`
 /// into `<job_dir>/FRESH_SNAPSHOT`, which a crash may have left and is removed first; on the job's `fingerprint`,
-/// `files.json`, `nav` and `meta.json` replace the job folder's own, and `FRESH_SNAPSHOT` is removed. On any other
-/// outcome the job folder's snapshot is untouched and `FRESH_SNAPSHOT` is removed. Err is the step's message:
-/// `the disc's recording could not be written: <error>` (the snapshot, or a leftover that cannot be removed),
-/// `the disc's fingerprint <found or "none"> differs from the job's <fingerprint>`, or `the disc's recording could not
-/// be put in place: <error>` (the swap). Def: T3-18. Use: T3-18.
+/// `files.json`, `nav` and `meta.json` replace the job folder's own, and `FRESH_SNAPSHOT` is removed. On a fingerprint
+/// that differs or a snapshot that fails the job folder's snapshot is untouched and `FRESH_SNAPSHOT` is removed.
+///
+/// The swap (`swap_in`; review round 1 of pull request 3, V12): the job's own entries are moved into `OLD_SNAPSHOT`
+/// before the fresh ones are moved in, and removed after. A move that fails puts every moved entry back, so the job
+/// folder keeps its own snapshot whole, and the step fails "could not be put in place", leaving `FRESH_SNAPSHOT` to the
+/// next run's first removal. An entry left aside by a crash, or by a rollback that could not finish, is put back by the
+/// next run before anything else (`restore_old`). Err is the step's message: `the disc's recording could not be
+/// written: <error>` (the snapshot, or a leftover that cannot be put back or removed), `the disc's fingerprint <found
+/// or "none"> differs from the job's <fingerprint>`, or `the disc's recording could not be put in place: <error>`
+/// (the swap). Def: T3-18, its swap PR #14 review round 1 (V12). Use: T3-18.
 pub(crate) fn snapshot_aside(
     root: &Path,
     label: &str,
@@ -324,8 +396,9 @@ pub(crate) fn snapshot_aside(
     captured_unix: u64,
     fingerprint: &str,
 ) -> Result<(), String> {
-    let fresh = job_dir.join(FRESH_SNAPSHOT);
+    let (fresh, old) = (job_dir.join(FRESH_SNAPSHOT), job_dir.join(OLD_SNAPSHOT));
     let unwritten = |error: io::Error| format!("the disc's recording could not be written: {error}");
+    restore_old(job_dir, &old).map_err(unwritten)?;
     remove_entry(&fresh).map_err(unwritten)?;
     // A removal that fails after a failed or differing snapshot leaves the folder to the next run's first removal, so
     // its error never replaces the step's message (Ruling PF3-S18-20-3).
@@ -342,15 +415,8 @@ pub(crate) fn snapshot_aside(
         return Err(format!("the disc's fingerprint {found} differs from the job's {fingerprint}"));
     }
     let unplaced = |error: io::Error| format!("the disc's recording could not be put in place: {error}");
-    for name in ["files.json", "nav", "meta.json"] {
-        let (from, to) = (fresh.join(name), job_dir.join(name));
-        remove_entry(&to).map_err(unplaced)?;
-        match fs::symlink_metadata(&from) {
-            Ok(_) => fs::rename(&from, &to).map_err(unplaced)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(unplaced(error)),
-        }
-    }
+    swap_in(job_dir, &fresh, &old, &mut |from, to| fs::rename(from, to)).map_err(unplaced)?;
+    remove_entry(&old).map_err(unplaced)?;
     fs::remove_dir(&fresh).map_err(unplaced)
 }
 
@@ -2066,6 +2132,89 @@ mod tests {
         assert!(job.join("nav/BDMV/index.bdmv").is_file());
         assert!(!job.join("nav/BDMV/stale.bdmv").exists());
         assert!(!job.join(FRESH_SNAPSHOT).exists());
+        assert!(!job.join(OLD_SNAPSHOT).exists());
+    }
+
+    /// The job folder `<s>/job` snapshotted from disc a (captured 1) and `FRESH_SNAPSHOT` from disc a (captured 2), so
+    /// meta.json differs from its fresh copy; with the job folder, disc a's fingerprint.
+    fn job_and_fresh(s: &Scratch) -> (PathBuf, String) {
+        let job = s.0.join("job");
+        let disc = disc_volume(s, "a", 1000);
+        let fingerprint = snapshot(&disc, "A", &job, 1).unwrap().fingerprint.unwrap();
+        snapshot(&disc, "A", &job.join(FRESH_SNAPSHOT), 2).unwrap();
+        (job, fingerprint)
+    }
+
+    /// A rename that fails its calls numbered in `fail` (counted from 1) with `held`, and renames otherwise.
+    fn failing_rename(fail: &[usize]) -> impl FnMut(&Path, &Path) -> io::Result<()> + '_ {
+        let mut calls = 0;
+        move |from, to| {
+            calls += 1;
+            if fail.contains(&calls) {
+                return Err(io::Error::other("held"));
+            }
+            fs::rename(from, to)
+        }
+    }
+
+    /// Review round 1 of pull request 3 (V12): whichever of the swap's six moves fails, every entry moved goes back, so
+    /// the job folder keeps its own snapshot whole, and OLD_SNAPSHOT is gone.
+    #[test]
+    fn a_swap_that_fails_at_any_move_leaves_the_jobs_own_snapshot_whole() {
+        for fail_at in 1..=6 {
+            let s = Scratch::new(&format!("swap-fails-{fail_at}"));
+            let (job, _) = job_and_fresh(&s);
+            let before = snapshot_files(&job);
+            let fail = [fail_at];
+            let mut rename = failing_rename(&fail);
+            let error = swap_in(&job, &job.join(FRESH_SNAPSHOT), &job.join(OLD_SNAPSHOT), &mut rename).unwrap_err();
+            assert_eq!(error.to_string(), "held", "{fail_at}");
+            assert_eq!(snapshot_files(&job), before, "{fail_at}");
+            assert!(!job.join(OLD_SNAPSHOT).exists(), "{fail_at}");
+        }
+    }
+
+    /// Review round 1 of pull request 3 (V12): an entry a rollback could not put back stays in OLD_SNAPSHOT, as one a
+    /// crash left there would, and the next run puts it back before anything else.
+    #[test]
+    fn an_entry_left_aside_by_a_failed_rollback_or_a_crash_is_put_back_by_the_next_run() {
+        let s = Scratch::new("swap-left-aside");
+        let (job, fingerprint) = job_and_fresh(&s);
+        let before = snapshot_files(&job);
+        let index = fs::read(job.join("nav/BDMV/index.bdmv")).unwrap();
+        let fail = [5, 8];
+        let mut rename = failing_rename(&fail);
+        swap_in(&job, &job.join(FRESH_SNAPSHOT), &job.join(OLD_SNAPSHOT), &mut rename).unwrap_err();
+        assert!(!job.join("nav").exists());
+        assert_eq!(fs::read(job.join(OLD_SNAPSHOT).join("nav/BDMV/index.bdmv")).unwrap(), index);
+        let error = snapshot_aside(&disc_volume(&s, "b", 2000), "B", &job, 3, &fingerprint).unwrap_err();
+        assert!(error.starts_with("the disc's fingerprint "), "{error}");
+        assert_eq!(snapshot_files(&job), before);
+        assert!(!job.join(OLD_SNAPSHOT).exists());
+    }
+
+    /// Review round 1 of pull request 3 (V12): a job file another process holds stops the swap at its move aside (os
+    /// error 32), every entry already moved goes back, so the job's snapshot is whole, and a second call once the file
+    /// is let go swaps the new snapshot in.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_job_file_stops_the_swap_and_leaves_the_snapshot_whole() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let s = Scratch::new("aside-held");
+        let job = s.0.join("job");
+        let disc = disc_volume(&s, "a", 1000);
+        let fingerprint = snapshot(&disc, "A", &job, 1).unwrap().fingerprint.unwrap();
+        let before = snapshot_files(&job);
+        let held = fs::OpenOptions::new().read(true).share_mode(0).open(job.join("meta.json")).unwrap();
+        let error = snapshot_aside(&disc, "A", &job, 2, &fingerprint).unwrap_err();
+        assert!(error.starts_with("the disc's recording could not be put in place: "), "{error}");
+        assert!(error.contains("os error 32"), "{error}");
+        drop(held);
+        assert_eq!(snapshot_files(&job), before);
+        assert!(!job.join(OLD_SNAPSHOT).exists());
+        snapshot_aside(&disc, "A", &job, 2, &fingerprint).unwrap();
+        let meta: Value = serde_json::from_slice(&fs::read(job.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["captured_unix"], json!(2));
     }
 
     #[test]
