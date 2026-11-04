@@ -2825,9 +2825,9 @@ impl Owner {
                     settings: held.settings.clone(),
                     job_dir: self.store.job_dir(&job),
                 };
-                let (shares, promises) = (Arc::clone(&self.parts.shares), Arc::clone(&self.parts.promises));
+                let promises = Arc::clone(&self.parts.promises);
                 Box::new(move || {
-                    let event = env.recheck(&input, busy, shares.as_ref(), &promises);
+                    let event = env.recheck(&input, busy, &promises);
                     CheckOutcome::Recheck { job, event }
                 })
             }

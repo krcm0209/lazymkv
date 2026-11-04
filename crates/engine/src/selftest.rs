@@ -522,16 +522,11 @@ impl CheckEnv {
     /// What a `retry` in a waiting state re-checks (Ruling S81), as the event its cleared condition gives, or None:
     /// AwaitingShare reaches the roots the return uses (ShareBack); AwaitingSpace runs the CheckSpace computation
     /// (SpaceFreed); AwaitingMakeMkv runs a fresh MakeMKV check, whose observed change the owner delivers (None here);
-    /// AwaitingTool runs `tool_found` with a fresh MakeMKV check. `busy` says a `makemkvcon` runs for a job. Def: T26.
-    /// Use: T26.
-    pub(crate) fn recheck(
-        &self,
-        job: &RecheckJob,
-        busy: bool,
-        shares: &dyn ShareConnector,
-        promises: &Mutex<Promises>,
-    ) -> Option<Event> {
+    /// AwaitingTool runs `tool_found` with a fresh MakeMKV check. `busy` says a `makemkvcon` runs for a job. The shares
+    /// are the environment's own (review round 1 of pull request 3, R53). Def: T26. Use: T26.
+    pub(crate) fn recheck(&self, job: &RecheckJob, busy: bool, promises: &Mutex<Promises>) -> Option<Event> {
         let settings = &job.settings;
+        let shares = self.shares.as_ref();
         match &job.record.state {
             State::AwaitingShare { .. } => share_back(&job.record, settings, shares),
             State::AwaitingSpace { return_to } => space_freed(job, return_to, shares, promises),
