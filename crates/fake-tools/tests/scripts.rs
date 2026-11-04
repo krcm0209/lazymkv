@@ -48,10 +48,42 @@ fn unique(stem: &str) -> String {
     format!("{stem}-{}-{nanos}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+/// `text` with the temp folder's path written `<temp>` and each account SID (`S-1-5-21-` and its digits and hyphens)
+/// written `<sid>`, for a failure's print, since the temp folder's path holds the account name (RP21; the round's final
+/// review (W14)). The path is matched without its trailing separator, so a text holding it with one keeps that
+/// separator after `<temp>`, and ignoring ASCII case, as Windows compares paths.
+#[cfg(windows)]
+fn redacted(text: &str) -> String {
+    let temp = std::env::temp_dir().display().to_string();
+    let temp = temp.trim_end_matches(['\\', '/']).to_ascii_lowercase();
+    let mut without_temp = String::with_capacity(text.len());
+    let mut last = 0;
+    if !temp.is_empty() {
+        // ASCII lowercasing keeps every byte offset, so the matches' offsets index `text` too.
+        for (at, _) in text.to_ascii_lowercase().match_indices(&temp) {
+            without_temp.push_str(&text[last..at]);
+            without_temp.push_str("<temp>");
+            last = at + temp.len();
+        }
+    }
+    without_temp.push_str(&text[last..]);
+    let prefix = "S-1-5-21-";
+    let mut result = String::with_capacity(without_temp.len());
+    let mut rest = without_temp.as_str();
+    while let Some(at) = rest.find(prefix) {
+        result.push_str(&rest[..at]);
+        result.push_str("<sid>");
+        let tail = &rest[at + prefix.len()..];
+        rest = &tail[tail.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(tail.len())..];
+    }
+    result.push_str(rest);
+    result
+}
+
 /// What `call` prints, trimmed, after the functions named `functions` and the top-level assignments to the variables
 /// named `variables` of the script at `path` are dot-sourced alone from its syntax tree (review round 1 of pull request
 /// 3, V13): nothing else in the script runs (Owner decision 3). The snippet goes to a temporary .ps1 that Windows
-/// PowerShell 5.1 runs with `-File`; a call that fails panics with what PowerShell printed.
+/// PowerShell 5.1 runs with `-File`; a call that fails panics with what PowerShell printed, `redacted`.
 #[cfg(windows)]
 fn define_and_call(path: &Path, functions: &[&str], variables: &[&str], call: &str) -> String {
     let quote = |items: &[&str]| {
@@ -94,9 +126,8 @@ fn define_and_call(path: &Path, functions: &[&str], variables: &[&str], call: &s
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     assert!(
         output.status.success(),
-        "powershell {}: {stdout}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
+        "{}",
+        redacted(&format!("powershell {}: {stdout}\n{}", output.status, String::from_utf8_lossy(&output.stderr).trim()))
     );
     stdout
 }
@@ -319,11 +350,15 @@ fn the_task_scripts_read_back_expects_aliases_as_windows_writes_them() {
     assert_eq!(lines, ["same", "LA"], "{output}");
 }
 
-/// Runs icacls with `args` and panics when it fails.
+/// Runs icacls with `args` and panics when it fails, with what icacls printed, `redacted`.
 #[cfg(windows)]
 fn icacls(args: &[&std::ffi::OsStr]) {
     let output = std::process::Command::new("icacls").args(args).output().expect("icacls starts");
-    assert!(output.status.success(), "icacls {}: {}", output.status, String::from_utf8_lossy(&output.stdout).trim());
+    assert!(
+        output.status.success(),
+        "{}",
+        redacted(&format!("icacls {}: {}", output.status, String::from_utf8_lossy(&output.stdout).trim()))
+    );
 }
 
 /// A scratch folder below the temp folder, its access list reset and the folder removed on drop.
