@@ -155,9 +155,10 @@ mod tests {
 
     /// Stores `value` under `name` and returns false. Returns true after printing a skip, writing nothing, when `CI`
     /// and `LAZYMKV_TEST_VAULT` are both unset, so no run writes the owner's vault before Owner decision 8's yes
-    /// (`platform-ignored.ps1` sets the variable for `win::creds::` only); and when this logon session has no vault
-    /// (ERROR_NO_SUCH_LOGON_SESSION, 1312; design part 6.1) and `CI` is unset. On continuous integration (CI) it never
-    /// skips, unless Owner decision 15's vault fallback is taken.
+    /// (`platform-ignored.ps1` sets the variable for a filter that is `win::creds`, `win::creds::` or a path inside it;
+    /// review round 1 of pull request 3, R3); and when this logon session has no vault (ERROR_NO_SUCH_LOGON_SESSION,
+    /// 1312; design part 6.1) and `CI` is unset. On continuous integration (CI) it never skips, unless Owner decision
+    /// 15's vault fallback is taken.
     fn stored(store: &CredentialStore, name: &str, value: &str) -> bool {
         if std::env::var_os("CI").is_none() && std::env::var_os("LAZYMKV_TEST_VAULT").is_none() {
             skip("LAZYMKV_TEST_VAULT is not set; the vault tests run on CI and, after Owner decision 8, in the desktop session (design part 6.1)");
