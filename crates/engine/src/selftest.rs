@@ -4,6 +4,7 @@
 //! is recorded capture-style under `<data>/selftest/` (design part 7.2). The owner thread runs none of this itself: it
 //! hands each self-test and re-check to a thread of its own (design part 4.4).
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -227,17 +228,35 @@ fn probe(dir: &Path) -> Result<(), String> {
 
 /// The write, rename and delete probe of spec 7 in `root` (in `<root>/.lazymkv-partial` when `library`). Changed:
 /// `reach` first (spec 13, "each root reachable"; Ruling W15), then `make_root` for staging and tuning, then the probe.
+/// `down` maps a volume key to why its share did not answer earlier in the same self-test: a root on a volume that
+/// already did not answer takes that answer without asking again (review round 1 of pull request 3, R36), and a
+/// root whose share does not answer adds its volume. Only failures are kept, so a volume that answered is asked again
+/// for each root and a share that drops between two checks is still seen; a root with no volume is always asked.
 /// A root that does not answer fails with `<root> is unreachable: <why>`, `space.rs`' wording. A staging or tuning
 /// root is made when only its last folder is missing (design part 6.2), and fails with `make_root`'s text otherwise.
 /// A library root that is not a folder fails with `<root> is not a folder`, and only the partial folder inside an
 /// existing root is made, so a mistyped or unmounted root never passes or leaves a folder behind (ruling at the final
-/// review). Def: T26, T3-17. Use: T26, T3-17.
-pub(crate) fn root_check(name: &str, root: Option<&str>, library: bool, shares: &dyn ShareConnector) -> SelfTestCheck {
+/// review). Def: T26, T3-17, its `down` PR #14 review round 1 (R36). Use: T26, T3-17.
+pub(crate) fn root_check(
+    name: &str,
+    root: Option<&str>,
+    library: bool,
+    shares: &dyn ShareConnector,
+    down: &mut BTreeMap<String, String>,
+) -> SelfTestCheck {
     let Some(root) = root else {
         return check(name, false, format!("{name} is unset"));
     };
     let dir = if library { Path::new(root).join(PARTIAL_FOLDER) } else { PathBuf::from(root) };
-    let made = if let Reach::Unreachable(why) = shares.reach(root) {
+    let volume = shares.volume(root);
+    let reach = match volume.as_ref().and_then(|key| down.get(key)) {
+        Some(why) => Reach::Unreachable(why.clone()),
+        None => shares.reach(root),
+    };
+    if let (Reach::Unreachable(why), Some(key)) = (&reach, volume) {
+        down.entry(key).or_insert_with(|| why.clone());
+    }
+    let made = if let Reach::Unreachable(why) = reach {
         Err(format!("{root} is unreachable: {why}"))
     } else if !library {
         make_root(root)
@@ -458,16 +477,19 @@ impl CheckEnv {
     /// Every check of spec 13's self-test that needs no disc, in S80's order: the MakeMKV check (`busy` while a
     /// `makemkvcon` runs), mkvmerge, ffprobe, ffmpeg, java, the three roots and the TMDb token (design part 9.4, S53).
     /// `listed` runs once the MakeMKV check has ended, so the owner can free the disc-phase token the check holds
-    /// (Ruling R26.c1). Def: T26. Use: T26.
+    /// (Ruling R26.c1). The three root checks share one `down` map, made here, so a share that did not answer is asked
+    /// once in this self-test; nothing is kept across self-tests or shared with jobs and re-checks (review round 1 of
+    /// pull request 3, R36). Def: T26. Use: T26.
     pub(crate) fn selftest(&self, settings: &Settings, busy: bool, listed: &dyn Fn()) -> SelfTest {
         let mut checks = vec![self.makemkv_check(settings, busy)];
         listed();
         let tools = [Tool::Mkvmerge, Tool::Ffprobe, Tool::Ffmpeg, Tool::Java];
         checks.extend(tools.map(|tool| self.tool_check(settings, tool)));
         let shares = self.shares.as_ref();
-        checks.push(root_check("staging_root", settings.staging_root.as_deref(), false, shares));
-        checks.push(root_check("tuning_root", settings.tuning_root.as_deref(), false, shares));
-        checks.push(root_check("movies_root", settings.movies_root.as_deref(), true, shares));
+        let mut down = BTreeMap::new();
+        checks.push(root_check("staging_root", settings.staging_root.as_deref(), false, shares, &mut down));
+        checks.push(root_check("tuning_root", settings.tuning_root.as_deref(), false, shares, &mut down));
+        checks.push(root_check("movies_root", settings.movies_root.as_deref(), true, shares, &mut down));
         checks.push(token_check(self.http.as_ref(), self.secrets.get("tmdb_token").as_deref()));
         SelfTest { checks }
     }
@@ -604,7 +626,8 @@ mod tests {
     #[test]
     fn a_library_root_is_probed_inside_lazymkv_partial_and_left_clean() {
         let s = Scratch::new("probe");
-        let check = root_check("movies_root", Some(s.0.to_str().unwrap()), true, &FakeShares::new());
+        let root = Some(s.0.to_str().unwrap());
+        let check = root_check("movies_root", root, true, &FakeShares::new(), &mut BTreeMap::new());
         assert!(check.ok, "{}", check.detail);
         assert_eq!(check.name, "movies_root");
         let partial = s.0.join(".lazymkv-partial");
@@ -619,7 +642,8 @@ mod tests {
     fn a_missing_library_root_fails_its_check_and_is_not_created() {
         let s = Scratch::new("probe-missing");
         let missing = s.0.join("Moives");
-        let check = root_check("movies_root", Some(missing.to_str().unwrap()), true, &FakeShares::new());
+        let root = Some(missing.to_str().unwrap());
+        let check = root_check("movies_root", root, true, &FakeShares::new(), &mut BTreeMap::new());
         assert!(!check.ok);
         assert_eq!(check.detail, format!("{} is not a folder", missing.display()));
         assert_eq!(check.path.as_deref(), missing.to_str());
@@ -628,7 +652,62 @@ mod tests {
 
     #[test]
     fn an_unset_root_fails_its_check() {
-        assert!(!root_check("tuning_root", None, false, &FakeShares::new()).ok);
+        assert!(!root_check("tuning_root", None, false, &FakeShares::new(), &mut BTreeMap::new()).ok);
+    }
+
+    /// Review round 1 of pull request 3 (R36): within one self-test, a root on a volume whose share did not answer
+    /// takes that answer without asking again, and nothing is made for it.
+    #[test]
+    fn a_share_that_does_not_answer_is_asked_once_per_selftest() {
+        let s = Scratch::new("down-once");
+        let (staging, tuning) = (s.0.join("staging"), s.0.join("tuning"));
+        let (staging, tuning) = (staging.to_str().unwrap(), tuning.to_str().unwrap());
+        let shares = FakeShares::new();
+        shares.same_volume(staging, tuning);
+        shares.set_reach(staging, Reach::Unreachable("share down".to_string()));
+        let mut down = BTreeMap::new();
+        assert!(!root_check("staging_root", Some(staging), false, &shares, &mut down).ok);
+        let check = root_check("tuning_root", Some(tuning), false, &shares, &mut down);
+        assert!(!check.ok);
+        assert_eq!(check.detail, format!("{tuning} is unreachable: share down"));
+        assert_eq!(shares.reaches(tuning), 0);
+        assert!(!Path::new(tuning).exists());
+    }
+
+    /// Review round 1 of pull request 3 (R36): a volume that answered is asked again for each root, so a share that
+    /// drops between two checks is still seen.
+    #[test]
+    fn a_share_that_answers_is_asked_again_for_each_root() {
+        let s = Scratch::new("answered-again");
+        let (staging, tuning) = (s.0.join("staging"), s.0.join("tuning"));
+        let (staging, tuning) = (staging.to_str().unwrap(), tuning.to_str().unwrap());
+        let shares = FakeShares::new();
+        shares.same_volume(staging, tuning);
+        shares.set_reach(tuning, Reach::Unreachable("dropped".to_string()));
+        let mut down = BTreeMap::new();
+        let first = root_check("staging_root", Some(staging), false, &shares, &mut down);
+        assert!(first.ok, "{}", first.detail);
+        let check = root_check("tuning_root", Some(tuning), false, &shares, &mut down);
+        assert!(!check.ok);
+        assert_eq!(check.detail, format!("{tuning} is unreachable: dropped"));
+    }
+
+    /// Review round 1 of pull request 3 (R36): a root on another volume is still asked after one did not answer.
+    #[test]
+    fn another_volume_is_still_asked_after_one_did_not_answer() {
+        let s = Scratch::new("other-volume");
+        let staging = s.0.join("staging");
+        let staging = staging.to_str().unwrap();
+        let movies = s.0.join("movies");
+        fs::create_dir(&movies).unwrap();
+        let movies = movies.to_str().unwrap();
+        let shares = FakeShares::new();
+        shares.set_reach(staging, Reach::Unreachable("share down".to_string()));
+        let mut down = BTreeMap::new();
+        assert!(!root_check("staging_root", Some(staging), false, &shares, &mut down).ok);
+        let check = root_check("movies_root", Some(movies), true, &shares, &mut down);
+        assert!(check.ok, "{}", check.detail);
+        assert_eq!(shares.reaches(movies), 1);
     }
 
     #[test]
