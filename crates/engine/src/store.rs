@@ -83,8 +83,9 @@ pub(crate) struct Store {
     data: PathBuf,
     /// The Unix seconds of engine.log lines.
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
-    /// Standard error in a console run, a ConsoleMirror in an engine, so the lock is never held across a console write
-    /// (review round 1 of pull request 3, V5). Its lock also keeps engine.log's lines whole and in order.
+    /// The ConsoleMirror `start_until` puts over `EngineConfig.console` (standard error in a console run, the harness's
+    /// buffer in tests), so the lock is held only while a line is queued, never across a write to the console (review
+    /// round 1 of pull request 3, V5). Its lock also keeps engine.log's lines whole and in order.
     console: Mutex<Option<Box<dyn Write + Send>>>,
     /// Held across every write of a persisted file (design part 7.4), so the store is the one writer per path.
     writing: Mutex<()>,
@@ -95,7 +96,7 @@ pub(crate) struct Store {
 
 impl Store {
     /// The store over `data` (design part 3.5). `now` gives the Unix seconds of engine.log lines. `console` is
-    /// standard error in a console run. Touches no file. Def: T21. Use: T22, T23, T25, T26.
+    /// the engine's ConsoleMirror, or None. Touches no file. Def: T21. Use: T22, T23, T25, T26.
     pub(crate) fn new(
         data: PathBuf,
         now: Arc<dyn Fn() -> u64 + Send + Sync>,
