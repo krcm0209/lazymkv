@@ -17,7 +17,6 @@ use lazymkv_core::plan::{staging_bytes_needed, write_bytes_needed, Kind, Plan};
 use lazymkv_core::record::{JobRecord, Transition};
 use lazymkv_core::settings::Settings;
 use lazymkv_platform::{Reach, ShareConnector};
-use lazymkv_tools::CancelToken;
 
 use crate::restart::held_promise;
 use crate::steps::mkv_files;
@@ -50,6 +49,14 @@ impl Promises {
     /// Use: T23, T24, T25.
     pub(crate) fn release(&mut self, job: &str, step: PromisedStep) {
         self.held.remove(&(job.to_string(), step));
+    }
+
+    /// Replaces the promise of `job`'s `step` when one is held, and promises nothing otherwise, so a refinement never
+    /// re-creates a promise a release dropped. Def: PR #14 review round 1 (R30). Use: refine_remux_promise.
+    pub(crate) fn replace(&mut self, job: &str, step: PromisedStep, volume: &str, bytes: u64) {
+        if let Some(held) = self.held.get_mut(&(job.to_string(), step)) {
+            *held = (volume.to_string(), bytes);
+        }
     }
 
     /// The bytes promised on `volume` to every job but `except_job` (design part 5.8). Def: T23. Use: T23, T24, T25.
@@ -355,25 +362,26 @@ pub(crate) fn remux_check(
 }
 
 /// engine.md:585 (Ruling S75): the Remux step's own promise once its staged sizes are read with no lock held:
-/// `remux_promise(bytes)` on `volume_of(library)`, written under the lock unless `cancel` is raised (the owner cancels a
-/// step before it releases that job's promises, so a release is never undone). Err leaves the estimate in place.
-/// Ruling T3-17-a: it replaces the plan's estimate `rebuild_promise` gives a Remuxing job. Def: T3-17. Use: T3-17.
+/// `remux_promise(bytes)` on `volume_of(library)`, written under the lock with `Promises::replace`, so the step
+/// replaces only a Remux promise the job holds. Every way into Remuxing promises one before the step starts
+/// (`remux_check`'s SpaceOk; `rebuild_promises` at a restart, a return or a Retry), and the owner releases a Remuxing
+/// job's Remux promise only after the step has ended (step_done feeds its result, or a cancel's failure), so a release
+/// is never undone, whatever the order (review round 1 of pull request 3, R30). Err leaves the estimate in place.
+/// Ruling T3-17-a: it replaces the plan's estimate `rebuild_promise` gives a Remuxing job. Def: T3-17, its replace
+/// PR #14 review round 1 (R30). Use: T3-17.
 pub(crate) fn refine_remux_promise(
     staged: Result<u64, String>,
     library: &str,
     shares: &dyn ShareConnector,
     promises: &Mutex<Promises>,
     job: &str,
-    cancel: &CancelToken,
 ) {
     let Ok(bytes) = staged else {
         return;
     };
     let volume = volume_of(shares, library);
     let mut promises = promises.lock().unwrap_or_else(PoisonError::into_inner);
-    if !cancel.is_cancelled() {
-        promises.promise(job, PromisedStep::Remux, &volume, remux_promise(bytes));
-    }
+    promises.replace(job, PromisedStep::Remux, &volume, remux_promise(bytes));
 }
 
 #[cfg(test)]
@@ -392,7 +400,6 @@ mod tests {
     use lazymkv_core::robot::parse;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
     use lazymkv_platform::fakes::FakeShares;
-    use lazymkv_tools::CancelToken;
 
     /// movie-direct's plan: one title, `t00-00800`, whose estimate `planned_remux_promise` is more than 0.
     fn movie_plan() -> Plan {
@@ -646,15 +653,12 @@ mod tests {
         let library = volume_of(&shares, "/m");
         let promises = Mutex::new(Promises::default());
         promises.lock().unwrap().promise("a-1", PromisedStep::Remux, &library, 4301);
-        let live = CancelToken::default();
-        refine_remux_promise(Err("/s/a-1/rip/t00-00800: not found".to_string()), "/m", &shares, &promises, "a-1", &live);
+        refine_remux_promise(Err("/s/a-1/rip/t00-00800: not found".to_string()), "/m", &shares, &promises, "a-1");
         assert_eq!(promises.lock().unwrap().promised(&library, "b-1"), 4301);
-        refine_remux_promise(Ok(16), "/m", &shares, &promises, "a-1", &live);
+        refine_remux_promise(Ok(16), "/m", &shares, &promises, "a-1");
         assert_eq!(promises.lock().unwrap().promised(&library, "b-1"), remux_promise(16));
         promises.lock().unwrap().release("a-1", PromisedStep::Remux);
-        let cancelled = CancelToken::default();
-        cancelled.cancel();
-        refine_remux_promise(Ok(16), "/m", &shares, &promises, "a-1", &cancelled);
+        refine_remux_promise(Ok(16), "/m", &shares, &promises, "a-1");
         assert_eq!(promises.lock().unwrap().promised(&library, "b-1"), 0);
     }
 }

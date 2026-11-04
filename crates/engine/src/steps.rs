@@ -1583,7 +1583,7 @@ impl Step<'_> {
         if let (Some(staging), Some(library)) = (settings.staging_root.as_deref(), library) {
             let staged = staged_bytes(staging, self.id, plan);
             let (shares, promises) = (self.steps.shares.as_ref(), &self.steps.promises);
-            refine_remux_promise(staged, library, shares, promises, self.id, &self.cancel);
+            refine_remux_promise(staged, library, shares, promises, self.id);
         }
         let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         for planned in &plan.titles {
