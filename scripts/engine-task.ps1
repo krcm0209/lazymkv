@@ -12,6 +12,10 @@ param(
     [switch]$AcceptWritableBuild
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell's own modules first: started from a PowerShell 7 session, 5.1 would find PowerShell 7's edition of
+# Microsoft.PowerShell.Security first on PSModulePath and Get-Acl would fail to load it (the CI run of review round 1 of
+# pull request 3's head).
+$env:PSModulePath = "$PSHOME\Modules;$env:PSModulePath"
 $name = 'lazymkv-engine'
 $run = 'C:\lazymkv\run'
 $release = 'C:\lazymkv\target\release'

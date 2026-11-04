@@ -89,8 +89,12 @@ fn define_and_call(path: &Path, functions: &[&str], variables: &[&str], call: &s
     let quote = |items: &[&str]| {
         items.iter().map(|item| format!("'{}'", item.replace('\'', "''"))).collect::<Vec<_>>().join(", ")
     };
+    // Windows PowerShell's own modules first: GitHub's windows-latest sets PSModulePath for PowerShell 7, whose edition of
+    // Microsoft.PowerShell.Security Windows PowerShell 5.1 then finds first and cannot load, so Get-Acl fails with
+    // CouldNotAutoloadMatchingModule (the CI run of the round's head; a planted module reproduced it on the mini PC).
     let snippet = format!(
         "$ErrorActionPreference = 'Stop'\r\n\
+         $env:PSModulePath = \"$PSHOME\\Modules;$env:PSModulePath\"\r\n\
          $tokens = $null; $errors = $null\r\n\
          $ast = [System.Management.Automation.Language.Parser]::ParseFile('{script}', [ref]$tokens, [ref]$errors)\r\n\
          if ($errors.Count -gt 0) {{ throw \"the script does not parse: $($errors -join '; ')\" }}\r\n\
