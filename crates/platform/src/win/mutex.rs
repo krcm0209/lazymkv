@@ -108,9 +108,14 @@ fn refusal_by_owner(handle: HANDLE) -> MutexRefusal {
         return unreadable();
     }
     let _descriptor = LocalMemory(descriptor);
-    // The owner in a binding whose address is never taken, so that the code scanner sees the null check cover its use.
+    // The owner in a binding whose address is never taken, so that the code scanner sees the null check cover its use:
+    // `owner` is read, by sid_string and account_name, only after the early return on null (the round's final review
+    // (W15)).
     let owner = owner;
-    let sid = if owner.is_null() { None } else { sid_string(owner).ok() };
+    if owner.is_null() {
+        return unreadable();
+    }
+    let sid = sid_string(owner).ok();
     match sid {
         Some(sid) if sid == ADMINISTRATORS_SID => MutexRefusal::EngineRunning,
         Some(sid) => MutexRefusal::Squatter { account: account_name(owner).unwrap_or(sid) },
