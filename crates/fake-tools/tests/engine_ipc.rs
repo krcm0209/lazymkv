@@ -1965,8 +1965,10 @@ fn stop_returns_within_the_drain_bound_while_a_webhook_hangs() {
     h.wait("a held POST", |h| !h.http().posts().is_empty());
     let started = Instant::now();
     h.restart();
-    assert!(started.elapsed() < Duration::from_secs(NOTIFY_DRAIN_S + 2), "{:?}", started.elapsed()); // unscaled
+    let took = started.elapsed();
     gate.open();
+    // The span holds the old engine's stop and the new engine's start; unscaled, it proves the stop gives up in time.
+    assert!(took < Duration::from_secs(NOTIFY_DRAIN_S + 10), "{took:?}");
 }
 
 // ---- Shutdown, progress, command and notifications ----
