@@ -481,6 +481,18 @@ pub fn record_to_fetch(inputs: &LookupInputs<'_>) -> Option<tmdb::TmdbIdentity> 
     }
 }
 
+/// The title of S47's entry-title search (design part 8.2 item 3, spec 8.1; Ruling T4-R5): the trimmed media title of
+/// the TheDiscDB record `discdb_match` picks, when that record has a title and no TMDb ID; None when no record is in
+/// hand, or the picked one has a TMDb ID or no title. The year is never part of the query (`/search/multi` takes only
+/// `query`, S20); `search_by_entry` checks it. Pure. Def: T4-3. Use: T4-3 (chain, restart), T4-8 (`search_queries`).
+pub fn entry_search_title(inputs: &LookupInputs<'_>) -> Option<String> {
+    let (_, record) = discdb_match(inputs, &mut Vec::new())?;
+    if record.tmdb_identity().is_some() {
+        return None;
+    }
+    record.title_and_year().map(|(title, _)| title)
+}
+
 /// The step `identify` reached and what it rests on: the TheDiscDB record whose media may name the work, and the one
 /// plausible search result.
 struct IdentityFound<'a> {

@@ -8,6 +8,7 @@ use std::path::Path;
 use lazymkv_clients::{Answers, Lookup, LookupBook, LookupState, PendingReason};
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::discdb::{parse_dischash, parse_discid};
+use lazymkv_core::lookup::entry_search_title;
 use lazymkv_core::lookup::name::fold_name;
 use lazymkv_core::lookup::tmdb::{parse_movie, parse_search};
 use lazymkv_core::record::{DrivesFile, JobRecord};
@@ -156,16 +157,20 @@ pub(crate) fn held_promise(state: &State) -> Option<PromisedStep> {
 }
 
 /// Ruling S73: each line of lookup-status.txt is mapped to a lookup by its first word (`dischash`, `discid`, `search`,
-/// `search-tagged`, and `tmdb` for the record) and to a state by its last word. `200` is `Answered { status: 200 }`
-/// with the saved file's parsed answer, or `Pending { Unparsed }` with the parser's sentence when the file does not
-/// parse; `404` is `Answered`; `000` is `Pending { Unreachable("no answer before the restart") }`; `unparsed` is `Pending { Unparsed }`
-/// with the sentence of reading the file again; any other number is `Pending { Status(n) }`. A line of another shape
-/// is skipped. A folder with no status line gives the empty book, as before the first round, so RunScan starts one.
-/// Otherwise each lookup of the disc's chain with no line is `NotAsked`, as a round leaves it: TheDiscDB by
-/// fingerprint always, by disc ID when meta.json has one, the search when the disc's name is not generic
-/// (`chain_inputs`), and the tagged search when that name's tagged and cleaned forms also fold to different texts. A
-/// `search-tagged 200` puts tmdb-search.json's page in `answers.tagged` as `search 200` puts it in `answers.search`;
-/// a file holding the merged page then sits in both, which merges to itself (J8).
+/// `search-tagged`, `search-entry`, and `tmdb` for the record) and to a state by its last word. `200` is
+/// `Answered { status: 200 }` with the saved file's parsed answer, or `Pending { Unparsed }` with the parser's sentence
+/// when the file does not parse; `404` is `Answered`; `000` is
+/// `Pending { Unreachable("no answer before the restart") }`; `unparsed` is `Pending { Unparsed }` with the sentence of
+/// reading the file again; any other number is `Pending { Status(n) }`. A line of another shape is skipped. A folder
+/// with no status line gives the empty book, as before the first round, so RunScan starts one. Otherwise each lookup of
+/// the disc's chain with no line is `NotAsked`, as a round leaves it: TheDiscDB by fingerprint always, by disc ID when
+/// meta.json has one, the search when the disc's name is not generic (`chain_inputs`), and the tagged search when that
+/// name's tagged and cleaned forms also fold to different texts. A `search-tagged 200` puts tmdb-search.json's page in
+/// `answers.tagged` as `search 200` puts it in `answers.search`; a file holding the merged page then sits in both,
+/// which merges to itself (J8). Ruling T4-R2: when the status text holds `search-entry 200`, the file is the
+/// entry-title search's page (S47) and goes to `answers.entry`, and the `200` of the `search` and `search-tagged` lines
+/// sets their states without a page. The entry-title search with no line is `NotAsked` when `entry_search_title` over
+/// the book names a title.
 ///
 /// A job's LookupBook read back from its folder's lookup-status.txt and saved answers (design part 8.3). Def: T25.
 /// Use: T25, T26.
@@ -174,6 +179,11 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
     let Ok(text) = fs::read_to_string(job_dir.join(STATUS_FILE)) else {
         return book;
     };
+    // The saved tmdb-search.json holds the entry-title search's page once that search answered (S47).
+    let entry_page = text.lines().any(|line| {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        words.first() == Some(&"search-entry") && words.last() == Some(&"200")
+    });
     for line in text.lines() {
         let words: Vec<&str> = line.split_whitespace().collect();
         let (Some(first), Some(last)) = (words.first(), words.last()) else {
@@ -184,10 +194,14 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
             "discid" => Lookup::Discid,
             "search" => Lookup::Search,
             "search-tagged" => Lookup::TaggedSearch,
+            "search-entry" => Lookup::EntrySearch,
             "tmdb" => Lookup::Record,
             _ => continue,
         };
         let state = match *last {
+            "200" if entry_page && matches!(lookup, Lookup::Search | Lookup::TaggedSearch) => {
+                LookupState::Answered { status: 200 }
+            }
             "200" => match read_answer(job_dir, lookup, &mut book.answers) {
                 Ok(()) => LookupState::Answered { status: 200 },
                 Err(sentence) => LookupState::Pending { reason: PendingReason::Unparsed(sentence) },
@@ -227,16 +241,19 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
     for lookup in chain {
         book.states.entry(lookup).or_insert(LookupState::NotAsked);
     }
+    if !book.states.contains_key(&Lookup::EntrySearch) && entry_search_title(&book.lookup_inputs(None)).is_some() {
+        book.states.insert(Lookup::EntrySearch, LookupState::NotAsked);
+    }
     book
 }
 
 /// The saved answer of `lookup` in a job folder: `thediscdb-hash.json`, `thediscdb-discid.json`, `tmdb-search.json`
-/// (for both name searches) or `tmdb-record.json` (design part 7.1).
+/// (for the name searches and the entry-title search) or `tmdb-record.json` (design part 7.1).
 fn answer_path(job_dir: &Path, lookup: Lookup) -> std::path::PathBuf {
     let name = match lookup {
         Lookup::Dischash => "thediscdb-hash.json",
         Lookup::Discid => "thediscdb-discid.json",
-        Lookup::Search | Lookup::TaggedSearch => "tmdb-search.json",
+        Lookup::Search | Lookup::TaggedSearch | Lookup::EntrySearch => "tmdb-search.json",
         Lookup::Record => "tmdb-record.json",
     };
     job_dir.join(name)
@@ -254,6 +271,7 @@ fn read_answer(job_dir: &Path, lookup: Lookup, answers: &mut Answers) -> Result<
         Lookup::Discid => answers.by_disc_id = parse_discid(&text, &shown)?,
         Lookup::Search => answers.search = Some(parse_search(&text, &shown)?),
         Lookup::TaggedSearch => answers.tagged = Some(parse_search(&text, &shown)?),
+        Lookup::EntrySearch => answers.entry = Some(parse_search(&text, &shown)?),
         Lookup::Record => answers.record = Some(parse_movie(&text, &shown)?),
     }
     Ok(())
@@ -508,5 +526,22 @@ mod tests {
         let book = rebuild_book(&s.0);
         assert!(book.answers.tagged.is_none());
         assert_eq!(waiting_message(&book), "search-tagged: HTTP 503");
+    }
+
+    #[test]
+    fn a_restart_routes_the_saved_page_by_the_search_entry_line() {
+        let s = Scratch::new("book-entry");
+        s.write("thediscdb-hash.json", r#"{"media": {"title": "Knowing", "year": 2009, "type": "Movie", "external_ids": {}}, "titles": [{"index": 0}]}"#);
+        s.write("tmdb-search.json", &search_json(&[("movie", 13811, "Knowing", "Knowing", "2009-03-19")]));
+        s.write("lookup-status.txt", "dischash 200\nsearch 200\nsearch-entry 200\n");
+        let book = rebuild_book(&s.0);
+        assert!(matches!(book.states[&Lookup::EntrySearch], LookupState::Answered { status: 200 }));
+        assert!(matches!(book.states[&Lookup::Search], LookupState::Answered { status: 200 }));
+        assert_eq!((book.answers.entry.as_ref().map(|p| p.results.len()), book.answers.search.is_none()), (Some(1), true));
+        s.write("lookup-status.txt", "dischash 200\nsearch 200\n");
+        let book = rebuild_book(&s.0);
+        assert!(book.answers.entry.is_none() && book.answers.search.is_some());
+        assert!(matches!(book.states[&Lookup::EntrySearch], LookupState::NotAsked));
+        assert!(book.pending().1);
     }
 }

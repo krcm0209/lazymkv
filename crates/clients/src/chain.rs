@@ -1,16 +1,17 @@
 //! The movie lookup chain (design parts 8.2 and 8.3): TheDiscDB by fingerprint, TheDiscDB by disc ID, TMDb's search
 //! on the disc's own name, J8's second search on its tagged name when that folds to another text (its page merged into
-//! the first by `merge_pages`), then the TMDb record that `core::lookup::record_to_fetch` names for the answers in
-//! hand. A round asks every lookup that is not answered yet, in that order, and saves each answer and
-//! `lookup-status.txt` as they come; a later round asks again what stayed pending. Pull request 2 runs the movie path only (S19), with no
-//! entry-title search (S47). Used by Tasks 23, 24, 25 and 26.
+//! the first by `merge_pages`), S47's search on the title of a TheDiscDB entry that has no TMDb ID
+//! (`core::lookup::entry_search_title`; the record step then reads its page instead of the name page), then the TMDb
+//! record that `core::lookup::record_to_fetch` names for the answers in hand. A round asks every lookup that is not
+//! answered yet, in that order, and saves each answer and `lookup-status.txt` as they come; a later round asks again
+//! what stayed pending. Pull request 2 runs the movie path only (S19). Used by Tasks 23, 24, 25 and 26.
 
 use std::collections::BTreeMap;
 
 use lazymkv_core::lookup::discdb::DiscDbRecord;
 use lazymkv_core::lookup::name::{fold_name, DiscName};
 use lazymkv_core::lookup::tmdb::{TmdbRecord, TmdbSearch};
-use lazymkv_core::lookup::{record_to_fetch, LookupInputs};
+use lazymkv_core::lookup::{entry_search_title, record_to_fetch, LookupInputs};
 use serde_json::Value;
 
 use crate::lookups::{
@@ -27,6 +28,7 @@ pub enum Lookup {
     Discid,
     Search,
     TaggedSearch,
+    EntrySearch,
     Record,
 }
 
@@ -52,6 +54,8 @@ pub struct Answers {
     pub search: Option<TmdbSearch>,
     /// The tagged name's page (design part 8.2 item 2). Def: T4-2. Use: T4-2, T4-3.
     pub tagged: Option<TmdbSearch>,
+    /// The entry-title search's page (S47; Ruling T4-R2). Def: T4-3. Use: T4-3, T4-9.
+    pub entry: Option<TmdbSearch>,
     pub record: Option<TmdbRecord>,
 }
 
@@ -82,14 +86,17 @@ impl LookupBook {
         let tmdb = !present(Lookup::Dischash)
             || waiting(Lookup::Search)
             || waiting(Lookup::TaggedSearch)
+            || waiting(Lookup::EntrySearch)
             || waiting(Lookup::Record);
         (discdb, tmdb)
     }
 
-    /// The book as core's `LookupInputs`, with the flags of `pending`. Def: T16. Use: T16, T23, T24.
+    /// The book as core's `LookupInputs` (Ruling T4-R2), with the flags of `pending`: `search` is `answers.entry` when
+    /// `entry_search_title` over the book names a title (None while that search is pending), else `answers.search`.
+    /// Def: T4-3. Use: T4-3, T4-5, T4-9.
     pub fn lookup_inputs<'a>(&'a self, name: Option<&'a DiscName>) -> LookupInputs<'a> {
         let (discdb_pending, tmdb_pending) = self.pending();
-        LookupInputs {
+        let mut inputs = LookupInputs {
             name,
             // dev's rule (`crates/dev/src/cmd/plan.rs`): the first disc ID record that has titles.
             discdb_by_disc_id: self.answers.by_disc_id.iter().find(|record| !record.titles.is_empty()),
@@ -99,7 +106,11 @@ impl LookupBook {
             record: self.answers.record.as_ref(),
             tmdb_pending,
             ..LookupInputs::default()
+        };
+        if entry_search_title(&inputs).is_some() {
+            inputs.search = self.answers.entry.as_ref();
         }
+        inputs
     }
 
     /// Whether a round asks `lookup`: it is part of the chain and not answered.
@@ -174,6 +185,7 @@ fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
             Lookup::Discid => "discid".to_string(),
             Lookup::Search => "search".to_string(),
             Lookup::TaggedSearch => "search-tagged".to_string(),
+            Lookup::EntrySearch => "search-entry".to_string(),
             Lookup::Record => {
                 let identity = match (state, &book.answers.record) {
                     (LookupState::Answered { .. }, Some(record)) => Some(record.identity),
@@ -211,13 +223,17 @@ fn answered_json<T>(settled: &Settled<T>, fetched: Option<&Fetched>) -> Option<V
     serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()
 }
 
+/// A parsed search page as JSON, for `slim_search`.
+fn page_value(page: &TmdbSearch) -> Value {
+    // Serializing a parsed page cannot fail: its fields are strings, numbers and options.
+    serde_json::to_value(page).unwrap_or_default()
+}
+
 /// `tmdb-search.json` over the name search pages in hand: the cleaned name's page (merged once the tagged page came)
 /// with its query, then the tagged name's page with its query (J8).
 fn search_file(answers: &Answers, name: &DiscName, today: &str) -> SavedFile {
-    // Serializing a parsed page cannot fail: its fields are strings, numbers and options.
-    let as_value = |page: &TmdbSearch| serde_json::to_value(page).unwrap_or_default();
-    let cleaned = answers.search.as_ref().map(as_value);
-    let tagged = answers.tagged.as_ref().map(as_value);
+    let cleaned = answers.search.as_ref().map(page_value);
+    let tagged = answers.tagged.as_ref().map(page_value);
     let mut pages: Vec<(&Value, &str)> = Vec::new();
     if let Some(page) = &cleaned {
         pages.push((page, &name.cleaned));
@@ -280,7 +296,7 @@ pub fn run_round(
             Some(tagged) => Some(merge_pages(&search, tagged)),
             None => Some(search),
         });
-        if page {
+        if page && entry_search_title(&book.lookup_inputs(name)).is_none() {
             save(search_file(&book.answers, searched, today));
         }
         save(status_file(book, name));
@@ -294,10 +310,38 @@ pub fn run_round(
         if let (Some(search), Some(tagged)) = (&book.answers.search, &book.answers.tagged) {
             book.answers.search = Some(merge_pages(search, tagged));
         }
-        if page {
+        if page && entry_search_title(&book.lookup_inputs(name)).is_none() {
             save(search_file(&book.answers, searched, today));
         }
         save(status_file(book, name));
+    }
+
+    // S47 (Rulings T4-R2, T4-R5): the entry's title is searched once; an answered entry search is not asked again for
+    // another title, as the fingerprint's and the disc ID's records of one disc name one work.
+    match entry_search_title(&book.lookup_inputs(name)) {
+        Some(title) => {
+            book.states.entry(Lookup::EntrySearch).or_insert(LookupState::NotAsked);
+            if book.asks(Lookup::EntrySearch) {
+                start(book, Lookup::EntrySearch, name, save);
+                let (settled, _) = settle(book, Lookup::EntrySearch, tmdb_search(t, token, &title));
+                let answered = matches!(settled, Settled::Value(_));
+                settled.write(&mut book.answers.entry, Some);
+                if let Some(page) = book.answers.entry.as_ref().filter(|_| answered).map(page_value) {
+                    save(json_file("tmdb-search.json", &slim_search(&[(&page, &title)], today)));
+                }
+                save(status_file(book, name));
+            }
+        }
+        None => {
+            if book.states.remove(&Lookup::EntrySearch).is_some() {
+                book.answers.entry = None;
+                let in_hand = book.answers.search.is_some() || book.answers.tagged.is_some();
+                if let Some(searched) = searched.filter(|_| in_hand) {
+                    save(search_file(&book.answers, searched, today));
+                }
+                save(status_file(book, name));
+            }
+        }
     }
 
     let Some(want) = record_to_fetch(&book.lookup_inputs(name)) else {
@@ -330,7 +374,7 @@ mod tests {
 
     use lazymkv_core::lookup::discdb::{parse_discid, DiscDbRecord};
     use lazymkv_core::lookup::name::disc_name;
-    use lazymkv_core::lookup::tmdb::{parse_movie, TmdbIdentity, TmdbKind};
+    use lazymkv_core::lookup::tmdb::{parse_movie, parse_search, TmdbIdentity, TmdbKind};
     use serde_json::{json, Value};
 
     use crate::{
@@ -764,5 +808,137 @@ mod tests {
         assert_eq!(book.pending(), (false, false));
         assert_eq!(search_files(&saved)[0]["queries"], json!(["PIRANHA", "PIRANHA 3D"]));
         assert_eq!(urls(&t).last(), Some(&record_url(movie(900103))));
+    }
+
+    /// A dischash hit whose media has a title and a year but no TMDb ID (S47's case), with one title.
+    fn entry_body(title: &str, year: i32) -> Vec<u8> {
+        json!({"media": {"title": title, "full_title": title, "year": year, "type": "Movie", "external_ids": {}},
+               "titles": [{"index": 0, "source_file": "00001.mpls", "duration": "2:01:14"}]}).to_string().into_bytes()
+    }
+    /// Knowing (TMDb 13811, TheDiscDB's) and a made-up namesake.
+    const KNOWING_PAGE: [(i64, &str, &str); 2] = [(13811, "Knowing", "2009-03-19"), (900201, "Knowing", "1990-01-01")];
+
+    /// TheDiscDB knows the fingerprint by title alone; the name and entry searches and Knowing's record answer.
+    fn knowing(t: &RecordedTransport, name_query: &str) {
+        t.answer(&dischash_url(FP), 200, &entry_body("Knowing", 2009));
+        t.answer(&discid_url(DISC_ID), 404, b"");
+        t.answer(&search_url(name_query), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&search_url("Knowing"), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&record_url(movie(13811)), 200, &movie_body(13811, "Knowing", "2009-03-19"));
+    }
+
+    #[test]
+    fn an_entry_without_a_tmdb_id_is_searched_by_its_title_alone() {
+        let t = RecordedTransport::new();
+        knowing(&t, "KNOWING");
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &chain(Some(DISC_ID), Some("KNOWING")));
+        assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url("KNOWING"), search_url("Knowing"), record_url(movie(13811))]);
+        assert_eq!(urls(&t)[3], "https://api.themoviedb.org/3/search/multi?query=Knowing");
+        assert_eq!(last_status(&saved), ["dischash 200", "discid 404", "search 200", "search-entry 200", "tmdb movie/13811 200"]);
+        assert_eq!(book.pending(), (false, false));
+    }
+
+    #[test]
+    fn the_plan_reads_the_entry_page_not_the_name_page() {
+        let record: DiscDbRecord = serde_json::from_slice(&entry_body("Knowing", 2009)).unwrap();
+        let name_page = parse_search(&String::from_utf8(search_body(&PIRANHA_CLEANED)).unwrap(), "name").unwrap();
+        let entry_page = parse_search(&String::from_utf8(search_body(&KNOWING_PAGE)).unwrap(), "entry").unwrap();
+        let mut book = LookupBook {
+            states: BTreeMap::from([(Lookup::Dischash, answered(200)), (Lookup::Search, answered(200)), (Lookup::EntrySearch, answered(200))]),
+            answers: Answers { by_fingerprint: Some(record), search: Some(name_page), entry: Some(entry_page.clone()), ..Answers::default() },
+            ..LookupBook::default() // Task 4 adds record_file
+        };
+        assert_eq!(book.lookup_inputs(None).search, Some(&entry_page));
+        book.states.insert(Lookup::EntrySearch, LookupState::Pending { reason: PendingReason::Status(503) });
+        book.answers.entry = None;
+        assert_eq!(book.lookup_inputs(None).search, None);
+        assert!(book.pending().1);
+    }
+
+    #[test]
+    fn the_entry_page_replaces_the_name_page_in_tmdb_search_json() {
+        let t = RecordedTransport::new();
+        t.fail(&dischash_url(FP), TransportError::Timeout);
+        knowing(&t, "KNOWING");
+        let inputs = chain(Some(DISC_ID), Some("KNOWING"));
+        let mut book = LookupBook::default();
+        let first = round(&t, &mut book, &inputs);
+        assert_eq!(search_files(&first).last().unwrap()["queries"], json!(["KNOWING"]));
+        let second = round(&t, &mut book, &inputs);
+        assert_eq!(search_files(&second).last().unwrap()["queries"], json!(["Knowing"]));
+    }
+
+    #[test]
+    fn an_entry_with_neither_id_nor_title_falls_back_to_the_name_search() {
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("JOHN_WICK"));
+        t.answer(&dischash_url(FP), 200, br#"{"media": {"type": "Movie", "external_ids": {}}, "titles": [{"index": 0}]}"#);
+        tmdb_only(&t, &inputs);
+        let mut book = LookupBook::default();
+        round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url("JOHN WICK"), record_url(JOHN_WICK)]);
+        assert!(!book.states.contains_key(&Lookup::EntrySearch));
+        assert_eq!(book.lookup_inputs(inputs.name.as_ref()).search, book.answers.search.as_ref());
+    }
+
+    #[test]
+    fn a_late_name_answer_never_overwrites_the_entry_page() {
+        let t = RecordedTransport::new();
+        t.answer(&search_url("KNOWING 3D"), 503, b"");
+        t.answer(&search_url("KNOWING 3D"), 200, &search_body(&[(900202, "Knowing 3D", "2011-01-01")]));
+        knowing(&t, "KNOWING");
+        let inputs = chain(Some(DISC_ID), Some("KNOWING_3D"));
+        let mut book = LookupBook::default();
+        let first = round(&t, &mut book, &inputs);
+        assert_eq!(search_files(&first).iter().map(|f| f["queries"].clone()).collect::<Vec<Value>>(), [json!(["Knowing"])]);
+        assert!(book.pending().1);
+        let second = round(&t, &mut book, &inputs);
+        assert!(search_files(&second).is_empty());
+        let merged: Vec<i64> = book.answers.search.as_ref().unwrap().results.iter().map(|r| r.id).collect();
+        assert_eq!(merged, [13811, 900201, 900202]);
+        assert!(last_status(&second).contains(&"search-tagged 200".to_string()));
+        assert_eq!(book.pending(), (false, false));
+    }
+
+    #[test]
+    fn an_entry_search_no_longer_named_leaves_the_book_and_the_name_page_returns() {
+        let t = RecordedTransport::new();
+        t.fail(&dischash_url(FP), TransportError::Timeout);
+        t.answer(&dischash_url(FP), 200, &corpus(JOHN_WICK_DISCHASH));
+        let disc_id_body = format!("[{}]", String::from_utf8(entry_body("Knowing", 2009)).unwrap());
+        t.answer(&discid_url(DISC_ID), 200, disc_id_body.as_bytes());
+        t.answer(&search_url("KNOWING"), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&search_url("Knowing"), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&record_url(movie(13811)), 200, &movie_body(13811, "Knowing", "2009-03-19"));
+        t.answer(&record_url(JOHN_WICK), 200, &movie_body(245891, "John Wick", "2014-10-22"));
+        let inputs = chain(Some(DISC_ID), Some("KNOWING"));
+        let mut book = LookupBook::default();
+        round(&t, &mut book, &inputs);
+        assert!(book.answers.entry.is_some());
+        let saved = round(&t, &mut book, &inputs);
+        assert!(!book.states.contains_key(&Lookup::EntrySearch));
+        assert!(book.answers.entry.is_none());
+        assert_eq!(search_files(&saved).last().unwrap()["queries"], json!(["KNOWING"]));
+        assert_eq!(urls(&t).last(), Some(&record_url(JOHN_WICK)));
+    }
+
+    #[test]
+    fn a_one_page_search_file_keeps_pull_request_2s_bytes() {
+        let mut inputs = chain(Some(DISC_ID), None);
+        inputs.name = disc_name(Some("Synthetic Movie"), Some("SYNTHETIC_MOVIE"));
+        let cleaned = inputs.name.as_ref().unwrap().cleaned.clone();
+        let body = search_body(&[(900001, "Synthetic Movie", "2001-02-03")]);
+        let t = RecordedTransport::new();
+        misses(&t);
+        t.answer(&search_url(&cleaned), 200, &body);
+        t.answer(&record_url(movie(900001)), 200, &movie_body(900001, "Synthetic Movie", "2001-02-03"));
+        let saved = round(&t, &mut LookupBook::default(), &inputs);
+        let raw: Value = serde_json::from_slice(&body).unwrap();
+        let mut expected = serde_json::to_vec_pretty(&slim_search(&[(&raw, &cleaned)], TODAY)).unwrap();
+        expected.push(b'\n');
+        let files: Vec<&SavedFile> = saved.iter().filter(|f| f.name == "tmdb-search.json").collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(String::from_utf8(files[0].bytes.clone()).unwrap(), String::from_utf8(expected).unwrap());
     }
 }

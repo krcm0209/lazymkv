@@ -354,13 +354,15 @@ pub(crate) fn refreshed_plan(
 }
 
 /// A lookup's word in the waiting message and job.log, the first word of its status line except the record's
-/// (Rulings R24.6, T4-R1): `dischash`, `discid`, `search`, `search-tagged`, `tmdb record`. Def: T4-2. Use: T4-3, T4-4.
+/// (Rulings R24.6, T4-R1): `dischash`, `discid`, `search`, `search-tagged`, `search-entry`, `tmdb record`. Def: T4-2.
+/// Use: T4-3, T4-4.
 pub(crate) fn lookup_word(lookup: Lookup) -> String {
     let word = match lookup {
         Lookup::Dischash => "dischash",
         Lookup::Discid => "discid",
         Lookup::Search => "search",
         Lookup::TaggedSearch => "search-tagged",
+        Lookup::EntrySearch => "search-entry",
         Lookup::Record => "tmdb record",
     };
     word.to_string()
