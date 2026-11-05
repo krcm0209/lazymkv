@@ -5,12 +5,12 @@
 use std::fs;
 use std::path::Path;
 
-use lazymkv_clients::{Answers, Lookup, LookupBook, LookupState, PendingReason};
+use lazymkv_clients::{seasons_to_fetch, Answers, Lookup, LookupBook, LookupState, PendingReason};
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::discdb::{parse_dischash, parse_discid};
 use lazymkv_core::lookup::entry_search_title;
 use lazymkv_core::lookup::name::fold_name;
-use lazymkv_core::lookup::tmdb::{parse_movie, parse_search};
+use lazymkv_core::lookup::tmdb::{parse_movie, parse_search, parse_tv, TmdbKind};
 use lazymkv_core::record::{DrivesFile, JobRecord};
 
 use crate::arrival::chain_inputs;
@@ -172,6 +172,11 @@ pub(crate) fn held_promise(state: &State) -> Option<PromisedStep> {
 /// sets their states without a page. The entry-title search with no line is `NotAsked` when `entry_search_title` over
 /// the book names a title.
 ///
+/// Design part 8.2 item 5 (Ruling T4-R4): a `season-<n>` line is `Lookup::Season(n)`, whose `200` reads no file (its
+/// episodes are in tmdb-record.json). A `tmdb` line whose second word starts `tv/` reads tmdb-record.json with
+/// `parse_tv`, else with `parse_movie`, and its `200` puts the file's JSON in `record_file`. An answered TV record's
+/// seasons of `seasons_to_fetch` with no line are `NotAsked`, so a restart before a season's answer asks it again.
+///
 /// A job's LookupBook read back from its folder's lookup-status.txt and saved answers (design part 8.3). Def: T25.
 /// Use: T25, T26.
 pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
@@ -196,20 +201,29 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
             "search-tagged" => Lookup::TaggedSearch,
             "search-entry" => Lookup::EntrySearch,
             "tmdb" => Lookup::Record,
-            _ => continue,
+            other => match other.strip_prefix("season-").map(str::parse::<u32>) {
+                Some(Ok(n)) => Lookup::Season(n),
+                _ => continue,
+            },
         };
+        let tv = lookup == Lookup::Record && words.get(1).is_some_and(|word| word.starts_with("tv/"));
         let state = match *last {
             "200" if entry_page && matches!(lookup, Lookup::Search | Lookup::TaggedSearch) => {
                 LookupState::Answered { status: 200 }
             }
-            "200" => match read_answer(job_dir, lookup, &mut book.answers) {
-                Ok(()) => LookupState::Answered { status: 200 },
+            "200" => match read_answer(job_dir, lookup, tv, &mut book.answers) {
+                Ok(()) => {
+                    if lookup == Lookup::Record {
+                        book.record_file = saved_json(&answer_path(job_dir, lookup));
+                    }
+                    LookupState::Answered { status: 200 }
+                }
                 Err(sentence) => LookupState::Pending { reason: PendingReason::Unparsed(sentence) },
             },
             "404" => LookupState::Answered { status: 404 },
             "000" => LookupState::Pending { reason: PendingReason::Unreachable(NO_ANSWER.to_string()) },
             "unparsed" => {
-                let again = read_answer(job_dir, lookup, &mut Answers::default());
+                let again = read_answer(job_dir, lookup, tv, &mut Answers::default());
                 let sentence = again.err().unwrap_or_else(|| {
                     let path = answer_path(job_dir, lookup);
                     format!("{}: the answer did not parse before the restart", path.display())
@@ -244,24 +258,43 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
     if !book.states.contains_key(&Lookup::EntrySearch) && entry_search_title(&book.lookup_inputs(None)).is_some() {
         book.states.insert(Lookup::EntrySearch, LookupState::NotAsked);
     }
+    let answered = matches!(book.states.get(&Lookup::Record), Some(LookupState::Answered { .. }));
+    let tv_record = book.answers.record.as_ref().filter(|record| answered && record.identity.kind == TmdbKind::Tv);
+    if let Some(record) = tv_record {
+        let name = chain_inputs(job_dir).ok().and_then(|inputs| inputs.name);
+        for n in seasons_to_fetch(record, name.as_ref()) {
+            book.states.entry(Lookup::Season(n)).or_insert(LookupState::NotAsked);
+        }
+    }
     book
 }
 
+/// A saved answer's JSON (after one byte order mark), or None when it cannot be read or is not JSON.
+fn saved_json(path: &Path) -> Option<serde_json::Value> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok()
+}
+
 /// The saved answer of `lookup` in a job folder: `thediscdb-hash.json`, `thediscdb-discid.json`, `tmdb-search.json`
-/// (for the name searches and the entry-title search) or `tmdb-record.json` (design part 7.1).
+/// (for the name searches and the entry-title search) or `tmdb-record.json` (for the record and its seasons; design
+/// part 7.1).
 fn answer_path(job_dir: &Path, lookup: Lookup) -> std::path::PathBuf {
     let name = match lookup {
         Lookup::Dischash => "thediscdb-hash.json",
         Lookup::Discid => "thediscdb-discid.json",
         Lookup::Search | Lookup::TaggedSearch | Lookup::EntrySearch => "tmdb-search.json",
-        Lookup::Record => "tmdb-record.json",
+        Lookup::Record | Lookup::Season(_) => "tmdb-record.json",
     };
     job_dir.join(name)
 }
 
-/// Reads `lookup`'s saved answer with core's parser into `answers` (`parse_movie` for the record: pull request 2 is
-/// movie only, S19). Err is the sentence of a file that cannot be read, is not UTF-8 or does not parse.
-fn read_answer(job_dir: &Path, lookup: Lookup, answers: &mut Answers) -> Result<(), String> {
+/// Reads `lookup`'s saved answer with core's parser into `answers` (the record with `parse_tv` when `tv`, else with
+/// `parse_movie`; a season reads nothing, as its episodes are in the record's file). Err is the sentence of a file that
+/// cannot be read, is not UTF-8 or does not parse.
+fn read_answer(job_dir: &Path, lookup: Lookup, tv: bool, answers: &mut Answers) -> Result<(), String> {
+    if let Lookup::Season(_) = lookup {
+        return Ok(());
+    }
     let path = answer_path(job_dir, lookup);
     let shown = path.display().to_string();
     let bytes = fs::read(&path).map_err(|error| format!("{shown}: {error}"))?;
@@ -272,7 +305,9 @@ fn read_answer(job_dir: &Path, lookup: Lookup, answers: &mut Answers) -> Result<
         Lookup::Search => answers.search = Some(parse_search(&text, &shown)?),
         Lookup::TaggedSearch => answers.tagged = Some(parse_search(&text, &shown)?),
         Lookup::EntrySearch => answers.entry = Some(parse_search(&text, &shown)?),
+        Lookup::Record if tv => answers.record = Some(parse_tv(&text, &shown)?),
         Lookup::Record => answers.record = Some(parse_movie(&text, &shown)?),
+        Lookup::Season(_) => {}
     }
     Ok(())
 }
@@ -284,6 +319,7 @@ mod tests {
     use lazymkv_core::plan::Mode;
     use lazymkv_core::profile::JOB_PROFILE_FILE;
     use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, DRIVES_FORMAT, JOB_FORMAT};
+    use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
     use lazymkv_core::testsupport::{search_json, Scratch, ScratchExt};
     use crate::file_phase::waiting_message;
     use std::collections::BTreeMap;
@@ -557,5 +593,36 @@ mod tests {
         assert!(matches!(book.states[&Lookup::EntrySearch], LookupState::Answered { status: 404 }));
         assert!(book.answers.entry.is_none());
         assert_eq!(book.pending(), (false, false));
+    }
+
+    /// A slim TV record whose season 1 is merged; no meta.json, so the name is None and every listed season, season 0
+    /// included, is wanted.
+    const SHOW_RECORD: &str = r#"{"id":900002,"name":"Example Show","original_name":"Example Show","first_air_date":"2005-03-24","original_language":"en","kind":"tv","seasons":[{"season_number":0,"episode_count":1},{"season_number":1,"episode_count":2,"episodes":[{"episode_number":1,"runtime":44},{"episode_number":2,"runtime":43}]},{"season_number":2,"episode_count":2}],"fetched_at":"2026-10-23"}"#;
+
+    #[test]
+    fn a_restart_reads_a_tv_record_with_its_merged_seasons() {
+        let job = Scratch::new("tv-record");
+        job.write("lookup-status.txt", "dischash 404\nseason-1 200\nseason-2 000\ntmdb tv/900002 200\n");
+        job.write("tmdb-record.json", SHOW_RECORD);
+        let book = rebuild_book(&job.0);
+        let record = book.answers.record.as_ref().unwrap();
+        assert_eq!(record.identity, TmdbIdentity { kind: TmdbKind::Tv, id: 900002 });
+        assert_eq!(record.episode_runtimes(None), vec![44, 43]);
+        assert_eq!(book.states.get(&Lookup::Season(1)), Some(&LookupState::Answered { status: 200 }));
+        assert!(matches!(book.states.get(&Lookup::Season(2)), Some(LookupState::Pending { .. })));
+        assert_eq!(book.record_file.as_ref().unwrap()["seasons"][1]["episodes"][1]["runtime"], serde_json::json!(43));
+        assert_eq!(book.pending(), (false, true));
+    }
+
+    #[test]
+    fn a_restart_after_a_tv_record_marks_its_unasked_seasons_not_asked() {
+        let job = Scratch::new("tv-record-unasked");
+        job.write("lookup-status.txt", "dischash 404\ntmdb tv/900002 200\n");
+        job.write("tmdb-record.json", SHOW_RECORD);
+        let book = rebuild_book(&job.0);
+        assert_eq!(book.states.get(&Lookup::Season(0)), Some(&LookupState::NotAsked));
+        assert_eq!(book.states.get(&Lookup::Season(1)), Some(&LookupState::NotAsked));
+        assert_eq!(book.states.get(&Lookup::Season(2)), Some(&LookupState::NotAsked));
+        assert!(book.pending().1);
     }
 }

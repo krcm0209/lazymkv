@@ -2,23 +2,24 @@
 //! on the disc's own name, J8's second search on its tagged name when that folds to another text (its page merged into
 //! the first by `merge_pages`), S47's search on the title of a TheDiscDB entry that has no TMDb ID
 //! (`core::lookup::entry_search_title`; the record step then reads its page instead of the name page), then the TMDb
-//! record that `core::lookup::record_to_fetch` names for the answers in hand. A round asks every lookup that is not
-//! answered yet, in that order, and saves each answer and `lookup-status.txt` as they come; a later round asks again
-//! what stayed pending. Pull request 2 runs the movie path only (S19). Used by Tasks 23, 24, 25 and 26.
+//! record that `core::lookup::record_to_fetch` names for the answers in hand, then a TV record's seasons
+//! (`seasons_to_fetch`). A round asks every lookup that is not answered yet, in that order, and saves each answer and
+//! `lookup-status.txt` as they come; a later round asks again what stayed pending. Pull request 2 runs the movie path
+//! only (S19). Used by Tasks 23, 24, 25 and 26.
 
 use std::collections::BTreeMap;
 
 use lazymkv_core::lookup::discdb::DiscDbRecord;
 use lazymkv_core::lookup::name::{fold_name, DiscName};
-use lazymkv_core::lookup::tmdb::{TmdbRecord, TmdbSearch};
+use lazymkv_core::lookup::tmdb::{merge_parsed_season, TmdbKind, TmdbRecord, TmdbSearch};
 use lazymkv_core::lookup::{entry_search_title, record_to_fetch, LookupInputs};
 use serde_json::Value;
 
 use crate::lookups::{
-    discdb_by_disc_id, discdb_by_fingerprint, tmdb_record, tmdb_search, Fetched, Outcome, PendingReason,
+    discdb_by_disc_id, discdb_by_fingerprint, tmdb_record, tmdb_search, tmdb_season, Fetched, Outcome, PendingReason,
 };
 use crate::merge::merge_pages;
-use crate::saved::{slim_record, slim_search, slim_tmdb, status_text, SavedFile};
+use crate::saved::{slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 use crate::transport::HttpTransport;
 
 /// One request of the chain of design part 8.2, in chain order. Def: T4-2. Use: T4-3 to T4-5, T4-9, T4-15.
@@ -30,6 +31,8 @@ pub enum Lookup {
     TaggedSearch,
     EntrySearch,
     Record,
+    /// A TV record's season, by number (design part 8.2 item 5). Def: T4-4. Use: T4-4, T4-8, T4-9.
+    Season(u32),
 }
 
 /// Where one lookup stands (design part 8.3). Def: T16. Use: T23, T24, T25.
@@ -65,6 +68,8 @@ pub struct Answers {
 pub struct LookupBook {
     pub states: BTreeMap<Lookup, LookupState>,
     pub answers: Answers,
+    /// The `tmdb-record.json` last saved, as JSON, for `splice_season` (Ruling T4-R4). Def: T4-4. Use: T4-4, T4-9.
+    pub record_file: Option<Value>,
 }
 
 /// What the chain asks with (design part 8.2). Def: T16. Use: T23.
@@ -87,7 +92,10 @@ impl LookupBook {
             || waiting(Lookup::Search)
             || waiting(Lookup::TaggedSearch)
             || waiting(Lookup::EntrySearch)
-            || waiting(Lookup::Record);
+            || waiting(Lookup::Record)
+            || self.states.iter().any(|(lookup, state)| {
+                matches!(lookup, Lookup::Season(_)) && !matches!(state, LookupState::Answered { .. })
+            });
         (discdb, tmdb)
     }
 
@@ -194,6 +202,7 @@ fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
                 let Some(identity) = identity else { continue };
                 format!("tmdb {}/{}", identity.kind.as_str(), identity.id)
             }
+            Lookup::Season(n) => format!("season-{n}"),
         };
         lines.insert(key, word);
     }
@@ -352,24 +361,90 @@ pub fn run_round(
         }
     }
 
-    let Some(want) = record_to_fetch(&book.lookup_inputs(name)) else {
-        if book.asks(Lookup::Record) {
-            book.states.remove(&Lookup::Record);
+    match record_to_fetch(&book.lookup_inputs(name)) {
+        None => {
+            if book.asks(Lookup::Record) {
+                book.states.remove(&Lookup::Record);
+            }
         }
-        return;
+        Some(want) => {
+            let answered = matches!(book.states.get(&Lookup::Record), Some(LookupState::Answered { .. }));
+            let in_hand = book.answers.record.as_ref().map(|record| record.identity);
+            if !answered || in_hand != Some(want) {
+                // Seasons and the saved record file belong to the record in hand (Ruling T4-R4).
+                if in_hand != Some(want) {
+                    book.states.retain(|lookup, _| !matches!(lookup, Lookup::Season(_)));
+                    book.record_file = None;
+                }
+                start(book, Lookup::Record, name, save);
+                let (settled, fetched) = settle(book, Lookup::Record, tmdb_record(t, token, want));
+                if let Some(raw) = answered_json(&settled, fetched.as_ref()) {
+                    save(json_file("tmdb.json", &slim_tmdb(&raw, today)));
+                    let file = slim_record(&raw, want.kind, today);
+                    save(json_file("tmdb-record.json", &file));
+                    book.record_file = Some(file);
+                } else if matches!(settled, Settled::Cleared) {
+                    book.record_file = None;
+                }
+                settled.write(&mut book.answers.record, Some);
+                save(status_file(book, name));
+            }
+        }
+    }
+
+    // Design part 8.2 item 5 (Ruling T4-R4): an answered TV record's seasons, each merged into the record and spliced
+    // into tmdb-record.json as it comes.
+    let show = match (book.states.get(&Lookup::Record), &book.answers.record) {
+        (Some(LookupState::Answered { .. }), Some(record)) if record.identity.kind == TmdbKind::Tv => {
+            Some((record.identity.id, seasons_to_fetch(record, name)))
+        }
+        _ => None,
     };
-    let answered = matches!(book.states.get(&Lookup::Record), Some(LookupState::Answered { .. }));
-    if answered && book.answers.record.as_ref().map(|record| record.identity) == Some(want) {
-        return;
+    let (show, wanted) = show.unwrap_or_default();
+    book.states.retain(|lookup, _| match lookup {
+        Lookup::Season(n) => wanted.contains(n),
+        _ => true,
+    });
+    for n in &wanted {
+        book.states.entry(Lookup::Season(*n)).or_insert(LookupState::NotAsked);
     }
-    start(book, Lookup::Record, name, save);
-    let (settled, fetched) = settle(book, Lookup::Record, tmdb_record(t, token, want));
-    if let Some(raw) = answered_json(&settled, fetched.as_ref()) {
-        save(json_file("tmdb.json", &slim_tmdb(&raw, today)));
-        save(json_file("tmdb-record.json", &slim_record(&raw, want.kind, today)));
+    let asked: Vec<u32> = book
+        .states
+        .keys()
+        .filter_map(|lookup| match lookup {
+            Lookup::Season(n) if book.asks(*lookup) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    for n in asked {
+        start(book, Lookup::Season(n), name, save);
+        let (settled, fetched) = settle(book, Lookup::Season(n), tmdb_season(t, token, show, n));
+        if let Some(raw) = answered_json(&settled, fetched.as_ref()) {
+            if let (Settled::Value(season), Some(record)) = (settled, book.answers.record.as_mut()) {
+                // The record is a TV record, which takes every season, so the merge cannot refuse it.
+                let _ = merge_parsed_season(record, season);
+            }
+            if let Some(file) = book.record_file.as_mut() {
+                splice_season(file, &raw);
+                save(json_file("tmdb-record.json", file));
+            }
+        }
+        save(status_file(book, name));
     }
-    settled.write(&mut book.answers.record, Some);
-    save(status_file(book, name));
+}
+
+/// The seasons the chain asks for a TV record (design part 8.2 item 5, Ruling T4-R4): `[n]` for a name with a parsed
+/// season `n`, listed or not; else every season the record lists, season 0 included, in the record's order (spec
+/// 8.1's runtime check still reads `episode_runtimes(None)`, which leaves season 0 out). Empty for a movie record.
+/// Def: T4-4. Use: T4-4, T4-8.
+pub fn seasons_to_fetch(record: &TmdbRecord, name: Option<&DiscName>) -> Vec<u32> {
+    if record.identity.kind != TmdbKind::Tv {
+        return Vec::new();
+    }
+    match name.and_then(|name| name.season) {
+        Some(n) => vec![n],
+        None => record.seasons.iter().map(|season| season.season_number).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -382,12 +457,12 @@ mod tests {
 
     use lazymkv_core::lookup::discdb::{parse_discid, DiscDbRecord};
     use lazymkv_core::lookup::name::disc_name;
-    use lazymkv_core::lookup::tmdb::{parse_movie, parse_search, TmdbIdentity, TmdbKind};
+    use lazymkv_core::lookup::tmdb::{parse_movie, parse_search, parse_tv, TmdbIdentity, TmdbKind};
     use serde_json::{json, Value};
 
     use crate::{
-        dischash_url, discid_url, record_url, search_url, Gate, PendingReason, RecordedTransport, SavedFile,
-        TransportError,
+        dischash_url, discid_url, record_url, search_url, season_url, Gate, PendingReason, RecordedTransport,
+        SavedFile, TransportError,
     };
 
     /// John Wick's UHD disc, whose TheDiscDB answers are recorded under corpus/thediscdb-api.
@@ -641,6 +716,7 @@ mod tests {
                 (Lookup::Record, LookupState::Pending { reason: PendingReason::Timeout }),
             ]),
             answers: Answers { record: Some(parse_movie(&earlier, "movie.json").unwrap()), ..Answers::default() },
+            record_file: None,
         };
         // TheDiscDB misses and the name search leaves two plausible results: no record is to be fetched.
         let t = RecordedTransport::new();
@@ -709,6 +785,7 @@ mod tests {
         let book = |states: &[(Lookup, LookupState)]| LookupBook {
             states: states.iter().cloned().collect(),
             answers: Answers::default(),
+            record_file: None,
         };
         let timeout = LookupState::Pending { reason: PendingReason::Timeout };
         assert_eq!(LookupBook::default().pending(), (true, true));
@@ -740,6 +817,7 @@ mod tests {
         let book = LookupBook {
             states: BTreeMap::from([(Lookup::Dischash, answered(404)), (Lookup::Discid, answered(200))]),
             answers: Answers { by_disc_id: vec![empty, known.clone()], ..Answers::default() },
+            record_file: None,
         };
         assert_eq!(book.lookup_inputs(None).discdb_by_disc_id, Some(&known));
         assert_eq!(book.lookup_inputs(None).discdb_by_fingerprint, None);
@@ -967,6 +1045,7 @@ mod tests {
                 (Lookup::EntrySearch, answered(200)),
             ]),
             answers: Answers { by_disc_id: vec![record], entry: Some(entry_page), ..Answers::default() },
+            record_file: None,
         };
         // The fingerprint's record now names John Wick's TMDb ID, so no entry title is named.
         let t = RecordedTransport::new();
@@ -1004,5 +1083,128 @@ mod tests {
         assert!(!last_status(&second).iter().any(|line| line.starts_with("search-entry")));
         assert_eq!(urls(&t)[asked..], [dischash_url(FP)]);
         assert!(!book.states.contains_key(&Lookup::EntrySearch));
+    }
+
+    const SHOW: i64 = 900002;
+
+    fn tv(id: i64) -> TmdbIdentity {
+        TmdbIdentity { kind: TmdbKind::Tv, id }
+    }
+
+    /// John Wick's public dischash answer made a `Series` entry naming the TMDb TV ID `show`.
+    fn series_dischash(show: i64) -> Vec<u8> {
+        let mut record: Value = serde_json::from_slice(&corpus(JOHN_WICK_DISCHASH)).unwrap();
+        record["media"]["type"] = json!("Series");
+        record["media"]["external_ids"]["tmdb"] = json!(show.to_string());
+        record.to_string().into_bytes()
+    }
+
+    /// A /tv/{id}?append_to_response=external_ids answer listing (season number, episode count) pairs.
+    fn tv_body(id: i64, seasons: &[(u32, u32)]) -> Vec<u8> {
+        let seasons: Vec<Value> =
+            seasons.iter().map(|(n, count)| json!({"season_number": n, "episode_count": count})).collect();
+        json!({"id": id, "name": "Example Show", "original_name": "Example Show", "first_air_date": "2005-03-24",
+               "original_language": "en", "seasons": seasons, "external_ids": {"tvdb_id": 70001}})
+        .to_string()
+        .into_bytes()
+    }
+
+    /// A /tv/{id}/season/{n} answer whose episodes have `runtimes`, numbered from 1.
+    fn season_body(n: u32, runtimes: &[u32]) -> Vec<u8> {
+        let episodes: Vec<Value> = runtimes
+            .iter()
+            .enumerate()
+            .map(|(i, runtime)| json!({"episode_number": i + 1, "name": format!("Episode {}", i + 1), "runtime": runtime}))
+            .collect();
+        json!({"season_number": n, "episodes": episodes}).to_string().into_bytes()
+    }
+
+    /// The disc name's searches answered with an empty page, so only the record and its seasons stay to ask.
+    fn empty_searches(t: &RecordedTransport, inputs: &ChainInputs) {
+        let name = inputs.name.as_ref().unwrap();
+        t.answer(&search_url(&name.cleaned), 200, &search_body(&[]));
+        t.answer(&search_url(&name.tagged), 200, &search_body(&[]));
+    }
+
+    fn season_urls(t: &RecordedTransport) -> Vec<String> {
+        urls(t).into_iter().filter(|url| url.contains("/season/")).collect()
+    }
+
+    #[test]
+    fn a_tv_record_with_a_parsed_season_fetches_that_season_only() {
+        let t = RecordedTransport::new();
+        let inputs = chain(None, Some("SHOW_S03"));
+        t.answer(&dischash_url(FP), 200, &series_dischash(SHOW));
+        empty_searches(&t, &inputs);
+        t.answer(&record_url(tv(SHOW)), 200, &tv_body(SHOW, &[(0, 1), (1, 2), (3, 2)]));
+        t.answer(&season_url(SHOW, 3), 200, &season_body(3, &[44, 43]));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(season_urls(&t), [season_url(SHOW, 3)]);
+        assert_eq!(book.answers.record.as_ref().unwrap().episode_runtimes(Some(3)), vec![44, 43]);
+        assert_eq!(book.states.get(&Lookup::Season(3)), Some(&answered(200)));
+        assert!(last_status(&saved).contains(&"season-3 200".to_string()));
+        let file = saved.iter().rev().find(|file| file.name == "tmdb-record.json").unwrap();
+        let text = String::from_utf8(file.bytes.clone()).unwrap();
+        assert_eq!(parse_tv(&text, "tmdb-record.json").unwrap().episode_runtimes(Some(3)), vec![44, 43]);
+        assert_eq!(book.pending(), (false, false));
+    }
+
+    #[test]
+    fn a_tv_record_without_a_parsed_season_fetches_every_listed_season() {
+        let t = RecordedTransport::new();
+        let inputs = chain(None, None);
+        t.answer(&dischash_url(FP), 200, &series_dischash(SHOW));
+        t.answer(&record_url(tv(SHOW)), 200, &tv_body(SHOW, &[(0, 1), (1, 2), (2, 2)]));
+        t.answer(&season_url(SHOW, 0), 200, &season_body(0, &[30]));
+        t.answer(&season_url(SHOW, 1), 200, &season_body(1, &[44, 43]));
+        t.answer(&season_url(SHOW, 2), 200, &season_body(2, &[42, 41]));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(season_urls(&t), [season_url(SHOW, 0), season_url(SHOW, 1), season_url(SHOW, 2)], "T4-R4");
+        // Season 0 is merged but left out of spec 8.1's runtime check.
+        assert_eq!(book.answers.record.as_ref().unwrap().episode_runtimes(None), vec![44, 43, 42, 41]);
+        assert_eq!(book.answers.record.as_ref().unwrap().episode_runtimes(Some(0)), vec![30]);
+        // Saved once with the record and again after each season.
+        assert_eq!(saved.iter().filter(|file| file.name == "tmdb-record.json").count(), 4);
+        assert_eq!(last_status(&saved), ["dischash 200", "season-0 200", "season-1 200", "season-2 200", "tmdb tv/900002 200"]);
+    }
+
+    #[test]
+    fn a_parsed_season_the_record_does_not_list_is_asked_and_a_404_is_a_miss() {
+        let t = RecordedTransport::new();
+        let inputs = chain(None, Some("SHOW_S07"));
+        t.answer(&dischash_url(FP), 200, &series_dischash(SHOW));
+        empty_searches(&t, &inputs);
+        t.answer(&record_url(tv(SHOW)), 200, &tv_body(SHOW, &[(1, 2)]));
+        t.answer(&season_url(SHOW, 7), 404, b"");
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(season_urls(&t), [season_url(SHOW, 7)]);
+        assert_eq!(book.states.get(&Lookup::Season(7)), Some(&answered(404)));
+        assert!(last_status(&saved).contains(&"season-7 404".to_string()));
+        assert_eq!(book.answers.record.as_ref().unwrap().season(7), None);
+        assert!(!book.pending().1);
+        let asked = t.requests().len();
+        round(&t, &mut book, &inputs);
+        assert_eq!(t.requests().len(), asked, "an answered season is not asked again");
+    }
+
+    #[test]
+    fn a_pending_season_keeps_tmdb_pending() {
+        let t = RecordedTransport::new();
+        let inputs = chain(None, None);
+        t.answer(&dischash_url(FP), 200, &series_dischash(SHOW));
+        t.answer(&record_url(tv(SHOW)), 200, &tv_body(SHOW, &[(1, 2)]));
+        t.fail(&season_url(SHOW, 1), TransportError::Timeout);
+        t.answer(&season_url(SHOW, 1), 200, &season_body(1, &[44, 43]));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(book.states.get(&Lookup::Season(1)), Some(&LookupState::Pending { reason: PendingReason::Timeout }));
+        assert!(last_status(&saved).contains(&"season-1 000".to_string()));
+        assert_eq!(book.pending(), (false, true));
+        round(&t, &mut book, &inputs);
+        assert_eq!(book.pending(), (false, false));
+        assert_eq!(urls(&t).iter().filter(|url| **url == record_url(tv(SHOW))).count(), 1, "the record is not asked again");
     }
 }

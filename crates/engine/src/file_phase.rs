@@ -354,8 +354,8 @@ pub(crate) fn refreshed_plan(
 }
 
 /// A lookup's word in the waiting message and job.log, the first word of its status line except the record's
-/// (Rulings R24.6, T4-R1): `dischash`, `discid`, `search`, `search-tagged`, `search-entry`, `tmdb record`. Def: T4-2.
-/// Use: T4-3, T4-4.
+/// (Rulings R24.6, T4-R1): `dischash`, `discid`, `search`, `search-tagged`, `search-entry`, `tmdb record`,
+/// `season-<n>`. Def: T4-2. Use: T4-3, T4-4.
 pub(crate) fn lookup_word(lookup: Lookup) -> String {
     let word = match lookup {
         Lookup::Dischash => "dischash",
@@ -364,6 +364,7 @@ pub(crate) fn lookup_word(lookup: Lookup) -> String {
         Lookup::TaggedSearch => "search-tagged",
         Lookup::EntrySearch => "search-entry",
         Lookup::Record => "tmdb record",
+        Lookup::Season(n) => return format!("season-{n}"),
     };
     word.to_string()
 }
@@ -496,5 +497,13 @@ mod tests {
         book.states.insert(Lookup::Search, LookupState::Pending { reason: PendingReason::NoToken });
         book.states.remove(&Lookup::Record);
         assert_eq!(waiting_message(&book), "dischash: x: bad; search: no tmdb_token is set");
+    }
+
+    #[test]
+    fn the_waiting_message_names_a_tv_record_season() {
+        let mut book = LookupBook::default();
+        book.states.insert(Lookup::Season(2), LookupState::Pending { reason: PendingReason::Timeout });
+        assert_eq!(lookup_word(Lookup::Season(2)), "season-2");
+        assert_eq!(waiting_message(&book), "season-2: no answer within 10 s");
     }
 }

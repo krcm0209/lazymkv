@@ -7,14 +7,14 @@ pub mod recorded;
 pub mod saved;
 pub mod transport;
 
-pub use chain::{run_round, Answers, ChainInputs, Lookup, LookupBook, LookupState};
+pub use chain::{run_round, seasons_to_fetch, Answers, ChainInputs, Lookup, LookupBook, LookupState};
 pub use lookups::{
     authentication_url, discdb_by_disc_id, discdb_by_fingerprint, dischash_url, discid_url, record_url, search_url,
-    tmdb_record, tmdb_search, Fetched, Outcome, PendingReason, DISCDB, TMDB,
+    season_url, tmdb_record, tmdb_search, tmdb_season, Fetched, Outcome, PendingReason, DISCDB, TMDB,
 };
 pub use merge::merge_pages;
 pub use recorded::{Gate, RecordedTransport};
-pub use saved::{slim_record, slim_search, slim_tmdb, status_text, SavedFile};
+pub use saved::{slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 pub use transport::{user_agent, HttpTransport, OfflineTransport, Response, TransportError, OFFLINE, TIMEOUT_S};
 
 #[cfg(test)]

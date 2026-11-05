@@ -116,6 +116,46 @@ pub fn slim_record(raw: &Value, kind: TmdbKind, today: &str) -> Value {
     dated(slim, today)
 }
 
+/// A raw season answer spliced into a slim `tmdb-record.json` (design part 7.1: "for a TV record, its seasons and
+/// episodes"; Ruling T4-R4; no season file is saved). The season whose `season_number` matches is rebuilt in place as
+/// `season_number`, `episode_count` (kept when present, else the number of episodes), `episodes` (each
+/// `episode_number` and `runtime` when present and not null, as `slim_record` keeps them); a season the file lacks is
+/// inserted before the first season with a higher number. A file without a `seasons` array, or an answer without a
+/// number, is left as it is. `fetched_at` stays last. Def: T4-4. Use: T4-4, T4-8.
+pub fn splice_season(record_file: &mut Value, season_raw: &Value) {
+    let Some(number) = season_raw.get("season_number").and_then(Value::as_u64) else { return };
+    let Some(seasons) = record_file.get_mut("seasons").and_then(Value::as_array_mut) else { return };
+    let number_of = |season: &Value| season.get("season_number").and_then(Value::as_u64);
+    let episodes = season_raw.get("episodes").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let listed = seasons.iter().position(|season| number_of(season) == Some(number));
+    let mut slim = Map::new();
+    slim.insert("season_number".to_string(), Value::from(number));
+    let count = listed
+        .and_then(|index| seasons[index].get("episode_count").filter(|count| !count.is_null()).cloned())
+        .unwrap_or_else(|| Value::from(episodes.len()));
+    slim.insert("episode_count".to_string(), count);
+    let episodes = episodes
+        .iter()
+        .map(|episode| {
+            let mut slim = Map::new();
+            keep(&mut slim, episode, "episode_number");
+            keep(&mut slim, episode, "runtime");
+            Value::Object(slim)
+        })
+        .collect();
+    slim.insert("episodes".to_string(), Value::Array(episodes));
+    match listed {
+        Some(index) => seasons[index] = Value::Object(slim),
+        None => {
+            let at = seasons
+                .iter()
+                .position(|season| number_of(season).is_some_and(|other| other > number))
+                .unwrap_or(seasons.len());
+            seasons.insert(at, Value::Object(slim));
+        }
+    }
+}
+
 /// The slim `tmdb-search.json` of one or more pages (design parts 7.1 and 8.4; S68, P29, J8): each page's movie and tv
 /// results slimmed as before, in page order, where a result of a later page is left out when a kept result has its
 /// `media_type` and `id` (so the results are `merge_pages`'s); then `queries`, each page's query in order; then
@@ -241,4 +281,17 @@ mod tests {
         assert_eq!(status_text(&lines), "dischash 000\ndiscid 404\nsearch 000\ntmdb movie/900001 unparsed\n");
     }
 
+    #[test]
+    fn splice_season_adds_episodes_and_keeps_the_slim_order() {
+        let tv = json!({"id": 5, "name": "Show", "original_name": "Show", "first_air_date": "2002-01-01",
+            "original_language": "en", "seasons": [{"season_number": 0, "episode_count": 1}, {"season_number": 1},
+            {"season_number": 3, "episode_count": 2}]});
+        let mut file = slim_record(&tv, TmdbKind::Tv, "2026-10-23");
+        splice_season(&mut file, &json!({"season_number": 1, "name": "S1", "episodes": [
+            {"episode_number": 1, "name": "Pilot", "runtime": 44, "still_path": "/x.jpg"}, {"episode_number": 2, "runtime": null}]}));
+        splice_season(&mut file, &json!({"season_number": 2, "episodes": [{"episode_number": 1, "runtime": 0}]}));
+        let text = serde_json::to_string(&file).unwrap();
+        assert_eq!(text, r#"{"id":5,"name":"Show","original_name":"Show","first_air_date":"2002-01-01","original_language":"en","kind":"tv","seasons":[{"season_number":0,"episode_count":1},{"season_number":1,"episode_count":2,"episodes":[{"episode_number":1,"runtime":44},{"episode_number":2}]},{"season_number":2,"episode_count":1,"episodes":[{"episode_number":1,"runtime":0}]},{"season_number":3,"episode_count":2}],"fetched_at":"2026-10-23"}"#);
+        assert_eq!(parse_tv(&text, "tmdb-record.json").unwrap().episode_runtimes(None), vec![44]);
+    }
 }

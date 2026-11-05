@@ -322,29 +322,55 @@ pub fn parse_tv(text: &str, shown: &str) -> Result<TmdbRecord, String> {
 
 /// A season answer merged into `record.seasons` (replacing that season's episodes; a season the record lacks is added
 /// and the seasons kept in number order; an absent episode_count takes the count merged). Err for a movie record, before
-/// the text is read, and for a malformed answer. Spec 8.1. Def: T3. Use: none in phase 1 (phase 2's TMDb client merges
-/// its season calls).
+/// the text is read, and for a malformed answer: the movie check, then `parse_season_answer`, then
+/// `merge_parsed_season`. Spec 8.1. Def: T3. Use: T4-4 (through its parts).
 pub fn merge_season(record: &mut TmdbRecord, season_text: &str, shown: &str) -> Result<(), String> {
+    if record.identity.kind != TmdbKind::Tv {
+        return Err(format!("{shown}: {}", movie_refusal(record)));
+    }
+    let season = parse_season_answer(season_text, shown)?;
+    merge_parsed_season(record, season)
+}
+
+/// A `/tv/{id}/season/{n}` answer (design part 8.2 item 5): `season_number`, the `episodes` array read as
+/// `TmdbEpisode`s (runtime 0 reads as None), `episode_count` the number of episodes. Err `<shown>: the season answer
+/// has no episodes` when `episodes` is absent or not an array (Ruling T4-4-a: a 200 that is no season is unparsed,
+/// never a season with no episodes); serde's sentence prefixed by `<shown>` for malformed JSON or no
+/// `season_number`. Def: T4-4. Use: T4-4, T4-8, T4-19.
+pub fn parse_season_answer(text: &str, shown: &str) -> Result<TmdbSeason, String> {
     #[derive(serde::Deserialize)]
     struct SeasonAnswer {
         season_number: u32,
         #[serde(default)]
-        episodes: Vec<TmdbEpisode>,
+        episodes: Option<Vec<TmdbEpisode>>,
     }
-    if record.identity.kind != TmdbKind::Tv {
-        return Err(format!("{shown}: a season answer belongs to a TV record, not to movie {}", record.identity.id));
-    }
-    let answer: SeasonAnswer = parse_json(season_text, shown)?;
-    let episodes: Vec<TmdbEpisode> = answer.episodes.into_iter().map(known_episode).collect();
+    let answer: SeasonAnswer = parse_json(text, shown)?;
+    let episodes = answer.episodes.ok_or_else(|| format!("{shown}: the season answer has no episodes"))?;
+    let episodes: Vec<TmdbEpisode> = episodes.into_iter().map(known_episode).collect();
     let count = u32::try_from(episodes.len()).unwrap_or(u32::MAX);
-    if let Some(season) = record.seasons.iter_mut().find(|season| season.season_number == answer.season_number) {
-        season.episode_count = season.episode_count.or(Some(count));
-        season.episodes = episodes;
+    Ok(TmdbSeason { season_number: answer.season_number, episode_count: Some(count), episodes })
+}
+
+/// `merge_season`'s rule over a parsed season (spec 8.1): that season's episodes replaced, a season the record lacks
+/// added in number order, an absent `episode_count` taking the season's. Err `a season answer belongs to a TV record,
+/// not to movie <id>` for a movie record, the record unchanged. Def: T4-4. Use: T4-4, T4-8.
+pub fn merge_parsed_season(record: &mut TmdbRecord, season: TmdbSeason) -> Result<(), String> {
+    if record.identity.kind != TmdbKind::Tv {
+        return Err(movie_refusal(record));
+    }
+    if let Some(listed) = record.seasons.iter_mut().find(|listed| listed.season_number == season.season_number) {
+        listed.episode_count = listed.episode_count.or(season.episode_count);
+        listed.episodes = season.episodes;
         return Ok(());
     }
-    record.seasons.push(TmdbSeason { season_number: answer.season_number, episode_count: Some(count), episodes });
+    record.seasons.push(season);
     record.seasons.sort_by_key(|season| season.season_number);
     Ok(())
+}
+
+/// The sentence refusing a season answer for a movie record.
+fn movie_refusal(record: &TmdbRecord) -> String {
+    format!("a season answer belongs to a TV record, not to movie {}", record.identity.id)
 }
 
 /// The IMDb ID (the embedded `external_ids.imdb_id`, else the top-level one) and the TVDB ID (positive only).
@@ -743,6 +769,33 @@ mod tests {
         let no_number = merge_season(&mut show, r#"{"episodes": []}"#, "season.json").unwrap_err();
         assert!(no_number.starts_with("season.json: missing field `season_number`"), "{no_number}");
         assert_eq!(show, the_office());
+    }
+
+    #[test]
+    fn merge_season_is_parse_then_merge() {
+        let mut merged = parse_tv(TV, "tv.json").unwrap();
+        merge_season(&mut merged, SEASON_3, "season-3.json").unwrap();
+        let season = parse_season_answer(SEASON_3, "season-3.json").unwrap();
+        assert_eq!((season.season_number, season.episode_count, season.episodes.len()), (3, Some(4), 4));
+        let mut composed = parse_tv(TV, "tv.json").unwrap();
+        merge_parsed_season(&mut composed, season.clone()).unwrap();
+        assert_eq!(composed, merged);
+        let mut movie = pans_labyrinth();
+        assert_eq!(merge_parsed_season(&mut movie, season),
+            Err("a season answer belongs to a TV record, not to movie 1417".to_string()));
+        assert_eq!(movie, pans_labyrinth());
+    }
+
+    #[test]
+    fn a_season_answer_without_episodes_is_refused_with_a_sentence() {
+        assert_eq!(parse_season_answer(r#"{"season_number": 2}"#, "season-2.json"),
+            Err("season-2.json: the season answer has no episodes".to_string()));
+        assert_eq!(parse_season_answer(r#"{"season_number": 2, "episodes": null}"#, "season-2.json"),
+            Err("season-2.json: the season answer has no episodes".to_string()));
+        let no_number = parse_season_answer(r#"{"episodes": []}"#, "season.json").unwrap_err();
+        assert!(no_number.starts_with("season.json: missing field `season_number`"), "{no_number}");
+        let empty = parse_season_answer(r#"{"season_number": 2, "episodes": []}"#, "season-2.json").unwrap();
+        assert_eq!((empty.episode_count, empty.episodes.len()), (Some(0), 0));
     }
 
     #[test]
