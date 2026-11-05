@@ -204,6 +204,7 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         path_var: std::env::var_os("PATH"),
         ctl,
         console: Some(console),
+        cleanup_minutes: None,
     };
     let engine = start(config, services).map_err(|error| could_not_start(&error))?;
     *lock(&slot) = Some(engine.shutdown_handle());

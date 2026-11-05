@@ -39,6 +39,7 @@ use lazymkv_tools::CancelToken;
 use serde_json::{json, Map, Value};
 
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
+use crate::cleanup::{run_pass, CleanupJob};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
@@ -162,6 +163,10 @@ pub(crate) struct TestHooks {
     /// The persists that meet a fault (`Store::with_faults`).
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) persist_faults: Option<PersistFaults>,
+    /// Sent once at the end of each cleanup pass (design part 5.9). Def: T4-11. Use: T4-11.
+    pub(crate) cleanup_done: Option<Sender<()>>,
+    /// Replaces the period `EngineConfig.cleanup_minutes` gives, tests only (design part 5.9). Def: T4-11. Use: T4-11.
+    pub(crate) cleanup_period: Option<Duration>,
 }
 
 /// Everything that reaches the owner thread, on its one channel (design part 4.4). Def: T22. Use: T22, T24, T26.
@@ -203,6 +208,11 @@ pub(crate) enum Msg {
     CommandRefetched { client: u64, id: Option<u64>, words: Vec<String>, refetched: Result<(), String> },
     /// A client's reader thread saw its connection end (design part 9.2), so a command it runs is killed (Ruling W24).
     Gone { client: u64 },
+    /// Runs one cleanup pass on a thread of its own unless one runs (design part 5.9; Ruling T4-R11): the schedule
+    /// thread's and `EngineHandle::cleanup_now`'s message. Def: T4-11. Use: T4-11.
+    Cleanup,
+    /// The running cleanup pass ended (design part 5.9). Def: T4-11. Use: T4-11.
+    CleanupDone,
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -247,6 +257,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     };
     let store = Arc::new(store);
     let stop_after = hooks.stop_after;
+    let cleanup_done = hooks.cleanup_done;
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
     let outbox = Outbox::default();
     let promises = Arc::new(Mutex::new(Promises::default()));
@@ -309,6 +320,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         Arc::clone(&drive_stop),
         present,
         selftest,
+        cleanup_done,
     );
     // Review round 1 of pull request 3 (R35): the thread's end, a panic included, drops `owner_exit`.
     let (owner_exit, owner_done) = channel::<()>();
@@ -317,6 +329,15 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         owner.run(inbox)
     });
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
+    // Design part 5.9: the cleanup's schedule, a pass at start and then each period, when the configuration asks.
+    let (cleanup_stop, cleanup_schedule) = match config.cleanup_minutes {
+        Some(minutes) => {
+            let period = hooks.cleanup_period.unwrap_or(Duration::from_secs(u64::from(minutes) * 60));
+            let (stop, stopped) = channel::<()>();
+            (Some(stop), Some(spawn_cleanup_schedule(sender.clone(), stopped, period)))
+        }
+        None => (None, None),
+    };
     let serve_stop = Arc::new(AtomicBool::new(false));
     let transport = Arc::clone(&ipc);
     let serve = spawn_serve(ipc, Arc::clone(&serve_stop), sender.clone());
@@ -326,6 +347,8 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         owner_done,
         drive,
         drive_stop,
+        cleanup_stop,
+        cleanup_schedule,
         notifier_done,
         busy,
         store,
@@ -350,6 +373,10 @@ pub struct EngineHandle {
     drive: JoinHandle<()>,
     /// Raised to end the drive thread.
     drive_stop: Arc<AtomicBool>,
+    /// Dropped to end the cleanup's schedule thread (design part 5.9); None when no schedule runs.
+    cleanup_stop: Option<Sender<()>>,
+    /// The cleanup's schedule thread (design part 5.9); None when `EngineConfig.cleanup_minutes` is None.
+    cleanup_schedule: Option<JoinHandle<()>>,
     /// Closes when the notifier thread has delivered its last notification and ended.
     notifier_done: Receiver<()>,
     /// The owner's `busy`, set after each message it handles.
@@ -377,11 +404,18 @@ impl EngineHandle {
         lock(&self.jobs).values().map(job_summary).collect()
     }
 
-    /// Whether the owner, after the last message it handled, had a step or a lookup round outstanding; false once it
-    /// has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet instead of 300 ms, and waits no
-    /// longer than that for it to clear (Ruling R24.c1). Def: T24. Use: T24 to T29.
+    /// Whether the owner, after the last message it handled, had a step, a lookup round or a cleanup pass (design part
+    /// 5.9) outstanding; false once it has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet
+    /// instead of 300 ms, and waits no longer than that for it to clear (Ruling R24.c1). Def: T24, T4-11. Use: T24 to
+    /// T29, T4-11.
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
+    }
+
+    /// Asks the owner for one cleanup pass (design part 5.9): it sends `Msg::Cleanup`, which a running pass drops.
+    /// Def: T4-11. Use: T4-11.
+    pub(crate) fn cleanup_now(&self) {
+        let _ = self.sender.send(Msg::Cleanup);
     }
 
     /// Polls `jobs` every 20 ms until `done` holds, and gives true; false once `timeout` has passed. Def: T22. Use: T22
@@ -423,23 +457,39 @@ impl EngineHandle {
     /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk and a client's reader
     /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first: `stop` closes the
     /// transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client connects while the
-    /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops; the
-    /// owner then waits for every step, recording, eject and check it started, closes every client, and the notifier
-    /// delivers what was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
+    /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops;
+    /// then the cleanup's schedule thread (design part 5.9), so it sends no more; the owner then waits for every
+    /// step, recording, eject, check and cleanup pass it started, closes every client, and the notifier delivers what
+    /// was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
     /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at
     /// most CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for
     /// its volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
     /// panics still reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked.
-    /// Def: T22, T3-10, PR #14 review round 1 (V5). Use: T22 to T29, T3-23.
+    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11. Use: T22 to T29, T3-23, T4-11.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
-            sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, ipc, clients, mirror, ..
+            sender,
+            owner,
+            drive,
+            drive_stop,
+            cleanup_stop,
+            cleanup_schedule,
+            notifier_done,
+            store,
+            serve,
+            serve_stop,
+            ipc,
+            clients,
+            mirror,
+            ..
         } = self;
         serve_stop.store(true, Ordering::SeqCst);
         ipc.close();
         let served = serve.join();
         drive_stop.store(true, Ordering::SeqCst);
         let drive = drive.join();
+        drop(cleanup_stop);
+        let schedule = cleanup_schedule.map(JoinHandle::join);
         let _ = sender.send(Msg::Stop);
         drop(sender);
         let owner = owner.join();
@@ -449,7 +499,7 @@ impl EngineHandle {
         if let Some(mirror) = &mirror {
             let _ = mirror.drain(CONSOLE_DRAIN);
         }
-        if served.is_err() || drive.is_err() || owner.is_err() {
+        if served.is_err() || drive.is_err() || owner.is_err() || schedule.is_some_and(|joined| joined.is_err()) {
             return Err(io::Error::other("lazymkv-engine: an engine thread panicked"));
         }
         Ok(())
@@ -702,6 +752,19 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The cleanup's schedule thread (design part 5.9; Ruling T4-R11): it sends `Msg::Cleanup`, then waits `period` on
+/// `stop`, and again, until `stop` is dropped or the owner has stopped.
+fn spawn_cleanup_schedule(sender: Sender<Msg>, stop: Receiver<()>, period: Duration) -> JoinHandle<()> {
+    thread::spawn(move || loop {
+        if sender.send(Msg::Cleanup).is_err() {
+            break;
+        }
+        if !matches!(stop.recv_timeout(period), Err(RecvTimeoutError::Timeout)) {
+            break;
+        }
+    })
+}
+
 /// The drive thread (design part 4.4): it hands each drive event to the owner until `stop` is raised.
 fn spawn_drive_thread(mut drives: Box<dyn DriveWatcher>, sender: Sender<Msg>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -921,13 +984,18 @@ struct Owner {
     refeed_armed: BTreeSet<String>,
     /// The `command` that runs, one at a time (design part 9.5): taken by its `Msg::CommandDone` or by a stop.
     command: Option<RunningCommand>,
+    /// Whether a cleanup pass runs (design part 5.9): set by `Msg::Cleanup`, cleared by `Msg::CleanupDone`.
+    cleanup_running: bool,
+    /// Sent once at the end of each cleanup pass, for the testkit (`TestHooks::cleanup_done`).
+    cleanup_done: Option<Sender<()>>,
 }
 
 impl Owner {
     /// The owner over the store's jobs and drives.json (design parts 5.10, 7.4), after the restart sequence over the
     /// discs `present` in the drives (`Owner::restart`), showing `selftest` until the first `run_selftest`. Each loaded
     /// job but a Filed or Discarded one has its lookup book rebuilt from its folder (`rebuild_book`, S73). A refused
-    /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only.
+    /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only. Each
+    /// cleanup pass's end is sent on `cleanup_done` when it is Some (design part 5.9).
     #[allow(clippy::too_many_arguments)]
     fn load(
         store: Arc<Store>,
@@ -939,6 +1007,7 @@ impl Owner {
         drive_stop: Arc<AtomicBool>,
         present: Vec<(String, PathBuf)>,
         selftest: SelfTest,
+        cleanup_done: Option<Sender<()>>,
     ) -> Owner {
         let mut jobs = BTreeMap::new();
         for loaded in store.load_jobs() {
@@ -1018,6 +1087,8 @@ impl Owner {
             refeed: BTreeMap::new(),
             refeed_armed: BTreeSet::new(),
             command: None,
+            cleanup_running: false,
+            cleanup_done,
         };
         owner.restart(present);
         owner
@@ -1232,6 +1303,8 @@ impl Owner {
                 self.on_command_refetched(client, id, words, refetched)
             }
             Msg::Gone { client } => self.kill_command_of(client),
+            Msg::Cleanup => self.start_cleanup(),
+            Msg::CleanupDone => self.cleanup_ended(),
         }
     }
 
@@ -1239,7 +1312,8 @@ impl Owner {
     /// only its notifications performed, progress still goes out, and nothing new starts: drive events, arrivals,
     /// timers and lookup rounds are dropped, a new client is turned away and every request is refused. The shutdown
     /// stopped and answered a running command already (`stop_command`), so its end is dropped; a client that leaves
-    /// still kills a command it runs (Ruling T3-22-c).
+    /// still kills a command it runs (Ruling T3-22-c). A cleanup pass's end is handled as outside one, so `busy` never
+    /// stays set, and a new pass is not started (design part 5.9).
     fn quiet_message(&mut self, message: Msg) {
         match message {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
@@ -1261,7 +1335,48 @@ impl Owner {
             Msg::Log(line) => self.store.log(&line),
             Msg::Gone { client } => self.kill_command_of(client),
             Msg::CommandDone { .. } | Msg::CommandRefetched { .. } => {}
-            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Stop => {}
+            Msg::CleanupDone => self.cleanup_ended(),
+            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Cleanup | Msg::Stop => {}
+        }
+    }
+
+    /// `Msg::Cleanup` (design part 5.9, S40; Ruling T4-R11): unless a pass runs, one `CleanupJob` per job, in id order
+    /// and whatever its state, from its record, its own settings (ENG-19) and its lookup book, handed to a pass on a
+    /// thread of its own, which `shut_down` joins. The pass writes engine.log through the store and sends
+    /// `Msg::CleanupDone` at its end.
+    fn start_cleanup(&mut self) {
+        if self.cleanup_running {
+            return;
+        }
+        let jobs: Vec<CleanupJob> = self
+            .jobs
+            .values()
+            .map(|job| CleanupJob {
+                id: job.record.id.clone(),
+                record: job.record.clone(),
+                staging_root: job.settings.staging_root.clone(),
+                keep_tuning_evidence: job.settings.keep_tuning_evidence,
+                retention_days: job.settings.retention_days,
+                lookups: Arc::clone(&job.lookups),
+            })
+            .collect();
+        self.cleanup_running = true;
+        let store = Arc::clone(&self.store);
+        let shares = Arc::clone(&self.parts.shares);
+        let data = self.parts.env.data.clone();
+        let (today, now) = (self.parts.host.local_date(), self.parts.host.now_unix());
+        let sender = self.sender.clone();
+        self.threads.push(thread::spawn(move || {
+            run_pass(jobs, &data, shares.as_ref(), &today, now, &|line| store.log(&line));
+            let _ = sender.send(Msg::CleanupDone);
+        }));
+    }
+
+    /// `Msg::CleanupDone` (design part 5.9): no pass runs any more, and the testkit hears of it.
+    fn cleanup_ended(&mut self) {
+        self.cleanup_running = false;
+        if let Some(done) = &self.cleanup_done {
+            let _ = done.send(());
         }
     }
 
@@ -1272,11 +1387,11 @@ impl Owner {
     }
 
     /// After the restart sequence and after each message: finished threads dropped, KeepAwake held or released, and
-    /// the busy flag set (Ruling R24.c1).
+    /// the busy flag set (Ruling R24.c1), a running cleanup pass counting (design part 5.9).
     fn after_message(&mut self) {
         self.threads.retain(|thread| !thread.is_finished());
         self.keep_awake();
-        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty() || self.checking;
+        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty() || self.checking || self.cleanup_running;
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 

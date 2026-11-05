@@ -12,7 +12,7 @@ use common::{Client, WAIT};
 use lazymkv_clients::OFFLINE;
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
-use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
+use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent, State};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
@@ -169,6 +169,16 @@ fn seed(h: &Harness, n: u64, state: State) -> String {
     let dir = h.data().join("jobs").join(&id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("state.json"), serde_json::to_vec(&r).unwrap()).unwrap();
+    id
+}
+
+/// `seed(h, n, State::Filed)` with `filed_unix` set in the written `state.json` (design part 5.9).
+fn seed_filed(h: &Harness, n: u64, filed_unix: u64) -> String {
+    let id = seed(h, n, State::Filed);
+    let path = h.job_dir(&id).join("state.json");
+    let mut r: JobRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    r.filed_unix = Some(filed_unix);
+    fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
     id
 }
 
@@ -2431,4 +2441,56 @@ fn the_self_test_creates_a_missing_tuning_root_under_an_existing_parent() {
     let result = c.ok("run_selftest", Value::Null);
     assert_eq!(check(&result, "tuning_root")["ok"], json!(true), "{result}");
     assert!(tuning.is_dir());
+}
+
+// ---- The cleanup (design part 5.9; Ruling T4-R11) ----
+
+#[test]
+fn the_harness_never_runs_a_cleanup_unasked() {
+    let h = scripted(vec![]);
+    let id = seed_filed(&h, 1, 1_792_800_000 - 8 * 86_400);
+    fs::write(h.job_dir(&id).join("tmdb.json"), r#"{"id": 1, "fetched_at": "2020-01-01"}"#).unwrap();
+    fs::create_dir_all(h.staging().join(&id).join("rip")).unwrap();
+    h.restart();
+    h.settle();
+    assert!(h.job_dir(&id).join("tmdb.json").exists());
+    assert!(h.staging().join(&id).is_dir());
+    assert_eq!(h.timers().pending(), Vec::<u32>::new());
+    assert!(!h.engine_log().contains("cleanup:"), "{}", h.engine_log());
+    h.run_cleanup(); // one pass, on demand
+    assert!(!h.job_dir(&id).join("tmdb.json").exists());
+    assert!(!h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted its staging folder")), "{}", h.engine_log());
+}
+
+#[test]
+fn the_cleanup_runs_off_the_owner_thread() {
+    let h = scripted(vec![]);
+    let id = seed_filed(&h, 1, 1_792_800_000 - 8 * 86_400);
+    fs::create_dir_all(h.staging().join(&id).join("rip")).unwrap();
+    let stall = h.shares().stall(&h.staging().to_string_lossy());
+    h.schedule_cleanup(Duration::from_secs(3600));
+    h.restart();
+    assert!(stall.wait_for_caller(WAIT * ci_factor()), "the pass reached the staging share");
+    assert!(snapshot_within(&h, Duration::from_secs(2)).is_some(), "the owner answers while the pass waits");
+    assert!(h.busy(), "a running pass counts as busy (R24.c1)");
+    stall.release();
+    h.wait("the staging folder deleted", |h| !h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted its staging folder")));
+}
+
+#[test]
+fn a_configured_cleanup_runs_once_at_start_and_again_each_period() {
+    let h = scripted(vec![]);
+    let id = seed(&h, 1, State::NeedsReview { held: Held::DispositionGate });
+    let copy = h.job_dir(&id).join("tmdb.json");
+    fs::write(&copy, r#"{"id": 1, "fetched_at": "2020-01-01"}"#).unwrap();
+    h.schedule_cleanup(Duration::from_millis(200));
+    h.restart();
+    h.wait("the first pass", |_| !copy.exists());
+    fs::write(&copy, r#"{"id": 1, "fetched_at": "2020-01-02"}"#).unwrap();
+    h.wait("the next pass", |_| !copy.exists());
+    let log = h.engine_log();
+    assert!(log.contains(&format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-01)")), "{log}");
+    assert!(log.contains(&format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-02)")), "{log}");
 }

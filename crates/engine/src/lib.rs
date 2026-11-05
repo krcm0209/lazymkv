@@ -1,6 +1,7 @@
 //! lazymkv-engine: the job-owner loop over core::job::reduce, the job store, the IPC (inter-process communication) server and the self-test (design parts 4.1, 4.4, 7.3).
 
 mod arrival;
+mod cleanup;
 mod file_phase;
 mod ipc_server;
 /// The engine on Windows (design parts 3.1 to 3.8). Def: T3-23. Use: T3-23.
@@ -49,11 +50,17 @@ pub struct EngineConfig {
     /// engine thread waits on it; a full queue drops the console copy only (review round 1 of pull request 3, V5).
     /// Def: T3-10. Use: T3-10, T3-23, PR #14 review round 1 (V5).
     pub console: Option<Box<dyn Write + Send>>,
+    /// The cleanup's period in minutes (design part 5.9; Ruling T4-R11): Some runs a pass at start and then each
+    /// period on a thread of its own; None runs none (tests). Def: T4-11. Use: T4-11, T4-17.
+    pub cleanup_minutes: Option<u32>,
 }
 
 /// The binary's usage line; `--data` is the one optional argument (design part 3.1; Ruling W1). Def: T21, T3-23.
 /// Use: T21, T3-23.
 pub const USAGE: &str = "usage: lazymkv-engine [--data DIR]";
+
+/// The binary's cleanup period: hourly (design part 5.9). Def: T4-11. Use: T4-17.
+pub const CLEANUP_MINUTES: u32 = 60;
 
 /// The lazymkv-engine binary's run (design parts 3.1, 4.2, 4.6; S28; Rulings W1, W2). On Windows it is
 /// `native::run_with(args, err, NativeOptions::production())`. Elsewhere it reads the arguments with `data_arg`: a

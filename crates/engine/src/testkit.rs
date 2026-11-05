@@ -22,6 +22,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,8 +48,6 @@ use serde_json::{json, Value};
 use std::io::BufRead;
 #[cfg(windows)]
 use std::panic;
-#[cfg(windows)]
-use std::sync::mpsc::channel;
 #[cfg(windows)]
 use std::thread::JoinHandle;
 
@@ -467,6 +466,12 @@ pub struct Harness {
     engine: Mutex<Option<EngineHandle>>,
     /// Whether `start` passes pull request 3's binary transport and sink, `use_binary_services`.
     binary_services: AtomicBool,
+    /// The `EngineConfig.cleanup_minutes` the next `start` passes; None until `schedule_cleanup` (design part 5.9).
+    cleanup_minutes: Mutex<Option<u32>>,
+    /// The `TestHooks::cleanup_period` the next `start` passes (design part 5.9).
+    cleanup_period: Mutex<Option<Duration>>,
+    /// The running engine's cleanup ends, one `()` per pass (`TestHooks::cleanup_done`).
+    cleanup_done: Mutex<Option<Receiver<()>>>,
     /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
     /// once `native_exit`, `stop` or the drop took it.
     #[cfg(windows)]
@@ -623,6 +628,7 @@ impl Harness {
             path_var: Some(OsString::new()),
             ctl: self.ctl.clone(),
             console: Some(Box::new(self.console_buffer())),
+            cleanup_minutes: *lock(&self.cleanup_minutes),
         };
         let hook = Arc::clone(&self.hook);
         let stop_after: StopAfter = Arc::new(move |transition: &Transition| {
@@ -644,7 +650,14 @@ impl Harness {
             let armed = lock(&armed);
             armed.as_ref().filter(|(_, applies)| applies(record, transition)).map(|(fault, _)| *fault)
         });
-        let hooks = TestHooks { stop_after: Some(stop_after), persist_faults: Some(persist_faults) };
+        let (cleanup_done, cleanup_ends) = channel::<()>();
+        *lock(&self.cleanup_done) = Some(cleanup_ends);
+        let hooks = TestHooks {
+            stop_after: Some(stop_after),
+            persist_faults: Some(persist_faults),
+            cleanup_done: Some(cleanup_done),
+            cleanup_period: *lock(&self.cleanup_period),
+        };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
         *lock(&self.engine) = Some(engine);
     }
@@ -1044,6 +1057,33 @@ impl Harness {
         &self.timers
     }
 
+    /// One cleanup pass through `Msg::Cleanup`; returns when the pass ends, and panics after 10 s times `ci_factor()`
+    /// (design part 5.9). Def: T4-11. Use: T4-11.
+    pub fn run_cleanup(&self) {
+        self.deliver();
+        let ends = lock(&self.cleanup_done);
+        let ends = ends.as_ref().expect("an engine has started");
+        while ends.try_recv().is_ok() {}
+        lock(&self.engine).as_ref().expect("an engine runs").cleanup_now();
+        let cap = WAIT_CAP * ci_factor();
+        if ends.recv_timeout(cap).is_err() {
+            panic!("run_cleanup: the pass did not end within {} s", cap.as_secs());
+        }
+    }
+
+    /// From the next `start`, `cleanup_minutes: Some(1)` with its period replaced by `period` (design part 5.9).
+    /// Def: T4-11. Use: T4-11.
+    pub fn schedule_cleanup(&self, period: Duration) {
+        *lock(&self.cleanup_minutes) = Some(1);
+        *lock(&self.cleanup_period) = Some(period);
+    }
+
+    /// The running engine's busy flag (Ruling R24.c1; a running pass counts); false when no engine runs.
+    /// Def: T4-11. Use: T4-11.
+    pub fn busy(&self) -> bool {
+        lock(&self.engine).as_ref().is_some_and(EngineHandle::busy)
+    }
+
     /// Waits until at least one timer is pending, then runs and drops every pending timer (design part 5.2). A
     /// transition is persisted before its actions run and StartTimer is one of them, so a test that fires as soon as
     /// it sees the state could otherwise find no timer and leave the job waiting for good (Ruling R29.c2a). Panics
@@ -1426,6 +1466,9 @@ impl Folders {
             faults: Arc::default(),
             engine: Mutex::default(),
             binary_services: AtomicBool::new(false),
+            cleanup_minutes: Mutex::default(),
+            cleanup_period: Mutex::default(),
+            cleanup_done: Mutex::default(),
             #[cfg(windows)]
             native: Mutex::default(),
             #[cfg(windows)]
