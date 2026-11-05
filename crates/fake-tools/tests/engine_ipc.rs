@@ -1524,6 +1524,8 @@ fn approve_delivers_review_approved_when_the_slot_is_free() {
     assert!(matches!(h.record(&a).state, State::NeedsReview { .. }));
     c.ok("cancel", json!({"job": b}));
     c.until_state(Some(&a), "Decided");
+    // state.json is replaced before the transitions line is appended (store.rs), so the line gets its own wait.
+    h.wait("the ReviewApproved line", |h| h.transitions(&a).iter().any(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))));
     let approved = h.transitions(&a).into_iter().find(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))).unwrap();
     let event = serde_json::to_value(&approved.event).unwrap();
     assert_eq!(event["approved_reasons"], reasons);

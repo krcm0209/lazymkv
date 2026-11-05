@@ -804,6 +804,8 @@ fn an_ejected_jobs_refused_lookup_pending_is_kept_and_fed_again_at_the_retry_tim
     h.allow_persists();
     h.fire_timers();
     h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    // state.json is replaced before the transitions line is appended (store.rs), so the line gets its own wait.
+    h.wait("the LookupPending line", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::LookupPending)));
     let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupPending)).unwrap();
     assert_eq!(fed.old, Some(State::Ejected { after_copy: false }));
     assert!(h.record(&id).message.is_some(), "the waiting message is fed again with the kept event");
