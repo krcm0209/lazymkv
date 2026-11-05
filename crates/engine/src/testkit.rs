@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::{search_url, HttpTransport, OfflineTransport, RecordedTransport};
+use lazymkv_clients::{search_url, HttpTransport, OfflineTransport, RecordedTransport, DISCDB, TMDB};
 use lazymkv_core::disc::bdmt_name;
 use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
@@ -525,7 +525,8 @@ impl Harness {
     ///   hex-decoded `hex`, or `size` zero bytes) and labels it with the file's `label`; any other name gets
     ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
     /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
-    ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
+    ///   and `disc_id` of the built volume, `search`, the search URL of its disc name's cleaned form, and
+    ///   `search_tagged`, the search URL of its tagged form (J8's second search).
     /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files,
     ///   `on_spawn`'s actions run before the spawns they name, and every spawn is kept for `spawns`.
     /// - When the merged scenarios hold `lazymkvctl.json`, it copies `fake_tool` as `lazymkvctl` (with the system's
@@ -570,8 +571,10 @@ impl Harness {
         let http_file = tools.join("http.json");
         let (http, urls) = match (&disc, http_file.is_file()) {
             (Some((name, spec)), true) => recorded_http(&http_file, &folders.volumes.join(name), spec),
-            (None, true) => (RecordedTransport::from_file(&http_file, &[]).expect("the scenario's http.json"), 0),
-            (_, false) => (RecordedTransport::new(), 0),
+            (None, true) => {
+                (RecordedTransport::from_file(&http_file, &[]).expect("the scenario's http.json"), LookupUrls::default())
+            }
+            (_, false) => (RecordedTransport::new(), LookupUrls::default()),
         };
         let mut defaults = folders.defaults();
         defaults["tool_paths"] = Value::Object(tool_paths);
@@ -1558,8 +1561,15 @@ impl Runner {
 
 /// Ruling R23.2: stand-in runs are faster than the recorded lookups' file writes. Before it spawns a scan (arguments
 /// holding `info` and a `--profile=` argument), this guard waits, at most 5 s, until `<the profile's
-/// folder>/lookup-status.txt` has one line per distinct URL of the merged `http.json` and no line ends in `000`. The
-/// engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
+/// folder>/lookup-status.txt` holds a status line of each kind the merged `http.json` asks for and no line ends in
+/// `000` (Ruling T4-R1). Each `url` of its `answers` is read after the same variable substitution
+/// `RecordedTransport::from_file` applies; every distinct URL under `DISCDB` or `TMDB` then needs a line of its kind:
+/// a dischash URL a `dischash` line, a discid URL a `discid` line, a record URL (`/3/movie/<id>` or `/3/tv/<id>` with
+/// `append_to_response=external_ids`) its `tmdb <kind>/<id>` line, a season URL (`/3/tv/<id>/season/<n>`) its
+/// `season-<n>` line, and the search family (URLs under `/3/search/`, and any URL that still starts with `{` after
+/// the substitution, which is a search URL) at least as many lines whose key is `search`, `search-tagged` or
+/// `search-entry` as there are distinct search URLs. A URL under neither root (a webhook) needs no line, nor does a
+/// URL of none of those kinds. The engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
 /// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
 /// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `native_guard()` through `retry_busy`
 /// (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake job runs it (Ruling W7), and
@@ -1567,8 +1577,8 @@ impl Runner {
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,
-    /// The distinct URLs of the merged `http.json`; 0 waits for nothing.
-    urls: usize,
+    /// The lookup URLs of the merged `http.json` by kind; empty waits for nothing.
+    urls: LookupUrls,
     /// `Harness::on_spawn`'s actions.
     hooks: SpawnHooks,
     /// Every spawn asked for, in order (`Harness::spawns`).
@@ -1592,10 +1602,10 @@ impl ProcessGuard for TestGuard {
         }
         let scan = spawn.args.iter().any(|arg| arg == "info");
         let profile = spawn.args.iter().find_map(|arg| arg.strip_prefix("--profile="));
-        if let (true, Some(profile)) = (scan && self.urls > 0 && self.wait.load(Ordering::SeqCst), profile) {
+        if let (true, Some(profile)) = (scan && !self.urls.is_empty() && self.wait.load(Ordering::SeqCst), profile) {
             let status = Path::new(profile).parent().map(|folder| folder.join("lookup-status.txt"));
             let deadline = Instant::now() + LOOKUP_WAIT_CAP;
-            while !status.as_deref().is_some_and(|status| answered(status, self.urls)) && Instant::now() < deadline {
+            while !status.as_deref().is_some_and(|status| answered(status, &self.urls)) && Instant::now() < deadline {
                 thread::sleep(POLL);
             }
         }
@@ -1603,11 +1613,76 @@ impl ProcessGuard for TestGuard {
     }
 }
 
-/// Whether `status` has `urls` lines and none ends in `000` (R23.2).
-fn answered(status: &Path, urls: usize) -> bool {
+/// The lookup URLs of a merged `http.json` by the status line each needs (Ruling T4-R1): the keys that need a line
+/// of their own, and the number of distinct search URLs, each needing one line of the search family.
+#[derive(Debug, Default, PartialEq)]
+struct LookupUrls {
+    /// `dischash`, `discid`, `tmdb <kind>/<id>` and `season-<n>`.
+    keys: BTreeSet<String>,
+    /// The distinct search URLs.
+    searches: usize,
+}
+
+impl LookupUrls {
+    /// Whether no URL needs a line, so the guard waits for nothing.
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.searches == 0
+    }
+}
+
+/// The status keys of a search line (Ruling T4-R1).
+const SEARCH_KEYS: [&str; 3] = ["search", "search-tagged", "search-entry"];
+
+/// Sorts the distinct `url`s of `document`'s `answers`, each with every `{name}` replaced from `vars` as
+/// `RecordedTransport::from_file` does, into `LookupUrls` (Ruling T4-R1): a URL that still starts with `{` or lies
+/// under `{TMDB}/search/` is a search URL; one under `DISCDB` needs `dischash` or `discid` by its path's first
+/// segment; one under `TMDB` needs `tmdb <kind>/<id>` for `/movie/<id>` or `/tv/<id>` with the query
+/// `append_to_response=external_ids`, and `season-<n>` for `/tv/<id>/season/<n>`; any other URL needs nothing.
+fn lookup_urls_by_kind(document: &Value, vars: &[(&str, &str)]) -> LookupUrls {
+    let urls: BTreeSet<String> = document["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|answer| answer["url"].as_str())
+        .map(|url| vars.iter().fold(url.to_string(), |url, (name, value)| url.replace(&format!("{{{name}}}"), value)))
+        .collect();
+    let mut found = LookupUrls::default();
+    for url in &urls {
+        if url.starts_with('{') || url.starts_with(&format!("{TMDB}/search/")) {
+            found.searches += 1;
+        } else if let Some(path) = url.strip_prefix(&format!("{DISCDB}/")) {
+            if let Some(kind @ ("dischash" | "discid")) = path.split('/').next() {
+                found.keys.insert(kind.to_string());
+            }
+        } else if let Some(path) = url.strip_prefix(&format!("{TMDB}/")) {
+            let (path, query) = path.split_once('?').unwrap_or((path, ""));
+            let segments: Vec<&str> = path.split('/').collect();
+            match segments.as_slice() {
+                [kind @ ("movie" | "tv"), id] if query == "append_to_response=external_ids" => {
+                    found.keys.insert(format!("tmdb {kind}/{id}"));
+                }
+                ["tv", _, "season", season] if query.is_empty() => {
+                    found.keys.insert(format!("season-{season}"));
+                }
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+/// Whether `status` holds a line of each kind `urls` needs and no line ends in `000` (Rulings R23.2, T4-R1): every
+/// key of `urls.keys` is a line's key (the text before its last space), and at least `urls.searches` lines have a
+/// search key.
+fn answered(status: &Path, urls: &LookupUrls) -> bool {
     fs::read_to_string(status).is_ok_and(|text| {
-        let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
-        lines.len() == urls && !lines.iter().any(|line| line.trim_end().ends_with("000"))
+        let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()).collect();
+        if lines.iter().any(|line| line.ends_with("000")) {
+            return false;
+        }
+        let keys: Vec<&str> = lines.iter().map(|line| line.rsplit_once(' ').map_or(*line, |(key, _)| key)).collect();
+        let searches = keys.iter().filter(|key| SEARCH_KEYS.contains(*key)).count();
+        urls.keys.iter().all(|key| keys.contains(&key.as_str())) && searches >= urls.searches
     })
 }
 
@@ -1661,9 +1736,10 @@ fn build_volume(root: &Path, spec: &Value) -> io::Result<()> {
 }
 
 /// The merged `http.json` with the vars of the scenario's disc, built at `root` (S31): `fingerprint` and `disc_id` in
-/// upper-case hex, and `search`, `search_url` of the cleaned disc name from `bdmt_eng.xml` and the label; with the
-/// number of distinct URLs in the file.
-fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, usize) {
+/// upper-case hex, `search`, `search_url` of the cleaned disc name from `bdmt_eng.xml` and the label, and
+/// `search_tagged`, `search_url` of its tagged form (J8's second search); with the file's lookup URLs by kind
+/// (`lookup_urls_by_kind`).
+fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, LookupUrls) {
     build_volume(root, spec).unwrap_or_else(|error| panic!("{}: {error}", root.display()));
     let files = list_files(root).expect("the harness lists the scenario's volume");
     let unit_key = unit_key_file(&files).and_then(|key| fs::read(root.join(&key.path)).ok());
@@ -1678,16 +1754,20 @@ fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, 
         .and_then(bdmt_name);
     let name = disc_name(bdmt.as_deref(), Some(&label)).expect("the scenario's disc has a name");
     let search = search_url(&name.cleaned);
+    let search_tagged = search_url(&name.tagged);
     let fingerprint = meta.fingerprint.unwrap_or_default();
     let disc_id = meta.disc_id.unwrap_or_default();
-    let vars = [("fingerprint", fingerprint.as_str()), ("disc_id", disc_id.as_str()), ("search", search.as_str())];
+    let vars = [
+        ("fingerprint", fingerprint.as_str()),
+        ("disc_id", disc_id.as_str()),
+        ("search", search.as_str()),
+        ("search_tagged", search_tagged.as_str()),
+    ];
     let transport =
         RecordedTransport::from_file(file, &vars).unwrap_or_else(|error| panic!("the scenario's http.json: {error}"));
     let text = fs::read_to_string(file).expect("the scenario's http.json");
     let document: Value = serde_json::from_str(&text).expect("the scenario's http.json is JSON");
-    let urls: BTreeSet<&str> =
-        document["answers"].as_array().into_iter().flatten().filter_map(|answer| answer["url"].as_str()).collect();
-    (transport, urls.len())
+    (transport, lookup_urls_by_kind(&document, &vars))
 }
 
 /// Puts each key of `given` into `defaults`, and each key inside `tool_paths` into the default `tool_paths` (R22.5:
@@ -1704,5 +1784,62 @@ fn merge_settings(defaults: &mut Value, given: Value) {
             }
         }
         defaults.insert(key, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{answered, lookup_urls_by_kind};
+    use lazymkv_core::testsupport::Scratch;
+
+    #[test]
+    fn the_guard_wants_a_line_of_each_lookup_urls_kind_and_ignores_webhooks() {
+        let http = serde_json::json!({"answers": [
+            {"url": "https://thediscdb.com/api/dischash/{fingerprint}", "status": 404, "body": ""},
+            {"url": "https://thediscdb.com/api/discid/{disc_id}", "status": 404, "body": ""},
+            {"url": "{search}", "status": 200, "body": ""},
+            {"url": "{search}", "status": 200, "body": ""},
+            {"url": "{search_tagged}", "status": 200, "body": ""},
+            {"url": "https://api.themoviedb.org/3/movie/900001?append_to_response=external_ids",
+             "status": 200, "body": ""},
+            {"url": "http://127.0.0.1:9/api/webhook/hook-sentinel-7f3a", "status": 200, "body": ""}]});
+        // `{search}` is substituted to a TMDb search URL; `{search_tagged}` is given no var, so it still starts
+        // with `{` and is a search URL too. One distinct `{search}` URL plus the tagged one: two search URLs.
+        let search = lazymkv_clients::search_url("Synthetic Movie");
+        let vars = [("fingerprint", "AB12"), ("disc_id", "CD34"), ("search", search.as_str())];
+        let urls = lookup_urls_by_kind(&http, &vars);
+        assert_eq!(urls.searches, 2, "{urls:?}");
+        assert_eq!(
+            urls.keys.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["dischash", "discid", "tmdb movie/900001"],
+            "the webhook URL needs no line"
+        );
+        let scratch = Scratch::new("guard");
+        let status = scratch.0.join("lookup-status.txt");
+        let case = |text: &str| {
+            std::fs::write(&status, text).unwrap();
+            answered(&status, &urls)
+        };
+        assert!(case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\ntmdb movie/900001 200\n"));
+        // An entry title equal to the cleaned name: one more search line than search URLs passes.
+        assert!(case(
+            "dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\nsearch-entry 200\ntmdb movie/900001 200\n"
+        ));
+        // The record URL needs its own line: neither the search lines nor another record's line stands in for it.
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\nsearch-entry 200\n"));
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\ntmdb movie/900002 200\n"));
+        // Two search URLs want two search lines.
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\ntmdb movie/900001 200\n"));
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 000\ntmdb movie/900001 200\n"));
+        // A season URL wants its season line.
+        let tv = serde_json::json!({"answers": [
+            {"url": "https://api.themoviedb.org/3/tv/900101?append_to_response=external_ids", "status": 200, "body": ""},
+            {"url": "https://api.themoviedb.org/3/tv/900101/season/1", "status": 200, "body": ""}]});
+        let tv_urls = lookup_urls_by_kind(&tv, &[]);
+        assert_eq!(tv_urls.keys.iter().map(String::as_str).collect::<Vec<_>>(), ["season-1", "tmdb tv/900101"]);
+        std::fs::write(&status, "tmdb tv/900101 200\n").unwrap();
+        assert!(!answered(&status, &tv_urls));
+        std::fs::write(&status, "season-1 200\ntmdb tv/900101 200\n").unwrap();
+        assert!(answered(&status, &tv_urls));
     }
 }

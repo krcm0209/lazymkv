@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +43,30 @@ fn json_of(path: &Path) -> Value {
 
 fn events(h: &Harness, id: &str) -> Vec<Event> {
     h.transitions(id).into_iter().filter_map(|line| line.event).collect()
+}
+
+/// Every file under `dir`, relative to it with '/' separators; empty when `dir` does not exist.
+fn files_under(dir: &Path) -> BTreeSet<String> {
+    fn walk(root: &Path, dir: &Path, found: &mut BTreeSet<String>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, found);
+            } else {
+                let relative = path.strip_prefix(root).unwrap().to_str().unwrap().replace('\\', "/");
+                found.insert(relative);
+            }
+        }
+    }
+    let mut found = BTreeSet::new();
+    walk(dir, dir, &mut found);
+    found
+}
+
+/// The rips the job asked of makemkvcon: each spawn whose arguments hold "mkv".
+fn rips(h: &Harness) -> Vec<String> {
+    h.spawns().into_iter().filter(|s| s.args.iter().any(|a| a == "mkv")).map(|s| s.args.join(" ")).collect()
 }
 
 fn final_path(h: &Harness) -> PathBuf {
@@ -885,4 +910,37 @@ fn the_engine_never_reads_tmdb_token_from_its_environment() {
     let message = h.record(&id).message.unwrap();
     assert!(message.contains("search: no tmdb_token is set"), "{message}");
     assert!(!message.contains("token-sentinel-5d2e") && !message.contains("test-token"));
+}
+
+#[test]
+fn an_identified_disc_with_two_feature_length_playlists_rips_only_its_main_title() {
+    let h = harness(&["movie-direct-main-playlist"], json!({}));
+    let id = run_to(&h, "Filed");
+    let rips = rips(&h);
+    assert_eq!(rips.len(), 1, "{rips:?}");
+    assert!(rips[0].contains("t00-00801") && !rips[0].contains("t00-00800"), "{rips:?}");
+    assert!(fs::read_to_string(h.job_dir(&id).join("lookup-status.txt")).unwrap().contains("dischash 200"));
+    assert!(!h.record(&id).message.unwrap_or_default().contains("copy mode"));
+}
+
+#[test]
+fn an_identified_disc_with_three_same_length_playlists_rips_the_one_its_record_names() {
+    let h = harness(&["movie-direct-three-playlists"], json!({}));
+    let id = run_to(&h, "Filed");
+    let rips = rips(&h);
+    assert_eq!(rips.len(), 1, "{rips:?}");
+    assert!(rips[0].contains("t00-00802"), "{rips:?}");
+    assert!(!h.record(&id).message.unwrap_or_default().contains("copy mode"));
+}
+
+#[test]
+fn a_tv_disc_identified_through_its_seasons_is_held_with_no_path() {
+    let h = harness(&["tv-direct-series"], json!({})); // the harness leaves tv_root unset
+    let id = run_to(&h, "NeedsReview");
+    let status = fs::read_to_string(h.job_dir(&id).join("lookup-status.txt")).unwrap();
+    assert!(status.contains("tmdb tv/900101 200") && status.contains("season-1 200"), "{status}");
+    let record = json_of(&h.job_dir(&id).join("tmdb-record.json"));
+    assert_eq!(record["seasons"][0]["episodes"], json!([{"episode_number": 1, "runtime": 119}]));
+    assert!(h.record(&id).titles.iter().all(|t| t.filed.is_none()));
+    assert!(files_under(h.library()).is_empty(), "nothing is written under movies_root (A5, design part 6.6)");
 }

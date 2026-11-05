@@ -9,7 +9,7 @@ use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_engine::testkit::{ci_factor, Harness};
-use lazymkv_platform::Host;
+use lazymkv_platform::{Host, SecretStore};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs;
@@ -57,6 +57,22 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+/// Waits (120 s, 480 s under CI) for the one job of `h` to reach `state`; its folder.
+fn job_in(h: &Harness, state: &str) -> PathBuf {
+    let (start, cap) = (Instant::now(), Duration::from_secs(120) * ci_factor());
+    loop {
+        let ids = h.job_ids();
+        if let [id] = ids.as_slice() {
+            if h.state_of(id) == state {
+                return h.job_dir(id);
+            }
+        }
+        let states: Vec<String> = ids.iter().map(|id| h.state_of(id)).collect();
+        assert!(start.elapsed() < cap, "no job reached {state}; jobs {ids:?} in {states:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Starts the engine on movie-direct, inserts its disc in tok0, waits for the job's last notification and the
@@ -269,4 +285,54 @@ fn the_whole_job_runs_with_no_unrecorded_url() {
     );
     assert_eq!(harness.http().unrecorded(), Vec::<String>::new());
     assert!(harness.notifications().iter().all(|n| matches!(n.event, NotifyEvent::DiscDone | NotifyEvent::Filed)));
+}
+
+#[test]
+fn a_tagged_name_files_with_both_searches_saved() {
+    let h = Harness::new(
+        Path::new(env!("CARGO_BIN_EXE_fake-tool")),
+        &["movie-direct", "movie-direct-tagged"],
+        json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1}),
+    );
+    h.insert("tok0", "movie-direct");
+    let job = job_in(&h, "Filed");
+    let name = disc_name(Some("Synthetic Movie 3D"), Some("SYNTHETIC_MOVIE_3D")).unwrap();
+    assert_eq!((name.cleaned.as_str(), name.tagged.as_str()), ("Synthetic Movie", "Synthetic Movie 3D"));
+    let urls: Vec<String> = h.http().requests().into_iter().map(|(url, _)| url).collect();
+    let at =
+        |url: &str| urls.iter().position(|asked| asked == url).unwrap_or_else(|| panic!("{url} not asked: {urls:?}"));
+    assert!(at(&search_url(&name.cleaned)) < at(&search_url(&name.tagged)));
+    assert_eq!(urls.len(), 5, "{urls:?}"); // each of the five recorded URLs once
+    assert_eq!(h.http().unrecorded(), Vec::<String>::new());
+    let status = fs::read_to_string(job.join("lookup-status.txt")).unwrap();
+    assert!(status.lines().any(|l| l == "search 200") && status.lines().any(|l| l == "search-tagged 200"), "{status}");
+    assert_eq!(read_json(&job.join("tmdb-search.json"))["queries"], json!(["Synthetic Movie", "Synthetic Movie 3D"]));
+    assert_eq!(names_in(&h.library().join(FILM)).len(), 1);
+}
+
+#[test]
+fn a_webhook_receives_disc_done_and_filed_for_a_whole_job() {
+    const HOOK: &str = "http://127.0.0.1:9/api/webhook/hook-sentinel-7f3a"; // the recorded transport answers it
+    let h = Harness::new(
+        Path::new(env!("CARGO_BIN_EXE_fake-tool")),
+        &["movie-direct"],
+        json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1}),
+    );
+    h.use_webhook_sink();
+    h.restart();
+    h.secrets().set("ha_webhook_url", HOOK).unwrap();
+    h.http().answer(HOOK, 200, b"");
+    h.insert("tok0", "movie-direct");
+    let job = job_in(&h, "Filed");
+    h.wait("two posts", |h| h.http().posts().len() == 2);
+    let events: Vec<String> = h
+        .http()
+        .posts()
+        .iter()
+        .map(|(_, _, body)| serde_json::from_slice::<Value>(body).unwrap()["event"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(events, ["disc_done", "filed"]);
+    for text in [h.engine_log(), fs::read_to_string(job.join("job.log")).unwrap()] {
+        assert!(!text.contains("hook-sentinel-7f3a") && !text.contains("was not delivered"), "{text}");
+    }
 }

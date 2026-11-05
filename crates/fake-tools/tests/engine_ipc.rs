@@ -9,10 +9,12 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use common::{Client, WAIT};
-use lazymkv_clients::OFFLINE;
+use lazymkv_clients::{record_url, search_url, OFFLINE};
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
 use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent, State};
+use lazymkv_core::lookup::name::disc_name;
+use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
@@ -2574,4 +2576,45 @@ fn a_configured_cleanup_runs_once_at_start_and_again_each_period() {
     let log = h.engine_log();
     assert!(log.contains(&first), "{log}");
     assert!(log.contains(&next), "{log}");
+}
+
+#[test]
+fn a_new_token_reaches_the_next_round_without_a_restart() {
+    let h = stand_in(&["movie-direct", "movie-direct-lookup-refused"], settings()); // search answers 401
+    h.secrets().set("tmdb_token", "token-sentinel-5d2e").unwrap();
+    h.scan_waits_for_lookups(false);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.settle();
+    assert!(h.record(&id).message.unwrap().contains("search: TMDb refused the token (HTTP 401)"));
+    let name = disc_name(Some("Synthetic Movie"), Some("SYNTHETIC_MOVIE")).unwrap();
+    let scenario = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct");
+    h.http().answer(&search_url(&name.cleaned), 200, &fs::read(scenario.join("tmdb-search-answer.json")).unwrap());
+    h.http().answer(
+        &record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 }),
+        200,
+        &fs::read(scenario.join("tmdb-movie-answer.json")).unwrap(),
+    );
+    assert_eq!(c.ok("secret_set", json!({"name": "tmdb_token", "value": "token-sentinel-2b9c"})), Value::Null);
+    c.ok("retry", json!({"job": id}));
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    let bearers: Vec<String> = h
+        .http()
+        .requests()
+        .into_iter()
+        .filter(|(url, _)| *url == search_url(&name.cleaned))
+        .filter_map(|(_, headers)| headers.into_iter().find(|(k, _)| k == "Authorization").map(|(_, v)| v))
+        .collect();
+    // The refused search is asked with the first token in every round before AwaitingLookup (at arrival and before
+    // the file-phase slot), then once with the new token after the retry.
+    assert!(bearers.len() >= 2, "{bearers:?}");
+    assert_eq!(bearers.last().map(String::as_str), Some("Bearer token-sentinel-2b9c"), "{bearers:?}");
+    assert!(bearers[..bearers.len() - 1].iter().all(|b| b == "Bearer token-sentinel-5d2e"), "{bearers:?}");
+    for path in [h.data().join("engine.log"), h.job_dir(&id).join("job.log"), h.job_dir(&id).join("state.json")] {
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("token-sentinel-5d2e") && !text.contains("token-sentinel-2b9c"), "{}", path.display());
+    }
 }
