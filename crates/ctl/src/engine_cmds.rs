@@ -5,7 +5,7 @@
 
 use std::io::{BufRead, Read, Write};
 
-use lazymkv_core::ipc::{read_reply, Envelope, OutputStream, Reply, PROTOCOL_VERSION};
+use lazymkv_core::ipc::{read_reply, Envelope, OutputStream, Reply, MAX_LINE_BYTES, PROTOCOL_VERSION};
 use lazymkv_core::settings::SettingsProblem;
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
@@ -24,6 +24,10 @@ pub(crate) const ENGINE_COMMANDS: [(&str, &str); 11] = [
     ("stop", "stop [--force]"),
 ];
 
+/// The argument error of a request whose line, newline excluded, is longer than MAX_LINE_BYTES (engine.md "Pull
+/// request 4"; Ruling T4-R18): checked before any connection, so `settings set` and `secret set` exit 2 with this
+/// text where the engine would have closed the connection (exit 4). Def: T4-14. Use: T4-14.
+pub(crate) const REQUEST_TOO_LONG: &str = "the request is longer than 4 MiB, the most the engine reads in one line";
 /// The message of exit 4 when the connection closes before the answer (T28-d).
 const CLOSED: &str = "lazymkvctl: the engine closed the connection before replying";
 /// The message of exit 1 when `selftest`'s `ok` came with no `selftest_result` push before it (T28-i).
@@ -37,7 +41,7 @@ const BAD_OUTPUT: &str = "lazymkvctl: the engine's command_output has no stream 
 /// 2 on an argument error, 4 when no engine answered (T28-d). Def: T28. Use: T28.
 pub(crate) fn run(argv: &[String], env: Env) -> i32 {
     let name = argv[0].as_str();
-    match exchange_of(name, &argv[1..], env.ctx, &mut *env.stdin) {
+    match exchange_of(name, &argv[1..], env.ctx, &mut *env.stdin).and_then(within_line_limit) {
         Ok(exchange) => talk(env, exchange),
         Err(message) => {
             let synopsis = ENGINE_COMMANDS.iter().find(|(command, _)| *command == name).map_or(name, |(_, text)| text);
@@ -60,7 +64,25 @@ pub(crate) fn relay(argv: &[String], env: Env) -> i32 {
             Err(message) => return argument_error(env.err, "retune", &message),
         }
     }
-    talk(env, Exchange::ask("command", json!({ "words": words }), Answer::ExitCode))
+    match within_line_limit(Exchange::ask("command", json!({ "words": words }), Answer::ExitCode)) {
+        Ok(exchange) => talk(env, exchange),
+        Err(message) => argument_error(env.err, &argv[0], &message),
+    }
+}
+
+/// The line `talk` sends for a request, newline excluded: the envelope of `kind` and `payload` with id 1 (T28-c).
+fn request_line(kind: &str, payload: &Value) -> String {
+    let envelope = Envelope { v: PROTOCOL_VERSION, kind: kind.to_string(), id: Some(1), payload: payload.clone() };
+    serde_json::to_string(&envelope).expect("an envelope of JSON values serialises")
+}
+
+/// `exchange` unchanged, or Err(REQUEST_TOO_LONG) when its request's `request_line` is longer than MAX_LINE_BYTES
+/// bytes; an exchange that sends nothing passes.
+fn within_line_limit(exchange: Exchange) -> Result<Exchange, String> {
+    match &exchange.request {
+        Some((kind, payload)) if request_line(kind, payload).len() > MAX_LINE_BYTES => Err(REQUEST_TOO_LONG.to_string()),
+        _ => Ok(exchange),
+    }
 }
 
 /// What one exchange sends and waits for.
@@ -107,7 +129,8 @@ enum Answer {
 }
 
 /// The checked exchange of engine command `name` over `words` (design part 9.6's table). Every check, the settings
-/// file read and the standard-input read happen here, before any connection (T28-h); Err is the argument error's text.
+/// file read and the standard-input read happen here, before any connection (T28-h), and so does the line's length
+/// too (Ruling T4-R18); Err is the argument error's text.
 fn exchange_of(name: &str, words: &[String], ctx: &Ctx, stdin: &mut dyn Read) -> Result<Exchange, String> {
     let job_request = |kind: &'static str| -> Result<Exchange, String> {
         let job = one_job(words)?;
@@ -204,7 +227,10 @@ fn settings_file(ctx: &Ctx, file: &str) -> Result<Value, String> {
     }
 }
 
-/// `secret set NAME` sends NAME and standard input's value (T28-f) as `secret_set`.
+/// `secret set NAME` sends NAME and standard input's value (T28-f) as `secret_set`. The owner types `tmdb_token` (the
+/// TMDb token the lookups and the self-test's token check send, design part 8.1) and the two webhook URLs this way
+/// only, never as an argument, at the elevated console (design part 9.6, A6); the value is never printed, and a
+/// refusal never holds it.
 fn secret(words: &[String], stdin: &mut dyn Read) -> Result<Exchange, String> {
     let words = Args::new(words, &[]).positionals()?;
     let name = match words.split_first() {
@@ -263,8 +289,7 @@ fn talk(env: Env, exchange: Exchange) -> i32 {
         }
     };
     if let Some((kind, payload)) = request {
-        let envelope = Envelope { v: PROTOCOL_VERSION, kind: kind.to_string(), id: Some(1), payload };
-        let line = serde_json::to_string(&envelope).expect("an envelope of JSON values serialises") + "\n";
+        let line = request_line(kind, &payload) + "\n";
         if writer.write_all(line.as_bytes()).and_then(|()| writer.flush()).is_err() {
             let _ = writeln!(env.err, "{CLOSED}");
             return 4;
@@ -379,8 +404,9 @@ fn print_json(out: &mut dyn Write, value: &Value) {
 
 #[cfg(test)]
 mod tests {
+    use super::REQUEST_TOO_LONG;
     use crate::{run, Env, NOT_ELEVATED, NOT_RUNNING, NO_TRANSPORT, REFUSED};
-    use lazymkv_core::ipc::{push_line, reply_error, reply_ok, OutputStream, Push};
+    use lazymkv_core::ipc::{push_line, reply_error, reply_ok, OutputStream, Push, MAX_LINE_BYTES};
     use lazymkv_core::settings::SettingsProblem;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
     use lazymkv_dev::evidence::Ctx;
@@ -436,6 +462,80 @@ mod tests {
 
     fn request_of(line: &str) -> Value {
         serde_json::from_str(line.trim_end()).unwrap()
+    }
+
+    #[test]
+    fn a_settings_file_over_4_mib_is_refused_before_connecting_with_exit_2() {
+        let scratch = Scratch::new("ctl-settings-long");
+        let file = scratch.write_path("big.json", &format!("{{\"staging_root\": \"{}\"}}", "a".repeat(MAX_LINE_BYTES)));
+        let connector = MemoryConnector::failing(ConnectError::NotRunning);
+        let (code, out, err) = call(&["settings", "set", file.to_str().unwrap()], Some(&connector), b"", &scratch.0);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, [
+            "usage: lazymkvctl settings get | settings set FILE".to_string(),
+            format!("lazymkvctl settings: error: {REQUEST_TOO_LONG}"),
+            String::new(),
+        ].join("\n"));
+        assert_eq!(REQUEST_TOO_LONG, "the request is longer than 4 MiB, the most the engine reads in one line");
+    }
+
+    #[test]
+    fn a_secret_value_over_4_mib_is_refused_without_echoing_it() {
+        let scratch = Scratch::new("ctl-secret-long");
+        let value = "token-sentinel-5d2e".repeat(MAX_LINE_BYTES / 19 + 1);
+        let connector = MemoryConnector::failing(ConnectError::NotRunning);
+        let (code, out, err) = call(&["secret", "set", "tmdb_token"], Some(&connector), value.as_bytes(), &scratch.0);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, [
+            "usage: lazymkvctl secret set NAME".to_string(),
+            format!("lazymkvctl secret: error: {REQUEST_TOO_LONG}"),
+            String::new(),
+        ].join("\n"));
+        assert!(!err.contains("token-sentinel-5d2e"));
+    }
+
+    #[test]
+    fn a_relayed_request_over_4_mib_is_refused_before_connecting() {
+        let scratch = Scratch::new("ctl-relay-long");
+        let job = "a".repeat(MAX_LINE_BYTES);
+        let connector = MemoryConnector::failing(ConnectError::NotRunning);
+        let (code, out, err) = call(&["plan", "--job", &job], Some(&connector), b"", &scratch.0);
+        assert_eq!((code, out.as_str(), err), (2, "", format!("lazymkvctl plan: error: {REQUEST_TOO_LONG}\n")));
+    }
+
+    /// The engine counts a line without its newline (`core::ipc`, MAX_LINE_BYTES), so a line of exactly MAX_LINE_BYTES
+    /// bytes is sent and one byte more is refused.
+    #[test]
+    fn a_request_of_exactly_the_limit_is_sent() {
+        let scratch = Scratch::new("ctl-limit");
+        // preserve_order keeps the envelope's field order and the payload's insertion order.
+        let empty = r#"{"v":1,"type":"secret_set","id":1,"payload":{"name":"tmdb_token","value":""}}"#;
+        let value = "a".repeat(MAX_LINE_BYTES - empty.len());
+        let (ipc, connector) = MemoryIpc::new();
+        let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![reply_ok(Some(1), Value::Null)]));
+        let (code, out, err) = call(&["secret", "set", "tmdb_token"], Some(&connector), value.as_bytes(), &scratch.0);
+        let line = finish(server, connector);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+        assert_eq!(line.trim_end_matches('\n').len(), MAX_LINE_BYTES);
+        let longer = format!("{value}a");
+        let refusing = MemoryConnector::failing(ConnectError::NotRunning);
+        let (code, _, err) = call(&["secret", "set", "tmdb_token"], Some(&refusing), longer.as_bytes(), &scratch.0);
+        assert_eq!(code, 2);
+        assert!(err.ends_with(&format!("lazymkvctl secret: error: {REQUEST_TOO_LONG}\n")), "{err}");
+    }
+
+    /// A6: the owner types the TMDb token on standard input; lazymkvctl sends it once in `secret_set` and prints nothing.
+    #[test]
+    fn secret_set_tmdb_token_reads_stdin_and_sends_it_once() {
+        let scratch = Scratch::new("ctl-token");
+        let (ipc, connector) = MemoryIpc::new();
+        let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![reply_ok(Some(1), Value::Null)]));
+        let (code, out, err) = call(&["secret", "set", "tmdb_token"], Some(&connector), b"token-sentinel-5d2e\r\n", &scratch.0);
+        let line = finish(server, connector);
+        assert_eq!(request_of(&line), json!({"v": 1, "type": "secret_set", "id": 1,
+                                              "payload": {"name": "tmdb_token", "value": "token-sentinel-5d2e"}}));
+        assert_eq!(line.matches("token-sentinel-5d2e").count(), 1);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
     }
 
     #[test]
