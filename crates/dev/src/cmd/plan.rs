@@ -13,7 +13,9 @@
 //! review reasons or settings problems (a plan that needs review is still a plan); 2 for an argument error, a scan that
 //! cannot be read, typed or planned, a lookup, settings, TMDb or remembered file that exists and cannot be read or does
 //! not parse, or a remembered decision for another disc; 3 when a slug is given and the evidence clone is absent;
-//! never 1 (ruling RP24). Defined by Task 15;
+//! 3 when a TMDb copy of the folder is more than six months old and cannot be fetched again (TMDB_TOKEN unset, or
+//! the fetch failed; design part 8.4, K15); an engine job folder is read as it is; never 1 (ruling RP24). Defined
+//! by Task 15;
 //! `lazymkv-dev decide`'s `plan` section (Task 16) calls `plan_doc`.
 
 use std::collections::BTreeMap;
@@ -565,7 +567,9 @@ arguments:
 
 exit status: 0 when the plan is printed, with or without review reasons or settings problems; 2 for an argument
 error, a scan that cannot be read, typed or planned, a lookup, settings, TMDb or remembered file that cannot be read
-or does not parse, or a remembered decision for another disc; 3 when a slug is given and the evidence clone is
+or does not parse, or a remembered decision for another disc; 3 when a TMDb copy of the folder is more than six
+months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch failed; design part 8.4, K15); an engine job
+folder is read as it is; 3 when a slug is given and the evidence clone is
 absent; never 1.
 ";
 
@@ -624,6 +628,9 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
                 return refused.code;
             }
         };
+        if let Err(code) = crate::stale::gate_recording(ctx, &rec, NAME, err) {
+            return code;
+        }
         plan_doc(ctx, &PlanSource::Recording(&rec), &parsed.options)
     };
     let doc = match result {

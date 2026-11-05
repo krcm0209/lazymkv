@@ -7,6 +7,7 @@ pub mod evidence;
 pub mod forms;
 pub mod pyjson;
 pub mod runner;
+pub mod stale;
 #[cfg(test)]
 pub(crate) mod testutil;
 

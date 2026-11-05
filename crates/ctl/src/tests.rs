@@ -160,3 +160,19 @@ fn the_relay_reads_plans_and_decides_own_flag_lists() {
         ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"]
     );
 }
+
+#[test]
+fn ctl_plan_over_a_folder_with_a_stale_copy_and_no_token_exits_3() {
+    let s = Scratch::new("ctl-stale");
+    recording(&s);
+    s.write("recs/disc-a/lookup-status.txt", "tmdb movie/6537 200\n");
+    s.write("recs/disc-a/tmdb-record.json",
+            r#"{"id": 6537, "title": "Made Up Film", "kind": "movie", "fetched_at": "2026-01-01"}"#);
+    let ctx = Ctx::for_test(&s.0);
+    let local = ctl(&ctx, &["plan", "recs/disc-a"]);
+    assert_eq!(local.0, 3);
+    assert_eq!(String::from_utf8(local.2.clone()).unwrap(),
+               "lazymkv-dev plan: error: recs/disc-a/tmdb-record.json: the TMDb copy is more than six months old \
+                (fetched_at 2026-01-01) and TMDB_TOKEN is not set to fetch it again\n");
+    assert_eq!(local, dev(&ctx, &["plan", "recs/disc-a"]));
+}

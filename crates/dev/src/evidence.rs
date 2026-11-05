@@ -3,6 +3,7 @@
 //! folder, a directory on disk as a `Tree`, and a recording named as a slug or a path.
 
 use crate::runner::{FakeRunner, RealRunner, Runner};
+use lazymkv_clients::{HttpTransport, UreqTransport};
 use lazymkv_core::recording::{decode_text, py_repr_str, read_text, text_mode, Encoding, Errors, Kind, Loader, MemTree, PathKey, ReadError, Tree};
 use lazymkv_core::robot::{parse, Scan};
 pub use lazymkv_core::recording::pathlib_str;
@@ -20,12 +21,17 @@ const SPEC: &str = "docs/superpowers/specs/2026-10-04-lazymkv-design.md";
 pub struct Ctx {
     /// The directory relative paths are taken against.
     pub cwd: PathBuf,
-    /// The environment variables the commands read: LAZYMKV_EVIDENCE, LAZYMKV_OCR_TEXT, TMPDIR, TEMP, TMP.
+    /// The environment variables the commands read: LAZYMKV_EVIDENCE, LAZYMKV_OCR_TEXT, TMPDIR, TEMP, TMP, and
+    /// TMDB_TOKEN for the refetch of a stale TMDb copy (design part 8.4).
     pub env: BTreeMap<String, String>,
     /// ffprobe and ffmpeg (and, for `now`, the clock programs).
     pub runner: Box<dyn Runner>,
     /// A fixed local time "YYYY-MM-DDTHH:MM:SS" for tests; None reads the system clock.
     pub clock: Option<String>,
+    /// The transport a local plan, decide or retune fetches a stale TMDb copy with (design part 8.4; Ruling T4-R10):
+    /// None in `from_process` and `for_test`, which asks through `OfflineTransport`; `with_live_transport` sets the
+    /// live one. The engine's in-process use of dev's library never reaches it. Def: T4-10. Use: T4-10.
+    pub http: Option<Arc<dyn HttpTransport>>,
 }
 
 impl Ctx {
@@ -38,6 +44,7 @@ impl Ctx {
                 .collect(),
             runner: Box::new(RealRunner),
             clock: None,
+            http: None,
         }
     }
 
@@ -48,7 +55,14 @@ impl Ctx {
             env: BTreeMap::new(),
             runner: Box::new(FakeRunner::absent()),
             clock: Some(TEST_CLOCK.to_string()),
+            http: None,
         }
+    }
+
+    /// `self` with `http` set to `UreqTransport::new()` (design parts 8.1, 8.4; Ruling T4-R10). Called only by
+    /// lazymkv-dev's and lazymkvctl's `main`. Def: T4-10. Use: T4-10.
+    pub fn with_live_transport(self) -> Ctx {
+        Ctx { http: Some(Arc::new(UreqTransport::new())), ..self }
     }
 
     /// Local time to the second, as datetime.now().isoformat(timespec="seconds"). std has no time zones and no date

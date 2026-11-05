@@ -10,8 +10,10 @@
 //! and subs_json), run on the inputs spec 3.3's `recording` derives (the title and the selection from the rip's
 //! summary, the selection from the profile's file name split on '\'). Exit 0; 1 when a reconcile verdict is no; 2
 //! for an argument error, an unreadable scan.txt or mkvmerge.json, a label that is not a rip label, or a library root
-//! in the settings file that is not absolute; 3 when a slug is given and the evidence clone is absent. A level
-//! folder or OCR text that is absent never changes the exit code: its section says why it was skipped.
+//! in the settings file that is not absolute; 3 when a slug is given and the evidence clone is absent; 3 when a
+//! TMDb copy of the folder is more than six months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch
+//! failed; design part 8.4, K15); an engine job folder is read as it is. A level folder or OCR text that is absent
+//! never changes the exit code: its section says why it was skipped.
 //!
 //! Phase 1 (RP14, design spec 6.4 step 11) appends two sections after `reviews` and leaves the six above, and their
 //! goldens, byte-identical: `plan`, the document `lazymkv-dev plan` prints for the recording (`cmd::plan::plan_doc`
@@ -107,7 +109,9 @@ arguments:
 
 exit status: 0; 1 when a reconcile verdict is no; 2 for an argument error, an unreadable scan.txt or
 mkvmerge.json, a label that is not a rip label, or a library root in the settings file that is not absolute;
-3 when the evidence clone is not there.
+3 when the evidence clone is not there; 3 when a TMDb copy of the folder is more than six months old and cannot
+be fetched again (TMDB_TOKEN unset, or the fetch failed; design part 8.4, K15); an engine job folder is read as
+it is.
 ";
 /// The level folders of a label: the folders the tuning harness measures. Py: audio_dataset.find_folders' glob.
 const LEVEL_FOLDERS: &str = "audio-levels-20ms-*";
@@ -663,6 +667,9 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
             return usage_error(err, NAME, USAGE, &format!("unrecognized arguments: {}", rest.join(" ")))
         }
     };
+    if let Err(code) = crate::stale::gate_recording(ctx, &rec, NAME, err) {
+        return code;
+    }
     let text = ocr_text_dir(ctx, text.as_deref());
     let options = PlanOptions {
         settings: settings.map(PathBuf::from),
