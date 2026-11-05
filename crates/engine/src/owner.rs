@@ -17,10 +17,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::{reason_text, HttpTransport, LookupBook, LookupState, PendingReason};
+use lazymkv_clients::{reason_text, webhook_target, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::ipc::{
     is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
     Notification, OutputStream, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+    WEBHOOK_SECRETS,
 };
 use lazymkv_core::job::{
     job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
@@ -68,6 +69,9 @@ const DRIVE_POLL: Duration = Duration::from_millis(50);
 const WAIT_POLL: Duration = Duration::from_millis(20);
 /// The minutes after which an event `unpersisted` kept is fed again (Ruling W23).
 const REFEED_MINUTES: u32 = 1;
+/// The refusal of a webhook value that is not an http or https URL with a host (Ruling T4-R15), after `<name> could
+/// not be stored: `, as SHARE_VALUE_SHAPE is for a share. Def: T4-13. Use: T4-13.
+const WEBHOOK_VALUE_SHAPE: &str = "the value must be an http or https URL with a host";
 
 /// The actions whose step returns no event, so their result writes no `returned no event` line (design part 5.2, PF-6:
 /// `ExtractSubtitleEvidence` runs with `Decide` as one unit). Def: T22. Use: T22, T24.
@@ -2798,10 +2802,14 @@ impl Owner {
 
     /// `secret_set` (design part 9.4, S77; Ruling W12): a name `is_secret_name` takes is stored through `SecretStore`,
     /// a share name's value only when `share_credential` reads it as a user name and a password on two lines, and a
-    /// share name joins the names the snapshot lists; the value is never echoed or logged.
+    /// share name joins the names the snapshot lists, and a webhook name's value only when `webhook_target` reads it
+    /// (Ruling T4-R15); the value is never echoed or logged.
     fn secret_set(&mut self, name: &str, value: &str) -> Result<Value, String> {
         if !is_secret_name(name) {
             return Err(not_a_secret(name));
+        }
+        if WEBHOOK_SECRETS.contains(&name) && webhook_target(value).is_none() {
+            return Err(format!("{name} could not be stored: {WEBHOOK_VALUE_SHAPE}"));
         }
         if !SECRET_NAMES.contains(&name) {
             share_credential(value).map_err(|shape| format!("{name} could not be stored: {shape}"))?;

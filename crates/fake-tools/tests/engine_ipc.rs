@@ -412,6 +412,29 @@ fn a_share_value_of_three_lines_is_refused_without_echoing_it() {
     assert!(!h.engine_log().contains("sentinel"));
 }
 
+/// Ruling T4-R15: a webhook value that is not an http or https URL with a host is refused, never echoed, and not
+/// stored; a URL is stored.
+#[test]
+fn a_webhook_value_that_is_not_an_http_url_is_refused_without_echoing_it() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    for (name, value) in [("ha_webhook_url", "ftp://hook-sentinel-1c4b/x"), ("webhook_url", "hook-sentinel-1c4b"),
+                          ("webhook_url", "http:///hook-sentinel-1c4b")] {
+        let message = c.err("secret_set", json!({"name": name, "value": value}));
+        assert_eq!(message, format!("{name} could not be stored: the value must be an http or https URL with a host"));
+        assert_eq!(h.secrets().get(name), None, "{name}");
+    }
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"]["webhook_url"], json!({"set": false, "host": null}));
+    assert!(!h.engine_log().contains("sentinel"));
+    let url = "https://ha.local/api/webhook/hook-sentinel-1c4b";
+    assert_eq!(c.ok("secret_set", json!({"name": "webhook_url", "value": url})), Value::Null);
+    assert_eq!(h.secrets().get("webhook_url").as_deref(), Some(url));
+}
+
 #[test]
 fn a_two_line_share_value_is_stored() {
     let h = scripted(vec![]);
@@ -1584,7 +1607,32 @@ fn the_engine_runs_the_makemkv_check_at_start_into_the_snapshot() {
     assert_eq!(makemkv["found"], json!("settings"));
     assert_eq!(makemkv["busy"], json!(false));
     let names: Vec<&str> = snapshot["selftest"]["checks"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root", "movies_root", "tmdb_token"]);
+    assert_eq!(names, ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root",
+                       "movies_root", "tmdb_token", "ha_webhook_url", "webhook_url"]);
+    assert!(h.http().connects().is_empty(), "a start opens no connection (S80)");
+}
+
+/// Design part 8.6, Ruling T4-R14: the self-test connects to the webhook's host and port, posts nothing, and an
+/// unset `webhook_url` passes.
+#[test]
+fn a_selftest_checks_each_webhook_by_host_and_port_and_posts_nothing() {
+    let h = stand_in(&["movie-direct"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let url = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
+    c.ok("secret_set", json!({"name": "ha_webhook_url", "value": url}));
+    h.http().connect_answer("ha.local", 8123, Ok(()));
+    let result = c.ok("run_selftest", Value::Null);
+    let ha = check(&result, "ha_webhook_url");
+    assert_eq!((&ha["ok"], &ha["detail"], &ha["path"]), (&json!(true), &json!("ha.local:8123 accepted a connection"), &Value::Null));
+    let generic = check(&result, "webhook_url");
+    assert_eq!((&generic["ok"], &generic["detail"]), (&json!(true), &json!("not set; its notifications are skipped")));
+    assert_eq!(h.http().connects(), [("ha.local".to_string(), 8123)]);
+    assert!(h.http().posts().is_empty());
+    assert!(!result.to_string().contains("hook-sentinel-7f3a"));
+    let mut d = Client::open(&h);
+    assert!(!d.line().unwrap().contains("hook-sentinel-7f3a"));
+    assert!(!h.engine_log().contains("hook-sentinel-7f3a"));
 }
 
 #[test]

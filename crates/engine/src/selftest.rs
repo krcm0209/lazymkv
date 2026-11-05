@@ -1,6 +1,6 @@
 //! The self-test (design parts 3.7, 9.4; Rulings S53, S79 to S81, RP-9): the MakeMKV check with the (version,
 //! licence code) it records across restarts, each tool's path, version and where it was found, the write, rename and
-//! delete probe of the three roots, the TMDb token's check, and what a `retry` re-checks for a waiting job. Every run
+//! delete probe of the three roots, the TMDb token's check, the two webhooks' connection checks (Ruling T4-R14), and what a `retry` re-checks for a waiting job. Every run
 //! is recorded capture-style under `<data>/selftest/` (design part 7.2). The owner thread runs none of this itself: it
 //! hands each self-test and re-check to a thread of its own (design part 4.4).
 
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lazymkv_clients::{authentication_url, user_agent, HttpTransport, TransportError};
-use lazymkv_core::ipc::{OutputStream, SelfTest, SelfTestCheck};
+use lazymkv_clients::{authentication_url, user_agent, webhook_target, HttpTransport, TransportError, WebhookTarget};
+use lazymkv_core::ipc::{OutputStream, SelfTest, SelfTestCheck, WEBHOOK_SECRETS};
 use lazymkv_core::job::{Event, State, Tool};
 use lazymkv_core::plan::Kind;
 use lazymkv_core::record::JobRecord;
@@ -158,10 +158,12 @@ pub(crate) fn not_checked(name: &str) -> SelfTestCheck {
 }
 
 /// The self-test a start shows until the first `run_selftest` (S80): `makemkv`, the check at start, then the other
-/// eight checks `not_checked`, in S80's order. Def: T26. Use: T26.
+/// ten checks `not_checked`, in S80's order: the nine of S80, then one per webhook secret (Ruling T4-R14).
+/// Def: T26. Use: T26.
 pub(crate) fn first_selftest(makemkv: SelfTestCheck) -> SelfTest {
     let others = ["mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root", "movies_root", "tmdb_token"];
-    SelfTest { checks: std::iter::once(makemkv).chain(others.into_iter().map(not_checked)).collect() }
+    let names = others.into_iter().chain(WEBHOOK_SECRETS);
+    SelfTest { checks: std::iter::once(makemkv).chain(names.map(not_checked)).collect() }
 }
 
 /// The serde spelling of `found`, as the check's `found` shows it (design part 9.2).
@@ -295,6 +297,42 @@ pub(crate) fn token_check(http: &dyn HttpTransport, token: Option<&str>) -> Self
         Ok(response) if response.status == 200 => check(NAME, true, "TMDb answered 200 to the token".to_string()),
         Ok(response) => check(NAME, false, format!("TMDb answered {} to the token", response.status)),
         Err(error) => check(NAME, false, format!("TMDb could not be asked: {}", transport_text(&error))),
+    }
+}
+
+/// The detail of a webhook check whose URL is not set: the check passes, because design part 12.7 makes the generic
+/// webhook optional and part 8.6 skips an unset channel (Ruling T4-R14). Def: T4-13. Use: T4-13.
+pub(crate) const WEBHOOK_NOT_SET: &str = "not set; its notifications are skipped";
+/// The detail of a webhook check whose stored value `webhook_target` does not read (Ruling T4-R14). Def: T4-13.
+/// Use: T4-13.
+pub(crate) const NOT_A_WEBHOOK_URL: &str = "the value is not an http or https URL";
+
+/// `<host>:<port>` of a target, the host in brackets when it holds a `:` (an IPv6 address), so `[::1]:8123`.
+fn host_port(target: &WebhookTarget) -> String {
+    if target.host.contains(':') {
+        format!("[{}]:{}", target.host, target.port)
+    } else {
+        format!("{}:{}", target.host, target.port)
+    }
+}
+
+/// The self-test's check of webhook secret `name` (design part 8.6, spec 13, S53; Ruling T4-R14): None passes with
+/// WEBHOOK_NOT_SET; a value `webhook_target` does not read fails with NOT_A_WEBHOOK_URL; otherwise one
+/// `http.connect(host, port)`, no request and no TLS handshake, so the owner's automation never fires: Ok passes with
+/// `<host>:<port> accepted a connection`, Err fails with `<host>:<port> could not be reached: <transport_text>`.
+/// `path` is always None and no text holds the URL, its path, its query or its userinfo (the URL is a secret,
+/// ENG-17). Def: T4-13. Use: T4-13.
+pub(crate) fn webhook_check(http: &dyn HttpTransport, name: &str, url: Option<&str>) -> SelfTestCheck {
+    let Some(url) = url else {
+        return check(name, true, WEBHOOK_NOT_SET.to_string());
+    };
+    let Some(target) = webhook_target(url) else {
+        return check(name, false, NOT_A_WEBHOOK_URL.to_string());
+    };
+    let place = host_port(&target);
+    match http.connect(&target.host, target.port) {
+        Ok(()) => check(name, true, format!("{place} accepted a connection")),
+        Err(error) => check(name, false, format!("{place} could not be reached: {}", transport_text(&error))),
     }
 }
 
@@ -476,7 +514,8 @@ impl CheckEnv {
     }
 
     /// Every check of spec 13's self-test that needs no disc, in S80's order: the MakeMKV check (`busy` while a
-    /// `makemkvcon` runs), mkvmerge, ffprobe, ffmpeg, java, the three roots and the TMDb token (design part 9.4, S53).
+    /// `makemkvcon` runs), mkvmerge, ffprobe, ffmpeg, java, the three roots, the TMDb token and the two webhooks
+    /// (design part 8.6, Ruling T4-R14), design part 9.4, S53.
     /// `listed` runs once the MakeMKV check has ended, so the owner can free the disc-phase token the check holds
     /// (Ruling R26.c1). The three root checks share one `down` map, made here, so a share that did not answer is asked
     /// once in this self-test; nothing is kept across self-tests or shared with jobs and re-checks (review round 1 of
@@ -492,6 +531,9 @@ impl CheckEnv {
         checks.push(root_check("tuning_root", settings.tuning_root.as_deref(), false, shares, &mut down));
         checks.push(root_check("movies_root", settings.movies_root.as_deref(), true, shares, &mut down));
         checks.push(token_check(self.http.as_ref(), self.secrets.get("tmdb_token").as_deref()));
+        for name in WEBHOOK_SECRETS {
+            checks.push(webhook_check(self.http.as_ref(), name, self.secrets.get(name).as_deref()));
+        }
         SelfTest { checks }
     }
 
@@ -607,6 +649,91 @@ mod tests {
     use lazymkv_clients::RecordedTransport;
     use lazymkv_core::testsupport::Scratch;
     use lazymkv_platform::fakes::FakeShares;
+
+    const HOOK: &str = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
+
+    fn webhook_ok(name: &str, detail: &str, ok: bool) -> SelfTestCheck {
+        SelfTestCheck { name: name.to_string(), ok, detail: detail.to_string(), path: None, version: None, found: None, busy: false }
+    }
+
+    #[test]
+    fn the_webhook_check_connects_to_host_and_port_and_posts_nothing() {
+        let http = RecordedTransport::new();
+        http.connect_answer("ha.local", 8123, Ok(()));
+        let check = webhook_check(&http, "ha_webhook_url", Some(HOOK));
+        assert_eq!(check, webhook_ok("ha_webhook_url", "ha.local:8123 accepted a connection", true));
+        assert_eq!(http.connects(), [("ha.local".to_string(), 8123)]);
+        assert!(http.posts().is_empty());
+        assert!(http.requests().is_empty());
+    }
+
+    #[test]
+    fn an_unset_webhook_passes_and_says_its_notifications_are_skipped() {
+        let http = RecordedTransport::new();
+        assert_eq!(webhook_check(&http, "webhook_url", None), webhook_ok("webhook_url", WEBHOOK_NOT_SET, true));
+        assert_eq!(WEBHOOK_NOT_SET, "not set; its notifications are skipped");
+        assert!(http.connects().is_empty());
+    }
+
+    /// Review Focus 3.
+    #[test]
+    fn the_webhook_check_shows_only_host_and_port() {
+        let http = RecordedTransport::new();
+        http.connect_answer("ha.local", 8123, Ok(()));
+        http.connect_answer("hooks.example.org", 443, Ok(()));
+        http.connect_answer("::1", 8123, Ok(()));
+        let full = "http://user-sentinel-7c1e:pass-sentinel-4b9d@ha.local:8123/api/webhook/hook-sentinel-7f3a?x=1#f";
+        let check = webhook_check(&http, "ha_webhook_url", Some(full));
+        assert_eq!(check, webhook_ok("ha_webhook_url", "ha.local:8123 accepted a connection", true));
+        let text = serde_json::to_string(&check).unwrap();
+        for secret in ["user-sentinel-7c1e", "pass-sentinel-4b9d", "hook-sentinel-7f3a", "x=1", "/api/webhook", "#f"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert_eq!(webhook_check(&http, "webhook_url", Some("https://hooks.example.org/x")).detail,
+                   "hooks.example.org:443 accepted a connection");
+        assert_eq!(webhook_check(&http, "webhook_url", Some("http://[::1]:8123/")).detail, "[::1]:8123 accepted a connection");
+        assert_eq!(http.connects(), [
+            ("ha.local".to_string(), 8123), ("hooks.example.org".to_string(), 443), ("::1".to_string(), 8123),
+        ]);
+    }
+
+    #[test]
+    fn an_unreachable_webhook_fails_with_its_host_and_port() {
+        let http = RecordedTransport::new();
+        http.connect_answer("ha.local", 8123, Err(TransportError::Unreachable("the connection was refused".to_string())));
+        let refused = webhook_check(&http, "ha_webhook_url", Some(HOOK));
+        assert_eq!(refused, webhook_ok("ha_webhook_url", "ha.local:8123 could not be reached: the connection was refused", false));
+        let slow = RecordedTransport::new();
+        slow.connect_answer("ha.local", 8123, Err(TransportError::Timeout));
+        assert_eq!(webhook_check(&slow, "ha_webhook_url", Some(HOOK)).detail,
+                   "ha.local:8123 could not be reached: no answer came in time");
+        // Task 6: an unrecorded connect names only host and port, so the URL's path cannot reach the detail.
+        let unrecorded = webhook_check(&RecordedTransport::new(), "ha_webhook_url", Some(HOOK));
+        assert_eq!(unrecorded.detail, "ha.local:8123 could not be reached: no answer is recorded for ha.local:8123");
+        assert!(!unrecorded.ok);
+    }
+
+    #[test]
+    fn a_webhook_value_that_is_not_a_url_fails_without_echoing_it_or_connecting() {
+        let http = RecordedTransport::new();
+        for value in ["ftp://hook-sentinel-1c4b/x", "hook-sentinel-1c4b", "http:///hook-sentinel-1c4b", "http://h:0/hook-sentinel-1c4b"] {
+            let check = webhook_check(&http, "webhook_url", Some(value));
+            assert_eq!(check, webhook_ok("webhook_url", NOT_A_WEBHOOK_URL, false), "{value}");
+        }
+        assert_eq!(NOT_A_WEBHOOK_URL, "the value is not an http or https URL");
+        assert!(http.connects().is_empty());
+    }
+
+    #[test]
+    fn a_start_lists_the_webhook_checks_as_not_checked() {
+        let first = first_selftest(not_checked("makemkvcon"));
+        let names: Vec<&str> = first.checks.iter().map(|check| check.name.as_str()).collect();
+        assert_eq!(names, ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root",
+                           "movies_root", "tmdb_token", "ha_webhook_url", "webhook_url"]);
+        for check in &first.checks[1..] {
+            assert_eq!((check.ok, check.detail.as_str()), (false, "not checked since the engine started"), "{}", check.name);
+        }
+    }
 
     /// A job waiting in AwaitingShare to return to `return_to`, with no plan (Ruling S81).
     fn waiting_for_share(return_to: State) -> JobRecord {
