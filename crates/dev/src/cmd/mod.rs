@@ -21,3 +21,4 @@ pub mod ocr_compare;
 pub mod decide;
 pub mod golden;
 pub mod plan;
+pub mod census;
