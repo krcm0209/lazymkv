@@ -287,6 +287,25 @@ pub fn run_round(
         save(status_file(book, name));
     }
 
+    // S47 (Ruling T4-R2): an entry search no longer named, as TheDiscDB's records now name a TMDb ID or no title,
+    // leaves the book with its page. A name search answered while its page is not in hand (a restart that read the
+    // saved file as the entry page) is asked again, so the name pages come back to tmdb-search.json.
+    if entry_search_title(&book.lookup_inputs(name)).is_none() && book.states.remove(&Lookup::EntrySearch).is_some() {
+        book.answers.entry = None;
+        for (lookup, in_hand) in
+            [(Lookup::Search, book.answers.search.is_some()), (Lookup::TaggedSearch, book.answers.tagged.is_some())]
+        {
+            if !in_hand && matches!(book.states.get(&lookup), Some(LookupState::Answered { status: 200 })) {
+                book.states.insert(lookup, LookupState::NotAsked);
+            }
+        }
+        let in_hand = book.answers.search.is_some() || book.answers.tagged.is_some();
+        if let Some(searched) = searched.filter(|_| in_hand) {
+            save(search_file(&book.answers, searched, today));
+        }
+        save(status_file(book, name));
+    }
+
     if let Some(searched) = searched.filter(|_| book.asks(Lookup::Search)) {
         start(book, Lookup::Search, name, save);
         let (settled, _) = settle(book, Lookup::Search, tmdb_search(t, token, &searched.cleaned));
@@ -296,7 +315,7 @@ pub fn run_round(
             Some(tagged) => Some(merge_pages(&search, tagged)),
             None => Some(search),
         });
-        if page && entry_search_title(&book.lookup_inputs(name)).is_none() {
+        if page && book.answers.entry.is_none() {
             save(search_file(&book.answers, searched, today));
         }
         save(status_file(book, name));
@@ -310,37 +329,26 @@ pub fn run_round(
         if let (Some(search), Some(tagged)) = (&book.answers.search, &book.answers.tagged) {
             book.answers.search = Some(merge_pages(search, tagged));
         }
-        if page && entry_search_title(&book.lookup_inputs(name)).is_none() {
+        if page && book.answers.entry.is_none() {
             save(search_file(&book.answers, searched, today));
         }
         save(status_file(book, name));
     }
 
     // S47 (Rulings T4-R2, T4-R5): the entry's title is searched once; an answered entry search is not asked again for
-    // another title, as the fingerprint's and the disc ID's records of one disc name one work.
-    match entry_search_title(&book.lookup_inputs(name)) {
-        Some(title) => {
-            book.states.entry(Lookup::EntrySearch).or_insert(LookupState::NotAsked);
-            if book.asks(Lookup::EntrySearch) {
-                start(book, Lookup::EntrySearch, name, save);
-                let (settled, _) = settle(book, Lookup::EntrySearch, tmdb_search(t, token, &title));
-                let answered = matches!(settled, Settled::Value(_));
-                settled.write(&mut book.answers.entry, Some);
-                if let Some(page) = book.answers.entry.as_ref().filter(|_| answered).map(page_value) {
-                    save(json_file("tmdb-search.json", &slim_search(&[(&page, &title)], today)));
-                }
-                save(status_file(book, name));
+    // another title, as the fingerprint's and the disc ID's records of one disc name one work. Its page replaces the
+    // name pages in tmdb-search.json; until it comes the name pages stay there.
+    if let Some(title) = entry_search_title(&book.lookup_inputs(name)) {
+        book.states.entry(Lookup::EntrySearch).or_insert(LookupState::NotAsked);
+        if book.asks(Lookup::EntrySearch) {
+            start(book, Lookup::EntrySearch, name, save);
+            let (settled, _) = settle(book, Lookup::EntrySearch, tmdb_search(t, token, &title));
+            let answered = matches!(settled, Settled::Value(_));
+            settled.write(&mut book.answers.entry, Some);
+            if let Some(page) = book.answers.entry.as_ref().filter(|_| answered).map(page_value) {
+                save(json_file("tmdb-search.json", &slim_search(&[(&page, &title)], today)));
             }
-        }
-        None => {
-            if book.states.remove(&Lookup::EntrySearch).is_some() {
-                book.answers.entry = None;
-                let in_hand = book.answers.search.is_some() || book.answers.tagged.is_some();
-                if let Some(searched) = searched.filter(|_| in_hand) {
-                    save(search_file(&book.answers, searched, today));
-                }
-                save(status_file(book, name));
-            }
+            save(status_file(book, name));
         }
     }
 
@@ -891,7 +899,10 @@ mod tests {
         let inputs = chain(Some(DISC_ID), Some("KNOWING_3D"));
         let mut book = LookupBook::default();
         let first = round(&t, &mut book, &inputs);
-        assert_eq!(search_files(&first).iter().map(|f| f["queries"].clone()).collect::<Vec<Value>>(), [json!(["Knowing"])]);
+        assert_eq!(
+            search_files(&first).iter().map(|f| f["queries"].clone()).collect::<Vec<Value>>(),
+            [json!(["KNOWING"]), json!(["Knowing"])]
+        );
         assert!(book.pending().1);
         let second = round(&t, &mut book, &inputs);
         assert!(search_files(&second).is_empty());
@@ -940,5 +951,58 @@ mod tests {
         let files: Vec<&SavedFile> = saved.iter().filter(|f| f.name == "tmdb-search.json").collect();
         assert_eq!(files.len(), 1);
         assert_eq!(String::from_utf8(files[0].bytes.clone()).unwrap(), String::from_utf8(expected).unwrap());
+    }
+
+    #[test]
+    fn a_restart_that_read_the_entry_page_fetches_the_name_page_again() {
+        // The book a restart leaves after "dischash 000", "discid 200", "search 200" and "search-entry 200": the saved
+        // tmdb-search.json held the entry page, so the name page is not in hand.
+        let record: DiscDbRecord = serde_json::from_slice(&entry_body("Knowing", 2009)).unwrap();
+        let entry_page = parse_search(&String::from_utf8(search_body(&KNOWING_PAGE)).unwrap(), "entry").unwrap();
+        let mut book = LookupBook {
+            states: BTreeMap::from([
+                (Lookup::Dischash, LookupState::Pending { reason: PendingReason::Timeout }),
+                (Lookup::Discid, answered(200)),
+                (Lookup::Search, answered(200)),
+                (Lookup::EntrySearch, answered(200)),
+            ]),
+            answers: Answers { by_disc_id: vec![record], entry: Some(entry_page), ..Answers::default() },
+        };
+        // The fingerprint's record now names John Wick's TMDb ID, so no entry title is named.
+        let t = RecordedTransport::new();
+        t.answer(&dischash_url(FP), 200, &corpus(JOHN_WICK_DISCHASH));
+        t.answer(&search_url("KNOWING"), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&record_url(JOHN_WICK), 200, &movie_body(245891, "John Wick", "2014-10-22"));
+        let saved = round(&t, &mut book, &chain(Some(DISC_ID), Some("KNOWING")));
+        assert!(urls(&t).contains(&search_url("KNOWING")));
+        assert!(book.answers.search.is_some());
+        assert!(book.answers.entry.is_none());
+        assert!(!book.states.contains_key(&Lookup::EntrySearch));
+        assert_eq!(search_files(&saved).last().unwrap()["queries"], json!(["KNOWING"]));
+    }
+
+    #[test]
+    fn a_record_from_thediscdb_drops_the_entry_line_from_the_status_file() {
+        // TheDiscDB's disc ID record names Knowing by title alone; the fingerprint, timed out at first, names TMDb 13811.
+        let t = RecordedTransport::new();
+        t.fail(&dischash_url(FP), TransportError::Timeout);
+        let mut named: Value = serde_json::from_slice(&entry_body("Knowing", 2009)).unwrap();
+        named["media"]["external_ids"]["tmdb"] = json!("13811");
+        t.answer(&dischash_url(FP), 200, named.to_string().as_bytes());
+        let disc_id_body = format!("[{}]", String::from_utf8(entry_body("Knowing", 2009)).unwrap());
+        t.answer(&discid_url(DISC_ID), 200, disc_id_body.as_bytes());
+        t.answer(&search_url("KNOWING"), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&search_url("Knowing"), 200, &search_body(&KNOWING_PAGE));
+        t.answer(&record_url(movie(13811)), 200, &movie_body(13811, "Knowing", "2009-03-19"));
+        let inputs = chain(Some(DISC_ID), Some("KNOWING"));
+        let mut book = LookupBook::default();
+        let first = round(&t, &mut book, &inputs);
+        assert!(last_status(&first).contains(&"search-entry 200".to_string()));
+        assert_eq!(urls(&t).last(), Some(&record_url(movie(13811))));
+        let asked = t.requests().len();
+        let second = round(&t, &mut book, &inputs);
+        assert!(!last_status(&second).iter().any(|line| line.starts_with("search-entry")));
+        assert_eq!(urls(&t)[asked..], [dischash_url(FP)]);
+        assert!(!book.states.contains_key(&Lookup::EntrySearch));
     }
 }

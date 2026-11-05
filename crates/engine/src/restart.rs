@@ -544,4 +544,18 @@ mod tests {
         assert!(matches!(book.states[&Lookup::EntrySearch], LookupState::NotAsked));
         assert!(book.pending().1);
     }
+
+    #[test]
+    fn a_failed_entry_search_leaves_the_name_page_for_the_restart() {
+        let s = Scratch::new("book-entry-failed");
+        s.write("thediscdb-hash.json", r#"{"media": {"title": "Knowing", "year": 2009, "type": "Movie", "external_ids": {}}, "titles": [{"index": 0}]}"#);
+        s.write("tmdb-search.json", &search_json(&[("movie", 13811, "Knowing", "Knowing", "2009-03-19")]));
+        s.write("lookup-status.txt", "dischash 200\nsearch 200\nsearch-entry 404\n");
+        let book = rebuild_book(&s.0);
+        assert!(matches!(book.states[&Lookup::Search], LookupState::Answered { status: 200 }));
+        assert_eq!(book.answers.search.as_ref().map(|p| p.results.len()), Some(1));
+        assert!(matches!(book.states[&Lookup::EntrySearch], LookupState::Answered { status: 404 }));
+        assert!(book.answers.entry.is_none());
+        assert_eq!(book.pending(), (false, false));
+    }
 }
