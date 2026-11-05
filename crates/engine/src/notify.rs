@@ -19,9 +19,9 @@ use crate::store::Store;
 /// drive.
 const TRY_THE_OTHER_DRIVE: &str = "; try the other drive";
 
-/// Where notifications go (design part 8.6, S36; spec 12): the engine's notifier is `WebhookSink`, and the binary
-/// passes `NoDelivery` until Task 17 changes it. Def: T22; T3-21 makes `deliver` return a Result; T4-12 adds
-/// `stop_flag`. Use: T22, T26, T29, T3-21, T3-23, T4-12.
+/// Where notifications go (design part 8.6, S36; spec 12): the engine's notifier is `WebhookSink`, which the binary
+/// passes (design part 8.6). Def: T22; T3-21 makes `deliver` return a Result; T4-12 adds `stop_flag`. Use: T22, T26,
+/// T29, T3-21, T3-23, T4-12, T4-17.
 pub trait NotifySink: Send {
     /// Delivers one notification, or gives why it could not. The notifier then writes `undelivered_line` to engine.log
     /// and goes on, so a notification never blocks a job (spec 12, design part 3.5). The reason never holds a secret,
@@ -143,21 +143,6 @@ fn outcome_text(outcome: &Result<Response, TransportError>) -> String {
     }
 }
 
-/// The reason `NoDelivery` gives for every notification (Rulings W26, T4-R16): a test double until Task 17 removes it
-/// with the binary's change. Def: T3-21. Use: T3-21.
-pub const NO_DELIVERY: &str = "no notification delivery in this build; it arrives in pull request 4";
-
-/// The sink the binary passes until Task 17 changes it (Rulings W26, T4-R16): it delivers nothing and refuses every
-/// notification with `NO_DELIVERY`, so each one is logged undelivered in engine.log (spec 12, design part 3.5); a test
-/// double until Task 17 removes it with the binary's change. Def: T3-21. Use: T3-21, T3-23.
-pub struct NoDelivery;
-
-impl NotifySink for NoDelivery {
-    fn deliver(&mut self, _notification: &Notification) -> Result<(), String> {
-        Err(NO_DELIVERY.to_string())
-    }
-}
-
 /// engine.log's line for a notification the sink refused (spec 12, design part 3.5):
 /// `notification <event> for <job id> was not delivered: <reason>`, with `no job` for a notification of no job and
 /// `<event>` from `NotifyEvent::as_str`. It holds neither the notification's message nor any other field.
@@ -244,7 +229,7 @@ mod tests {
     use lazymkv_platform::fakes::MemorySecrets;
     use lazymkv_platform::SecretStore;
 
-    use super::{spawn_notifier, undelivered_line, NoDelivery, NotifySink, WebhookSink, NO_DELIVERY};
+    use super::{spawn_notifier, undelivered_line, NotifySink, WebhookSink};
     use crate::store::Store;
 
     const HA: &str = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
@@ -277,15 +262,6 @@ mod tests {
             } else {
                 Ok(())
             }
-        }
-    }
-
-    #[test]
-    fn no_delivery_refuses_every_notification_with_its_sentence() {
-        assert_eq!(NO_DELIVERY, "no notification delivery in this build; it arrives in pull request 4");
-        let mut sink = NoDelivery;
-        for event in [NotifyEvent::DiscDone, NotifyEvent::Filed, NotifyEvent::EjectFailed] {
-            assert_eq!(sink.deliver(&notification(event, Some("abc-1"))), Err(NO_DELIVERY.to_string()));
         }
     }
 

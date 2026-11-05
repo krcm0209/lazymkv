@@ -476,8 +476,8 @@ pub struct Harness {
     faults: Arc<Mutex<ArmedFault>>,
     engine: Mutex<Option<EngineHandle>>,
     /// The transport and sink `start` passes: the recorded ones by default, or a `WebhookSink` over the offline or
-    /// the recorded transport (`use_offline_services`, `use_webhook_sink`); the binary passes `NoDelivery` until
-    /// Task 17 changes it (Ruling T4-R16).
+    /// the recorded transport (`use_offline_services`, `use_webhook_sink`); a native harness passes its own
+    /// (`new_native`, `new_native_with_webhook_sink`).
     services: Mutex<ServicesMode>,
     /// The `EngineConfig.cleanup_minutes` the next `start` passes; None until `schedule_cleanup` (design part 5.9).
     cleanup_minutes: Mutex<Option<u32>>,
@@ -1133,7 +1133,7 @@ impl Harness {
     }
 
     /// From the next `start`: `OfflineTransport` and a `WebhookSink` over the harness's secrets with a no-op pause
-    /// (Ruling T4-R16; it replaces `use_binary_services`). Def: T4-12. Use: T4-12.
+    /// (Ruling T4-R16). Def: T4-12. Use: T4-12.
     pub fn use_offline_services(&self) {
         self.deliver();
         *lock(&self.services) = ServicesMode::Offline;
@@ -1225,15 +1225,28 @@ impl Harness {
     /// buffer of its own for standard error, and `NativeOptions { mutex: Global\<the pipe's name after
     /// \\.\pipe\>, pipe, drives: the harness's SharedDrives, ejector: its RecordingEjector with removals, processes:
     /// its TestGuard, secrets: its MemorySecrets, http: its recorded transport, console: its console buffer,
-    /// console_stop: a closure that keeps the handler, token: None, program_data_var: None }`. The real WinHost,
+    /// console_stop: a closure that keeps the handler, token: None, program_data_var: None, .. }`; `notify`: a
+    /// `MemorySink` over the harness's list, so `notifications()` reads it; `cleanup_minutes`: None. The real WinHost,
     /// WinKeepAwake and share connector run, so `host()`, `awake()` and `shares()` are not this engine's. It returns
     /// once a client through `pipe_client()` has read its snapshot line (60 s cap, 240 s under continuous integration,
     /// CI), and panics with `run_with`'s standard error when `run_with` returned first. `restart`, `run_until` and
     /// `run_until_event` are not for it. Native harnesses of one test process run one at a time (`NativeSlot`): the
     /// real WinHost shows S55 every running `makemkvcon64`, another native harness's stand-in included, so it first
     /// waits until no other is alive.
-    /// Def: T3-23. Use: T3-23.
+    /// Def: T3-23; T4-17. Use: T3-23, T4-17.
     pub fn new_native(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str) -> Harness {
+        Harness::native_with(fake_tool, scenarios, settings, pipe, false)
+    }
+
+    /// `new_native`, except that `NativeOptions.notify` is None, so the binary builds its own `WebhookSink` over the
+    /// harness's `MemorySecrets` and recorded transport (design part 8.6; W26 replaced); its waits are real, so a test
+    /// answers the webhook 2xx. Def: T4-17. Use: T4-17.
+    pub fn new_native_with_webhook_sink(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str) -> Harness {
+        Harness::native_with(fake_tool, scenarios, settings, pipe, true)
+    }
+
+    /// `new_native`'s body; `webhook_sink` leaves `NativeOptions.notify` None (`new_native_with_webhook_sink`).
+    fn native_with(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str, webhook_sink: bool) -> Harness {
         let slot = NativeSlot::take();
         let mut harness = Harness::prepared(fake_tool, scenarios, settings);
         harness.native_slot = Some(slot);
@@ -1262,10 +1275,13 @@ impl Harness {
             processes: Some(Arc::clone(&harness.processes)),
             secrets: Some(Arc::clone(&harness.secrets) as _),
             http: Some(Arc::clone(&harness.http) as _),
+            notify: (!webhook_sink)
+                .then(|| Box::new(MemorySink { list: Arc::clone(&harness.sent) }) as Box<dyn NotifySink>),
             console: Some(Box::new(harness.console_buffer())),
             console_stop: Some(Box::new(console_stop)),
             token: None,
             program_data_var: None,
+            cleanup_minutes: None,
         };
         let args = vec!["--data".to_string(), harness.data.display().to_string()];
         let stderr = Arc::new(Mutex::new(Vec::new()));
