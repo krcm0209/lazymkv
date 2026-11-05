@@ -57,6 +57,21 @@ pub fn add_months(date: &str, months: u32) -> Option<String> {
     Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
+/// The proleptic Gregorian (year, month, day) of a count of seconds since 1970-01-01 (UTC), by the days-to-civil
+/// algorithm. Pure. Def: T4-19. Use: T4-19, dev's `civil_time`.
+pub fn civil_date(unix_secs: u64) -> (i64, u32, u32) {
+    let z = (unix_secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
+}
+
 /// Whether a copy fetched on `fetched_at` is past TMDb's six-month limit on `today` (design part 8.4, R-B4; Ruling
 /// T4-R7): never when `today` is not a real `yyyy-MM-dd` date; always when `fetched_at` is None or not a real date;
 /// else when `today` is after `fetched_at` plus `STALE_MONTHS` months. A date after today is fresh. Pure. Def: T4-8.

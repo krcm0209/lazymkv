@@ -211,6 +211,55 @@ pub fn status_text(lines: &BTreeMap<String, String>) -> String {
     lines.iter().map(|(key, status)| format!("{key} {status}\n")).collect()
 }
 
+/// The shape record of design part 8.5 (P29, Ruling T4-R19): every scalar becomes its JSON type name ("string",
+/// "number", "boolean", "null"); an object keeps its keys, in order, with their values' shapes; an array becomes a
+/// one-element array of its elements' merged shape (`[]` when empty). Merging unites two objects' keys (first seen
+/// first) key by key, merges two arrays' element shapes, and otherwise joins the type names with `|` in the order
+/// object, array, string, number, boolean, null (`"number|null"`); an object or array meeting a scalar keeps only its
+/// type name (`"object|null"`). No value of the answer survives. Def: T4-19. Use: T4-19.
+pub fn shape_of(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(map.iter().map(|(key, value)| (key.clone(), shape_of(value))).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(shape_of).reduce(merge_shapes).into_iter().collect()),
+        Value::String(_) => Value::from("string"),
+        Value::Number(_) => Value::from("number"),
+        Value::Bool(_) => Value::from("boolean"),
+        Value::Null => Value::from("null"),
+    }
+}
+
+/// The order a shape joins type names in (Ruling T4-R19).
+const SHAPE_TYPES: [&str; 6] = ["object", "array", "string", "number", "boolean", "null"];
+
+/// Two shapes as one, by `shape_of`'s merge rules (Ruling T4-R19).
+fn merge_shapes(a: Value, b: Value) -> Value {
+    match (a, b) {
+        (Value::Object(mut a), Value::Object(b)) => {
+            for (key, shape) in b {
+                match a.get_mut(&key) {
+                    // get_mut and take, never remove and insert: serde_json's preserve_order map would reorder keys.
+                    Some(slot) => *slot = merge_shapes(std::mem::take(slot), shape),
+                    None => drop(a.insert(key, shape)),
+                }
+            }
+            Value::Object(a)
+        }
+        (Value::Array(a), Value::Array(b)) => Value::Array(a.into_iter().chain(b).reduce(merge_shapes).into_iter().collect()),
+        (a, b) => {
+            let names = |shape: &Value| -> Vec<String> {
+                match shape {
+                    Value::Object(_) => vec!["object".to_string()],
+                    Value::Array(_) => vec!["array".to_string()],
+                    other => other.as_str().unwrap_or_default().split('|').map(str::to_string).collect(),
+                }
+            };
+            let (a, b) = (names(&a), names(&b));
+            let joined: Vec<&str> = SHAPE_TYPES.into_iter().filter(|name| a.iter().chain(&b).any(|kept| kept == name)).collect();
+            Value::from(joined.join("|"))
+        }
+    }
+}
+
 // PF-17: only the tests below call this. Task 16's chain writes each status word from its `LookupState`, so the
 // non-test build has no caller and the function exists only in the test build.
 /// The status word S66 gives an outcome: the HTTP status for `Answered`, `Miss` and a `Pending` that has a fetched
@@ -302,5 +351,28 @@ mod tests {
         let text = serde_json::to_string(&file).unwrap();
         assert_eq!(text, r#"{"id":5,"name":"Show","original_name":"Show","first_air_date":"2002-01-01","original_language":"en","kind":"tv","seasons":[{"season_number":0,"episode_count":1},{"season_number":1,"episode_count":2,"episodes":[{"episode_number":1,"runtime":44},{"episode_number":2}]},{"season_number":2,"episode_count":1,"episodes":[{"episode_number":1,"runtime":0}]},{"season_number":3,"episode_count":2}],"fetched_at":"2026-10-23"}"#);
         assert_eq!(parse_tv(&text, "tmdb-record.json").unwrap().episode_runtimes(None), vec![44]);
+    }
+
+    #[test]
+    fn shape_records_hold_names_and_types_only() {
+        let raw = json!({"id": 900001, "title": "Synthetic Movie", "adult": false, "imdb_id": null,
+            "genres": [{"id": 28, "name": "Action"}, {"id": 53, "name": null, "extra": true}], "videos": [],
+            "external_ids": {"imdb_id": "tt0900001", "tvdb_id": 7}, "mixed": [1, null, "x"],
+            "maybe": [{"a": 1}, null], "nested": [[1], [2.5, "y"]]});
+        let shape = shape_of(&raw);
+        assert_eq!(shape, json!({"id": "number", "title": "string", "adult": "boolean", "imdb_id": "null",
+            "genres": [{"id": "number", "name": "string|null", "extra": "boolean"}], "videos": [],
+            "external_ids": {"imdb_id": "string", "tvdb_id": "number"}, "mixed": ["string|number|null"],
+            "maybe": ["object|null"], "nested": [["string|number"]]}));
+        let keys: Vec<&str> = shape.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["id", "title", "adult", "imdb_id", "genres", "videos", "external_ids", "mixed", "maybe", "nested"]);
+        let genre: Vec<&str> = shape["genres"][0].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(genre, ["id", "name", "extra"]);
+        let text = serde_json::to_string(&shape).unwrap();
+        assert_eq!(text.find(|c: char| c.is_ascii_digit()), None, "{text}");
+        for value in ["Synthetic Movie", "Action", "tt0900001", "\"x\"", "\"y\""] {
+            assert!(!text.contains(value), "{value} in {text}");
+        }
+        assert_eq!(shape_of(&json!("x")), json!("string"));
     }
 }
