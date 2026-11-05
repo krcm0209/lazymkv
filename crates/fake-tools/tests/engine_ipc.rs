@@ -2494,8 +2494,11 @@ fn the_cleanup_runs_off_the_owner_thread() {
     assert!(snapshot_within(&h, Duration::from_secs(2)).is_some(), "the owner answers while the pass waits");
     assert!(h.busy(), "a running pass counts as busy (R24.c1)");
     stall.release();
-    h.wait("the staging folder deleted", |h| !h.staging().join(&id).exists());
-    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted its staging folder")));
+    // The pass deletes and then logs, so the wait is on the log line (Ruling T11-R2).
+    let line = format!("cleanup: {id}: deleted its staging folder");
+    h.wait("the staging folder deleted", |h| h.engine_log().contains(&line));
+    assert!(!h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&line));
 }
 
 #[test]
@@ -2506,10 +2509,15 @@ fn a_configured_cleanup_runs_once_at_start_and_again_each_period() {
     fs::write(&copy, r#"{"id": 1, "fetched_at": "2020-01-01"}"#).unwrap();
     h.schedule_cleanup(Duration::from_millis(200));
     h.restart();
-    h.wait("the first pass", |_| !copy.exists());
+    // The pass deletes and then logs, so each wait is on the log line (Ruling T11-R2).
+    let first = format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-01)");
+    let next = format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-02)");
+    h.wait("the first pass", |h| h.engine_log().contains(&first));
+    assert!(!copy.exists());
     fs::write(&copy, r#"{"id": 1, "fetched_at": "2020-01-02"}"#).unwrap();
-    h.wait("the next pass", |_| !copy.exists());
+    h.wait("the next pass", |h| h.engine_log().contains(&next));
+    assert!(!copy.exists());
     let log = h.engine_log();
-    assert!(log.contains(&format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-01)")), "{log}");
-    assert!(log.contains(&format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-02)")), "{log}");
+    assert!(log.contains(&first), "{log}");
+    assert!(log.contains(&next), "{log}");
 }
