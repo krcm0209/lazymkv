@@ -19,3 +19,6 @@ fancy-regex = "0.20"
 unicode-normalization = "0.1"
 # The Windows API declarations, used by lazymkv-platform only and pinned exactly (design parts 4.3, 4.5, 4.7; P33).
 windows-sys = "=0.61.2"
+# The blocking HTTP client of the lookups and the notifier: rustls on the ring provider with webpki-roots compiled in,
+# default features off except TLS; used by lazymkv-clients only (design parts 4.7 and 8.1; P33, A1).
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
