@@ -2,10 +2,10 @@
 //! on the disc's own name, J8's second search on its tagged name when that folds to another text (its page merged into
 //! the first by `merge_pages`), S47's search on the title of a TheDiscDB entry that has no TMDb ID
 //! (`core::lookup::entry_search_title`; the record step then reads its page instead of the name page), then the TMDb
-//! record that `core::lookup::record_to_fetch` names for the answers in hand, then a TV record's seasons
-//! (`seasons_to_fetch`). A round asks every lookup that is not answered yet, in that order, and saves each answer and
-//! `lookup-status.txt` as they come; a later round asks again what stayed pending. Pull request 2 runs the movie path
-//! only (S19). Used by Tasks 23, 24, 25 and 26.
+//! record that `core::lookup::record_to_fetch` names: the remembered identity first when the inputs carry one (Ruling
+//! T4-R6), then the answers in hand. Then a TV record's seasons (`seasons_to_fetch`). A round asks every lookup that is
+//! not answered yet, in that order, and saves each answer and `lookup-status.txt` as they come; a later round asks
+//! again what stayed pending. Pull request 2 runs the movie path only (S19). Used by Tasks 23, 24, 25 and 26.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +19,7 @@ use crate::lookups::{
     discdb_by_disc_id, discdb_by_fingerprint, tmdb_record, tmdb_search, tmdb_season, Fetched, Outcome, PendingReason,
 };
 use crate::merge::merge_pages;
-use crate::saved::{slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
+use crate::saved::{json_file, slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 use crate::transport::HttpTransport;
 
 /// One request of the chain of design part 8.2, in chain order. Def: T4-2. Use: T4-3 to T4-5, T4-9, T4-15.
@@ -175,7 +175,10 @@ fn status_word(state: &LookupState) -> Option<String> {
         LookupState::InFlight => "000".to_string(),
         LookupState::Answered { status } => status.to_string(),
         LookupState::Pending { reason } => match reason {
-            PendingReason::NoToken | PendingReason::Timeout | PendingReason::Unreachable(_) => "000".to_string(),
+            PendingReason::NoToken
+            | PendingReason::Timeout
+            | PendingReason::Unreachable(_)
+            | PendingReason::Stale(_) => "000".to_string(),
             PendingReason::TokenRefused => "401".to_string(),
             PendingReason::Status(code) => code.to_string(),
             PendingReason::Unparsed(_) => "unparsed".to_string(),
@@ -224,14 +227,6 @@ fn status_file(book: &LookupBook, inputs: &ChainInputs) -> SavedFile {
 fn start(book: &mut LookupBook, lookup: Lookup, inputs: &ChainInputs, save: &mut dyn FnMut(SavedFile)) {
     book.states.insert(lookup, LookupState::InFlight);
     save(status_file(book, inputs));
-}
-
-/// A slim copy as saved: pretty JSON and a final newline.
-fn json_file(name: &str, value: &Value) -> SavedFile {
-    // Writing a `Value` into memory cannot fail: its map keys are strings and a Vec takes every byte.
-    let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_default();
-    bytes.push(b'\n');
-    SavedFile { name: name.to_string(), bytes }
 }
 
 /// The body of a TMDb request that answered with a record, as JSON; None for a miss or a pending lookup, whose bodies
@@ -411,12 +406,12 @@ pub fn run_round(
         }
         _ => None,
     };
-    let (show, wanted) = show.unwrap_or_default();
+    let (show, seasons) = show.unwrap_or_default();
     book.states.retain(|lookup, _| match lookup {
-        Lookup::Season(n) => wanted.contains(n),
+        Lookup::Season(n) => seasons.contains(n),
         _ => true,
     });
-    for n in &wanted {
+    for n in &seasons {
         book.states.entry(Lookup::Season(*n)).or_insert(LookupState::NotAsked);
     }
     let asked: Vec<u32> = book
@@ -1343,5 +1338,13 @@ mod tests {
         assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url("JOHN WICK"), record_url(movie(7))]);
         assert_eq!(book.answers.record.as_ref().map(|record| record.identity), Some(movie(7)));
         assert!(last_status(&saved).contains(&"tmdb movie/7 200".to_string()));
+    }
+
+    #[test]
+    fn a_stale_lookup_reads_000_in_the_status_file() {
+        let mut book = LookupBook::default();
+        book.states.insert(Lookup::Dischash, LookupState::Answered { status: 404 });
+        book.states.insert(Lookup::Search, LookupState::Pending { reason: PendingReason::Stale("tmdb-search.json".into()) });
+        assert_eq!(String::from_utf8(status_file(&book, &chain(None, None)).bytes).unwrap(), "dischash 404\nsearch 000\n");
     }
 }

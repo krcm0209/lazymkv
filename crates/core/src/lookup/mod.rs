@@ -7,6 +7,7 @@
 
 pub mod discdb;
 pub mod tmdb;
+pub mod stale;
 /// The disc's own name: spec 8.1's parsing, cleaning, generic names and plausibility, and 8.2's season marker (Task 4).
 pub mod name;
 
@@ -491,6 +492,21 @@ pub fn entry_search_title(inputs: &LookupInputs<'_>) -> Option<String> {
         return None;
     }
     record.title_and_year().map(|(title, _)| title)
+}
+
+/// The queries of a search page (design part 8.2 items 2 and 3, 8.4; J8, S47): the entry title alone when
+/// `entry_search_title` names one (Ruling T4-R5); else, for a disc name that is not generic, its cleaned name, then its
+/// tagged name when the two differ once folded (`name::fold_name`); else none. Pure. Def: T4-8. Use: T4-9.
+pub fn search_queries(inputs: &LookupInputs<'_>) -> Vec<String> {
+    if let Some(title) = entry_search_title(inputs) {
+        return vec![title];
+    }
+    let Some(disc_name) = inputs.name.filter(|disc_name| !disc_name.generic) else { return Vec::new() };
+    let mut queries = vec![disc_name.cleaned.clone()];
+    if name::fold_name(&disc_name.tagged) != name::fold_name(&disc_name.cleaned) {
+        queries.push(disc_name.tagged.clone());
+    }
+    queries
 }
 
 /// The step `identify` reached and what it rests on: the TheDiscDB record whose media may name the work, and the one

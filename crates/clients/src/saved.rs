@@ -17,6 +17,15 @@ pub struct SavedFile {
     pub bytes: Vec<u8>,
 }
 
+/// A slim copy as saved: pretty JSON and a final newline (T16 rulings). Moved here from the chain so the refetch
+/// writes the same bytes (design part 8.4).
+pub(crate) fn json_file(name: &str, value: &Value) -> SavedFile {
+    // Writing a `Value` into memory cannot fail: its map keys are strings and a Vec takes every byte.
+    let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_default();
+    bytes.push(b'\n');
+    SavedFile { name: name.to_string(), bytes }
+}
+
 /// Phase 0's slim keys, in phase 0's order (scripts/phase0/record-disc.ps1).
 const SLIM_FIELDS: [&str; 9] = [
     "id",

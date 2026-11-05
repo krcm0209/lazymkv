@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use lazymkv_clients::{Lookup, LookupBook, LookupState, PendingReason, TIMEOUT_S};
+use lazymkv_clients::{reason_text, Lookup, LookupBook, LookupState};
 use lazymkv_core::job::State;
 use lazymkv_core::naming::{edition_label, NamedPath};
 use lazymkv_core::plan::movie::{LibraryFacts, THEATRICAL_CUT};
@@ -369,20 +369,9 @@ pub(crate) fn lookup_word(lookup: Lookup) -> String {
     word.to_string()
 }
 
-/// Why a lookup is pending, in the words of Ruling R24.6.
-fn reason_text(reason: &PendingReason) -> String {
-    match reason {
-        PendingReason::NoToken => "no tmdb_token is set".to_string(),
-        PendingReason::TokenRefused => "TMDb refused the token (HTTP 401)".to_string(),
-        PendingReason::Timeout => format!("no answer within {TIMEOUT_S} s"),
-        PendingReason::Unreachable(text) => text.clone(),
-        PendingReason::Status(status) => format!("HTTP {status}"),
-        PendingReason::Unparsed(sentence) => sentence.clone(),
-    }
-}
-
 /// The waiting message of a pending lookup (design part 8.3): each pending lookup in `Lookup` order as
-/// `<word>: <reason>`, joined by "; ", the word being `lookup_word`'s (Ruling R24.6).
+/// `<word>: <reason>`, joined by "; ", the word being `lookup_word`'s and the reason `lazymkv_clients::reason_text`'s
+/// (Ruling R24.6).
 /// Def: T24. Use: T24, T26.
 pub(crate) fn waiting_message(book: &LookupBook) -> String {
     let pending = book.states.iter().filter_map(|(lookup, state)| match state {
@@ -395,6 +384,7 @@ pub(crate) fn waiting_message(book: &LookupBook) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazymkv_clients::PendingReason;
     use lazymkv_core::naming::join;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
 

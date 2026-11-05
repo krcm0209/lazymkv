@@ -1397,3 +1397,17 @@ fn the_entry_title_is_trimmed_and_a_blank_one_is_none() {
     assert_eq!(entry_search_title(&LookupInputs { discdb_by_fingerprint: Some(&padded), ..LookupInputs::default() }), Some("Knowing".to_string()));
     assert_eq!(entry_search_title(&LookupInputs { discdb_by_fingerprint: Some(&blank), ..LookupInputs::default() }), None);
 }
+
+#[test]
+fn search_queries_follow_the_entry_or_the_two_name_forms() {
+    let piranha = label("PIRANHA_3D");
+    assert_eq!(search_queries(&LookupInputs { name: Some(&piranha), ..LookupInputs::default() }), ["PIRANHA", "PIRANHA 3D"]);
+    let plain = label("SYNTHETIC_MOVIE");
+    assert_eq!(search_queries(&LookupInputs { name: Some(&plain), ..LookupInputs::default() }), ["SYNTHETIC MOVIE"]);
+    let generic = label("DVD_VIDEO");
+    assert!(search_queries(&LookupInputs { name: Some(&generic), ..LookupInputs::default() }).is_empty());
+    assert!(search_queries(&LookupInputs::default()).is_empty());
+    let knowing = without_tmdb_id("Knowing", 2009);
+    let entry = LookupInputs { name: Some(&piranha), discdb_by_fingerprint: Some(&knowing), ..LookupInputs::default() };
+    assert_eq!(search_queries(&entry), ["Knowing"], "S47: the entry's title alone (T4-R5)");
+}

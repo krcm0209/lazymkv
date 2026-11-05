@@ -5,6 +5,7 @@ pub mod live;
 pub mod lookups;
 mod merge;
 pub mod recorded;
+pub mod refetch;
 pub mod saved;
 pub mod transport;
 
@@ -14,10 +15,11 @@ pub use live::{
 };
 pub use lookups::{
     authentication_url, discdb_by_disc_id, discdb_by_fingerprint, dischash_url, discid_url, record_url, search_url,
-    season_url, tmdb_record, tmdb_search, tmdb_season, Fetched, Outcome, PendingReason, DISCDB, TMDB,
+    reason_text, season_url, tmdb_record, tmdb_search, tmdb_season, Fetched, Outcome, PendingReason, DISCDB, TMDB,
 };
 pub use merge::merge_pages;
 pub use recorded::{Gate, RecordedTransport};
+pub use refetch::{refetch_record, refetch_search, stale_copies, status_record, StaleCopy};
 pub use saved::{slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 pub use transport::{
     user_agent, webhook_target, HttpTransport, OfflineTransport, Response, TransportError, WebhookTarget, OFFLINE,

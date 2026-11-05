@@ -10,7 +10,7 @@ use lazymkv_core::lookup::tmdb::{
     TmdbSeason,
 };
 
-use crate::transport::{user_agent, HttpTransport, TransportError};
+use crate::transport::{user_agent, HttpTransport, TransportError, TIMEOUT_S};
 
 /// TheDiscDB's API root. Design part 8.1. Def: T15. Use: T16.
 pub const DISCDB: &str = "https://thediscdb.com/api";
@@ -68,7 +68,7 @@ pub struct Fetched {
     pub body: Vec<u8>,
 }
 
-/// Why a lookup stays pending. Design part 8.3. Def: T15. Use: T16, T24.
+/// Why a lookup stays pending. Design part 8.3, Ruling R24.6. Def: T15 (`Stale`: T4-8). Use: T16, T24, T4-9, T4-10.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingReason {
     /// TMDb was not asked, because no token is set.
@@ -83,6 +83,24 @@ pub enum PendingReason {
     Status(u16),
     /// A 200 whose body the parser refused, or that is not UTF-8: the sentence names the URL.
     Unparsed(String),
+    /// A kept TMDb copy, the file named, is past the six-month limit or was deleted, and is fetched again (design part
+    /// 8.4, R-B4; Ruling T4-R7). Its status word is `000`. Def: T4-8. Use: T4-9, T4-10.
+    Stale(String),
+}
+
+/// Why a lookup is pending, in the words of Ruling R24.6 for the six reasons it names, and `<file> is more than six
+/// months old or was deleted, and is fetched again` for `Stale` (design part 8.3, 8.4). No text holds a token.
+/// Def: T4-8. Use: T4-9, T4-10.
+pub fn reason_text(reason: &PendingReason) -> String {
+    match reason {
+        PendingReason::NoToken => "no tmdb_token is set".to_string(),
+        PendingReason::TokenRefused => "TMDb refused the token (HTTP 401)".to_string(),
+        PendingReason::Timeout => format!("no answer within {TIMEOUT_S} s"),
+        PendingReason::Unreachable(text) => text.clone(),
+        PendingReason::Status(status) => format!("HTTP {status}"),
+        PendingReason::Unparsed(sentence) => sentence.clone(),
+        PendingReason::Stale(file) => format!("{file} is more than six months old or was deleted, and is fetched again"),
+    }
 }
 
 /// The result of one lookup. `Answered` always carries a record (S46): TheDiscDB's 404, and a 200 that the parser reads
@@ -325,5 +343,14 @@ mod tests {
         assert_eq!(tmdb_season(&t, Some("token"), 900002, 2), Outcome::Pending {
             reason: PendingReason::Unparsed(format!("{}: the answer is season 3, not season 2", season_url(900002, 2))),
             fetched: Some(Fetched { url: season_url(900002, 2), status: 200, body: br#"{"season_number": 3, "episodes": []}"#.to_vec() }) });
+    }
+
+    #[test]
+    fn reason_text_keeps_r24_6s_texts() {
+        let texts = [(PendingReason::NoToken, "no tmdb_token is set"), (PendingReason::TokenRefused, "TMDb refused the token (HTTP 401)"),
+            (PendingReason::Timeout, "no answer within 10 s"), (PendingReason::Unreachable("down".into()), "down"),
+            (PendingReason::Status(503), "HTTP 503"), (PendingReason::Unparsed("x: bad".into()), "x: bad"),
+            (PendingReason::Stale("tmdb-record.json".into()), "tmdb-record.json is more than six months old or was deleted, and is fetched again")];
+        for (reason, text) in texts { assert_eq!(reason_text(&reason), text); }
     }
 }
