@@ -353,15 +353,17 @@ pub(crate) fn refreshed_plan(
     Ok(refresh_identity(plan, &book.lookup_inputs(inputs.name.as_ref()), settings))
 }
 
-/// A lookup's word in the waiting message and job.log (Ruling R24.6): `dischash`, `discid`, `search` or `tmdb record`.
-/// Def: T24. Use: T24.
-pub(crate) fn lookup_word(lookup: Lookup) -> &'static str {
-    match lookup {
+/// A lookup's word in the waiting message and job.log, the first word of its status line except the record's
+/// (Rulings R24.6, T4-R1): `dischash`, `discid`, `search`, `search-tagged`, `tmdb record`. Def: T4-2. Use: T4-3, T4-4.
+pub(crate) fn lookup_word(lookup: Lookup) -> String {
+    let word = match lookup {
         Lookup::Dischash => "dischash",
         Lookup::Discid => "discid",
         Lookup::Search => "search",
+        Lookup::TaggedSearch => "search-tagged",
         Lookup::Record => "tmdb record",
-    }
+    };
+    word.to_string()
 }
 
 /// Why a lookup is pending, in the words of Ruling R24.6.
@@ -377,7 +379,7 @@ fn reason_text(reason: &PendingReason) -> String {
 }
 
 /// The waiting message of a pending lookup (design part 8.3): each pending lookup in `Lookup` order as
-/// `<word>: <reason>`, joined by "; ", the word being `dischash`, `discid`, `search` or `tmdb record` (Ruling R24.6).
+/// `<word>: <reason>`, joined by "; ", the word being `lookup_word`'s (Ruling R24.6).
 /// Def: T24. Use: T24, T26.
 pub(crate) fn waiting_message(book: &LookupBook) -> String {
     let pending = book.states.iter().filter_map(|(lookup, state)| match state {

@@ -116,16 +116,26 @@ pub fn slim_record(raw: &Value, kind: TmdbKind, today: &str) -> Value {
     dated(slim, today)
 }
 
-/// The slim `tmdb-search.json`: only the results whose `media_type` is `movie` or `tv`, each with `media_type`, `id`
-/// and the kind's title, original title and date (`title`, `original_title`, `release_date` for a movie; `name`,
-/// `original_name`, `first_air_date` for tv) when present and not null. The page then gets `queries` (the one query
-/// searched) and `fetched_at`. Design parts 7.1 and 8.4 (S68, P29). Def: T15. Use: T16.
-pub fn slim_search(raw: &Value, query: &str, today: &str) -> Value {
-    let results = raw.get("results").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-    let results = results
-        .iter()
-        .filter_map(|result| {
-            let kind: TmdbKind = result.get("media_type").and_then(Value::as_str)?.parse().ok()?;
+/// The slim `tmdb-search.json` of one or more pages (design parts 7.1 and 8.4; S68, P29, J8): each page's movie and tv
+/// results slimmed as before, in page order, where a result of a later page is left out when a kept result has its
+/// `media_type` and `id` (so the results are `merge_pages`'s); then `queries`, each page's query in order; then
+/// `fetched_at`. One page gives pull request 2's file byte for byte. Def: T4-2. Use: T4-2, T4-3, T4-8.
+pub fn slim_search(pages: &[(&Value, &str)], today: &str) -> Value {
+    let mut kept: Vec<(TmdbKind, Option<Value>)> = Vec::new();
+    let mut results = Vec::new();
+    for (index, (raw, _)) in pages.iter().enumerate() {
+        let page = raw.get("results").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        for result in page {
+            let Some(kind) = result.get("media_type").and_then(Value::as_str).and_then(|kind| kind.parse().ok()) else {
+                continue;
+            };
+            let key = (kind, result.get("id").cloned());
+            if index > 0 && kept.contains(&key) {
+                continue;
+            }
+            kept.push(key);
+            // A slim result: `media_type`, `id`, and the kind's title, original title and date when present and not
+            // null. A result of another media type was dropped above.
             let fields = match kind {
                 TmdbKind::Movie => ["title", "original_title", "release_date"],
                 TmdbKind::Tv => ["name", "original_name", "first_air_date"],
@@ -136,12 +146,13 @@ pub fn slim_search(raw: &Value, query: &str, today: &str) -> Value {
             for field in fields {
                 keep(&mut slim, result, field);
             }
-            Some(Value::Object(slim))
-        })
-        .collect();
+            results.push(Value::Object(slim));
+        }
+    }
+    let queries = pages.iter().map(|(_, query)| Value::String(query.to_string())).collect();
     let mut page = Map::new();
     page.insert("results".to_string(), Value::Array(results));
-    page.insert("queries".to_string(), Value::Array(vec![Value::String(query.to_string())]));
+    page.insert("queries".to_string(), Value::Array(queries));
     dated(page, today)
 }
 
@@ -210,7 +221,7 @@ mod tests {
              "release_date": "2001-02-03", "popularity": 1.5},
             {"media_type": "person", "id": 7, "name": "Someone"},
             {"media_type": "tv", "id": 5, "name": "Show", "original_name": "Show", "first_air_date": "2002-01-01"}]});
-        let text = serde_json::to_string(&slim_search(&raw, "SYNTHETIC MOVIE", "2026-10-23")).unwrap();
+        let text = serde_json::to_string(&slim_search(&[(&raw, "SYNTHETIC MOVIE")], "2026-10-23")).unwrap();
         assert_eq!(text, r#"{"results":[{"media_type":"movie","id":900001,"title":"Synthetic Movie","original_title":"Synthetic Movie","release_date":"2001-02-03"},{"media_type":"tv","id":5,"name":"Show","original_name":"Show","first_air_date":"2002-01-01"}],"queries":["SYNTHETIC MOVIE"],"fetched_at":"2026-10-23"}"#);
         assert_eq!(parse_search(&text, "tmdb-search.json").unwrap().results.len(), 2);
     }

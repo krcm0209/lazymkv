@@ -1,13 +1,14 @@
 //! The movie lookup chain (design parts 8.2 and 8.3): TheDiscDB by fingerprint, TheDiscDB by disc ID, TMDb's search
-//! on the disc's own name, then the TMDb record that `core::lookup::record_to_fetch` names for the answers in hand. A
-//! round asks every lookup that is not answered yet, in that order, and saves each answer and `lookup-status.txt` as
-//! they come; a later round asks again what stayed pending. Pull request 2 runs the movie path only (S19), with no
+//! on the disc's own name, J8's second search on its tagged name when that folds to another text (its page merged into
+//! the first by `merge_pages`), then the TMDb record that `core::lookup::record_to_fetch` names for the answers in
+//! hand. A round asks every lookup that is not answered yet, in that order, and saves each answer and
+//! `lookup-status.txt` as they come; a later round asks again what stayed pending. Pull request 2 runs the movie path only (S19), with no
 //! entry-title search (S47). Used by Tasks 23, 24, 25 and 26.
 
 use std::collections::BTreeMap;
 
 use lazymkv_core::lookup::discdb::DiscDbRecord;
-use lazymkv_core::lookup::name::DiscName;
+use lazymkv_core::lookup::name::{fold_name, DiscName};
 use lazymkv_core::lookup::tmdb::{TmdbRecord, TmdbSearch};
 use lazymkv_core::lookup::{record_to_fetch, LookupInputs};
 use serde_json::Value;
@@ -15,15 +16,17 @@ use serde_json::Value;
 use crate::lookups::{
     discdb_by_disc_id, discdb_by_fingerprint, tmdb_record, tmdb_search, Fetched, Outcome, PendingReason,
 };
+use crate::merge::merge_pages;
 use crate::saved::{slim_record, slim_search, slim_tmdb, status_text, SavedFile};
 use crate::transport::HttpTransport;
 
-/// One request of the movie chain (design part 8.2 items 1 to 4). Def: T16. Use: T23, T24, T25.
+/// One request of the chain of design part 8.2, in chain order. Def: T4-2. Use: T4-3 to T4-5, T4-9, T4-15.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Lookup {
     Dischash,
     Discid,
     Search,
+    TaggedSearch,
     Record,
 }
 
@@ -45,7 +48,10 @@ pub enum LookupState {
 pub struct Answers {
     pub by_fingerprint: Option<DiscDbRecord>,
     pub by_disc_id: Vec<DiscDbRecord>,
+    /// The cleaned name's page, merged with `tagged` once both are in hand (J8). Def: T4-2. Use: T4-2, T4-3, T4-9.
     pub search: Option<TmdbSearch>,
+    /// The tagged name's page (design part 8.2 item 2). Def: T4-2. Use: T4-2, T4-3.
+    pub tagged: Option<TmdbSearch>,
     pub record: Option<TmdbRecord>,
 }
 
@@ -73,7 +79,10 @@ impl LookupBook {
         let waiting = |lookup: Lookup| present(lookup) && !answered(lookup);
         // No Dischash state means no round has started, so both lookups read as pending.
         let discdb = !answered(Lookup::Dischash) || waiting(Lookup::Discid);
-        let tmdb = !present(Lookup::Dischash) || waiting(Lookup::Search) || waiting(Lookup::Record);
+        let tmdb = !present(Lookup::Dischash)
+            || waiting(Lookup::Search)
+            || waiting(Lookup::TaggedSearch)
+            || waiting(Lookup::Record);
         (discdb, tmdb)
     }
 
@@ -164,6 +173,7 @@ fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
             Lookup::Dischash => "dischash".to_string(),
             Lookup::Discid => "discid".to_string(),
             Lookup::Search => "search".to_string(),
+            Lookup::TaggedSearch => "search-tagged".to_string(),
             Lookup::Record => {
                 let identity = match (state, &book.answers.record) {
                     (LookupState::Answered { .. }, Some(record)) => Some(record.identity),
@@ -201,6 +211,23 @@ fn answered_json<T>(settled: &Settled<T>, fetched: Option<&Fetched>) -> Option<V
     serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()
 }
 
+/// `tmdb-search.json` over the name search pages in hand: the cleaned name's page (merged once the tagged page came)
+/// with its query, then the tagged name's page with its query (J8).
+fn search_file(answers: &Answers, name: &DiscName, today: &str) -> SavedFile {
+    // Serializing a parsed page cannot fail: its fields are strings, numbers and options.
+    let as_value = |page: &TmdbSearch| serde_json::to_value(page).unwrap_or_default();
+    let cleaned = answers.search.as_ref().map(as_value);
+    let tagged = answers.tagged.as_ref().map(as_value);
+    let mut pages: Vec<(&Value, &str)> = Vec::new();
+    if let Some(page) = &cleaned {
+        pages.push((page, &name.cleaned));
+    }
+    if let Some(page) = &tagged {
+        pages.push((page, &name.tagged));
+    }
+    json_file("tmdb-search.json", &slim_search(&pages, today))
+}
+
 /// One round of design part 8.3: asks every lookup of the chain that is not answered, in the order of design part 8.2,
 /// saving each answer and the status file as they come. Def: T16. Use: T23, T24, T25, T26.
 pub fn run_round(
@@ -217,8 +244,11 @@ pub fn run_round(
     if inputs.disc_id.is_some() {
         book.states.entry(Lookup::Discid).or_insert(LookupState::NotAsked);
     }
-    if searched.is_some() {
+    if let Some(searched) = searched {
         book.states.entry(Lookup::Search).or_insert(LookupState::NotAsked);
+        if fold_name(&searched.tagged) != fold_name(&searched.cleaned) {
+            book.states.entry(Lookup::TaggedSearch).or_insert(LookupState::NotAsked);
+        }
     }
 
     if book.asks(Lookup::Dischash) {
@@ -243,11 +273,30 @@ pub fn run_round(
 
     if let Some(searched) = searched.filter(|_| book.asks(Lookup::Search)) {
         start(book, Lookup::Search, name, save);
-        let (settled, fetched) = settle(book, Lookup::Search, tmdb_search(t, token, &searched.cleaned));
-        if let Some(raw) = answered_json(&settled, fetched.as_ref()) {
-            save(json_file("tmdb-search.json", &slim_search(&raw, &searched.cleaned, today)));
+        let (settled, _) = settle(book, Lookup::Search, tmdb_search(t, token, &searched.cleaned));
+        let page = matches!(settled, Settled::Value(_));
+        let answers = &mut book.answers;
+        settled.write(&mut answers.search, |search| match &answers.tagged {
+            Some(tagged) => Some(merge_pages(&search, tagged)),
+            None => Some(search),
+        });
+        if page {
+            save(search_file(&book.answers, searched, today));
         }
-        settled.write(&mut book.answers.search, Some);
+        save(status_file(book, name));
+    }
+
+    if let Some(searched) = searched.filter(|_| book.asks(Lookup::TaggedSearch)) {
+        start(book, Lookup::TaggedSearch, name, save);
+        let (settled, _) = settle(book, Lookup::TaggedSearch, tmdb_search(t, token, &searched.tagged));
+        let page = matches!(settled, Settled::Value(_));
+        settled.write(&mut book.answers.tagged, Some);
+        if let (Some(search), Some(tagged)) = (&book.answers.search, &book.answers.tagged) {
+            book.answers.search = Some(merge_pages(search, tagged));
+        }
+        if page {
+            save(search_file(&book.answers, searched, today));
+        }
         save(status_file(book, name));
     }
 
@@ -642,5 +691,78 @@ mod tests {
         };
         assert_eq!(book.lookup_inputs(None).discdb_by_disc_id, Some(&known));
         assert_eq!(book.lookup_inputs(None).discdb_by_fingerprint, None);
+    }
+
+    /// The name search pages of `PIRANHA_3D` (cleaned `PIRANHA`, tagged `PIRANHA 3D`; decision-core H1). IDs made up.
+    const PIRANHA_CLEANED: [(i64, &str, &str); 2] = [(900101, "Piranha", "1978-08-03"), (900102, "Piranha", "2010-08-20")];
+    const PIRANHA_TAGGED: [(i64, &str, &str); 2] = [(900102, "Piranha", "2010-08-20"), (900103, "Piranha 3D", "2010-08-20")];
+
+    /// The tmdb-search.json files in `saved`, parsed, in order.
+    fn search_files(saved: &[SavedFile]) -> Vec<Value> {
+        saved.iter().filter(|f| f.name == "tmdb-search.json").map(|f| serde_json::from_slice(&f.bytes).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_name_whose_tagged_form_differs_is_searched_twice_and_merged() {
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("PIRANHA_3D"));
+        misses(&t);
+        t.answer(&search_url("PIRANHA"), 200, &search_body(&PIRANHA_CLEANED));
+        t.answer(&search_url("PIRANHA 3D"), 200, &search_body(&PIRANHA_TAGGED));
+        t.answer(&record_url(movie(900103)), 200, &movie_body(900103, "Piranha 3D", "2010-08-20"));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        let searched = [search_url("PIRANHA"), search_url("PIRANHA 3D")];
+        assert_eq!(urls(&t)[2..4], searched);
+        assert_eq!(urls(&t).last(), Some(&record_url(movie(900103))));
+        let merged: Vec<i64> = book.answers.search.as_ref().unwrap().results.iter().map(|r| r.id).collect();
+        assert_eq!(merged, [900101, 900102, 900103]);
+        assert_eq!(book.pending(), (false, false));
+        assert_eq!(last_status(&saved), ["dischash 404", "discid 404", "search 200", "search-tagged 200", "tmdb movie/900103 200"]);
+        let files = search_files(&saved);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["queries"], json!(["PIRANHA"]));
+        assert_eq!(files[1]["queries"], json!(["PIRANHA", "PIRANHA 3D"]));
+        assert_eq!(files[1]["results"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_name_whose_forms_fold_equal_is_searched_once() {
+        let mut inputs = chain(Some(DISC_ID), None);
+        inputs.name = disc_name(Some("Synthetic Movie"), Some("SYNTHETIC_MOVIE"));
+        let cleaned = inputs.name.as_ref().unwrap().cleaned.clone();
+        let t = RecordedTransport::new();
+        misses(&t);
+        t.answer(&search_url(&cleaned), 200, &search_body(&[(900001, "Synthetic Movie", "2001-02-03")]));
+        t.answer(&record_url(movie(900001)), 200, &movie_body(900001, "Synthetic Movie", "2001-02-03"));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url(&cleaned), record_url(movie(900001))]);
+        assert!(!book.states.contains_key(&Lookup::TaggedSearch));
+        assert!(!last_status(&saved).iter().any(|line| line.starts_with("search-tagged")));
+    }
+
+    #[test]
+    fn tmdb_stays_pending_until_the_tagged_search_answers() {
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("PIRANHA_3D"));
+        misses(&t);
+        t.answer(&search_url("PIRANHA"), 200, &search_body(&PIRANHA_CLEANED));
+        t.answer(&search_url("PIRANHA 3D"), 503, b"");
+        t.answer(&search_url("PIRANHA 3D"), 200, &search_body(&PIRANHA_TAGGED));
+        t.answer(&record_url(movie(900103)), 200, &movie_body(900103, "Piranha 3D", "2010-08-20"));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(book.states[&Lookup::TaggedSearch], LookupState::Pending { reason: PendingReason::Status(503) });
+        assert!(book.pending().1);
+        assert!(last_status(&saved).contains(&"search-tagged 503".to_string()));
+        let files = search_files(&saved);
+        assert_eq!((files.len(), &files[0]["queries"]), (1, &json!(["PIRANHA"])));
+        // Two plausible "Piranha" results: no record yet.
+        assert!(!urls(&t).iter().any(|url| url.contains("/movie/")));
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(book.pending(), (false, false));
+        assert_eq!(search_files(&saved)[0]["queries"], json!(["PIRANHA", "PIRANHA 3D"]));
+        assert_eq!(urls(&t).last(), Some(&record_url(movie(900103))));
     }
 }

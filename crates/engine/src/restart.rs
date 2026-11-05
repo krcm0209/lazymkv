@@ -8,6 +8,7 @@ use std::path::Path;
 use lazymkv_clients::{Answers, Lookup, LookupBook, LookupState, PendingReason};
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::discdb::{parse_dischash, parse_discid};
+use lazymkv_core::lookup::name::fold_name;
 use lazymkv_core::lookup::tmdb::{parse_movie, parse_search};
 use lazymkv_core::record::{DrivesFile, JobRecord};
 
@@ -155,14 +156,16 @@ pub(crate) fn held_promise(state: &State) -> Option<PromisedStep> {
 }
 
 /// Ruling S73: each line of lookup-status.txt is mapped to a lookup by its first word (`dischash`, `discid`, `search`,
-/// and `tmdb` for the record) and to a state by its last word. `200` is `Answered { status: 200 }` with the saved
-/// file's parsed answer, or `Pending { Unparsed }` with the parser's sentence when the file does not parse; `404` is
-/// `Answered`; `000` is `Pending { Unreachable("no answer before the restart") }`; `unparsed` is `Pending { Unparsed }`
+/// `search-tagged`, and `tmdb` for the record) and to a state by its last word. `200` is `Answered { status: 200 }`
+/// with the saved file's parsed answer, or `Pending { Unparsed }` with the parser's sentence when the file does not
+/// parse; `404` is `Answered`; `000` is `Pending { Unreachable("no answer before the restart") }`; `unparsed` is `Pending { Unparsed }`
 /// with the sentence of reading the file again; any other number is `Pending { Status(n) }`. A line of another shape
 /// is skipped. A folder with no status line gives the empty book, as before the first round, so RunScan starts one.
 /// Otherwise each lookup of the disc's chain with no line is `NotAsked`, as a round leaves it: TheDiscDB by
-/// fingerprint always, by disc ID when meta.json has one, and the search when the disc's name is not generic
-/// (`chain_inputs`).
+/// fingerprint always, by disc ID when meta.json has one, the search when the disc's name is not generic
+/// (`chain_inputs`), and the tagged search when that name's tagged and cleaned forms also fold to different texts. A
+/// `search-tagged 200` puts tmdb-search.json's page in `answers.tagged` as `search 200` puts it in `answers.search`;
+/// a file holding the merged page then sits in both, which merges to itself (J8).
 ///
 /// A job's LookupBook read back from its folder's lookup-status.txt and saved answers (design part 8.3). Def: T25.
 /// Use: T25, T26.
@@ -180,6 +183,7 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
             "dischash" => Lookup::Dischash,
             "discid" => Lookup::Discid,
             "search" => Lookup::Search,
+            "search-tagged" => Lookup::TaggedSearch,
             "tmdb" => Lookup::Record,
             _ => continue,
         };
@@ -213,8 +217,11 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
         if inputs.disc_id.is_some() {
             chain.push(Lookup::Discid);
         }
-        if inputs.name.is_some_and(|name| !name.generic) {
+        if let Some(name) = inputs.name.filter(|name| !name.generic) {
             chain.push(Lookup::Search);
+            if fold_name(&name.tagged) != fold_name(&name.cleaned) {
+                chain.push(Lookup::TaggedSearch);
+            }
         }
     }
     for lookup in chain {
@@ -223,13 +230,13 @@ pub(crate) fn rebuild_book(job_dir: &Path) -> LookupBook {
     book
 }
 
-/// The saved answer of `lookup` in a job folder: `thediscdb-hash.json`, `thediscdb-discid.json`, `tmdb-search.json` or
-/// `tmdb-record.json` (design part 7.1).
+/// The saved answer of `lookup` in a job folder: `thediscdb-hash.json`, `thediscdb-discid.json`, `tmdb-search.json`
+/// (for both name searches) or `tmdb-record.json` (design part 7.1).
 fn answer_path(job_dir: &Path, lookup: Lookup) -> std::path::PathBuf {
     let name = match lookup {
         Lookup::Dischash => "thediscdb-hash.json",
         Lookup::Discid => "thediscdb-discid.json",
-        Lookup::Search => "tmdb-search.json",
+        Lookup::Search | Lookup::TaggedSearch => "tmdb-search.json",
         Lookup::Record => "tmdb-record.json",
     };
     job_dir.join(name)
@@ -246,6 +253,7 @@ fn read_answer(job_dir: &Path, lookup: Lookup, answers: &mut Answers) -> Result<
         Lookup::Dischash => answers.by_fingerprint = parse_dischash(&text, &shown)?,
         Lookup::Discid => answers.by_disc_id = parse_discid(&text, &shown)?,
         Lookup::Search => answers.search = Some(parse_search(&text, &shown)?),
+        Lookup::TaggedSearch => answers.tagged = Some(parse_search(&text, &shown)?),
         Lookup::Record => answers.record = Some(parse_movie(&text, &shown)?),
     }
     Ok(())
@@ -259,6 +267,7 @@ mod tests {
     use lazymkv_core::profile::JOB_PROFILE_FILE;
     use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, DRIVES_FORMAT, JOB_FORMAT};
     use lazymkv_core::testsupport::{search_json, Scratch, ScratchExt};
+    use crate::file_phase::waiting_message;
     use std::collections::BTreeMap;
 
     fn record(id: &str, fingerprint: &str, created: u64, state: State) -> JobRecord {
@@ -483,5 +492,21 @@ mod tests {
         let book = rebuild_book(&s.0);
         assert!(matches!(book.states[&Lookup::Search], LookupState::Pending { reason: PendingReason::Unparsed(_) }));
         assert!(book.states.get(&Lookup::Dischash).map_or(true, |state| matches!(state, LookupState::NotAsked)));
+    }
+
+    #[test]
+    fn the_rebuilt_book_reads_the_tagged_search_line() {
+        let s = Scratch::new("book-tagged");
+        let page = search_json(&[("movie", 900101, "Piranha", "Piranha", "1978-08-03"), ("movie", 900103, "Piranha 3D", "Piranha 3D", "2010-08-20")]);
+        s.write("tmdb-search.json", &page);
+        s.write("lookup-status.txt", "dischash 404\nsearch 200\nsearch-tagged 200\n");
+        let book = rebuild_book(&s.0);
+        assert!(matches!(book.states[&Lookup::TaggedSearch], LookupState::Answered { status: 200 }));
+        assert_eq!(book.answers.search.as_ref().map(|p| p.results.len()), Some(2));
+        assert_eq!(book.answers.tagged, book.answers.search);
+        s.write("lookup-status.txt", "dischash 404\nsearch 200\nsearch-tagged 503\n");
+        let book = rebuild_book(&s.0);
+        assert!(book.answers.tagged.is_none());
+        assert_eq!(waiting_message(&book), "search-tagged: HTTP 503");
     }
 }
