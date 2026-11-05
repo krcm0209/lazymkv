@@ -1431,6 +1431,8 @@ fn a_rip_again_beside_a_kept_lookup_pending_leaves_it_to_its_refeed_timer() {
     h.allow_persists();
     h.fire_timers();
     h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    // state.json is replaced before the transitions line is appended (store.rs), so the line gets its own wait.
+    h.wait("the LookupPending line", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::LookupPending)));
     let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupPending)).unwrap();
     assert_eq!(fed.old, Some(State::Ejected { after_copy: false }));
     let record = h.record(&id);
