@@ -1,6 +1,7 @@
 //! lazymkv-clients: TheDiscDB and TMDb (The Movie Database) behind an HTTP transport trait, with a transport that replays recorded answers (design parts 4.1, 8.1). Two test doubles, `RecordedTransport` and `OfflineTransport`, stand in for the live transport.
 
 pub mod chain;
+pub mod live;
 pub mod lookups;
 mod merge;
 pub mod recorded;
@@ -8,6 +9,9 @@ pub mod saved;
 pub mod transport;
 
 pub use chain::{run_round, seasons_to_fetch, Answers, ChainInputs, Lookup, LookupBook, LookupState};
+pub use live::{
+    UreqTransport, BAD_ANSWER, BODY_TOO_LONG, CONNECTION_FAILED, MAX_BODY_BYTES, NO_HOST, REFUSED, TLS_FAILED,
+};
 pub use lookups::{
     authentication_url, discdb_by_disc_id, discdb_by_fingerprint, dischash_url, discid_url, record_url, search_url,
     season_url, tmdb_record, tmdb_search, tmdb_season, Fetched, Outcome, PendingReason, DISCDB, TMDB,

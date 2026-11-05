@@ -57,7 +57,8 @@ pub struct WebhookTarget {
 /// A webhook URL's target (design part 8.6). The scheme is `http` (port 80) or `https` (443), ASCII case ignored;
 /// the host is read as the engine's `secret_host` reads it (the authority up to `/`, `?` or `#`, any `user@` dropped,
 /// a bracketed IPv6 address unbracketed); an explicit port wins. None for any other scheme, an empty host, whitespace
-/// anywhere in the URL, or a port that is empty, not a number or not in 1..=65535. Def: T4-6. Use: T4-12, T4-13.
+/// anywhere in the URL, or a port that is empty, not all ASCII digits or not in 1..=65535.
+/// Def: T4-6. Use: T4-12, T4-13.
 pub fn webhook_target(url: &str) -> Option<WebhookTarget> {
     if url.contains(char::is_whitespace) {
         return None;
@@ -96,6 +97,8 @@ pub fn webhook_target(url: &str) -> Option<WebhookTarget> {
                 80
             }
         }
+        // A URL parser refuses a signed port, though `u16::from_str` takes a leading `+`.
+        Some(text) if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) => return None,
         Some(text) => match text.parse::<u16>() {
             Ok(0) | Err(_) => return None,
             Ok(port) => port,
@@ -145,7 +148,7 @@ mod tests {
         assert_eq!(webhook_target("http://[::1]:8123/"), target(false, "::1", 8123));
         assert_eq!(webhook_target("https://[fe80::1]/x"), target(true, "fe80::1", 443));
         for refused in ["ftp://h/", "http:///x", "not a url", "h:8123", "", "http://h:0/", "http://h:70000/",
-                        "http://h:/", "http://h:80x/", "http://h /x"] {
+                        "http://h:/", "http://h:80x/", "http://h /x", "http://h:+80/"] {
             assert_eq!(webhook_target(refused), None, "{refused}");
         }
     }
