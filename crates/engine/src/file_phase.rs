@@ -453,7 +453,8 @@ fn answer_stale(book: &mut LookupBook, file: &str) {
 /// `search_queries` over the book. Each fetched file is written with `write_atomic` (a record fetch writes both of its
 /// files, and one that cannot be written fails the copies of its fetch). The book is locked only to read the queries
 /// and to install an answer, never across a request: the record and `record_file`, or the page into `answers.entry`
-/// when the status holds `search-entry 200`, else `answers.search`, each `Pending { Stale(_) }` state of that file's
+/// when the status holds `search-entry 200`, else `answers.search` (and `answers.tagged` too when the status holds
+/// `search-tagged 200`), each `Pending { Stale(_) }` state of that file's
 /// lookups becoming `Answered { status: 200 }`. A copy that failed sets its file's lookups present in the book to
 /// `Pending { Stale(<first failed file of its fetch>) }`, so the next round asks them again. Ok holds the listed copies
 /// fetched again, in `TMDB_COPIES` order; Err joins a `stale_sentence` per copy not fetched again with "; ".
@@ -510,14 +511,21 @@ pub(crate) fn refetch_stale(
             .and_then(|(page, file)| write_copies(job_dir, std::slice::from_ref(&file)).map(|()| page));
         match fetched {
             Ok(page) => {
-                let entry = status.lines().any(|line| {
-                    let words: Vec<&str> = line.split_whitespace().collect();
-                    words.first() == Some(&"search-entry") && words.last() == Some(&"200")
-                });
+                let answered = |key: &str| {
+                    status.lines().any(|line| {
+                        let words: Vec<&str> = line.split_whitespace().collect();
+                        words.first() == Some(&key) && words.last() == Some(&"200")
+                    })
+                };
                 let mut book = lock();
-                if entry {
+                if answered("search-entry") {
                     book.answers.entry = Some(page);
                 } else {
+                    // The page merges both queries, and merge_pages of a page with itself is the page (J8), as
+                    // rebuild_book reads a `search-tagged 200` line.
+                    if answered("search-tagged") {
+                        book.answers.tagged = Some(page.clone());
+                    }
                     book.answers.search = Some(page);
                 }
                 answer_stale(&mut book, SEARCH_COPY);
@@ -707,6 +715,37 @@ mod tests {
         ].join("; "));
         assert_eq!(lock(&book).states[&Lookup::Record], LookupState::Pending { reason: PendingReason::Stale("tmdb.json".into()) });
         assert!(t.requests().is_empty());
+    }
+
+    /// A /search/multi first page holding the one movie `id`.
+    fn one_result_page(id: i64, title: &str) -> String {
+        format!(r#"{{"page": 1, "results": [{{"media_type": "movie", "id": {id}, "title": "{title}", "original_title": "{title}", "release_date": "2010-08-20"}}], "total_pages": 1, "total_results": 1}}"#)
+    }
+
+    #[test]
+    fn a_refetched_search_page_fills_the_tagged_answer_when_its_line_says_200() {
+        let s = Scratch::new("stale-tagged");
+        s.write("lookup-status.txt", "dischash 404\nsearch 200\nsearch-tagged 200\n");
+        let page = r#"{"results": [{"media_type": "movie", "id": 900101, "title": "Piranha", "original_title": "Piranha", "release_date": "1978-08-03"}], "queries": ["PIRANHA", "PIRANHA 3D"], "fetched_at": "2026-01-01"}"#;
+        s.write("tmdb-search.json", page);
+        let t = RecordedTransport::new();
+        t.answer(&lazymkv_clients::search_url("PIRANHA"), 200, one_result_page(900101, "Piranha").as_bytes());
+        t.answer(&lazymkv_clients::search_url("PIRANHA 3D"), 200, one_result_page(900103, "Piranha 3D").as_bytes());
+        let book = Mutex::new(LookupBook::default());
+        for lookup in [Lookup::Search, Lookup::TaggedSearch] {
+            let stale = LookupState::Pending { reason: PendingReason::Stale("tmdb-search.json".into()) };
+            lock(&book).states.insert(lookup, stale);
+        }
+        let fetched = refetch_stale(&s.0, None, &book, &t, Some("token-sentinel-5d2e"), "2026-10-23");
+        assert_eq!(fetched, Ok(vec!["tmdb-search.json".to_string()]));
+        let book = lock(&book);
+        assert_eq!(book.states[&Lookup::Search], LookupState::Answered { status: 200 });
+        assert_eq!(book.states[&Lookup::TaggedSearch], LookupState::Answered { status: 200 });
+        assert!(book.answers.search.is_some());
+        assert_eq!(book.answers.tagged, book.answers.search);
+        assert_eq!(book.answers.entry, None);
+        let saved: Value = serde_json::from_slice(&std::fs::read(s.0.join("tmdb-search.json")).unwrap()).unwrap();
+        assert_eq!(saved["queries"], serde_json::json!(["PIRANHA", "PIRANHA 3D"]));
     }
 
     #[test]
