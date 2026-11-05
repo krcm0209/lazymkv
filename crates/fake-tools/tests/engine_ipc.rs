@@ -18,7 +18,7 @@ use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
-use lazymkv_engine::NO_DELIVERY;
+use lazymkv_engine::NOTIFY_DRAIN_S;
 use lazymkv_platform::{IpcConnector, Reach, SecretStore};
 use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
@@ -1908,32 +1908,35 @@ fn the_token_check_runs_over_the_engines_transport() {
     assert!(h.http().requests().iter().any(|(url, _)| url == "https://api.themoviedb.org/3/authentication"));
 }
 
-// ---- The binary's transport and sink (spec 12; design part 3.5; Ruling W26) ----
+// ---- The engine's notifier (spec 12; design part 8.6; Ruling T4-R13) ----
 
-/// Spec 12 and design part 3.5: a notification the sink cannot deliver is logged in engine.log with its event, its job
-/// and the sink's reason, and never blocks the job. Under pull request 3's binary sink, `NoDelivery`, every
-/// notification is one (Ruling W26).
+const HA_URL: &str = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
+
+/// Spec 12 and design part 8.6: a notification no channel accepts is logged in engine.log with its event, its job and
+/// the failed channel's name, never its URL, and never blocks the job.
 #[test]
-fn an_undelivered_notification_is_logged_with_its_reason() {
+fn an_undelivered_notification_is_logged_with_its_channel() {
     let h = stand_in(&[DISC_A], settings());
-    h.use_binary_services();
+    h.use_webhook_sink();
+    h.secrets().set("ha_webhook_url", HA_URL).unwrap();
+    h.http().answer(HA_URL, 500, b"");
     h.restart();
     h.scan_waits_for_lookups(false);
     h.insert("tok0", DISC_A);
     let id = id_of(&h, DISC_A);
-    let line = format!("notification disc_done for {id} was not delivered: {NO_DELIVERY}");
+    let line = format!("notification disc_done for {id} was not delivered: ha_webhook_url: HTTP 500 after 3 attempts");
     h.wait("the undelivered disc_done", |h| h.engine_log().contains(&line));
-    assert_eq!(NO_DELIVERY, "no notification delivery in this build; it arrives in pull request 4");
+    assert!(!h.engine_log().contains("hook-sentinel-7f3a"));
     assert!(h.notifications().is_empty(), "{:?}", h.notifications());
 }
 
-/// Ruling W26: with pull request 3's binary transport, `OfflineTransport`, every lookup is unreachable, so a disc goes
-/// through its disc phase and then waits in AwaitingLookup with its hourly timer, its waiting message naming the
-/// transport's reason; the recorded transport is never asked.
+/// Ruling T4-R16: with the offline transport every lookup is unreachable, so a disc goes through its disc phase and
+/// then waits in AwaitingLookup with its hourly timer, its waiting message naming the transport's reason; the
+/// recorded transport is never asked, and with no webhook set nothing is logged undelivered.
 #[test]
 fn with_the_offline_transport_a_disc_waits_for_its_lookups() {
     let h = stand_in(&[DISC_A], settings());
-    h.use_binary_services();
+    h.use_offline_services();
     h.restart();
     h.scan_waits_for_lookups(false);
     h.insert("tok0", DISC_A);
@@ -1942,12 +1945,28 @@ fn with_the_offline_transport_a_disc_waits_for_its_lookups() {
     h.settle();
     let record = h.record(&id);
     assert_eq!(record.state, State::AwaitingLookup { return_to: Box::new(State::Ejected { after_copy: false }) });
-    let message = record.message.unwrap_or_default();
-    assert!(message.contains(&format!("dischash: {OFFLINE}")), "{message}");
+    assert!(record.message.unwrap_or_default().contains(&format!("dischash: {OFFLINE}")));
     assert_eq!(h.timers().pending(), vec![60]);
     assert!(h.http().requests().is_empty(), "{:?}", h.http().requests());
-    let waiting = format!("notification waiting for {id} was not delivered: {NO_DELIVERY}");
-    assert!(h.engine_log().contains(&waiting), "{}", h.engine_log());
+    assert!(!h.engine_log().contains("was not delivered"), "no webhook is set: {}", h.engine_log());
+}
+
+/// Spec 12 and Ruling T4-R13: a restart loses a notification still being delivered, so a stop waits for the notifier
+/// at most `NOTIFY_DRAIN_S` while a webhook hangs.
+#[test]
+fn stop_returns_within_the_drain_bound_while_a_webhook_hangs() {
+    let h = stand_in(&[DISC_A], settings());
+    h.use_webhook_sink();
+    h.secrets().set("ha_webhook_url", HA_URL).unwrap();
+    let gate = h.http().gate(HA_URL);
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    h.wait("a held POST", |h| !h.http().posts().is_empty());
+    let started = Instant::now();
+    h.restart();
+    assert!(started.elapsed() < Duration::from_secs(NOTIFY_DRAIN_S + 2), "{:?}", started.elapsed()); // unscaled
+    gate.open();
 }
 
 // ---- Shutdown, progress, command and notifications ----

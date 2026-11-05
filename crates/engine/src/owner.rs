@@ -47,7 +47,7 @@ use crate::ipc_server::{
     spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
     DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
-use crate::notify::{self, spawn_notifier, NotifySink};
+use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
     child_words, command_answer, command_job, not_started, spawn_command_refetch, spawn_relay, CommandRefetch,
     RunningCommand, COMMAND_BUSY, COMMAND_FORMS, COMMAND_NO_CTL, COMMAND_WRITABLE, STALE_EXIT,
@@ -285,6 +285,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv))
     });
     let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
+    let notify_stop = notify.stop_flag();
     let (delivered, notifier_done) = channel::<()>();
     let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }), Arc::clone(&store));
     let (sender, inbox) = channel::<Msg>();
@@ -350,6 +351,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         cleanup_stop,
         cleanup_schedule,
         notifier_done,
+        notify_stop,
         busy,
         store,
         jobs: shown,
@@ -379,6 +381,9 @@ pub struct EngineHandle {
     cleanup_schedule: Option<JoinHandle<()>>,
     /// Closes when the notifier thread has delivered its last notification and ended.
     notifier_done: Receiver<()>,
+    /// The sink's stop flag, raised first by `stop` so the sink skips its waits (design part 8.6; Ruling T4-R13);
+    /// None for a sink that never waits.
+    notify_stop: Option<Arc<AtomicBool>>,
     /// The owner's `busy`, set after each message it handles.
     busy: Arc<AtomicBool>,
     /// The data folder's store, for the `engine stopped` line.
@@ -454,18 +459,21 @@ impl EngineHandle {
     }
 
     /// Cancels every running step's CancelToken (CheckSpace and Eject included), drops their results, writes the
-    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk and a client's reader
-    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first: `stop` closes the
-    /// transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client connects while the
-    /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops;
-    /// then the cleanup's schedule thread (design part 5.9), so it sends no more; the owner then waits for every
-    /// step, recording, eject, check and cleanup pass it started, closes every client, and the notifier delivers what
-    /// was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
-    /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at
-    /// most CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for
-    /// its volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
+    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk, a client's reader and
+    /// writer, which end with the client (design part 3.5, R22.10), and a notifier still delivering after
+    /// `NOTIFY_DRAIN_S`. First `stop` raises the sink's stop flag, so the sink skips its waits and gives each
+    /// notification still queued one attempt per channel (design part 8.6; Ruling T4-R13). The serve thread ends next:
+    /// `stop` closes the transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client
+    /// connects while the engine stops; then the drive thread, so every drive event it handed over is handled before
+    /// the owner stops; then the cleanup's schedule thread (design part 5.9), so it sends no more; the owner then waits
+    /// for every step, recording, eject, check and cleanup pass it started, closes every client, and the notifier
+    /// delivers what was raised, waited for at most `NOTIFY_DRAIN_S` (spec 12: a restart loses a notification still
+    /// being retried). Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write what was
+    /// queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at most
+    /// CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for its
+    /// volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
     /// panics still reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked.
-    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11. Use: T22 to T29, T3-23, T4-11.
+    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12. Use: T22 to T29, T3-23, T4-11, T4-12.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
             sender,
@@ -475,6 +483,7 @@ impl EngineHandle {
             cleanup_stop,
             cleanup_schedule,
             notifier_done,
+            notify_stop,
             store,
             serve,
             serve_stop,
@@ -483,6 +492,9 @@ impl EngineHandle {
             mirror,
             ..
         } = self;
+        if let Some(notify_stop) = &notify_stop {
+            notify_stop.store(true, Ordering::SeqCst);
+        }
         serve_stop.store(true, Ordering::SeqCst);
         ipc.close();
         let served = serve.join();
@@ -493,7 +505,7 @@ impl EngineHandle {
         let _ = sender.send(Msg::Stop);
         drop(sender);
         let owner = owner.join();
-        let _ = notifier_done.recv();
+        let _ = notifier_done.recv_timeout(Duration::from_secs(NOTIFY_DRAIN_S));
         clients.drain(CLIENT_DRAIN);
         store.log("engine stopped");
         if let Some(mirror) = &mirror {
@@ -787,6 +799,10 @@ struct Delivered {
 impl NotifySink for Delivered {
     fn deliver(&mut self, notification: &Notification) -> Result<(), String> {
         self.sink.deliver(notification)
+    }
+
+    fn stop_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.sink.stop_flag()
     }
 }
 

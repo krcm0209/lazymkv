@@ -65,7 +65,7 @@ use crate::owner::panic_text;
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
 use crate::{
-    EngineConfig, JobContext, NoDelivery, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers,
+    EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers, WebhookSink,
 };
 
 /// How often the harness looks again while it waits.
@@ -409,6 +409,17 @@ enum Queued {
     Remove(String),
 }
 
+/// The transport and sink the harness's `start` passes (Ruling T4-R16).
+#[derive(Clone, Copy)]
+enum ServicesMode {
+    /// The harness's `RecordedTransport` and `MemorySink`.
+    Recorded,
+    /// `OfflineTransport` and a `WebhookSink` over it (`use_offline_services`).
+    Offline,
+    /// The harness's `RecordedTransport` and a `WebhookSink` over it (`use_webhook_sink`).
+    Webhook,
+}
+
 /// A real engine over a scratch folder `<root>/{data, staging, library/Movies, tuning, volumes}`, with the platform
 /// fakes, scripted steps (or, from `new`, the real step runner on stand-in tools in `<root>/tools`), a memory sink and
 /// manual timers (design parts 12.1, 12.2, the interface sheet's helper list). Every
@@ -464,8 +475,10 @@ pub struct Harness {
     /// The persist fault a test armed, shared with every engine the harness starts (review round 1, V1).
     faults: Arc<Mutex<ArmedFault>>,
     engine: Mutex<Option<EngineHandle>>,
-    /// Whether `start` passes pull request 3's binary transport and sink, `use_binary_services`.
-    binary_services: AtomicBool,
+    /// The transport and sink `start` passes: the recorded ones by default, or a `WebhookSink` over the offline or
+    /// the recorded transport (`use_offline_services`, `use_webhook_sink`); the binary passes `NoDelivery` until
+    /// Task 17 changes it (Ruling T4-R16).
+    services: Mutex<ServicesMode>,
     /// The `EngineConfig.cleanup_minutes` the next `start` passes; None until `schedule_cleanup` (design part 5.9).
     cleanup_minutes: Mutex<Option<u32>>,
     /// The `TestHooks::cleanup_period` the next `start` passes (design part 5.9).
@@ -603,12 +616,17 @@ impl Harness {
             ipc: ipc as _,
             host: Arc::clone(&self.host) as _,
         };
-        let (http, notify): (Arc<dyn HttpTransport>, Box<dyn NotifySink>) =
-            if self.binary_services.load(Ordering::SeqCst) {
-                (Arc::new(OfflineTransport), Box::new(NoDelivery))
-            } else {
-                (Arc::clone(&self.http) as _, Box::new(MemorySink { list: Arc::clone(&self.sent) }))
-            };
+        let mode = *lock(&self.services);
+        let http: Arc<dyn HttpTransport> = match mode {
+            ServicesMode::Offline => Arc::new(OfflineTransport),
+            ServicesMode::Recorded | ServicesMode::Webhook => Arc::clone(&self.http) as _,
+        };
+        let notify: Box<dyn NotifySink> = match mode {
+            ServicesMode::Recorded => Box::new(MemorySink { list: Arc::clone(&self.sent) }),
+            ServicesMode::Offline | ServicesMode::Webhook => Box::new(
+                WebhookSink::new(Arc::clone(&http), Arc::clone(&self.secrets) as _).with_pause(Arc::new(|_| {})),
+            ),
+        };
         let services = Services {
             platform,
             http,
@@ -1114,12 +1132,18 @@ impl Harness {
         self.lookups_wait.store(wait, Ordering::SeqCst);
     }
 
-    /// From the next `start`, that is the next `restart`, the engine gets pull request 3's binary transport and sink
-    /// (Ruling W26): `OfflineTransport` as `Services.http` and `NoDelivery` as `Services.notify`, so `http()` records
-    /// no request and `notifications()` stays empty. Def: T3-21. Use: T3-21.
-    pub fn use_binary_services(&self) {
+    /// From the next `start`: `OfflineTransport` and a `WebhookSink` over the harness's secrets with a no-op pause
+    /// (Ruling T4-R16; it replaces `use_binary_services`). Def: T4-12. Use: T4-12.
+    pub fn use_offline_services(&self) {
         self.deliver();
-        self.binary_services.store(true, Ordering::SeqCst);
+        *lock(&self.services) = ServicesMode::Offline;
+    }
+
+    /// From the next `start`: the harness's `RecordedTransport` and a `WebhookSink` over its secrets with a no-op
+    /// pause, so `http().posts()` holds the deliveries and `notifications()` stays empty. Def: T4-12. Use: T4-12, T4-18.
+    pub fn use_webhook_sink(&self) {
+        self.deliver();
+        *lock(&self.services) = ServicesMode::Webhook;
     }
 
     /// A clone of the harness's `MemoryConnector`, which connects an IPC client to the running engine (design part
@@ -1465,7 +1489,7 @@ impl Folders {
             hook: Arc::default(),
             faults: Arc::default(),
             engine: Mutex::default(),
-            binary_services: AtomicBool::new(false),
+            services: Mutex::new(ServicesMode::Recorded),
             cleanup_minutes: Mutex::default(),
             cleanup_period: Mutex::default(),
             cleanup_done: Mutex::default(),
