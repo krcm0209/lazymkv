@@ -1,20 +1,24 @@
-//! The `command` relay (S35; design parts 4.4, 9.1, 9.3, 9.5; Rulings W10, W24, W25): the child's words, the thread
-//! that streams its lines to the client that asked, and the reply.
+//! The `command` relay (S35; design parts 4.4, 9.1, 9.3, 9.5; Rulings W10, W24, W25, T4-R9): the child's words, the
+//! thread that fetches the job's stale TMDb copies again before the child, the thread that streams its lines to the
+//! client that asked, and the reply.
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use lazymkv_clients::{HttpTransport, LookupBook};
 use lazymkv_core::ipc::{push_line, OutputStream, Push};
+use lazymkv_core::plan::Plan;
 use lazymkv_dev::forms::read_forms;
 use lazymkv_platform::{GuardedChild, KillHandle};
 use serde_json::{json, Value};
 
-use crate::file_phase::replay_options;
+use crate::file_phase::{refetch_stale, replay_options};
 use crate::ipc_server::{no_job, Clients};
 use crate::owner::Msg;
+use crate::store::Store;
 
 /// A second `command` while one runs (design part 9.5). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_BUSY: &str = "a command is already running; one runs at a time (design part 9.5)";
@@ -31,6 +35,10 @@ pub(crate) const COMMAND_FORMS: &str =
 /// 1 of pull request 3, R15). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_WRITABLE: &str =
     "lazymkvctl or its folder can be written by a non-elevated process, so the engine will not run it (design part 3.6)";
+
+/// The exit code of a relayed command whose job's stale TMDb copies could not be fetched again (design part 9.5; Ruling
+/// T4-R9; K15): no child ran. Def: T4-9. Use: T4-9.
+pub(crate) const STALE_EXIT: i32 = 3;
 
 /// `job <id> has no title <key>`, for a `decide --job --title` whose key is not one of the job record's titles, so no
 /// key leads out of the job folder (Ruling W24). Def: T3-22. Use: T3-22.
@@ -96,6 +104,59 @@ pub(crate) fn child_words(
     Ok(child)
 }
 
+/// The job `read_forms` reads from words `child_words` accepted (design part 9.5): `plan --job <id>` and `decide --job
+/// <id> --title <key>` name it; None for words it does not read. Def: T4-9. Use: T4-9.
+pub(crate) fn command_job(words: &[String]) -> Option<String> {
+    let (name, rest) = words.split_first()?;
+    read_forms(name, rest).ok()?.job
+}
+
+/// What the relay's refetch works with (design part 9.5; Ruling T4-R9): the job's folder, plan and lookup book, the
+/// transport, the `tmdb_token` (None when none is set), the host's local date, and the store for job.log. Def: T4-9.
+/// Use: T4-9.
+pub(crate) struct CommandRefetch {
+    pub(crate) job_dir: PathBuf,
+    pub(crate) plan: Option<Plan>,
+    pub(crate) lookups: Arc<Mutex<LookupBook>>,
+    pub(crate) http: Arc<dyn HttpTransport>,
+    pub(crate) token: Option<String>,
+    pub(crate) today: String,
+    pub(crate) store: Arc<Store>,
+}
+
+/// The job's stale TMDb copies fetched again before a relayed `plan` or `decide` (design part 9.5; Ruling T4-R9; K15),
+/// on a thread of its own, so the owner thread never waits on a request: `refetch_stale` over `work`, the job.log line
+/// `the TMDb copy <file> was fetched again` for each copy fetched again, then `Msg::CommandRefetched` with the
+/// command's `client`, `id` and `words` and Ok, or Err with the sentences of the copies not fetched again.
+/// Def: T4-9. Use: T4-9.
+pub(crate) fn spawn_command_refetch(
+    work: CommandRefetch,
+    client: u64,
+    id: Option<u64>,
+    words: Vec<String>,
+    owner: Sender<Msg>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let fetched = refetch_stale(
+            &work.job_dir,
+            work.plan.as_ref(),
+            &work.lookups,
+            work.http.as_ref(),
+            work.token.as_deref(),
+            &work.today,
+        );
+        let refetched = fetched.map(|files| {
+            if let Some(job) = work.job_dir.file_name().and_then(|name| name.to_str()) {
+                for file in files {
+                    work.store.job_log(job, &format!("the TMDb copy {file} was fetched again"));
+                }
+            }
+        });
+        // An owner that is gone has stopped and answered the command already (Ruling T3-22-d).
+        let _ = owner.send(Msg::CommandRefetched { client, id, words, refetched });
+    })
+}
+
 /// The reply to a `command` once its child ended (design parts 9.3, 9.5): `{"exit_code": <code>}`, `NO_EXIT_CODE`
 /// for none, or `lazymkvctl could not be waited for: <error>`. Def: T3-22. Use: T3-22.
 pub(crate) fn command_answer(exit: io::Result<Option<i32>>) -> Result<Value, String> {
@@ -107,14 +168,15 @@ pub(crate) fn command_answer(exit: io::Result<Option<i32>>) -> Result<Value, Str
 }
 
 /// The command that runs (design part 9.5: one at a time): the client and request it answers and its child's kill
-/// handle. Def: T3-22. Use: T3-22.
+/// handle. Def: T3-22 (`kill` an Option: T4-9). Use: T3-22, T4-9.
 pub(crate) struct RunningCommand {
     /// The client that sent the `command`.
     pub(crate) client: u64,
     /// The `command` request's id.
     pub(crate) id: Option<u64>,
-    /// Kills the child `lazymkvctl` (Rulings T3-22-c, T3-22-d).
-    pub(crate) kill: KillHandle,
+    /// Kills the child `lazymkvctl` (Rulings T3-22-c, T3-22-d); None while the job's stale TMDb copies are fetched
+    /// again, before the child starts (Ruling T4-R9).
+    pub(crate) kill: Option<KillHandle>,
 }
 
 /// Streams `child`'s lines to `client` and reports its end, on a thread of its own (design parts 4.4, 9.1; Rulings

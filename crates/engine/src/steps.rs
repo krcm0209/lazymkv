@@ -55,7 +55,7 @@ use serde_json::{json, Value};
 
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
-    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refreshed_plan,
+    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -897,7 +897,9 @@ impl Step<'_> {
         }
     }
 
-    /// Plan (design part 5.4 step 5, S30): `core::plan::plan` over the scan, the book as it stands (R23.1: a book a
+    /// Plan (design part 5.4 step 5, S30): the job's stale TMDb copies fetched again first, unless a running round
+    /// holds the book (Ruling T4-R9; one that cannot be fetched gives PlanFailed { Unknown } with `refetch_stale`'s
+    /// sentences); then `core::plan::plan` over the scan, the book as it stands (R23.1: a book a
     /// running round holds counts as empty, so every lookup is pending) and the remembered decision, persisted with
     /// one TitleRecord per planned title. A Copy plan gives PlanFailed { Unknown } (P1, design part 5.5). The data
     /// folder's remembered decision is copied to `<job>/remembered.json`; when there is none, when it is refused, or
@@ -910,6 +912,10 @@ impl Step<'_> {
         let record = &self.job.record;
         let (_, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         let inputs = chain_inputs(&self.job.job_dir).map_err(|error| unknown(failed, error))?;
+        // A running round is fetching fresh copies, and Plan then counts the book empty (R23.1).
+        if !matches!(self.job.lookups.try_lock(), Err(TryLockError::WouldBlock)) {
+            self.refetch_copies(record.plan.as_ref()).map_err(|reason| unknown(failed, reason))?;
+        }
         let book = match self.job.lookups.try_lock() {
             Ok(book) => book.clone(),
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
@@ -975,6 +981,21 @@ impl Step<'_> {
             Mode::Direct => event(Event::PlanDone { mode: Mode::Direct }),
             Mode::Copy => unknown(failed, COPY_PLAN),
         })
+    }
+
+    /// The job's stale TMDb copies fetched again before Plan or Decide reads them (design parts 8.4, 5.10; Ruling
+    /// T4-R9): `refetch_stale` with the runner's transport, `tmdb_token` and local date, each copy fetched again
+    /// writing the job.log line `the TMDb copy <file> was fetched again`. Err is `refetch_stale`'s.
+    fn refetch_copies(&self, plan: Option<&Plan>) -> Result<(), String> {
+        let steps = self.steps;
+        let token = steps.secrets.get("tmdb_token");
+        let today = steps.host.local_date();
+        let job = self.job;
+        let files = refetch_stale(&job.job_dir, plan, &job.lookups, steps.http.as_ref(), token.as_deref(), &today)?;
+        for file in files {
+            self.log(&format!("the TMDb copy {file} was fetched again"));
+        }
+        Ok(())
     }
 
     /// Removes `<job>/remembered.json`, the copy an earlier Plan of the job made, when it is there; a removal that
@@ -1526,7 +1547,9 @@ impl Step<'_> {
         write_atomic(&path, text.as_bytes()).map_err(|error| shown(&error))
     }
 
-    /// Decide (design parts 5.7 step 11, 8.4): the record's plan, refreshed from the saved answers while it is
+    /// Decide (design parts 5.7 step 11, 8.4): the job's stale TMDb copies fetched again first (Ruling T4-R9; one that
+    /// cannot be fetched gives LookupPending in Inspecting and DecisionFailed { Unknown } otherwise, with
+    /// `refetch_stale`'s sentences); then the record's plan, refreshed from the saved answers while it is
     /// lookup-pending and persisted so (R24.2); each planned title failing with S32's sentence when it needs step 10,
     /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
     /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
@@ -1546,6 +1569,12 @@ impl Step<'_> {
     fn decide(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let mut plan = self.job_plan(failed)?.clone();
+        if let Err(reason) = self.refetch_copies(Some(&plan)) {
+            return Ok(match self.job.record.state {
+                State::Inspecting => with(Event::LookupPending, reason),
+                _ => unknown(failed, reason),
+            });
+        }
         let settings = &self.job.settings;
         let library = library_root(&plan, settings);
         if let Some(root) = library {

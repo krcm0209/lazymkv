@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use common::Client;
 use lazymkv_core::job::{Action, Event, FailureClass, Held, NotifyEvent, State, Tool, WaitReason};
+use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::review::ReviewReason;
 use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder};
@@ -16,7 +17,7 @@ use lazymkv_dev::cmd::plan::PlanOptions;
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_engine::testkit::Harness;
-use lazymkv_platform::{Host, Reach};
+use lazymkv_platform::{Host, Reach, SecretStore};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
@@ -46,6 +47,20 @@ fn events(h: &Harness, id: &str) -> Vec<Event> {
 fn final_path(h: &Harness) -> PathBuf {
     let folder = "Synthetic Movie (2001) {tmdb-900001}";
     h.library().join(folder).join(format!("{folder} - 1080p.mkv"))
+}
+
+/// Rewrites `<job>/<file>` with its `fetched_at` set to 2026-01-01, past the six-month limit on the harness's date
+/// (2026-10-23).
+fn stale(h: &Harness, id: &str, file: &str) {
+    let path = h.job_dir(id).join(file);
+    let mut copy = json_of(&path);
+    copy["fetched_at"] = json!("2026-01-01");
+    fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+}
+
+/// Removes the harness's `tmdb_token`, so the engine has none.
+fn no_token(h: &Harness) {
+    h.secrets().forget("tmdb_token");
 }
 
 #[test]
@@ -750,4 +765,116 @@ fn a_retry_after_the_folder_opens_files_the_title() {
     Client::open(&h).ok("retry", json!({"job": id}));
     h.wait("Filed", |h| h.state_of(&id) == "Filed");
     assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+}
+
+#[test]
+fn a_first_decide_with_a_stale_copy_it_cannot_fetch_waits_for_its_lookup() {
+    let h = harness(&[], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Inspecting");
+    stale(&h, &id, "tmdb-record.json");
+    no_token(&h);
+    h.restart();
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    let message = h.record(&id).message.unwrap();
+    assert!(message.contains("tmdb-record.json: the TMDb copy is more than six months old (fetched_at 2026-01-01) and could \
+        not be fetched again: no tmdb_token is set"), "{message}");
+    assert!(!message.contains("test-token"));
+    assert!(events(&h, &id).contains(&Event::LookupPending));
+}
+
+#[test]
+fn a_decide_in_decided_after_a_restart_with_a_stale_copy_it_cannot_fetch_fails_unknown() {
+    let h = harness(&[], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Decided");
+    stale(&h, &id, "tmdb-record.json");
+    no_token(&h);
+    h.restart(); // resume(Decided) runs Decide (core job.rs:741)
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::DecisionFailed { failure } if failure.class == FailureClass::Unknown)));
+    let message = h.record(&id).message.unwrap();
+    assert!(message.contains("tmdb-record.json: the TMDb copy is more than six months old"), "{message}");
+    assert!(!message.contains("test-token"));
+}
+
+#[test]
+fn a_plan_again_from_scanned_with_a_deleted_copy_fetches_it_and_plans() {
+    let h = harness(&[], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Scanned");
+    fs::remove_file(h.job_dir(&id).join("tmdb-record.json")).unwrap();
+    let movie = TmdbIdentity { kind: TmdbKind::Movie, id: 900001 };
+    let record_asks = |h: &Harness| h.http().requests().iter().filter(|(url, _)| *url == lazymkv_clients::record_url(movie)).count();
+    let before = record_asks(&h);
+    h.restart();
+    h.wait("Planned", |h| h.transitions(&id).iter().any(|l| l.event.as_ref().is_some_and(|e| matches!(e, Event::PlanDone { .. }))));
+    assert_eq!(record_asks(&h), before + 1, "the deleted copy is fetched again, once");
+    assert_eq!(json_of(&h.job_dir(&id).join("tmdb-record.json"))["fetched_at"], json!("2026-10-23"));
+    let plan = h.record(&id).plan.unwrap();
+    assert_eq!((plan.identity.tmdb, plan.identity.lookup_pending), (Some(movie), false));
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains("the TMDb copy tmdb-record.json was fetched again"), "{log}");
+    assert!(!log.contains("the TMDb copy tmdb.json was fetched again"), "only listed copies are named: {log}");
+}
+
+#[test]
+fn a_plan_again_from_scanned_with_a_stale_copy_it_cannot_fetch_fails_unknown() {
+    let h = harness(&[], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Scanned");
+    stale(&h, &id, "tmdb-record.json");
+    no_token(&h);
+    h.restart();
+    h.wait("Failed", |h| h.state_of(&id) == "Failed");
+    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::PlanFailed { failure } if failure.class == FailureClass::Unknown)));
+    let message = h.record(&id).message;
+    assert_eq!(message.as_deref(), Some("tmdb-record.json: the TMDb copy is more than six months old \
+        (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set"));
+    assert!(!message.unwrap().contains("test-token"));
+    h.secrets().set("tmdb_token", "test-token").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("retry", json!({ "job": id }));
+    h.wait("Planned", |h| h.transitions(&id).iter().any(|l| l.event.as_ref().is_some_and(|e| matches!(e, Event::PlanDone { .. }))));
+}
+
+#[test]
+fn a_stale_copy_fetched_again_replaces_the_file_and_the_decision_uses_it() {
+    let h = harness(&[], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Inspecting");
+    let path = h.job_dir(&id).join("tmdb-record.json");
+    let mut copy = json_of(&path);
+    copy["title"] = json!("Stale Title");
+    copy["fetched_at"] = json!("2026-01-01");
+    fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+    h.restart();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    let fresh = json_of(&path);
+    assert_eq!((&fresh["title"], &fresh["fetched_at"]), (&json!("Synthetic Movie"), &json!("2026-10-23")));
+    assert!(!fs::read_to_string(h.job_dir(&id).join(KEY).join("decide.json")).unwrap().contains("Stale Title"));
+    assert!(final_path(&h).is_file());
+    assert!(fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap().contains("the TMDb copy tmdb-record.json was fetched again"));
+}
+
+#[test]
+fn the_engine_never_reads_tmdb_token_from_its_environment() {
+    let h = harness(&[], json!({}));
+    no_token(&h);
+    std::env::set_var("TMDB_TOKEN", "token-sentinel-5d2e");
+    h.scan_waits_for_lookups(false);
+    let id = run_to(&h, "AwaitingLookup");
+    std::env::remove_var("TMDB_TOKEN");
+    let requests = h.http().requests();
+    assert!(requests.iter().all(|(url, _)| !url.starts_with(lazymkv_clients::TMDB)), "{requests:?}");
+    assert!(requests.iter().flat_map(|(_, headers)| headers).all(|(_, value)| !value.contains("token-sentinel-5d2e")));
+    let message = h.record(&id).message.unwrap();
+    assert!(message.contains("search: no tmdb_token is set"), "{message}");
+    assert!(!message.contains("token-sentinel-5d2e") && !message.contains("test-token"));
 }

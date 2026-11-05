@@ -48,6 +48,15 @@ fn state_json(dir: &Path) -> JobRecord {
 
 fn final_path(h: &Harness) -> PathBuf { h.library().join(FINAL) }
 
+/// Rewrites `<job>/<file>` with its `fetched_at` set to 2026-01-01, past the six-month limit on the harness's date
+/// (2026-10-23).
+fn stale(h: &Harness, id: &str, file: &str) {
+    let path = h.job_dir(id).join(file);
+    let mut copy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    copy["fetched_at"] = json!("2026-01-01");
+    fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+}
+
 fn root(path: &Path) -> String {
     path.to_str().unwrap().to_string()
 }
@@ -900,4 +909,20 @@ fn a_refused_engine_restart_in_awaiting_lookup_is_kept_and_starts_the_hourly_tim
     assert_eq!(restarted.actions, vec![Action::StartTimer { minutes: 60 }]);
     h.settle();
     assert_eq!(h.timers().pending(), vec![60]);
+}
+
+#[test]
+fn a_restart_reads_a_stale_copy_as_pending_and_asks_nothing() {
+    let h = harness(&[DISC, "movie-direct-probe-error"], settings()); // Failed: no step runs at the restart
+    h.insert("tok0", DISC);
+    h.run_until("Failed");
+    let id = only_job(&h);
+    stale(&h, &id, "tmdb-record.json");
+    let before = h.http().requests().len();
+    h.restart();
+    h.settle();
+    assert_eq!(h.http().requests().len(), before, "the engine's start sends no request (design part 4.4)");
+    let log = h.engine_log();
+    assert!(log.contains(&format!("{id}: tmdb-record.json is more than six months old or was deleted, and is fetched again")), "{log}");
+    assert!(!log.contains("test-token"));
 }

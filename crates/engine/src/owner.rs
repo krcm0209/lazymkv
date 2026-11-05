@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::{HttpTransport, LookupBook};
+use lazymkv_clients::{reason_text, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::ipc::{
     is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
-    Notification, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+    Notification, OutputStream, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
 };
 use lazymkv_core::job::{
     job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
@@ -36,7 +36,7 @@ use lazymkv_platform::{
     Spawn,
 };
 use lazymkv_tools::CancelToken;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
@@ -48,8 +48,8 @@ use crate::ipc_server::{
 };
 use crate::notify::{self, spawn_notifier, NotifySink};
 use crate::relay::{
-    child_words, command_answer, not_started, spawn_relay, RunningCommand, COMMAND_BUSY, COMMAND_NO_CTL,
-    COMMAND_WRITABLE,
+    child_words, command_answer, command_job, not_started, spawn_command_refetch, spawn_relay, CommandRefetch,
+    RunningCommand, COMMAND_BUSY, COMMAND_FORMS, COMMAND_NO_CTL, COMMAND_WRITABLE, STALE_EXIT,
 };
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
@@ -197,6 +197,10 @@ pub(crate) enum Msg {
     Log(String),
     /// The relay's child ended (design part 9.5): its `wait`, for the `command` request `id` of `client`.
     CommandDone { client: u64, id: Option<u64>, exit: io::Result<Option<i32>> },
+    /// The relay's refetch of the job's stale TMDb copies ended (design part 9.5; Ruling T4-R9), for the `command`
+    /// request `id` of `client` with its `words`: Ok, or the sentences of the copies not fetched again. Def: T4-9.
+    /// Use: T4-9.
+    CommandRefetched { client: u64, id: Option<u64>, words: Vec<String>, refetched: Result<(), String> },
     /// A client's reader thread saw its connection end (design part 9.2), so a command it runs is killed (Ruling W24).
     Gone { client: u64 },
 }
@@ -947,8 +951,21 @@ impl Owner {
                     // answers (design part 8.4). A filed or discarded job runs no step.
                     let book = match record.state {
                         State::Filed | State::Discarded => LookupBook::default(),
-                        _ => rebuild_book(&job_dir),
+                        _ => rebuild_book(&job_dir, &parts.host.local_date()),
                     };
+                    // Ruling T4-R8: a stale copy is read as pending, and engine.log names each such file once.
+                    let mut stale_files: Vec<&str> = Vec::new();
+                    for state in book.states.values() {
+                        if let LookupState::Pending { reason: PendingReason::Stale(file) } = state {
+                            if !stale_files.contains(&file.as_str()) {
+                                stale_files.push(file);
+                            }
+                        }
+                    }
+                    for file in stale_files {
+                        let reason = reason_text(&PendingReason::Stale(file.to_string()));
+                        store.log(&format!("{}: {reason}", record.id));
+                    }
                     lock(&shown).insert(record.id.clone(), record.clone());
                     let lookups = Arc::new(Mutex::new(book));
                     let job = Job { record, settings, generation: 0, disc: None, lookups, edits: Vec::new() };
@@ -1211,6 +1228,9 @@ impl Owner {
                 self.command = None;
                 self.reply(client, id, command_answer(exit));
             }
+            Msg::CommandRefetched { client, id, words, refetched } => {
+                self.on_command_refetched(client, id, words, refetched)
+            }
             Msg::Gone { client } => self.kill_command_of(client),
         }
     }
@@ -1240,7 +1260,7 @@ impl Owner {
             Msg::Connect(stream) => drop(stream),
             Msg::Log(line) => self.store.log(&line),
             Msg::Gone { client } => self.kill_command_of(client),
-            Msg::CommandDone { .. } => {}
+            Msg::CommandDone { .. } | Msg::CommandRefetched { .. } => {}
             Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Stop => {}
         }
     }
@@ -2464,10 +2484,9 @@ impl Owner {
 
     /// `command` (design part 9.5; Rulings W24, W25): refused, in Ruling T3-22-b's order, while a command runs, when
     /// the engine has no `lazymkvctl`, when a non-elevated process could write `lazymkvctl` or its folder, for words
-    /// `child_words` refuses and when the child cannot be started. Otherwise the owner starts the child through
-    /// `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority with no extra
-    /// environment (S43), keeps its kill handle, and hands it to the relay thread, whose `Msg::CommandDone` replies
-    /// (`on_message`).
+    /// `child_words` refuses and when the child cannot be started. Words `child_words` accepts make the command run,
+    /// with no child yet: the job's stale TMDb copies are fetched again first, on a thread of its own
+    /// (`spawn_command_refetch`, Ruling T4-R9), whose `Msg::CommandRefetched` goes on (`on_command_refetched`).
     fn command(&mut self, client: u64, id: Option<u64>, words: Vec<String>) {
         if self.command.is_some() {
             return self.reply(client, id, Err(COMMAND_BUSY.to_string()));
@@ -2483,37 +2502,98 @@ impl Owner {
         if ctl.parent().is_none_or(|folder| host.user_writable(folder)) || (ctl.is_file() && host.user_writable(&ctl)) {
             return self.reply(client, id, Err(COMMAND_WRITABLE.to_string()));
         }
+        if let Err(refusal) = self.command_words(&words) {
+            return self.reply(client, id, Err(refusal));
+        }
+        // `child_words` accepted the words, so they name a job the owner holds.
+        let Some(job) = command_job(&words).and_then(|job_id| self.jobs.get(&job_id)) else {
+            return self.reply(client, id, Err(COMMAND_FORMS.to_string()));
+        };
+        let work = CommandRefetch {
+            job_dir: self.store.job_dir(&job.record.id),
+            plan: job.record.plan.clone(),
+            lookups: Arc::clone(&job.lookups),
+            http: Arc::clone(&self.parts.http),
+            token: self.parts.secrets.get("tmdb_token"),
+            today: self.parts.host.local_date(),
+            store: Arc::clone(&self.store),
+        };
+        self.command = Some(RunningCommand { client, id, kill: None });
+        self.threads.push(spawn_command_refetch(work, client, id, words, self.sender.clone()));
+    }
+
+    /// `child_words` over the jobs the owner holds (design part 9.5).
+    fn command_words(&self, words: &[String]) -> Result<Vec<String>, String> {
         let job = |job_id: &str| {
             let titles = &self.jobs.get(job_id)?.record.titles;
             let keys: Vec<String> = titles.iter().map(|title| title.key.clone()).collect();
             Some((self.store.job_dir(job_id), keys))
         };
-        let args = match child_words(&words, &job) {
+        child_words(words, &job)
+    }
+
+    /// The relay's refetch ended (design part 9.5; Ruling T4-R9; K15). One for a command that no longer runs (its
+    /// client left, or a stop answered it) is dropped. Err ends the command with no child and no job transition: the
+    /// client gets the stderr line `lazymkvctl: <reason>` and the reply `{"exit_code": 3}`. Ok checks the words again
+    /// with `child_words`, as the flags follow the files as they now stand (a refusal is the reply), and starts the
+    /// child through `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority
+    /// with no extra environment (S43), keeps its kill handle, and hands it to the relay thread, whose
+    /// `Msg::CommandDone` replies (`on_message`). Def: T4-9. Use: T4-9.
+    fn on_command_refetched(&mut self, client: u64, id: Option<u64>, words: Vec<String>, refetched: Result<(), String>) {
+        let waiting = self.command.as_ref().is_some_and(|command| {
+            command.client == client && command.id == id && command.kill.is_none()
+        });
+        if !waiting {
+            return;
+        }
+        if let Err(reason) = refetched {
+            let push = Push::CommandOutput { stream: OutputStream::Stderr, line: format!("lazymkvctl: {reason}") };
+            self.parts.clients.send(client, push_line(&push, id));
+            self.command = None;
+            return self.reply(client, id, Ok(json!({ "exit_code": STALE_EXIT })));
+        }
+        let args = match self.command_words(&words) {
             Ok(args) => args,
-            Err(refusal) => return self.reply(client, id, Err(refusal)),
+            Err(refusal) => {
+                self.command = None;
+                return self.reply(client, id, Err(refusal));
+            }
+        };
+        let Some(ctl) = self.parts.ctl.clone() else {
+            self.command = None;
+            return self.reply(client, id, Err(COMMAND_NO_CTL.to_string()));
         };
         let spawn = Spawn { program: ctl, args, env: Vec::new(), below_normal: true };
         match self.parts.env.processes.spawn(&spawn) {
-            Err(error) => self.reply(client, id, Err(not_started(&error))),
+            Err(error) => {
+                self.command = None;
+                self.reply(client, id, Err(not_started(&error)));
+            }
             Ok(child) => {
-                self.command = Some(RunningCommand { client, id, kill: child.killer() });
+                self.command = Some(RunningCommand { client, id, kill: Some(child.killer()) });
                 let clients = Arc::clone(&self.parts.clients);
                 self.threads.push(spawn_relay(child, client, id, clients, self.sender.clone()));
             }
         }
     }
 
-    /// Kills the running command's child when `client` runs it, as its client left (Ruling T3-22-c); the relay then
-    /// reports its end. A kill that fails is logged.
-    fn kill_command_of(&self, client: u64) {
-        if let Some(command) = self.command.as_ref().filter(|command| command.client == client) {
-            self.kill_command(command);
+    /// Ends the running command when `client` runs it, as its client left (Ruling T3-22-c): a child is killed, and the
+    /// relay then reports its end; a command still fetching its stale copies, with no child, simply ends, and its
+    /// `Msg::CommandRefetched` is dropped. A kill that fails is logged.
+    fn kill_command_of(&mut self, client: u64) {
+        match self.command.as_ref().filter(|command| command.client == client) {
+            Some(command) if command.kill.is_none() => self.command = None,
+            Some(command) => self.kill_command(command),
+            None => {}
         }
     }
 
-    /// Kills `command`'s child; a kill that fails is logged (engine.log).
+    /// Kills `command`'s child, when it has one; a kill that fails is logged (engine.log).
     fn kill_command(&self, command: &RunningCommand) {
-        if let Err(error) = command.kill.kill() {
+        let Some(kill) = &command.kill else {
+            return;
+        };
+        if let Err(error) = kill.kill() {
             self.store.log(&format!("the command's lazymkvctl could not be killed: {error}"));
         }
     }

@@ -1,7 +1,7 @@
 //! The file phase's own parts (design parts 5.7, 6.4, 8.3, 8.4): the file-phase slot and its queue, the partial
 //! file's path, the engine's `DecideInputs` for one title (K5), the library facts read at the namer's path, the
-//! identity refreshed from the saved answers, and the waiting message of a pending lookup. The file phase's steps are
-//! `RealSteps`' (steps.rs).
+//! identity refreshed from the saved answers, the waiting message of a pending lookup, and the refetch of a job's
+//! stale TMDb copies. The file phase's steps are `RealSteps`' (steps.rs).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -9,8 +9,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use lazymkv_clients::{reason_text, Lookup, LookupBook, LookupState};
+use lazymkv_clients::{
+    reason_text, refetch_record, refetch_search, stale_copies, status_record, HttpTransport, Lookup, LookupBook,
+    LookupState, PendingReason, SavedFile, StaleCopy,
+};
 use lazymkv_core::job::State;
+use lazymkv_core::lookup::search_queries;
 use lazymkv_core::naming::{edition_label, NamedPath};
 use lazymkv_core::plan::movie::{LibraryFacts, THEATRICAL_CUT};
 use lazymkv_core::plan::{refresh_identity, Plan};
@@ -25,6 +29,8 @@ use lazymkv_dev::cmd::decide::{
 };
 use lazymkv_dev::cmd::plan::{plan_doc, PlanOptions, PlanSource};
 use lazymkv_dev::evidence::Ctx;
+use lazymkv_platform::write_atomic;
+use serde_json::Value;
 
 use crate::arrival::chain_inputs;
 use crate::owner::JobContext;
@@ -381,10 +387,172 @@ pub(crate) fn waiting_message(book: &LookupBook) -> String {
     pending.collect::<Vec<String>>().join("; ")
 }
 
+/// The two copies a record fetch writes (design part 8.4).
+const RECORD_COPIES: [&str; 2] = ["tmdb.json", "tmdb-record.json"];
+/// The search's copy (design part 8.4).
+const SEARCH_COPY: &str = "tmdb-search.json";
+
+/// Whether the TMDb copy `file` keeps `lookup`'s answer (Ruling T4-R8): `tmdb.json` and `tmdb-record.json` keep the
+/// record's and each season's, `tmdb-search.json` the three searches'. Def: T4-9. Use: T4-9.
+pub(crate) fn copy_holds(file: &str, lookup: Lookup) -> bool {
+    match lookup {
+        Lookup::Record | Lookup::Season(_) => RECORD_COPIES.contains(&file),
+        Lookup::Search | Lookup::TaggedSearch | Lookup::EntrySearch => file == SEARCH_COPY,
+        Lookup::Dischash | Lookup::Discid => false,
+    }
+}
+
+/// Why a stale TMDb copy was not fetched again, as a sentence (design part 8.4; Ruling T4-R9): `<file>: the TMDb copy
+/// is more than six months old (fetched_at <date>) and could not be fetched again: <reason>` for a copy with a date;
+/// `has no fetched_at date` in place of the age for a copy present without one; `was deleted` for a copy no longer in
+/// `job_dir`. The reason is `reason_text`'s. Def: T4-9. Use: T4-9.
+pub(crate) fn stale_sentence(job_dir: &Path, copy: &StaleCopy, reason: &PendingReason) -> String {
+    let file = copy.file;
+    let why = match &copy.fetched_at {
+        Some(date) => format!("is more than six months old (fetched_at {date})"),
+        None if job_dir.join(file).exists() => "has no fetched_at date".to_string(),
+        None => "was deleted".to_string(),
+    };
+    format!("{file}: the TMDb copy {why} and could not be fetched again: {}", reason_text(reason))
+}
+
+/// Writes `files` into `job_dir` with `write_atomic`, in order, stopping at the first that fails; Err is that copy's
+/// reason, `<path>: the TMDb copy could not be written: <error>`.
+fn write_copies(job_dir: &Path, files: &[SavedFile]) -> Result<(), PendingReason> {
+    for file in files {
+        let path = job_dir.join(&file.name);
+        if let Err(error) = write_atomic(&path, &file.bytes) {
+            let sentence = format!("{}: the TMDb copy could not be written: {error}", path.display());
+            return Err(PendingReason::Unparsed(sentence));
+        }
+    }
+    Ok(())
+}
+
+/// A JSON file's value after one byte order mark, or None when it cannot be read or is not JSON.
+fn read_json(path: &Path) -> Option<Value> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).ok()
+}
+
+/// Every state of the lookups `file` holds that is `Pending { Stale(_) }` becomes `Answered { status: 200 }`.
+fn answer_stale(book: &mut LookupBook, file: &str) {
+    for (lookup, state) in book.states.iter_mut() {
+        if copy_holds(file, *lookup) && matches!(state, LookupState::Pending { reason: PendingReason::Stale(_) }) {
+            *state = LookupState::Answered { status: 200 };
+        }
+    }
+}
+
+/// The job's stale TMDb copies fetched again (design parts 8.4, 5.10, 9.5; Rulings T4-R8, T4-R9), before Plan, Decide
+/// and the relay's child read them. The copies are `stale_copies` over `lookup-status.txt` (empty when absent) in a job
+/// folder on `today`; none asks nothing and gives Ok(vec![]). A listed `tmdb.json` or `tmdb-record.json` is fetched
+/// once for both with `refetch_record`, by the plan's TMDb identity, else the status file's record (`status_record`),
+/// and the season of `chain_inputs`' disc name when that reads; no identity fails both with `no TMDb ID names the
+/// record`. A listed `tmdb-search.json` is fetched with `refetch_search` over the file's `queries`, else
+/// `search_queries` over the book. Each fetched file is written with `write_atomic` (a record fetch writes both of its
+/// files, and one that cannot be written fails the copies of its fetch). The book is locked only to read the queries
+/// and to install an answer, never across a request: the record and `record_file`, or the page into `answers.entry`
+/// when the status holds `search-entry 200`, else `answers.search`, each `Pending { Stale(_) }` state of that file's
+/// lookups becoming `Answered { status: 200 }`. A copy that failed sets its file's lookups present in the book to
+/// `Pending { Stale(<first failed file of its fetch>) }`, so the next round asks them again. Ok holds the listed copies
+/// fetched again, in `TMDB_COPIES` order; Err joins a `stale_sentence` per copy not fetched again with "; ".
+/// Def: T4-9. Use: T4-9.
+pub(crate) fn refetch_stale(
+    job_dir: &Path,
+    plan: Option<&Plan>,
+    lookups: &Mutex<LookupBook>,
+    http: &dyn HttpTransport,
+    token: Option<&str>,
+    today: &str,
+) -> Result<Vec<String>, String> {
+    let status = fs::read_to_string(job_dir.join("lookup-status.txt")).unwrap_or_default();
+    let copies = stale_copies(&status, &|file| fs::read(job_dir.join(file)).ok(), true, today);
+    if copies.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lock = || lookups.lock().unwrap_or_else(PoisonError::into_inner);
+    let name = chain_inputs(job_dir).ok().and_then(|inputs| inputs.name);
+    let listed = |file: &str| copies.iter().any(|copy| copy.file == file);
+    let mut failed: BTreeMap<&str, PendingReason> = BTreeMap::new();
+    if RECORD_COPIES.iter().any(|file| listed(file)) {
+        let identity = plan.and_then(|plan| plan.identity.tmdb).or_else(|| status_record(&status));
+        let season = name.as_ref().and_then(|name| name.season);
+        let fetched = match identity {
+            None => Err(PendingReason::Unparsed("no TMDb ID names the record".to_string())),
+            Some(id) => refetch_record(http, token, id, season, today),
+        };
+        let fetched = fetched.and_then(|(record, files)| write_copies(job_dir, &files).map(|()| (record, files)));
+        match fetched {
+            Ok((record, files)) => {
+                let saved = files.iter().find(|file| file.name == "tmdb-record.json");
+                let record_file = saved.and_then(|file| serde_json::from_slice(&file.bytes).ok());
+                let mut book = lock();
+                book.answers.record = Some(record);
+                book.record_file = record_file;
+                answer_stale(&mut book, "tmdb-record.json");
+            }
+            Err(reason) => {
+                for file in RECORD_COPIES.into_iter().filter(|file| listed(file)) {
+                    failed.insert(file, reason.clone());
+                }
+            }
+        }
+    }
+    if listed(SEARCH_COPY) {
+        let saved = read_json(&job_dir.join(SEARCH_COPY));
+        let saved = saved.as_ref().and_then(|saved| saved["queries"].as_array()).map(Vec::as_slice).unwrap_or_default();
+        let mut queries: Vec<String> = saved.iter().filter_map(|query| query.as_str().map(str::to_string)).collect();
+        if queries.is_empty() {
+            queries = search_queries(&lock().lookup_inputs(name.as_ref()));
+        }
+        let fetched = refetch_search(http, token, &queries, today)
+            .and_then(|(page, file)| write_copies(job_dir, std::slice::from_ref(&file)).map(|()| page));
+        match fetched {
+            Ok(page) => {
+                let entry = status.lines().any(|line| {
+                    let words: Vec<&str> = line.split_whitespace().collect();
+                    words.first() == Some(&"search-entry") && words.last() == Some(&"200")
+                });
+                let mut book = lock();
+                if entry {
+                    book.answers.entry = Some(page);
+                } else {
+                    book.answers.search = Some(page);
+                }
+                answer_stale(&mut book, SEARCH_COPY);
+            }
+            Err(reason) => {
+                failed.insert(SEARCH_COPY, reason);
+            }
+        }
+    }
+    if failed.is_empty() {
+        return Ok(copies.iter().map(|copy| copy.file.to_string()).collect());
+    }
+    {
+        let mut book = lock();
+        let mut marked: BTreeMap<Lookup, &str> = BTreeMap::new();
+        for copy in copies.iter().filter(|copy| failed.contains_key(copy.file)) {
+            for lookup in book.states.keys().filter(|lookup| copy_holds(copy.file, **lookup)) {
+                marked.entry(*lookup).or_insert(copy.file);
+            }
+        }
+        for (lookup, file) in marked {
+            book.states.insert(lookup, LookupState::Pending { reason: PendingReason::Stale(file.to_string()) });
+        }
+    }
+    let sentences: Vec<String> = copies
+        .iter()
+        .filter_map(|copy| failed.get(copy.file).map(|reason| stale_sentence(job_dir, copy, reason)))
+        .collect();
+    Err(sentences.join("; "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazymkv_clients::PendingReason;
+    use lazymkv_clients::{PendingReason, RecordedTransport};
     use lazymkv_core::naming::join;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
 
@@ -495,6 +663,50 @@ mod tests {
         book.states.insert(Lookup::Season(2), LookupState::Pending { reason: PendingReason::Timeout });
         assert_eq!(lookup_word(Lookup::Season(2)), "season-2");
         assert_eq!(waiting_message(&book), "season-2: no answer within 10 s");
+    }
+
+    /// A slim copy of movie 900001 fetched on `date`.
+    fn movie_copy(date: &str) -> String {
+        format!(r#"{{"id": 900001, "title": "Synthetic Movie", "original_title": "Synthetic Movie", "release_date": "2001-02-03", "original_language": "en", "kind": "movie", "runtime": 119, "fetched_at": "{date}"}}"#)
+    }
+
+    /// A job folder whose status says the search and movie 900001 answered 200, with a slim tmdb-search.json fetched
+    /// 2026-10-01 and each `(file, fetched_at)` of `copies` as a slim copy of movie 900001.
+    fn stale_folder(copies: &[(&str, &str)]) -> Scratch {
+        let s = Scratch::new("stale-folder");
+        s.write("lookup-status.txt", "dischash 404\nsearch 200\ntmdb movie/900001 200\n");
+        let page = r#"{"results": [{"media_type": "movie", "id": 900001, "title": "Synthetic Movie", "original_title": "Synthetic Movie", "release_date": "2001-02-03"}], "queries": ["Synthetic Movie"], "fetched_at": "2026-10-01"}"#;
+        s.write("tmdb-search.json", page);
+        for (file, date) in copies {
+            s.write(file, movie_copy(date));
+        }
+        s
+    }
+
+    fn lock(book: &Mutex<LookupBook>) -> std::sync::MutexGuard<'_, LookupBook> {
+        book.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[test]
+    fn refetch_stale_of_fresh_copies_asks_nothing() {
+        let s = stale_folder(&[("tmdb.json", "2026-10-01"), ("tmdb-record.json", "2026-10-01")]);
+        let t = RecordedTransport::new();
+        assert_eq!(refetch_stale(&s.0, None, &Mutex::default(), &t, None, "2026-10-23"), Ok(vec![]));
+        assert!(t.requests().is_empty());
+    }
+
+    #[test]
+    fn refetch_stale_names_each_copy_it_could_not_fetch() {
+        let s = stale_folder(&[("tmdb.json", "2026-01-01")]); // tmdb-record.json deleted
+        let (t, book) = (RecordedTransport::new(), Mutex::new(LookupBook::default()));
+        lock(&book).states.insert(Lookup::Record, LookupState::Answered { status: 200 });
+        let error = refetch_stale(&s.0, None, &book, &t, None, "2026-10-23").unwrap_err();
+        assert_eq!(error, [
+            "tmdb.json: the TMDb copy is more than six months old (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set",
+            "tmdb-record.json: the TMDb copy was deleted and could not be fetched again: no tmdb_token is set",
+        ].join("; "));
+        assert_eq!(lock(&book).states[&Lookup::Record], LookupState::Pending { reason: PendingReason::Stale("tmdb.json".into()) });
+        assert!(t.requests().is_empty());
     }
 
     #[test]

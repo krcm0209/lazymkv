@@ -429,6 +429,12 @@ impl MemorySecrets {
     pub fn refuse_sets(&self, reason: &str) {
         *lock(&self.refusal) = Some(reason.to_string());
     }
+
+    /// Removes `name`. A test double's removal, as the owner deleting a Credential Manager entry by hand; the engine
+    /// never removes a secret (design part 4.2). Def: T4-9. Use: T4-9.
+    pub fn forget(&self, name: &str) {
+        lock(&self.secrets).remove(name);
+    }
 }
 
 impl Default for MemorySecrets {

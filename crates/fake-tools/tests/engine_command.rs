@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use common::{Client, WAIT};
 use lazymkv_core::ipc::Reply;
+use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::testsupport::Scratch;
 use lazymkv_ctl::{run, Env};
 use lazymkv_dev::evidence::Ctx;
@@ -95,6 +96,24 @@ fn client(h: &Harness) -> Client {
 /// The stand-in lazymkvctl's path in the harness's tools folder.
 fn ctl_path(h: &Harness) -> PathBuf { h.tools().join(format!("lazymkvctl{EXE_SUFFIX}")) }
 
+fn json_of(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).unwrap()
+}
+
+/// Rewrites `<job>/<file>` with its `fetched_at` set to 2026-01-01, past the six-month limit on the harness's date
+/// (2026-10-23).
+fn stale(h: &Harness, id: &str, file: &str) {
+    let path = h.job_dir(id).join(file);
+    let mut copy = json_of(&path);
+    copy["fetched_at"] = json!("2026-01-01");
+    fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+}
+
+/// Removes the harness's `tmdb_token`, so the engine has none.
+fn no_token(h: &Harness) {
+    h.secrets().forget("tmdb_token");
+}
+
 #[test]
 fn plan_job_runs_the_child_with_the_job_folder_and_its_existing_replay_flags() {
     let (h, id) = filed();
@@ -122,15 +141,82 @@ fn decide_job_title_runs_decide_on_the_title_folder() {
 }
 
 #[test]
-fn a_missing_replay_file_adds_no_flag() {
+fn a_missing_tmdb_copy_is_fetched_again_before_the_words() {
     let (h, id) = filed();
     let job = h.job_dir(&id);
-    let given = ["settings.json", "tmdb-search.json"];
+    replay_files(&job, &["settings.json", "tmdb-search.json"]); // tmdb-record.json deleted; its status line says 200
+    let url = lazymkv_clients::record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 });
+    let record_asks = |h: &Harness| h.http().requests().iter().filter(|(u, _)| *u == url).count();
+    let before = record_asks(&h);
+    let mut c = client(&h);
+    let (_, reply) = c.command(&["plan", "--job", &id]);
+    assert_eq!(reply, exit(0, 1));
+    assert!(job.join("tmdb-record.json").is_file(), "the record file is back");
+    assert_eq!(record_asks(&h), before + 1);
+    let given = ["settings.json", "tmdb-search.json", "tmdb-record.json"];
+    assert_eq!(ctl_spawns(&h).pop().unwrap().args, built(&["plan".to_string(), text(job.clone())], &job, &given));
+}
+
+#[test]
+fn a_missing_replay_file_outside_the_lookups_adds_no_flag() {
+    let (h, id) = filed();
+    let job = h.job_dir(&id);
+    let given = ["settings.json", "tmdb-search.json", "tmdb-record.json"]; // remembered.json deleted: no refetch restores it
     replay_files(&job, &given);
     let mut c = client(&h);
     let (_, reply) = c.command(&["plan", "--job", &id]);
     assert_eq!(reply, exit(0, 1));
+    assert!(!job.join("remembered.json").exists());
     assert_eq!(ctl_spawns(&h).pop().unwrap().args, built(&["plan".to_string(), text(job.clone())], &job, &given));
+}
+
+#[test]
+fn a_relayed_plan_with_a_stale_copy_it_cannot_fetch_exits_3_and_leaves_the_job_alone() {
+    let (h, id) = filed();
+    stale(&h, &id, "tmdb-record.json");
+    no_token(&h);
+    let mut c = client(&h);
+    let (outputs, reply) = c.command(&["plan", "--job", &id]);
+    assert_eq!(reply, exit(3, 1));
+    assert_eq!(outputs, [pair("stderr", "lazymkvctl: tmdb-record.json: the TMDb copy is more than six months old \
+        (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set")]);
+    assert!(outputs.iter().all(|(_, line)| !line.contains("test-token")));
+    assert!(ctl_spawns(&h).is_empty());
+    assert_eq!(h.state_of(&id), "Filed");
+}
+
+#[test]
+fn a_relayed_decide_with_a_stale_copy_it_cannot_fetch_exits_3_and_leaves_the_job_alone() {
+    let (h, id) = filed();
+    stale(&h, &id, "tmdb-record.json");
+    no_token(&h);
+    let mut c = client(&h);
+    let (outputs, reply) = c.command(&["decide", "--job", &id, "--title", KEY]);
+    assert_eq!(reply, exit(3, 1));
+    assert_eq!(outputs, [pair("stderr", "lazymkvctl: tmdb-record.json: the TMDb copy is more than six months old \
+        (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set")]);
+    assert!(outputs.iter().all(|(_, line)| !line.contains("test-token")));
+    assert!(ctl_spawns(&h).is_empty());
+    assert_eq!(h.state_of(&id), "Filed");
+}
+
+#[test]
+fn the_relays_refetch_runs_off_the_owner_thread() {
+    let (h, id) = filed();
+    stale(&h, &id, "tmdb-record.json");
+    let url = lazymkv_clients::record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 });
+    let record_asks = |h: &Harness| h.http().requests().iter().filter(|(u, _)| *u == url).count();
+    let before = record_asks(&h);
+    let gate = h.http().gate(&url);
+    let mut a = client(&h);
+    let asked = a.send("command", json!({ "words": ["plan", "--job", &id] }));
+    h.wait("the refetch's request", |h| record_asks(h) == before + 1);
+    let mut b = client(&h); // its snapshot arrives while the refetch waits
+    b.ok("history", json!({}));
+    assert!(ctl_spawns(&h).is_empty(), "the child waits for the refetch");
+    gate.open();
+    assert_eq!(a.reply_to(asked).1, exit(0, asked));
+    assert_eq!(json_of(&h.job_dir(&id).join("tmdb-record.json"))["fetched_at"], json!("2026-10-23"));
 }
 
 #[test]
