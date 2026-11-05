@@ -36,7 +36,7 @@ use lazymkv_core::remembered::Remembered;
 use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{Settings, SettingsProblem};
 
-use crate::cmd::hit_rate::{lookup as lookup_answer, statuses, FAILED, HIT, MISS, NOT_MADE};
+use crate::cmd::hit_rate::{statuses, FAILED, HIT, MISS, NOT_MADE};
 use crate::evidence::{pathlib_split, read_file_text, repo_root, resolve_recording, Ctx, Recording, Refused};
 use crate::pyjson::{dumps, Style};
 use crate::{usage_error, Args};
@@ -151,13 +151,18 @@ struct Found {
     lookup_status: BTreeMap<String, String>,
     discdb_pending: bool,
     tmdb_pending: bool,
+    /// Whether another TMDb lookup than the record's (`search`, `search-tagged`, `search-entry`, `season-<n>`) has a
+    /// lookup-status.txt word that is neither 200 nor 404 (Ruling T4-R1's keys; the book's `waiting`).
+    other_tmdb_pending: bool,
 }
 
 /// The document for one recording or pinned log (RP14). A recording (slug or directory) is read from scan.txt
 /// (typed by `disc::disc`), meta.json (fingerprint and disc ID), the first of `disc::bdmt_candidates` under
 /// nav/BDMV/META/DL through `disc::bdmt_name`, thediscdb-hash.json (`parse_dischash`), thediscdb-discid.json
 /// (`parse_discid`; its first record with titles is `discdb_by_disc_id`), tmdb.json (`parse_recorded`) and
-/// lookup-status.txt (`hit_rate::statuses`); an absent lookup file means that lookup was not made, a lookup that
+/// lookup-status.txt (`hit_rate::statuses`), TheDiscDB's two files read by `discdb_answer` (S46: a 200 that names no
+/// disc is a miss), and the other TMDb lookups' words (`search`, `search-tagged`, `search-entry`, `season-<n>`), each
+/// pending when present and neither 200 nor 404, whatever file is given (Ruling T4-R17); an absent lookup file means that lookup was not made, a lookup that
 /// failed is pending (8.1), an answer file whose status line is not 200 is not parsed (the recorder keeps the error
 /// body of a 404 or a failed lookup), and only a file that exists and does not parse is Refused { code: 2 }. A bare
 /// scan file `<dir>/discNN.txt` is a pinned log: its fingerprint is
@@ -223,8 +228,9 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
             record,
             // SR8: a record the owner gives replaces the lookup's answer, so a failed TMDb lookup no longer leaves the
             // job pending; --tmdb-search is a different lookup and does not clear the flag. G3: only a record of the
-            // planned identity does, which the plan below checks.
-            tmdb_pending: found.tmdb_pending && given_record.is_none(),
+            // planned identity does, which the plan below checks. Ruling T4-R17: neither file clears another TMDb lookup's
+            // pending word (a search or a season).
+            tmdb_pending: (found.tmdb_pending && given_record.is_none()) || found.other_tmdb_pending,
             remembered: None,
             reviewed: None,
         },
@@ -239,7 +245,7 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
     // the failed lookup stays pending: plan again with the flag the lookups set.
     if let Some((_, given)) = &given_record {
         if planned.identity.tmdb != Some(given.identity) {
-            let again = PlanInputs { lookups: LookupInputs { tmdb_pending: found.tmdb_pending, ..inputs.lookups }, ..inputs };
+            let again = PlanInputs { lookups: LookupInputs { tmdb_pending: found.tmdb_pending || found.other_tmdb_pending, ..inputs.lookups }, ..inputs };
             planned = plan(&again).map_err(|sentence| refused(format!("{}: {}", found.scan, sentence)))?;
         }
     }
@@ -333,11 +339,11 @@ fn recording_inputs(rec: &Recording) -> Result<Found, Refused> {
     let status = |lookup: &str| lookup_status.get(lookup).map(String::as_str);
     let discdb_hash = LookupFile {
         path: hash.map(|(shown, _)| shown),
-        answer: lookup_answer(tree, &hash_key, status("dischash")).to_string(),
+        answer: discdb_answer(tree, &hash_key, status("dischash"), false).to_string(),
     };
     let discdb_discid = LookupFile {
         path: discid.map(|(shown, _)| shown),
-        answer: lookup_answer(tree, &discid_key, status("discid")).to_string(),
+        answer: discdb_answer(tree, &discid_key, status("discid"), true).to_string(),
     };
     let tmdb = LookupFile {
         path: tmdb_file.map(|(shown, _)| shown),
@@ -346,6 +352,11 @@ fn recording_inputs(rec: &Recording) -> Result<Found, Refused> {
     // 8.1: an unreachable service leaves its lookup pending; planning proceeds on what is in hand.
     let discdb_pending = discdb_hash.answer == FAILED || discdb_discid.answer == FAILED;
     let tmdb_pending = tmdb.answer == FAILED;
+    let other_tmdb_pending = lookup_status.iter().any(|(key, word)| {
+        (matches!(key.as_str(), "search" | "search-tagged" | "search-entry") || key.starts_with("season-"))
+            && word != "200"
+            && word != "404"
+    });
     Ok(Found {
         slug: rec.slug.clone(),
         scan,
@@ -364,6 +375,7 @@ fn recording_inputs(rec: &Recording) -> Result<Found, Refused> {
         lookup_status,
         discdb_pending,
         tmdb_pending,
+        other_tmdb_pending,
     })
 }
 
@@ -394,6 +406,7 @@ fn scan_file_inputs(ctx: &Ctx, path: &Path) -> Result<Found, Refused> {
         lookup_status: BTreeMap::new(),
         discdb_pending: false,
         tmdb_pending: false,
+        other_tmdb_pending: false,
     })
 }
 
@@ -512,6 +525,34 @@ fn tmdb_answer(status: Option<&str>, read: bool) -> &'static str {
         None => NOT_MADE,
         Some("404") => MISS,
         Some("200") if read => HIT,
+        Some(_) => FAILED,
+    }
+}
+
+/// TheDiscDB's answer word for `path` as the engine's book reads it (S46; T16-r1; Ruling T4-R17): no status "n/a";
+/// 404 "miss"; any status but 200 (`000`, `unparsed`, `429`, `503`) "failed"; 200 with the file unread "failed"; 200
+/// read by `parse_discid` when `discid`, else by `parse_dischash`: a record (a non-empty disc ID list) "hit", none
+/// (an empty body, `[]`, `{"errors": ..}`, `{"titles": []}`) "miss", a parse error "failed". Def: T4-15. Use: T4-15, T4-16.
+pub fn discdb_answer(tree: &dyn Tree, path: &PathKey, status: Option<&str>, discid: bool) -> &'static str {
+    match status {
+        None => NOT_MADE,
+        Some("404") => MISS,
+        Some("200") => {
+            let shown = tree.display(path);
+            let Ok(text) = read_text(tree, path, Encoding::Utf8Sig, Errors::Strict) else {
+                return FAILED;
+            };
+            let record = if discid {
+                parse_discid(&text, &shown).map(|records| !records.is_empty())
+            } else {
+                parse_dischash(&text, &shown).map(|record| record.is_some())
+            };
+            match record {
+                Ok(true) => HIT,
+                Ok(false) => MISS,
+                Err(_) => FAILED,
+            }
+        }
         Some(_) => FAILED,
     }
 }
@@ -666,6 +707,11 @@ mod tests {
     use lazymkv_core::review::{Note, ReviewReason};
     use lazymkv_core::testsupport::{scan_text_with_messages, search_json, tmdb_movie_json, tmdb_tv_json};
 
+    use lazymkv_clients::{
+        dischash_url, discid_url, record_url, run_round, search_url, ChainInputs, LookupBook, RecordedTransport, SavedFile,
+        TransportError,
+    };
+
     use crate::evidence::resolve_recording;
     use crate::testutil::{Scratch, ScratchExt};
 
@@ -804,6 +850,170 @@ mod tests {
     fn corpus(relative: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus").join(relative);
         fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    const PENDING_TMDB: &str = "the TMDb lookup is pending";
+
+    fn rec_key(tmp: &Scratch, file: &str) -> (Recording, PathKey) {
+        let rec = resolve_recording(&Ctx::for_test(&tmp.0), None, "rec").unwrap();
+        let key = rec.dir.join(file);
+        (rec, key)
+    }
+
+    #[test]
+    fn a_dischash_200_that_is_no_disc_is_a_miss_for_plan() {
+        let tmp = Scratch::new("plan-s46-dischash");
+        film_recording(&tmp, "rec");
+        let cases: [(&str, Option<&str>, &str); 9] = [
+            (r#"{"errors": "x"}"#, Some("200"), "miss"),
+            (r#"{"titles": []}"#, Some("200"), "miss"),
+            ("", Some("200"), "miss"),
+            (DISCHASH, Some("200"), "hit"),
+            ("not json", Some("200"), "failed"),
+            (DISCHASH, Some("404"), "miss"),
+            (DISCHASH, None, "n/a"),
+            (DISCHASH, Some("000"), "failed"),
+            (DISCHASH, Some("unparsed"), "failed"),
+        ];
+        for (body, status, word) in cases {
+            tmp.write("rec/thediscdb-hash.json", body);
+            let (rec, key) = rec_key(&tmp, "thediscdb-hash.json");
+            assert_eq!(discdb_answer(&rec.tree, &key, status, false), word, "{body:?} {status:?}");
+        }
+        let (rec, absent) = rec_key(&tmp, "absent.json");
+        assert_eq!(discdb_answer(&rec.tree, &absent, Some("200"), false), "failed");
+        // Through plan: S46's miss leaves TheDiscDB answered, not pending.
+        tmp.write("rec/thediscdb-hash.json", r#"{"errors": "x"}"#);
+        let doc = planned(&tmp, &PlanOptions::default());
+        assert_eq!(doc.inputs.discdb_hash, found("rec/thediscdb-hash.json", "miss"));
+        assert!(!doc.plan.identity.lookup_pending, "{:?}", doc.plan.identity.evidence);
+    }
+
+    #[test]
+    fn an_empty_discid_200_is_a_miss_for_plan() {
+        let tmp = Scratch::new("plan-s46-discid");
+        film_recording(&tmp, "rec");
+        for (body, word) in [("", "miss"), ("[]", "miss"), (r#"{"x": 1}"#, "failed")] {
+            tmp.write("rec/thediscdb-discid.json", body);
+            let (rec, key) = rec_key(&tmp, "thediscdb-discid.json");
+            assert_eq!(discdb_answer(&rec.tree, &key, Some("200"), true), word, "{body:?}");
+        }
+        tmp.write("rec/thediscdb-discid.json", &format!("[{DISCHASH}]"));
+        let (rec, key) = rec_key(&tmp, "thediscdb-discid.json");
+        assert_eq!(discdb_answer(&rec.tree, &key, Some("200"), true), "hit");
+        tmp.write("rec/thediscdb-discid.json", "");
+        tmp.write("rec/lookup-status.txt", "dischash 200\ndiscid 200\ntmdb movie/6537 200\n");
+        let doc = planned(&tmp, &PlanOptions::default());
+        assert_eq!(doc.inputs.discdb_discid, found("rec/thediscdb-discid.json", "miss"));
+        assert!(!doc.plan.identity.lookup_pending, "{:?}", doc.plan.identity.evidence);
+    }
+
+    #[test]
+    fn a_pending_search_word_makes_tmdb_pending_for_plan() {
+        let tmp = Scratch::new("plan-search-words");
+        film_recording(&tmp, "rec");
+        for (line, pending) in [
+            ("search 000", true),
+            ("search-tagged 503", true),
+            ("search-entry unparsed", true),
+            ("search 429", true),
+            ("search 404", false),
+            ("search 200", false),
+        ] {
+            tmp.write("rec/lookup-status.txt", &format!("dischash 200\ndiscid 404\ntmdb movie/6537 200\n{line}\n"));
+            let doc = planned(&tmp, &PlanOptions::default());
+            assert_eq!(doc.inputs.tmdb, found("rec/tmdb.json", "hit"), "{line}");
+            assert_eq!(doc.plan.identity.lookup_pending, pending, "{line}");
+            assert_eq!(doc.plan.identity.evidence.iter().any(|s| s == PENDING_TMDB), pending, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_pending_season_word_makes_tmdb_pending_for_plan() {
+        let tmp = Scratch::new("plan-season-words");
+        film_recording(&tmp, "rec");
+        for (line, pending) in [("season-2 000", true), ("season-1 500", true), ("season-7 404", false), ("season-1 200", false)] {
+            tmp.write("rec/lookup-status.txt", &format!("dischash 200\ndiscid 404\ntmdb movie/6537 200\n{line}\n"));
+            assert_eq!(planned(&tmp, &PlanOptions::default()).plan.identity.lookup_pending, pending, "{line}");
+        }
+    }
+
+    /// SR8 unchanged: a given search page or record answers its own lookup only, never another TMDb lookup's.
+    #[test]
+    fn a_given_tmdb_search_file_does_not_clear_a_pending_search() {
+        let tmp = Scratch::new("plan-search-given");
+        film_recording(&tmp, "rec");
+        tmp.write("rec/lookup-status.txt", "dischash 200\ndiscid 404\ntmdb movie/6537 200\nsearch 000\n");
+        tmp.write("search.json", search_json(&[("movie", 6537, "Made Up Film", "Pelicula Inventada", "2007-05-20")]));
+        tmp.write("movie.json", tmdb_movie_json(6537, "Made Up Film", "Pelicula Inventada", "2007-05-20", "es", Some(100)));
+        let search = PlanOptions { tmdb_search: Some(PathBuf::from("search.json")), ..PlanOptions::default() };
+        assert!(planned(&tmp, &search).plan.identity.lookup_pending);
+        let both = PlanOptions { tmdb_record: Some(PathBuf::from("movie.json")), ..search };
+        let doc = planned(&tmp, &both);
+        assert!(doc.plan.identity.lookup_pending);
+        assert!(doc.plan.identity.evidence.iter().any(|s| s == PENDING_TMDB), "{:?}", doc.plan.identity.evidence);
+    }
+
+    enum Ans {
+        Status(u16, String),
+        Fail(TransportError),
+    }
+
+    /// Design part 7.1, T16-r1: dev reads a folder the chain wrote as the book reads itself.
+    #[test]
+    fn plan_over_an_engine_job_folder_flags_lookups_as_the_book_does() {
+        let name = disc_name(Some("Made Up Film"), Some("MADE_UP_FILM")).unwrap();
+        let record = tmdb_movie_json(6537, "Made Up Film", "Pelicula Inventada", "2007-05-20", "es", Some(100));
+        let page = search_json(&[("movie", 6537, "Made Up Film", "Pelicula Inventada", "2007-05-20")]);
+        let empty = search_json(&[]);
+        let ok = |body: &str| Ans::Status(200, body.to_string());
+        // (case, dischash, search, record, the book's pending)
+        let cases = [
+            ("all answered", ok(DISCHASH), ok(&page), ok(&record), (false, false)),
+            ("S46 miss", ok(r#"{"errors": "x"}"#), ok(&empty), ok(&record), (false, false)),
+            ("TheDiscDB 503", Ans::Status(503, String::new()), ok(&empty), ok(&record), (true, false)),
+            ("search timeout", ok(DISCHASH), Ans::Fail(TransportError::Timeout), ok(&record), (false, true)),
+            ("search 429", ok(DISCHASH), Ans::Status(429, String::new()), ok(&record), (false, true)),
+            ("record 500", ok(DISCHASH), ok(&page), Ans::Status(500, String::new()), (false, true)),
+        ];
+        for (case, hash, search, rec_answer, expected) in cases {
+            let tmp = Scratch::new("plan-book-equivalence");
+            tmp.write("rec/scan.txt", film_scan(FILM_STREAMS));
+            tmp.write("rec/meta.json", META);
+            tmp.write(&format!("rec/{BDMT_DIR}/bdmt_eng.xml"), bdmt_xml("Made Up Film"));
+            let http = RecordedTransport::new();
+            let identity = TmdbIdentity { kind: TmdbKind::Movie, id: 6537 };
+            for (url, answer) in
+                [(dischash_url(FINGERPRINT), hash), (search_url(&name.cleaned), search), (record_url(identity), rec_answer)]
+            {
+                match answer {
+                    Ans::Status(code, body) => http.answer(&url, code, body.as_bytes()),
+                    Ans::Fail(error) => http.fail(&url, error),
+                }
+            }
+            http.answer(&discid_url(DISC_ID), 404, b"");
+            let mut book = LookupBook::default();
+            let inputs = ChainInputs {
+                fingerprint: FINGERPRINT.to_string(),
+                disc_id: Some(DISC_ID.to_string()),
+                name: Some(name.clone()),
+                remembered: None,
+            };
+            let dir = tmp.0.join("rec");
+            run_round(&http, Some("token-sentinel-5d2e"), &mut book, &inputs, "2026-10-13", &mut |file: SavedFile| {
+                fs::write(dir.join(&file.name), &file.bytes).unwrap()
+            });
+            assert_eq!(book.pending(), expected, "{case}: the case's own premise");
+            let (rec, _) = rec_key(&tmp, "scan.txt");
+            let found = recording_inputs(&rec).unwrap_or_else(|refused| panic!("{case}: {}", refused.line));
+            assert_eq!((found.discdb_pending, found.tmdb_pending || found.other_tmdb_pending), expected, "{case}");
+            // The engine's replay (file_phase::replay_options): the folder's tmdb-search.json and tmdb-record.json given.
+            let given = |file: &str| Some(dir.join(file)).filter(|path| path.is_file());
+            let replay =
+                PlanOptions { tmdb_search: given("tmdb-search.json"), tmdb_record: given("tmdb-record.json"), ..PlanOptions::default() };
+            let doc = doc_of(&tmp, "rec", &replay).unwrap_or_else(|refused| panic!("{case}: {}", refused.line));
+            assert_eq!(doc.plan.identity.lookup_pending, expected.0 || expected.1, "{case}");
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! where the Python crashed (no argument; the folder or a meta.json unreadable; a lookup-status.txt not UTF-8).
 
 use crate::evidence::{run_on_folder, Ctx};
-use lazymkv_core::recording::files::{lookup_statuses, thediscdb_answer, DiscDbAnswer, Meta};
+use lazymkv_core::recording::files::{lookup_statuses, Meta};
 use lazymkv_core::recording::{decode_text, read_json, Encoding, Errors, Ordered, PathKey, Tree};
 use std::io::Write;
 
@@ -29,25 +29,11 @@ pub fn statuses(tree: &dyn Tree, disc: &PathKey) -> Result<Ordered<String>, Stri
     Ok(lookup_statuses(&text))
 }
 
-/// "hit", "miss", "failed" or "n/a" for the answer file `path` given the lookup's HTTP status. Only an answer from
-/// TheDiscDB counts as a miss. Py: hit_rate.lookup.
-pub fn lookup(tree: &dyn Tree, path: &PathKey, status: Option<&str>) -> &'static str {
-    match status {
-        // the lookup was not made, for example the disc has no disc ID
-        None => NOT_MADE,
-        Some("404") => MISS,
-        // network error, rate limit or server error
-        Some(status) if status != "200" => FAILED,
-        Some(_) => match read_json::<serde_json::Value>(tree, path) {
-            Err(_) => FAILED,
-            Ok(value) => match thediscdb_answer(&value) {
-                DiscDbAnswer::Hit => HIT,
-                DiscDbAnswer::Miss => MISS,
-                // a 200 answer that is not a disc record
-                DiscDbAnswer::NotADisc => FAILED,
-            },
-        },
-    }
+/// `hit`, `miss`, `failed` or `n/a` for the answer file `path` given the lookup's HTTP status, read as S46 reads it
+/// (`plan::discdb_answer`; Ruling T4-R17, overturned by the owner on 2026-11-04, so a dischash 200 that is no disc
+/// record is a miss, where the Python read it as failed). Def: T4-15. Use: T4-15.
+pub fn lookup(tree: &dyn Tree, path: &PathKey, status: Option<&str>, discid: bool) -> &'static str {
+    crate::cmd::plan::discdb_answer(tree, path, status, discid)
 }
 
 /// Writes hit_rate.main's lines for the recordings directly in `root` as it goes, and returns the exit code; Err
@@ -60,8 +46,8 @@ pub fn report(tree: &dyn Tree, root: &PathKey, out: &mut dyn Write) -> Result<i3
         }
         let meta: Meta = read_json(tree, &disc.join("meta.json"))?;
         let status = statuses(tree, &disc)?;
-        let by_hash = lookup(tree, &disc.join("thediscdb-hash.json"), status.get("dischash").map(String::as_str));
-        let by_id = lookup(tree, &disc.join("thediscdb-discid.json"), status.get("discid").map(String::as_str));
+        let by_hash = lookup(tree, &disc.join("thediscdb-hash.json"), status.get("dischash").map(String::as_str), false);
+        let by_id = lookup(tree, &disc.join("thediscdb-discid.json"), status.get("discid").map(String::as_str), true);
         rows.push((by_hash, by_id));
         // str(meta.get('format')): the format, or "None" without one.
         let format = meta.format.as_deref().unwrap_or("None");
@@ -158,12 +144,12 @@ mod tests {
     }
 
     #[test]
-    fn hit_rate_a_200_answer_that_is_not_a_disc_record_is_a_failure() {
+    fn hit_rate_a_200_answer_that_is_not_a_disc_record_is_a_miss() {
         let tmp = TempDir::new("not-a-disc");
         disc(&tmp, "a", "dischash 200\n", Some(r#"{"errors": "x"}"#), None);
         let (code, out, _) = quiet(&tmp.0);
-        assert_eq!(code, 1, "{out}");
-        assert!(out.contains("hash=failed"), "{out}");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("hash=miss"), "{out}");
     }
 
     #[test]

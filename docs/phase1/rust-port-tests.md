@@ -154,7 +154,7 @@ the plan's Review Focus) are not listed here; `cargo test --workspace -- --list`
 | 134 | `test_decisions.py::HitRate::test_hits_and_misses_are_counted_when_every_lookup_answered` | `cmd::hit_rate::tests::hit_rate_hits_and_misses_are_counted_when_every_lookup_answered` | `crates/dev/src/cmd/hit_rate.rs` | 12 |
 | 135 | `test_decisions.py::HitRate::test_a_failed_lookup_is_not_a_miss` | `cmd::hit_rate::tests::hit_rate_a_failed_lookup_is_not_a_miss` | `crates/dev/src/cmd/hit_rate.rs` | 12 |
 | 136 | `test_decisions.py::HitRate::test_a_failed_disc_id_lookup_is_reported` | `cmd::hit_rate::tests::hit_rate_a_failed_disc_id_lookup_is_reported` | `crates/dev/src/cmd/hit_rate.rs` | 12 |
-| 137 | `test_decisions.py::HitRate::test_a_200_answer_that_is_not_a_disc_record_is_a_failure` | `cmd::hit_rate::tests::hit_rate_a_200_answer_that_is_not_a_disc_record_is_a_failure` | `crates/dev/src/cmd/hit_rate.rs` | 12 |
+| 137 | `test_decisions.py::HitRate::test_a_200_answer_that_is_not_a_disc_record_is_a_failure` | `cmd::hit_rate::tests::hit_rate_a_200_answer_that_is_not_a_disc_record_is_a_miss` | `crates/dev/src/cmd/hit_rate.rs` | 12 |
 | 138 | `test_decisions.py::HitRate::test_a_recording_without_a_status_file_is_not_a_miss` | `cmd::hit_rate::tests::hit_rate_a_recording_without_a_status_file_is_not_a_miss` | `crates/dev/src/cmd/hit_rate.rs` | 12 |
 | 139 | `test_decisions.py::ParseLines::test_only_a_newline_ends_a_line` | `robot::tests::parse_lines::only_a_newline_ends_a_line` | `crates/core/src/robot.rs` | 2 |
 | 140 | `test_exp11_tracks.py::Coverage::test_a_uhd_with_only_english_audio_tests_neither_special_nor_nolang` | `cmd::exp11::tests::coverage_a_uhd_with_only_english_audio_tests_neither_special_nor_nolang` | `crates/dev/src/cmd/exp11.rs` | 12 |
