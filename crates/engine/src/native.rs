@@ -102,11 +102,11 @@ impl NativeOptions {
 }
 
 /// Runs the engine on Windows until a `shutdown` request or the console's stop event stops it (design parts 3.1 to
-/// 3.8; Rulings W1 to W5, W19, W26): the arguments, the elevation check, the default data folder's place when no
-/// `--data` is given (whole-branch review F2), the mutex, the data folder, the first pipe instance, the console
-/// handler, the process's critical-error mode (`fail_critical_errors`, review round 1 of pull request 3, V6), then
-/// `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a usage error; every refusal's
-/// text goes to `err` (Step 3 lists them). Def: T3-23. Use: T3-23.
+/// 3.8, and design parts 8.1 and 8.6 (T4-17); Rulings W1 to W5, W19, W26): the arguments, the elevation check, the
+/// default data folder's place when no `--data` is given (whole-branch review F2), the mutex, the data folder, the
+/// first pipe instance, the console handler, the process's critical-error mode (`fail_critical_errors`, review round 1
+/// of pull request 3, V6), then `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a
+/// usage error; every refusal's text goes to `err` (Step 3 lists them). Def: T3-23; T4-17. Use: T3-23, T4-17.
 pub fn run_with(args: &[String], err: &mut dyn Write, options: NativeOptions) -> i32 {
     let data = match data_arg(args) {
         Ok(data) => data,

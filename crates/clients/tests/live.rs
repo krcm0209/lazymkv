@@ -51,7 +51,7 @@ fn records_dir(today: &str) -> Option<PathBuf> {
         skip("LAZYMKV_EVIDENCE is not set");
         return None;
     };
-    if !root.is_dir() || root.join(".git").exists() {
+    if !root.is_dir() || root.ancestors().any(|folder| folder.join(".git").exists()) {
         skip(&format!("{} is not the evidence mirror (no folder, or it holds .git; design part 8.5)", root.display()));
         return None;
     }

@@ -166,6 +166,7 @@ pub fn line(row: &CensusRow) -> String {
         None => "?",
     };
     let subs = row.english_subtitles.map_or_else(|| "?".to_string(), |count| count.to_string());
+    // The object column prints `?` when `english_subtitles` is None because both come from the scan.
     let object = if row.english_subtitles.is_none() {
         "?".to_string()
     } else if row.object_audio.is_empty() {
@@ -188,8 +189,8 @@ pub fn line(row: &CensusRow) -> String {
 /// hit-rate lists them) as it goes, and returns 0; Err after the lines written so far when a row cannot be read. No
 /// summary line follows the rows (decisions.md A9, Ruling T4-R22). Def: T4-16. Use: T4-16.
 pub fn report(tree: &dyn Tree, root: &PathKey, out: &mut dyn Write) -> Result<i32, String> {
-    let mut recordings = tree.list(root);
-    recordings.sort();
+    let recordings = tree.list(root);
+    // `Tree::list` already gives PathKey order, so no sort follows.
     for disc in recordings {
         if !tree.exists(&disc.join("meta.json")) {
             continue;

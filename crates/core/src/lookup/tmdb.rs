@@ -334,9 +334,9 @@ pub fn merge_season(record: &mut TmdbRecord, season_text: &str, shown: &str) -> 
 
 /// A `/tv/{id}/season/{n}` answer (design part 8.2 item 5): `season_number`, the `episodes` array read as
 /// `TmdbEpisode`s (runtime 0 reads as None), `episode_count` the number of episodes. Err `<shown>: the season answer
-/// has no episodes` when `episodes` is absent or not an array (Ruling T4-4-a: a 200 that is no season is unparsed,
-/// never a season with no episodes); serde's sentence prefixed by `<shown>` for malformed JSON or no
-/// `season_number`. Def: T4-4. Use: T4-4, T4-8, T4-19.
+/// has no episodes` when `episodes` is absent or null (another non-array value gives serde's sentence; Ruling T4-4-a: a
+/// 200 that is no season is unparsed, never a season with no episodes); serde's sentence prefixed by `<shown>` for
+/// malformed JSON or no `season_number`. Def: T4-4. Use: T4-4, T4-8, T4-19.
 pub fn parse_season_answer(text: &str, shown: &str) -> Result<TmdbSeason, String> {
     #[derive(serde::Deserialize)]
     struct SeasonAnswer {

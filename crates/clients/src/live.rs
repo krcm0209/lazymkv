@@ -13,7 +13,8 @@ use ureq::Agent;
 
 use crate::transport::{HttpTransport, Response, TransportError, TIMEOUT_S};
 
-/// The longest answer body read, in bytes: 8 MiB. A longer one is `Unreachable(BODY_TOO_LONG)`. Design part 8.1.
+/// The longest answer body read, in bytes: 8 MiB. The cap is exclusive: a body of 8 MiB or longer is
+/// `Unreachable(BODY_TOO_LONG)`. Design part 8.1.
 /// Def: T4-7. Use: T4-7.
 pub const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -163,7 +164,8 @@ mod tests {
     const QUICK: Duration = Duration::from_millis(500);
     /// Windows answers a connection to a closed loopback port only after about 2 s of connection retries.
     const REFUSAL: Duration = Duration::from_secs(5);
-    /// Taken by every test here: `no_proxy_is_read_from_the_environment` sets proxy variables process-wide.
+    /// Taken by every test that sends or reads the environment, and not by `the_production_timeout_is_ten_seconds`:
+    /// `no_proxy_is_read_from_the_environment` sets proxy variables process-wide.
     static ENV: Mutex<()> = Mutex::new(());
 
     fn answer(status: &str, body: &[u8]) -> Vec<u8> {

@@ -99,7 +99,9 @@ pub fn reason_text(reason: &PendingReason) -> String {
         PendingReason::Unreachable(text) => text.clone(),
         PendingReason::Status(status) => format!("HTTP {status}"),
         PendingReason::Unparsed(sentence) => sentence.clone(),
-        PendingReason::Stale(file) => format!("{file} is more than six months old or was deleted, and is fetched again"),
+        PendingReason::Stale(file) => {
+            format!("{file} is more than six months old or was deleted, and is fetched again")
+        }
     }
 }
 

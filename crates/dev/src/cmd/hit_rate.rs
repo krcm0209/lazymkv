@@ -1,6 +1,8 @@
 //! `lazymkv-dev hit-rate <dir>`: experiment 10, how many recorded discs does TheDiscDB know?
-//! Py: hit_rate, its lines verbatim. Exit 0 when there is a recording and every lookup answered; 1 otherwise; 2
-//! where the Python crashed (no argument; the folder or a meta.json unreadable; a lookup-status.txt not UTF-8).
+//! Py: hit_rate, its lines verbatim. Since pull request 4 a dischash 200 that is no disc record reads `miss` where the
+//! Python read `failed` (Ruling T4-R17, overturned by the owner on 2026-11-04). Exit 0 when there is a recording and
+//! every lookup answered; 1 otherwise; 2 where the Python crashed (no argument; the folder or a meta.json unreadable; a
+//! lookup-status.txt not UTF-8).
 
 use crate::evidence::{run_on_folder, Ctx};
 use lazymkv_core::recording::files::{lookup_statuses, Meta};

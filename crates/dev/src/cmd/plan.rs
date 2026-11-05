@@ -57,10 +57,10 @@ const API_DIR: &str = "corpus/thediscdb-api";
 /// One lookup file the command looked for (spec 15 "Recordings": thediscdb-hash.json, thediscdb-discid.json,
 /// tmdb.json; for a pinned log its TheDiscDB answer): its displayed path when the answer file exists (None: no answer
 /// file is on disk, because the lookup was not made or failed before the recorder wrote one; its line in
-/// lookup-status.txt says which) and the answer word "hit", "miss", "failed" or "n/a". For a
-/// recording's TheDiscDB answers the word is `hit_rate::lookup`'s; for its tmdb.json it is `tmdb_answer`'s (the same
-/// words over a TMDb record); for a pinned log "hit" when a record was read, else "n/a". RP14. Def: T15. Use: T15,
-/// T16.
+/// lookup-status.txt says which) and the answer word "hit", "miss", "failed" or "n/a". For a recording's TheDiscDB
+/// answers the word comes from `discdb_answer` (through `hit_rate::lookup`); for its tmdb.json it is `tmdb_answer`'s
+/// (the same words over a TMDb record); for a pinned log "hit" when a record was read, else "n/a". RP14. Def: T15.
+/// Use: T15, T16.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LookupFile {
     pub path: Option<String>,
@@ -162,10 +162,10 @@ struct Found {
 /// (`parse_discid`; its first record with titles is `discdb_by_disc_id`), tmdb.json (`parse_recorded`) and
 /// lookup-status.txt (`hit_rate::statuses`), TheDiscDB's two files read by `discdb_answer` (S46: a 200 that names no
 /// disc is a miss), and the other TMDb lookups' words (`search`, `search-tagged`, `search-entry`, `season-<n>`), each
-/// pending when present and neither 200 nor 404, whatever file is given (Ruling T4-R17); an absent lookup file means that lookup was not made, a lookup that
-/// failed is pending (8.1), an answer file whose status line is not 200 is not parsed (the recorder keeps the error
-/// body of a 404 or a failed lookup), and only a file that exists and does not parse is Refused { code: 2 }. A bare
-/// scan file `<dir>/discNN.txt` is a pinned log: its fingerprint is
+/// pending when present and neither 200 nor 404, whatever file is given (Ruling T4-R17); an absent lookup file means
+/// that lookup was not made, a lookup that failed is pending (8.1), an answer file whose status line is not 200 is not
+/// parsed (the recorder keeps the error body of a 404 or a failed lookup), and only a file that exists and does not
+/// parse is Refused { code: 2 }. A bare scan file `<dir>/discNN.txt` is a pinned log: its fingerprint is
 /// `fingerprint::content_hash(&fingerprint::hashed_files(log))` of its HSH lines; `discdb_by_fingerprint` is
 /// `corpus/thediscdb-api/dischash-<fingerprint>.json` under
 /// `repo_root(ctx.cwd)` when present (it carries media), else `<dir>/discNN.json` with the same stem (no media: kind
@@ -175,9 +175,10 @@ struct Found {
 /// lookup stays pending, and --tmdb-search, a different lookup, does not clear the flag) and --remembered (refused
 /// when it remembers another fingerprint); the disc name with
 /// `lookup::name::disc_name(bdmt, disc.volume_label)`; PlanInputs with no sessions, no overrides and default
-/// LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). The flag stays cleared only
-/// when the given record is the planned identity's (spec 8.1, ruling G3): when the plan's `identity.tmdb` is not the
-/// record's identity, `plan::plan` dropped the record, so it runs a second time with the pending flag the lookups set.
+/// LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). The flag stays cleared
+/// only when the given record is the planned identity's (spec 8.1, ruling G3): when the plan's `identity.tmdb` is not
+/// the record's identity, `plan::plan` dropped the record, so it runs a second time with the pending flag the lookups
+/// set.
 /// Def: T15. Use: T15, T16.
 pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Result<PlanDoc, Refused> {
     let found = match source {
@@ -228,8 +229,8 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
             record,
             // SR8: a record the owner gives replaces the lookup's answer, so a failed TMDb lookup no longer leaves the
             // job pending; --tmdb-search is a different lookup and does not clear the flag. G3: only a record of the
-            // planned identity does, which the plan below checks. Ruling T4-R17: neither file clears another TMDb lookup's
-            // pending word (a search or a season).
+            // planned identity does, which the plan below checks. Ruling T4-R17: neither file clears another TMDb
+            // lookup's pending word (a search or a season).
             tmdb_pending: (found.tmdb_pending && given_record.is_none()) || found.other_tmdb_pending,
             remembered: None,
             reviewed: None,

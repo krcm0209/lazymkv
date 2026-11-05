@@ -378,7 +378,7 @@ pub use crate::subtitle::text::READING;
 /// Spec section 17 row 14 (a) read from the spec text, its costly verdicts, and the subtitle harness behind
 /// `lazymkv-dev retune --subtitles` (RP15; spec 15 "Rules against the stored evidence"; 8.7 "Text"; Task 18). What other
 /// code uses is re-exported above it; the module is public since T4-16 for `row14::{media, recorded_discdb, Media}`
-/// (decisions.md A9, Ruling T4-R22). Def: T4-16. Use: T4-16.
+/// (decisions.md A9, Ruling T4-R22). Def: RP15, spec 15 (Task 18); T4-16 makes it public. Use: T4-16.
 pub mod row14;
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 //! The self-test (design parts 3.7, 9.4; Rulings S53, S79 to S81, RP-9): the MakeMKV check with the (version,
 //! licence code) it records across restarts, each tool's path, version and where it was found, the write, rename and
-//! delete probe of the three roots, the TMDb token's check, the two webhooks' connection checks (Ruling T4-R14), and what a `retry` re-checks for a waiting job. Every run
-//! is recorded capture-style under `<data>/selftest/` (design part 7.2). The owner thread runs none of this itself: it
-//! hands each self-test and re-check to a thread of its own (design part 4.4).
+//! delete probe of the three roots, the TMDb token's check, the two webhooks' connection checks (Ruling T4-R14), and
+//! what a `retry` re-checks for a waiting job. Every run is recorded capture-style under `<data>/selftest/` (design
+//! part 7.2). The owner thread runs none of this itself: it hands each self-test and re-check to a thread of its own
+//! (design part 4.4).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -515,7 +516,7 @@ impl CheckEnv {
 
     /// Every check of spec 13's self-test that needs no disc, in S80's order: the MakeMKV check (`busy` while a
     /// `makemkvcon` runs), mkvmerge, ffprobe, ffmpeg, java, the three roots, the TMDb token and the two webhooks
-    /// (design part 8.6, Ruling T4-R14), design part 9.4, S53.
+    /// (design part 9.4, S53; design part 8.6, Ruling T4-R14).
     /// `listed` runs once the MakeMKV check has ended, so the owner can free the disc-phase token the check holds
     /// (Ruling R26.c1). The three root checks share one `down` map, made here, so a share that did not answer is asked
     /// once in this self-test; nothing is kept across self-tests or shared with jobs and re-checks (review round 1 of

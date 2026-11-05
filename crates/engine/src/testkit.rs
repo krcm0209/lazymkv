@@ -1569,11 +1569,12 @@ impl Runner {
 /// `season-<n>` line, and the search family (URLs under `/3/search/`, and any URL that still starts with `{` after
 /// the substitution, which is a search URL) at least as many lines whose key is `search`, `search-tagged` or
 /// `search-entry` as there are distinct search URLs. A URL under neither root (a webhook) needs no line, nor does a
-/// URL of none of those kinds. The engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
-/// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
-/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `native_guard()` through `retry_busy`
-/// (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake job runs it (Ruling W7), and
-/// `StdProcessGuard` elsewhere. Before all of that it keeps a copy of the spawn for `Harness::spawns` (Task T3-22).
+/// URL of none of those kinds. The engine's planning still never waits, and the whole-job tests are deterministic. It
+/// relies on `run_round` applying each outcome to the book before it saves the status file. Before any spawn it runs
+/// the first `on_spawn` action not yet run whose needles the arguments hold (Task 24). Every spawn then goes to
+/// `native_guard()` through `retry_busy` (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake
+/// job runs it (Ruling W7), and `StdProcessGuard` elsewhere. Before all of that it keeps a copy of the spawn for
+/// `Harness::spawns` (Task T3-22).
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,

@@ -828,6 +828,7 @@ mod tests {
         assert_eq!(secret_host("http://ha.local:8123/api/webhook/abc123").as_deref(), Some("ha.local"));
         assert_eq!(secret_host("https://user:pw@hooks.example.org/x").as_deref(), Some("hooks.example.org"));
         assert_eq!(secret_host("not a url"), None);
+        assert_eq!(secret_host("ftp://h/"), None);
     }
 
     fn record(n: u64, state: lazymkv_core::job::State) -> lazymkv_core::record::JobRecord {

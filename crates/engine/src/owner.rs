@@ -356,6 +356,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         cleanup_schedule,
         notifier_done,
         notify_stop,
+        #[cfg(any(test, feature = "testkit"))]
         busy,
         store,
         jobs: shown,
@@ -389,6 +390,7 @@ pub struct EngineHandle {
     /// None for a sink that never waits.
     notify_stop: Option<Arc<AtomicBool>>,
     /// The owner's `busy`, set after each message it handles.
+    #[cfg(any(test, feature = "testkit"))]
     busy: Arc<AtomicBool>,
     /// The data folder's store, for the `engine stopped` line.
     store: Arc<Store>,
@@ -417,12 +419,14 @@ impl EngineHandle {
     /// 5.9) outstanding; false once it has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet
     /// instead of 300 ms, and waits no longer than that for it to clear (Ruling R24.c1). Def: T24, T4-11. Use: T24 to
     /// T29, T4-11.
+    #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
 
     /// Asks the owner for one cleanup pass (design part 5.9): it sends `Msg::Cleanup`, which a running pass drops.
     /// Def: T4-11. Use: T4-11.
+    #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn cleanup_now(&self) {
         let _ = self.sender.send(Msg::Cleanup);
     }
@@ -476,7 +480,9 @@ impl EngineHandle {
     /// queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at most
     /// CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for its
     /// volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
-    /// panics still reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked.
+    /// panics still reports (R22.11), so stop never waits on one. A notifier still retrying when the drain bound passes
+    /// may append its `was not delivered` lines after `engine stopped`. Err when the serve, drive or owner thread
+    /// panicked.
     /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12. Use: T22 to T29, T3-23, T4-11, T4-12.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
