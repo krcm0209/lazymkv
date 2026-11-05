@@ -1,4 +1,4 @@
-//! lazymkv-clients: TheDiscDB and TMDb (The Movie Database) behind an HTTP transport trait, with a transport that replays recorded answers (design parts 4.1, 8.1). The live transport arrives in pull request 4.
+//! lazymkv-clients: TheDiscDB and TMDb (The Movie Database) behind an HTTP transport trait, with a transport that replays recorded answers (design parts 4.1, 8.1). Two test doubles, `RecordedTransport` and `OfflineTransport`, stand in for the live transport.
 
 pub mod chain;
 pub mod lookups;
@@ -15,7 +15,10 @@ pub use lookups::{
 pub use merge::merge_pages;
 pub use recorded::{Gate, RecordedTransport};
 pub use saved::{slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
-pub use transport::{user_agent, HttpTransport, OfflineTransport, Response, TransportError, OFFLINE, TIMEOUT_S};
+pub use transport::{
+    user_agent, webhook_target, HttpTransport, OfflineTransport, Response, TransportError, WebhookTarget, OFFLINE,
+    TIMEOUT_S,
+};
 
 #[cfg(test)]
 mod tests {

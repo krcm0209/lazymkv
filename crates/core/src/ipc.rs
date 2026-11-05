@@ -30,6 +30,10 @@ pub const CANCELLED: &str = "cancelled by the owner";
 /// The names `secret_set` takes besides a share's (design part 9.4). Def: T7. Use: T26.
 pub const SECRET_NAMES: [&str; 3] = ["tmdb_token", "ha_webhook_url", "webhook_url"];
 
+/// The two secrets that hold a webhook URL, in the order the notifier delivers and the self-test checks them (design
+/// part 8.6, S77). Def: T4-6. Use: T4-6, T4-12, T4-13.
+pub const WEBHOOK_SECRETS: [&str; 2] = ["ha_webhook_url", "webhook_url"];
+
 /// Whether `name` is a secret `secret_set` takes: one of SECRET_NAMES, or a share's `share:\\<server>\<share>`, with
 /// both parts non-empty and no further backslash, because design part 9.4 names a share and not a folder (Ruling
 /// T7-f). Def: T7. Use: T26.
@@ -552,6 +556,12 @@ mod tests {
     use crate::record::{JobRecord, TitleRecord, JOB_FORMAT};
     use crate::review::ReviewReason;
     use crate::settings::{Settings, SettingsProblem};
+
+    #[test]
+    fn the_webhook_secrets_are_secret_names_in_channel_order() {
+        assert_eq!(WEBHOOK_SECRETS, ["ha_webhook_url", "webhook_url"]);
+        assert!(WEBHOOK_SECRETS.iter().all(|name| SECRET_NAMES.contains(name) && is_secret_name(name)));
+    }
 
     fn record(state: State, message: Option<&str>) -> JobRecord {
         JobRecord {

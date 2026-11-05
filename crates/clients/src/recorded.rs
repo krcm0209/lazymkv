@@ -59,6 +59,9 @@ struct State {
     slots: HashMap<String, Slot>,
     requests: Vec<(String, Vec<(String, String)>)>,
     unrecorded: Vec<String>,
+    posts: Vec<(String, Vec<(String, String)>, Vec<u8>)>,
+    connects: Vec<(String, u16)>,
+    connect_answers: HashMap<(String, u16), Result<(), TransportError>>,
     gates: HashMap<String, Gate>,
 }
 
@@ -164,15 +167,29 @@ impl RecordedTransport {
     }
 }
 
-/// Design part 8.1. Def: T15. Use: T16.
-impl HttpTransport for RecordedTransport {
-    fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Response, TransportError> {
-        let gate = {
-            let mut state = locked(&self.state);
-            let sent = headers.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
-            state.requests.push((url.to_string(), sent));
-            state.gates.get(url).cloned()
-        };
+impl RecordedTransport {
+    /// Every POST so far, in arrival order: the URL, the headers and the body, a POST still waiting on its gate
+    /// included (S64); memory only. A POST is served from the same per-URL answers as a GET (`answer`, `fail`, `gate`),
+    /// and `requests` keeps listing GETs only. Def: T4-6. Use: T4-12, T4-13, T4-18.
+    pub fn posts(&self) -> Vec<(String, Vec<(String, String)>, Vec<u8>)> {
+        locked(&self.state).posts.clone()
+    }
+
+    /// Sets the outcome every `connect(host, port)` gets from now on. Def: T4-6. Use: T4-13.
+    pub fn connect_answer(&self, host: &str, port: u16, outcome: Result<(), TransportError>) {
+        locked(&self.state).connect_answers.insert((host.to_string(), port), outcome);
+    }
+
+    /// Every connect so far, in arrival order. An unset pair gives `Err(Unrecorded("<host>:<port>"))` and is not
+    /// listed by `unrecorded`, which lists URLs. Def: T4-6. Use: T4-13.
+    pub fn connects(&self) -> Vec<(String, u16)> {
+        locked(&self.state).connects.clone()
+    }
+
+    /// Waits on the URL's gate, then serves its next answer; a URL with none is listed in `unrecorded`. The one path
+    /// `get` and `post` share.
+    fn serve(&self, url: &str) -> Result<Response, TransportError> {
+        let gate = locked(&self.state).gates.get(url).cloned();
         if let Some(gate) = gate {
             gate.wait();
         }
@@ -188,6 +205,36 @@ impl HttpTransport for RecordedTransport {
                 unrecorded.push(url.to_string());
                 Err(TransportError::Unrecorded(url.to_string()))
             }
+        }
+    }
+}
+
+/// Design part 8.1. Def: T15. Use: T16.
+impl HttpTransport for RecordedTransport {
+    fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Response, TransportError> {
+        {
+            let mut state = locked(&self.state);
+            let sent = headers.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+            state.requests.push((url.to_string(), sent));
+        }
+        self.serve(url)
+    }
+
+    fn post(&self, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response, TransportError> {
+        {
+            let mut state = locked(&self.state);
+            let sent = headers.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+            state.posts.push((url.to_string(), sent, body.to_vec()));
+        }
+        self.serve(url)
+    }
+
+    fn connect(&self, host: &str, port: u16) -> Result<(), TransportError> {
+        let mut state = locked(&self.state);
+        state.connects.push((host.to_string(), port));
+        match state.connect_answers.get(&(host.to_string(), port)) {
+            Some(outcome) => outcome.clone(),
+            None => Err(TransportError::Unrecorded(format!("{host}:{port}"))),
         }
     }
 }
@@ -231,6 +278,52 @@ mod tests {
         assert_eq!(t.requests().len(), 1);
         gate.open();
         assert!(matches!(got.recv_timeout(Duration::from_secs(5)).unwrap(), Outcome::Miss { .. }));
+    }
+
+    const HOOK: &str = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
+
+    #[test]
+    fn a_recorded_post_is_answered_from_its_urls_queue_and_kept_in_memory() {
+        let t = RecordedTransport::new();
+        t.answer(HOOK, 500, b"");
+        t.answer(HOOK, 200, b"");
+        let headers = [("Content-Type", "application/json"), ("User-Agent", "lazymkv/test")];
+        assert_eq!(t.post(HOOK, &headers, br#"{"event":"filed"}"#), Ok(Response { status: 500, body: Vec::new() }));
+        assert_eq!(t.post(HOOK, &headers, b"{}"), Ok(Response { status: 200, body: Vec::new() }));
+        let sent: Vec<(String, String)> =
+            headers.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+        assert_eq!(t.posts(), vec![
+            (HOOK.to_string(), sent.clone(), br#"{"event":"filed"}"#.to_vec()),
+            (HOOK.to_string(), sent, b"{}".to_vec()),
+        ]);
+        assert!(t.requests().is_empty(), "requests lists GETs only");
+        assert_eq!(t.post("http://other/x", &headers, b""), Err(TransportError::Unrecorded("http://other/x".to_string())));
+    }
+
+    #[test]
+    fn a_gated_post_waits_until_opened() {
+        let t = std::sync::Arc::new(RecordedTransport::new());
+        t.answer(HOOK, 200, b"");
+        let gate = t.gate(HOOK);
+        let (sent, got) = mpsc::channel();
+        let posting = t.clone();
+        std::thread::spawn(move || sent.send(posting.post(HOOK, &[], b"{}")).unwrap());
+        assert!(got.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(t.posts().len(), 1);
+        gate.open();
+        assert_eq!(got.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(Response { status: 200, body: Vec::new() }));
+    }
+
+    #[test]
+    fn an_unrecorded_connect_names_only_host_and_port() {
+        let t = RecordedTransport::new();
+        assert_eq!(t.connect("ha.local", 8123), Err(TransportError::Unrecorded("ha.local:8123".to_string())));
+        t.connect_answer("ha.local", 8123, Ok(()));
+        t.connect_answer("ha.local", 9000, Err(TransportError::Timeout));
+        assert_eq!(t.connect("ha.local", 8123), Ok(()));
+        assert_eq!(t.connect("ha.local", 9000), Err(TransportError::Timeout));
+        assert_eq!(t.connects(), vec![("ha.local".to_string(), 8123), ("ha.local".to_string(), 8123), ("ha.local".to_string(), 9000)]);
+        assert!(t.requests().is_empty() && t.posts().is_empty() && t.unrecorded().is_empty());
     }
 
     #[test]
