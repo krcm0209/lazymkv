@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use lazymkv_core::lookup::discdb::DiscDbRecord;
 use lazymkv_core::lookup::name::{fold_name, DiscName};
-use lazymkv_core::lookup::tmdb::{merge_parsed_season, TmdbKind, TmdbRecord, TmdbSearch};
+use lazymkv_core::lookup::tmdb::{merge_parsed_season, TmdbIdentity, TmdbKind, TmdbRecord, TmdbSearch};
 use lazymkv_core::lookup::{entry_search_title, record_to_fetch, LookupInputs};
 use serde_json::Value;
 
@@ -78,6 +78,9 @@ pub struct ChainInputs {
     pub fingerprint: String,
     pub disc_id: Option<String>,
     pub name: Option<DiscName>,
+    /// The remembered decision's TMDb identity, which `record_to_fetch` takes before any answer (spec 5, spec 8.1;
+    /// engine.md "Pull request 4"; Ruling T4-R6). Def: T4-5. Use: T4-5, T4-9.
+    pub remembered: Option<TmdbIdentity>,
 }
 
 impl LookupBook {
@@ -181,10 +184,18 @@ fn status_word(state: &LookupState) -> Option<String> {
     Some(word)
 }
 
+/// The record the chain wants: `record_to_fetch` over the book with the remembered identity, which it takes before
+/// any answer (Ruling T4-R6).
+fn wanted(book: &LookupBook, inputs: &ChainInputs) -> Option<TmdbIdentity> {
+    let mut lookup = book.lookup_inputs(inputs.name.as_ref());
+    lookup.remembered = inputs.remembered;
+    record_to_fetch(&lookup)
+}
+
 /// `lookup-status.txt` for the book as it stands: one line per lookup asked. The record's key is `tmdb <kind>/<id>`,
-/// named by the record in hand while `Record` is answered with one, else by `record_to_fetch` over the book (PF-18);
-/// when that names nothing there is no record line, as step 3 of the round then drops `Record`. Design part 8.4.
-fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
+/// named by the record in hand while `Record` is answered with one, else by `wanted` (PF-18, Ruling T4-R6); when that
+/// names nothing there is no record line, as step 3 of the round then drops `Record`. Design part 8.4.
+fn status_file(book: &LookupBook, inputs: &ChainInputs) -> SavedFile {
     let mut lines = BTreeMap::new();
     for (lookup, state) in &book.states {
         let Some(word) = status_word(state) else { continue };
@@ -197,7 +208,7 @@ fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
             Lookup::Record => {
                 let identity = match (state, &book.answers.record) {
                     (LookupState::Answered { .. }, Some(record)) => Some(record.identity),
-                    _ => record_to_fetch(&book.lookup_inputs(name)),
+                    _ => wanted(book, inputs),
                 };
                 let Some(identity) = identity else { continue };
                 format!("tmdb {}/{}", identity.kind.as_str(), identity.id)
@@ -210,9 +221,9 @@ fn status_file(book: &LookupBook, name: Option<&DiscName>) -> SavedFile {
 }
 
 /// Sets `lookup` in flight and saves the status file, so a reader sees `000` while the request is out (S23).
-fn start(book: &mut LookupBook, lookup: Lookup, name: Option<&DiscName>, save: &mut dyn FnMut(SavedFile)) {
+fn start(book: &mut LookupBook, lookup: Lookup, inputs: &ChainInputs, save: &mut dyn FnMut(SavedFile)) {
     book.states.insert(lookup, LookupState::InFlight);
-    save(status_file(book, name));
+    save(status_file(book, inputs));
 }
 
 /// A slim copy as saved: pretty JSON and a final newline.
@@ -277,23 +288,23 @@ pub fn run_round(
     }
 
     if book.asks(Lookup::Dischash) {
-        start(book, Lookup::Dischash, name, save);
+        start(book, Lookup::Dischash, inputs, save);
         let (settled, fetched) = settle(book, Lookup::Dischash, discdb_by_fingerprint(t, &inputs.fingerprint));
         settled.write(&mut book.answers.by_fingerprint, Some);
         if let Some(fetched) = fetched {
             save(SavedFile { name: "thediscdb-hash.json".to_string(), bytes: fetched.body });
         }
-        save(status_file(book, name));
+        save(status_file(book, inputs));
     }
 
     if let Some(disc_id) = inputs.disc_id.as_deref().filter(|_| book.asks(Lookup::Discid)) {
-        start(book, Lookup::Discid, name, save);
+        start(book, Lookup::Discid, inputs, save);
         let (settled, fetched) = settle(book, Lookup::Discid, discdb_by_disc_id(t, disc_id));
         settled.write(&mut book.answers.by_disc_id, |records| records);
         if let Some(fetched) = fetched {
             save(SavedFile { name: "thediscdb-discid.json".to_string(), bytes: fetched.body });
         }
-        save(status_file(book, name));
+        save(status_file(book, inputs));
     }
 
     // S47 (Ruling T4-R2): an entry search no longer named, as TheDiscDB's records now name a TMDb ID or no title,
@@ -312,11 +323,11 @@ pub fn run_round(
         if let Some(searched) = searched.filter(|_| in_hand) {
             save(search_file(&book.answers, searched, today));
         }
-        save(status_file(book, name));
+        save(status_file(book, inputs));
     }
 
     if let Some(searched) = searched.filter(|_| book.asks(Lookup::Search)) {
-        start(book, Lookup::Search, name, save);
+        start(book, Lookup::Search, inputs, save);
         let (settled, _) = settle(book, Lookup::Search, tmdb_search(t, token, &searched.cleaned));
         let page = matches!(settled, Settled::Value(_));
         let answers = &mut book.answers;
@@ -327,11 +338,11 @@ pub fn run_round(
         if page && book.answers.entry.is_none() {
             save(search_file(&book.answers, searched, today));
         }
-        save(status_file(book, name));
+        save(status_file(book, inputs));
     }
 
     if let Some(searched) = searched.filter(|_| book.asks(Lookup::TaggedSearch)) {
-        start(book, Lookup::TaggedSearch, name, save);
+        start(book, Lookup::TaggedSearch, inputs, save);
         let (settled, _) = settle(book, Lookup::TaggedSearch, tmdb_search(t, token, &searched.tagged));
         let page = matches!(settled, Settled::Value(_));
         settled.write(&mut book.answers.tagged, Some);
@@ -341,7 +352,7 @@ pub fn run_round(
         if page && book.answers.entry.is_none() {
             save(search_file(&book.answers, searched, today));
         }
-        save(status_file(book, name));
+        save(status_file(book, inputs));
     }
 
     // S47 (Rulings T4-R2, T4-R5): the entry's title is searched once; an answered entry search is not asked again for
@@ -350,18 +361,18 @@ pub fn run_round(
     if let Some(title) = entry_search_title(&book.lookup_inputs(name)) {
         book.states.entry(Lookup::EntrySearch).or_insert(LookupState::NotAsked);
         if book.asks(Lookup::EntrySearch) {
-            start(book, Lookup::EntrySearch, name, save);
+            start(book, Lookup::EntrySearch, inputs, save);
             let (settled, _) = settle(book, Lookup::EntrySearch, tmdb_search(t, token, &title));
             let answered = matches!(settled, Settled::Value(_));
             settled.write(&mut book.answers.entry, Some);
             if let Some(page) = book.answers.entry.as_ref().filter(|_| answered).map(page_value) {
                 save(json_file("tmdb-search.json", &slim_search(&[(&page, &title)], today)));
             }
-            save(status_file(book, name));
+            save(status_file(book, inputs));
         }
     }
 
-    match record_to_fetch(&book.lookup_inputs(name)) {
+    match wanted(book, inputs) {
         None => {
             if book.asks(Lookup::Record) {
                 book.states.remove(&Lookup::Record);
@@ -376,7 +387,7 @@ pub fn run_round(
                     book.states.retain(|lookup, _| !matches!(lookup, Lookup::Season(_)));
                     book.record_file = None;
                 }
-                start(book, Lookup::Record, name, save);
+                start(book, Lookup::Record, inputs, save);
                 let (settled, fetched) = settle(book, Lookup::Record, tmdb_record(t, token, want));
                 if let Some(raw) = answered_json(&settled, fetched.as_ref()) {
                     save(json_file("tmdb.json", &slim_tmdb(&raw, today)));
@@ -387,7 +398,7 @@ pub fn run_round(
                     book.record_file = None;
                 }
                 settled.write(&mut book.answers.record, Some);
-                save(status_file(book, name));
+                save(status_file(book, inputs));
             }
         }
     }
@@ -417,19 +428,20 @@ pub fn run_round(
         })
         .collect();
     for n in asked {
-        start(book, Lookup::Season(n), name, save);
+        start(book, Lookup::Season(n), inputs, save);
         let (settled, fetched) = settle(book, Lookup::Season(n), tmdb_season(t, token, show, n));
         if let Some(raw) = answered_json(&settled, fetched.as_ref()) {
             if let (Settled::Value(season), Some(record)) = (settled, book.answers.record.as_mut()) {
                 // The record is a TV record, which takes every season, so the merge cannot refuse it.
-                let _ = merge_parsed_season(record, season);
+                let merged = merge_parsed_season(record, season);
+                debug_assert!(merged.is_ok(), "a TV record takes every season");
             }
             if let Some(file) = book.record_file.as_mut() {
                 splice_season(file, &raw);
                 save(json_file("tmdb-record.json", file));
             }
         }
-        save(status_file(book, name));
+        save(status_file(book, inputs));
     }
 }
 
@@ -509,6 +521,7 @@ mod tests {
             fingerprint: FP.to_string(),
             disc_id: disc_id.map(str::to_string),
             name: label.and_then(|label| disc_name(None, Some(label))),
+            remembered: None,
         }
     }
 
@@ -1206,5 +1219,129 @@ mod tests {
         round(&t, &mut book, &inputs);
         assert_eq!(book.pending(), (false, false));
         assert_eq!(urls(&t).iter().filter(|url| **url == record_url(tv(SHOW))).count(), 1, "the record is not asked again");
+    }
+
+    /// Design part 8.3's class of an outcome, as a short text the table compares.
+    fn class<T>(outcome: &Outcome<T>) -> String {
+        match outcome {
+            Outcome::Answered { .. } => "answered".to_string(),
+            Outcome::Miss { .. } => "miss".to_string(),
+            Outcome::Pending { reason, .. } => format!("pending {reason:?}"),
+        }
+    }
+
+    #[test]
+    fn each_http_outcome_has_its_class() {
+        let hit = corpus(JOHN_WICK_DISCHASH);
+        let page = search_body(&[(245891, "John Wick", "2014-10-22")]);
+        let not_utf8: &[u8] = &[0xff, 0xfe, 0x00];
+        let unparsed = |url: String| format!("pending Unparsed({:?})", format!("{url}: the body is not UTF-8"));
+        // (status, TheDiscDB's body, TMDb's body, TheDiscDB's class, TMDb's class, TMDb's status word)
+        let rows: Vec<(u16, &[u8], &[u8], String, String, &str)> = vec![
+            (200, hit.as_slice(), page.as_slice(), "answered".into(), "answered".into(), "200"),
+            (404, b"", b"", "miss".into(), "miss".into(), "404"),
+            (500, b"", b"", "pending Status(500)".into(), "pending Status(500)".into(), "500"),
+            (503, b"", b"", "pending Status(503)".into(), "pending Status(503)".into(), "503"),
+            (429, b"", b"", "pending Status(429)".into(), "pending Status(429)".into(), "429"),
+            (401, b"", b"", "pending Status(401)".into(), "pending TokenRefused".into(), "401"),
+            (204, b"", b"", "pending Status(204)".into(), "pending Status(204)".into(), "204"),
+            (302, b"", b"", "pending Status(302)".into(), "pending Status(302)".into(), "302"),
+            (200, not_utf8, not_utf8, unparsed(dischash_url(FP)), unparsed(search_url("JOHN WICK")), "unparsed"),
+        ];
+        for (status, discdb_body, tmdb_body, discdb_class, tmdb_class, word) in rows {
+            let t = RecordedTransport::new();
+            t.answer(&dischash_url(FP), status, discdb_body);
+            t.answer(&search_url("JOHN WICK"), status, tmdb_body);
+            assert_eq!(class(&discdb_by_fingerprint(&t, FP)), discdb_class, "{status}");
+            let outcome = tmdb_search(&t, Some(TOKEN), "JOHN WICK");
+            assert_eq!(class(&outcome), tmdb_class, "{status}");
+            assert_eq!(crate::saved::status_word(&outcome), word, "{status}");
+        }
+        let t = RecordedTransport::new();
+        t.fail(&search_url("JOHN WICK"), TransportError::Timeout);
+        let outcome = tmdb_search(&t, Some(TOKEN), "JOHN WICK");
+        assert_eq!((class(&outcome), crate::saved::status_word(&outcome)), ("pending Timeout".to_string(), "000".to_string()));
+        // A refused connection (the words Task 7's REFUSED holds, spelled here because Task 7 comes later).
+        let t = RecordedTransport::new();
+        t.fail(&search_url("JOHN WICK"), TransportError::Unreachable("the connection was refused".to_string()));
+        let outcome = tmdb_search(&t, Some(TOKEN), "JOHN WICK");
+        assert_eq!((class(&outcome), crate::saved::status_word(&outcome)),
+                   ("pending Unreachable(\"the connection was refused\")".to_string(), "000".to_string()));
+        // No token: no request is made (design part 8.3).
+        let t = RecordedTransport::new();
+        let outcome = tmdb_search(&t, None, "JOHN WICK");
+        assert_eq!((class(&outcome), crate::saved::status_word(&outcome)), ("pending NoToken".to_string(), "000".to_string()));
+        assert!(t.requests().is_empty());
+    }
+
+    /// Review Focus 1: TMDb's 429 (its Retry-After ignored) leaves the cleaned search pending, asked once in the round,
+    /// while the round still asks TheDiscDB and the tagged search; the next round asks it once more.
+    #[test]
+    fn a_429_leaves_the_search_pending_as_http_429_and_is_asked_once_in_the_round() {
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("PIRANHA_3D"));
+        misses(&t);
+        t.answer(&search_url("PIRANHA"), 429, br#"{"status_code":25,"status_message":"over the limit"}"#);
+        t.answer(&search_url("PIRANHA 3D"), 200, &search_body(&[]));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url("PIRANHA"), search_url("PIRANHA 3D")]);
+        assert_eq!(book.states.get(&Lookup::Search), Some(&LookupState::Pending { reason: PendingReason::Status(429) }));
+        assert_eq!(last_status(&saved), ["dischash 404", "discid 404", "search 429", "search-tagged 200"]);
+        assert_eq!(book.pending(), (false, true));
+        assert!(saved.iter().all(|file| !String::from_utf8_lossy(&file.bytes).contains("status_code")), "P29");
+        round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t).iter().filter(|url| **url == search_url("PIRANHA")).count(), 2);
+        assert_eq!(urls(&t).iter().filter(|url| **url == search_url("PIRANHA 3D")).count(), 1);
+    }
+
+    /// Review Focus 2: a TheDiscDB `Series` entry naming an ID TMDb has only as a movie (or has dropped).
+    #[test]
+    fn a_discdb_id_of_the_wrong_kind_is_a_record_miss_and_leaves_nothing_pending() {
+        let t = RecordedTransport::new();
+        let inputs = chain(None, None);
+        t.answer(&dischash_url(FP), 200, &series_dischash(245891));
+        t.answer(&record_url(tv(245891)), 404, br#"{"success":false,"status_code":34}"#);
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t), [dischash_url(FP), record_url(tv(245891))]);
+        assert_eq!(last_status(&saved), ["dischash 200", "tmdb tv/245891 404"]);
+        assert_eq!(book.pending(), (false, false));
+        assert_eq!(book.lookup_inputs(None).record, None);
+        assert!(saved.iter().all(|file| !file.name.starts_with("tmdb")), "no TMDb copy is saved for a miss");
+        round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t).iter().filter(|url| **url == record_url(tv(245891))).count(), 2, "E:338: asked again");
+    }
+
+    /// Review Focus 4: a captive portal's 200 HTML page.
+    #[test]
+    fn a_200_html_page_is_unparsed_and_its_sentence_quotes_no_markup() {
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("JOHN_WICK"));
+        misses(&t);
+        t.answer(&search_of(&inputs), 200, b"<html><head><title>Sign in</title></head><body>portal</body></html>");
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        let Some(LookupState::Pending { reason: PendingReason::Unparsed(sentence) }) = book.states.get(&Lookup::Search) else {
+            panic!("{:?}", book.states)
+        };
+        assert!(sentence.starts_with(&search_url("JOHN WICK")), "{sentence}");
+        assert!(!sentence.contains("<html") && !sentence.contains("portal"), "{sentence}");
+        assert!(last_status(&saved).contains(&"search unparsed".to_string()));
+        assert!(saved.iter().all(|file| file.name != "tmdb-search.json"));
+    }
+
+    #[test]
+    fn the_remembered_identity_is_fetched_before_the_search_top_result() {
+        let t = RecordedTransport::new();
+        let inputs = ChainInputs { remembered: Some(movie(7)), ..chain(Some(DISC_ID), Some("JOHN_WICK")) };
+        misses(&t);
+        t.answer(&search_of(&inputs), 200, &search_body(&[(9, "John Wick", "2014-10-22")]));
+        t.answer(&record_url(movie(7)), 200, &movie_body(7, "Remembered Movie", "2001-02-03"));
+        let mut book = LookupBook::default();
+        let saved = round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t), [dischash_url(FP), discid_url(DISC_ID), search_url("JOHN WICK"), record_url(movie(7))]);
+        assert_eq!(book.answers.record.as_ref().map(|record| record.identity), Some(movie(7)));
+        assert!(last_status(&saved).contains(&"tmdb movie/7 200".to_string()));
     }
 }

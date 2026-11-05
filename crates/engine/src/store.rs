@@ -233,12 +233,12 @@ impl Store {
         write_atomic(&path, &pretty(drives)?)
     }
 
-    /// `<data>/remembered/<fingerprint>.json` through `check_format(REMEMBERED_FORMAT)` (design part 7.4), with the
-    /// file's bytes for remembered.json. An Err is "<path>: <reason>". Absent gives Ok(None).
+    /// `<data>/remembered/<fingerprint>.json` through `remembered_file` (design part 7.4), with the file's bytes for
+    /// remembered.json, refused when it remembers another disc. An Err is "<path>: <reason>". Absent gives Ok(None).
     /// Def: T21. Use: T22, T23, T25, T26.
     pub(crate) fn remembered(&self, fingerprint: &str) -> Result<Option<(Remembered, Vec<u8>)>, String> {
         let path = self.data.join(REMEMBERED_DIR).join(format!("{fingerprint}.json"));
-        read_checked(&path, REMEMBERED_FORMAT)
+        remembered_file(&path, fingerprint)
     }
 
     /// `<data>/settings.json` through `Settings::from_json` (design parts 3.5, 7.4). Absent gives
@@ -530,6 +530,21 @@ fn read_checked<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Option
     Ok(Some((read, bytes)))
 }
 
+/// A remembered-decisions file at `path` through `check_format(REMEMBERED_FORMAT)` (design part 7.4), refused when its
+/// inner `fingerprint` is not `fingerprint`, ASCII case ignored (spec 5; engine.md "Pull request 4", the sentence of
+/// dev's `--remembered`): Err `<path>: it remembers the disc <inner>, not this disc (<fingerprint>)`. Absent gives
+/// Ok(None). Def: T4-5. Use: T4-5.
+pub(crate) fn remembered_file(path: &Path, fingerprint: &str) -> Result<Option<(Remembered, Vec<u8>)>, String> {
+    let read: Option<(Remembered, Vec<u8>)> = read_checked(path, REMEMBERED_FORMAT)?;
+    match read {
+        Some((remembered, _)) if !remembered.fingerprint.eq_ignore_ascii_case(fingerprint) => Err(at(
+            path,
+            format!("it remembers the disc {}, not this disc ({fingerprint})", remembered.fingerprint),
+        )),
+        read => Ok(read),
+    }
+}
+
 /// Ok when no file is at `path`, or when it is JSON that passes `check_format(format)`. Otherwise
 /// `ErrorKind::InvalidData` with "<path>: <reason>": design part 7.4's refused file, which is never overwritten. It
 /// reads the file at each write, so a refusal needs no state in the store. A read error is returned as the OS gave it.
@@ -579,6 +594,7 @@ mod tests {
     use lazymkv_core::settings::Settings;
     use lazymkv_platform::TEMP_SUFFIX;
     use serde_json::{json, Value};
+    use lazymkv_core::testsupport::{Scratch, ScratchExt};
 
     use crate::testkit::ci_factor;
 
@@ -1038,5 +1054,18 @@ mod tests {
         store.log("engine started");
         assert!(drain.drain(Duration::from_secs(1)), "the console mirror did not drain");
         assert_eq!(fs::read_to_string(tmp.0.join("engine.log")).unwrap(), "7 engine started\n");
+    }
+
+    #[test]
+    fn a_remembered_file_for_another_disc_is_refused_ascii_case_ignored() {
+        let tmp = Scratch::new("remembered-fp");
+        let store = Store::new(tmp.0.clone(), Arc::new(|| 7), None);
+        let path = tmp.0.join("remembered").join("ABC.json");
+        let text = |inner: &str| format!(r#"{{"format":"lazymkv remembered v1","fingerprint":"{inner}","tmdb":{{"kind":"movie","id":2}},"titles":[]}}"#);
+        tmp.write("remembered/ABC.json", &text("FFFF"));
+        assert_eq!(store.remembered("ABC").unwrap_err(),
+            format!("{}: it remembers the disc FFFF, not this disc (ABC)", path.display()));
+        tmp.write("remembered/ABC.json", &text("abc"));
+        assert_eq!(store.remembered("ABC").unwrap().unwrap().0.tmdb.id, 2);
     }
 }

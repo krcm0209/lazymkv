@@ -506,4 +506,11 @@ mod tests {
         assert_eq!(lookup_word(Lookup::Season(2)), "season-2");
         assert_eq!(waiting_message(&book), "season-2: no answer within 10 s");
     }
+
+    #[test]
+    fn a_search_answered_http_429_waits_with_http_429() {
+        let mut book = LookupBook::default();
+        book.states.insert(Lookup::Search, LookupState::Pending { reason: PendingReason::Status(429) });
+        assert_eq!(waiting_message(&book), "search: HTTP 429");
+    }
 }

@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lazymkv_clients::record_url;
 use lazymkv_core::job::{Event, Failure, FailureClass, NotifyEvent, OutputCause, State, Tool, WaitReason};
+use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::plan::Mode;
 use lazymkv_core::review::{Note, ReviewReason};
@@ -655,6 +657,51 @@ fn a_remembered_copy_that_cannot_be_written_removes_the_earlier_copy() {
     assert_eq!(h.record(&id).plan.unwrap().identity.step, IdentityStep::Remembered);
     let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
     assert!(log.contains(&format!("{}: ", copy.display())), "{log}");
+}
+
+/// engine.md "Pull request 4": before this, such a file planned with its identity and then failed Decide with
+/// "no plan: ...".
+#[test]
+fn a_remembered_file_for_another_disc_plans_without_it() {
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    fs::create_dir_all(h.data().join("remembered")).unwrap();
+    fs::write(h.data().join("remembered").join(format!("{fp}.json")), format!(concat!(
+        r#"{{"format":"lazymkv remembered v1","fingerprint":"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF","#,
+        r#""tmdb":{{"kind":"movie","id":900001}},"titles":[]}}"#))).unwrap();
+    let id = run_to(&h, "Ejected");
+    assert_ne!(h.record(&id).plan.unwrap().identity.step, IdentityStep::Remembered);
+    assert!(!h.job_dir(&id).join("remembered.json").exists());
+    let log = h.engine_log();
+    assert!(log.contains(&format!("it remembers the disc FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF, not this disc ({fp})")), "{log}");
+    assert!(log.contains(&format!("{id}: the remembered decision is refused: ")), "{log}");
+}
+
+/// engine.md "Pull request 4": a disc whose remembered identity differs from the search's top result plans with a
+/// TMDb record for its own identity (the round's ChainInputs carries it, Ruling T4-R6).
+#[test]
+fn a_remembered_identity_other_than_the_search_top_result_plans_with_its_own_record() {
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    fs::create_dir_all(h.data().join("remembered")).unwrap();
+    fs::write(h.data().join("remembered").join(format!("{fp}.json")), format!(concat!(
+        r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","#,
+        r#""tmdb":{{"kind":"movie","id":900002}},"titles":[]}}"#), fp = fp)).unwrap();
+    let remembered = TmdbIdentity { kind: TmdbKind::Movie, id: 900002 };
+    h.http().answer(&record_url(remembered), 200, concat!(
+        r#"{"id":900002,"title":"Synthetic Movie Remembered","original_title":"Synthetic Movie Remembered","#,
+        r#""release_date":"2002-03-04","original_language":"en","runtime":119,"external_ids":{"imdb_id":"tt0900002"}}"#)
+        .as_bytes());
+    let id = run_to(&h, "Ejected");
+    let urls: Vec<String> = h.http().requests().into_iter().map(|(url, _)| url).collect();
+    assert!(urls.contains(&record_url(remembered)), "{urls:?}");
+    assert!(!urls.contains(&record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 })), "{urls:?}");
+    let status = fs::read_to_string(h.job_dir(&id).join("lookup-status.txt")).unwrap();
+    assert!(status.lines().any(|line| line == "tmdb movie/900002 200"), "{status}");
+    let record: Value = serde_json::from_slice(&fs::read(h.job_dir(&id).join("tmdb-record.json")).unwrap()).unwrap();
+    assert_eq!(record["id"], json!(900002));
+    let plan = h.record(&id).plan.unwrap();
+    assert_eq!((plan.identity.step, plan.identity.tmdb), (IdentityStep::Remembered, Some(remembered)));
 }
 
 #[test]

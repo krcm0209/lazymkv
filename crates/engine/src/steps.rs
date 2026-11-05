@@ -53,7 +53,7 @@ use lazymkv_tools::{
 };
 use serde_json::{json, Value};
 
-use crate::arrival::chain_inputs;
+use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
     engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refreshed_plan,
 };
@@ -428,11 +428,12 @@ pub(crate) fn rip_started_text(title: &TitleRecord, host: &dyn Host) -> Option<S
     title.rip_started_ms.map(|unix_ms| host.local_time(unix_ms))
 }
 
-/// One lookup round on its own thread (design part 8.2): run_round over the locked book, each SavedFile written with
-/// write_atomic into the job folder (a write that fails is logged in engine.log); `done` gets `book.pending()` or
-/// chain_inputs' Err. The round holds the book for the whole round (R23.1). Each lookup the round leaves
-/// `Pending { Unparsed(sentence) }` writes the job.log line `lookup <word>: <sentence>` (design part 8.3, R24.6). A
-/// panic of the round is caught and given to `done` as an Err. Def: T23. Use: T23, T24.
+/// One lookup round on its own thread (design part 8.2): run_round over the locked book with `round_inputs` (the
+/// remembered identity, Ruling T4-R6), each SavedFile written with write_atomic into the job folder (a write that fails
+/// is logged in engine.log); `done` gets `book.pending()` or chain_inputs' Err. The round holds the book for the whole
+/// round (R23.1). Each lookup the round leaves `Pending { Unparsed(sentence) }` writes the job.log line
+/// `lookup <word>: <sentence>` (design part 8.3, R24.6). A panic of the round is caught and given to `done` as an Err.
+/// Def: T23. Use: T23, T24.
 pub(crate) fn spawn_round(
     job_dir: PathBuf,
     lookups: Arc<Mutex<LookupBook>>,
@@ -444,7 +445,7 @@ pub(crate) fn spawn_round(
 ) {
     thread::spawn(move || {
         let round = panic::catch_unwind(AssertUnwindSafe(|| {
-            let inputs = chain_inputs(&job_dir)?;
+            let inputs = round_inputs(&job_dir, &store)?;
             let mut book = lock(&lookups);
             run_round(http.as_ref(), token.as_deref(), &mut book, &inputs, &today, &mut |file| {
                 let path = job_dir.join(&file.name);

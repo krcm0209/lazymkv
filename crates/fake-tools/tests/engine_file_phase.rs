@@ -212,6 +212,30 @@ fn remembered_keep(fp: &str) -> String {
         r#""action":"keep","order":0,"default":true}}],"subtitles":[]}}]}}"#), fp = fp)
 }
 
+/// Ruling T4-R21, the second half of engine.md's V14 item, accepted with no code: Decide reads only the job's own
+/// copy (R-B1), so a copy Plan could not write plans with the remembered identity and titles, decides without the
+/// track overrides (audio part 0.95, not the Keep's 1.00), and job.log names the copy.
+#[test]
+fn an_unwritable_remembered_copy_decides_without_overrides_and_logs_it() {
+    let h = harness(&[], json!({}));
+    let fp = h.fingerprint("movie-direct");
+    fs::create_dir_all(h.data().join("remembered")).unwrap();
+    fs::write(h.data().join("remembered").join(format!("{fp}.json")), remembered_keep(&fp)).unwrap();
+    h.insert("tok0", "movie-direct");
+    h.run_until("Scanned");
+    let id = format!("{}-1", fp.to_ascii_lowercase());
+    let dir = h.job_dir(&id);
+    fs::create_dir_all(dir.join(format!("remembered.json{}", lazymkv_platform::TEMP_SUFFIX))).unwrap();
+    h.restart();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    assert_eq!(h.record(&id).plan.unwrap().identity.step, IdentityStep::Remembered);
+    assert!(!dir.join("remembered.json").exists());
+    let doc = json_of(&dir.join(KEY).join("decide.json"));
+    assert_eq!(doc["decision"]["decision"]["audio"]["confidence"], json!(0.95));
+    let log = fs::read_to_string(dir.join("job.log")).unwrap();
+    assert!(log.contains(&format!("{}: ", dir.join("remembered.json").display())), "{log}");
+}
+
 /// The PR #6 review's V14 (spec 5, F10, RR1-14): a remembered decision's track overrides reach decide.json. The Keep
 /// covers the title's only audio stream, so the audio part is 1.00 (0.95 without it); the track confidence stays 0.95,
 /// the case of a title with no English subtitle stream. The filed file is the one without the override, and decide.json
