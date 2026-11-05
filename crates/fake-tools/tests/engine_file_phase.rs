@@ -776,7 +776,9 @@ fn a_first_decide_with_a_stale_copy_it_cannot_fetch_waits_for_its_lookup() {
     stale(&h, &id, "tmdb-record.json");
     no_token(&h);
     h.restart();
-    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    // The store replaces state.json before it appends the transition's line, so the wait is on the event (Ruling T9-R2).
+    h.wait("LookupPending", |h| events(h, &id).contains(&Event::LookupPending));
+    assert_eq!(h.state_of(&id), "AwaitingLookup");
     let message = h.record(&id).message.unwrap();
     assert!(message.contains("tmdb-record.json: the TMDb copy is more than six months old (fetched_at 2026-01-01) and could \
         not be fetched again: no tmdb_token is set"), "{message}");
@@ -793,8 +795,11 @@ fn a_decide_in_decided_after_a_restart_with_a_stale_copy_it_cannot_fetch_fails_u
     stale(&h, &id, "tmdb-record.json");
     no_token(&h);
     h.restart(); // resume(Decided) runs Decide (core job.rs:741)
-    h.wait("Failed", |h| h.state_of(&id) == "Failed");
-    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::DecisionFailed { failure } if failure.class == FailureClass::Unknown)));
+    // The store replaces state.json before it appends the transition's line, so the wait is on the event (Ruling T9-R2).
+    let failed = |h: &Harness| events(h, &id).iter().any(|e| matches!(e, Event::DecisionFailed { failure } if failure.class == FailureClass::Unknown));
+    h.wait("DecisionFailed", failed);
+    assert_eq!(h.state_of(&id), "Failed");
+    assert!(failed(&h));
     let message = h.record(&id).message.unwrap();
     assert!(message.contains("tmdb-record.json: the TMDb copy is more than six months old"), "{message}");
     assert!(!message.contains("test-token"));
@@ -830,8 +835,11 @@ fn a_plan_again_from_scanned_with_a_stale_copy_it_cannot_fetch_fails_unknown() {
     stale(&h, &id, "tmdb-record.json");
     no_token(&h);
     h.restart();
-    h.wait("Failed", |h| h.state_of(&id) == "Failed");
-    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::PlanFailed { failure } if failure.class == FailureClass::Unknown)));
+    // The store replaces state.json before it appends the transition's line, so the wait is on the event (Ruling T9-R2).
+    let failed = |h: &Harness| events(h, &id).iter().any(|e| matches!(e, Event::PlanFailed { failure } if failure.class == FailureClass::Unknown));
+    h.wait("PlanFailed", failed);
+    assert_eq!(h.state_of(&id), "Failed");
+    assert!(failed(&h));
     let message = h.record(&id).message;
     assert_eq!(message.as_deref(), Some("tmdb-record.json: the TMDb copy is more than six months old \
         (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set"));
