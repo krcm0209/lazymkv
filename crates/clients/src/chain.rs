@@ -197,8 +197,10 @@ fn wanted(book: &LookupBook, inputs: &ChainInputs) -> Option<TmdbIdentity> {
 
 /// `lookup-status.txt` for the book as it stands: one line per lookup asked. The record's key is `tmdb <kind>/<id>`,
 /// named by the record in hand while `Record` is answered with one, else by `wanted` (PF-18, Ruling T4-R6); when that
-/// names nothing there is no record line, as step 3 of the round then drops `Record`. Design part 8.4.
-fn status_file(book: &LookupBook, inputs: &ChainInputs) -> SavedFile {
+/// names nothing there is no record line, as step 3 of the round then drops `Record`. Design part 8.4; the engine's
+/// refetch writes it too once it installed a record, so the per-season answers persist (PR #15 review round 1, R4).
+/// Def: T16. Use: T16, T4-9.
+pub fn status_file(book: &LookupBook, inputs: &ChainInputs) -> SavedFile {
     let mut lines = BTreeMap::new();
     for (lookup, state) in &book.states {
         let Some(word) = status_word(state) else { continue };

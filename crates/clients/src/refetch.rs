@@ -76,18 +76,74 @@ fn body_json(fetched: &Fetched) -> Option<Value> {
     serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()
 }
 
-/// TMDb's record `id` fetched again (design part 8.4; Ruling T4-R4): the parsed record and the slim `tmdb.json` and
-/// `tmdb-record.json` dated `today`; for a TV record, the seasons of Ruling T4-R4 (`[n]` for a parsed season `n`, else
-/// every season the record lists) fetched too, each merged into the record and spliced into `tmdb-record.json`, a
-/// season answered 404 skipped. Err `Status(404)` when TMDb has no such record, else the record's or a season's
-/// pending reason (`NoToken` asks nothing). Def: T4-8. Use: T4-9, T4-10, T4-11.
+/// What a refetch did with a TV record's seasons (design part 8.4; Ruling T4-R4), each list in the order asked: the
+/// seasons answered and merged, the seasons TMDb answered 404, the first season left pending with its reason (the
+/// requests stop there), and the seasons after it, not asked. Def: T4-8 (PR #15 review round 1, R4). Use: T4-9,
+/// T4-10.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SeasonsFetched {
+    pub merged: Vec<u32>,
+    pub missing: Vec<u32>,
+    pub pending: Option<(u32, PendingReason)>,
+    pub unasked: Vec<u32>,
+}
+
+/// A record fetched again (design part 8.4): the parsed record, the slim `tmdb.json` and `tmdb-record.json` in that
+/// order, and what its seasons gave (`SeasonsFetched`, empty for a movie). Def: T4-8 (PR #15 review round 1, R4). Use:
+/// T4-9, T4-10.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordRefetch {
+    pub record: TmdbRecord,
+    pub files: Vec<SavedFile>,
+    pub seasons: SeasonsFetched,
+}
+
+/// The TV record `record`'s `seasons` fetched again in order (design part 8.4; Ruling T4-R4): each answered season
+/// merged into `record` and spliced into its slim `file` (`splice_season`), a season answered 404 reported missing,
+/// and the first pending season ending the requests, the seasons after it reported unasked. Def: T4-8 (PR #15 review
+/// round 1, R4). Use: T4-8, T4-9.
+pub fn refetch_seasons(
+    t: &dyn HttpTransport,
+    token: Option<&str>,
+    record: &mut TmdbRecord,
+    file: &mut Value,
+    seasons: &[u32],
+) -> SeasonsFetched {
+    let mut fetched = SeasonsFetched::default();
+    for (at, &n) in seasons.iter().enumerate() {
+        match tmdb_season(t, token, record.identity.id, n) {
+            Outcome::Answered { value, fetched: answer } => {
+                // The record is a TV record, which takes every season, so the merge cannot refuse it.
+                let merged = merge_parsed_season(record, value);
+                debug_assert!(merged.is_ok(), "a TV record takes every season");
+                if let Some(season_raw) = body_json(&answer) {
+                    splice_season(file, &season_raw);
+                }
+                fetched.merged.push(n);
+            }
+            Outcome::Miss { .. } => fetched.missing.push(n),
+            Outcome::Pending { reason, .. } => {
+                fetched.pending = Some((n, reason));
+                fetched.unasked = seasons[at + 1..].to_vec();
+                break;
+            }
+        }
+    }
+    fetched
+}
+
+/// TMDb's record `id` fetched again (design part 8.4; Ruling T4-R4): a `RecordRefetch` with the parsed record and the
+/// slim `tmdb.json` and `tmdb-record.json` dated `today`; for a TV record, the seasons of Ruling T4-R4 (`[n]` for a
+/// parsed season `n`, else every season the record lists) fetched too with `refetch_seasons`, its `seasons` saying
+/// which were merged and which TMDb answered 404. Err `Status(404)` when TMDb has no such record, else the record's or
+/// a season's pending reason (`NoToken` asks nothing). Def: T4-8. Use: T4-9, T4-10, T4-11.
 pub fn refetch_record(
     t: &dyn HttpTransport,
     token: Option<&str>,
     id: TmdbIdentity,
     season: Option<u32>,
     today: &str,
-) -> Result<(TmdbRecord, Vec<SavedFile>), PendingReason> {
+) -> Result<RecordRefetch, PendingReason> {
     let (mut record, fetched) = match tmdb_record(t, token, id) {
         Outcome::Answered { value, fetched } => (value, fetched),
         Outcome::Miss { .. } => return Err(PendingReason::Status(404)),
@@ -96,27 +152,18 @@ pub fn refetch_record(
     let raw = body_json(&fetched).unwrap_or_default();
     let mut file = slim_record(&raw, id.kind, today);
     let tmdb = json_file("tmdb.json", &slim_tmdb(&raw, today));
+    let mut seasons = SeasonsFetched::default();
     if id.kind == TmdbKind::Tv {
-        let seasons = match season {
+        let asked: Vec<u32> = match season {
             Some(n) => vec![n],
             None => record.seasons.iter().map(|listed| listed.season_number).collect(),
         };
-        for n in seasons {
-            match tmdb_season(t, token, id.id, n) {
-                Outcome::Answered { value, fetched } => {
-                    // The record is a TV record, which takes every season, so the merge cannot refuse it.
-                    let merged = merge_parsed_season(&mut record, value);
-                    debug_assert!(merged.is_ok(), "a TV record takes every season");
-                    if let Some(season_raw) = body_json(&fetched) {
-                        splice_season(&mut file, &season_raw);
-                    }
-                }
-                Outcome::Miss { .. } => {}
-                Outcome::Pending { reason, .. } => return Err(reason),
-            }
+        seasons = refetch_seasons(t, token, &mut record, &mut file, &asked);
+        if let Some((_, reason)) = seasons.pending.take() {
+            return Err(reason);
         }
     }
-    Ok((record, vec![tmdb, json_file("tmdb-record.json", &file)]))
+    Ok(RecordRefetch { record, files: vec![tmdb, json_file("tmdb-record.json", &file)], seasons })
 }
 
 /// TMDb's search fetched again for each of `queries` in order (design part 8.4; J8, S47; `core::lookup::search_queries`
@@ -222,8 +269,9 @@ mod tests {
     fn refetch_record_writes_both_slim_files_with_todays_date() {
         let t = RecordedTransport::new();
         t.answer(&record_url(MOVIE), 200, MOVIE_BODY);
-        let (record, saved) = refetch_record(&t, Some(TOKEN), MOVIE, None, TODAY).unwrap();
+        let RecordRefetch { record, files: saved, seasons } = refetch_record(&t, Some(TOKEN), MOVIE, None, TODAY).unwrap();
         assert_eq!(record.identity, MOVIE);
+        assert_eq!(seasons, SeasonsFetched::default(), "a movie has no season");
         let raw: Value = serde_json::from_slice(MOVIE_BODY).unwrap();
         assert_eq!(saved, vec![json_file("tmdb.json", &slim_tmdb(&raw, TODAY)),
                                json_file("tmdb-record.json", &slim_record(&raw, TmdbKind::Movie, TODAY))]);
@@ -234,9 +282,10 @@ mod tests {
         let t = RecordedTransport::new();
         t.answer(&record_url(SHOW), 200, SHOW_BODY);
         for n in [0, 1, 2] { t.answer(&season_url(1437, n), 200, season_body(n).as_bytes()); }
-        let (record, saved) = refetch_record(&t, Some(TOKEN), SHOW, None, TODAY).unwrap();
+        let RecordRefetch { record, files: saved, seasons } = refetch_record(&t, Some(TOKEN), SHOW, None, TODAY).unwrap();
         let urls: Vec<String> = t.requests().into_iter().map(|(url, _)| url).collect();
         assert_eq!(urls, [record_url(SHOW), season_url(1437, 0), season_url(1437, 1), season_url(1437, 2)], "every listed season (T4-R4)");
+        assert_eq!(seasons, SeasonsFetched { merged: vec![0, 1, 2], ..SeasonsFetched::default() });
         assert_eq!(record.season(2).unwrap().episodes.len(), 2);
         let file: Value = serde_json::from_slice(&saved[1].bytes).unwrap();
         assert_eq!(file["seasons"][2]["episodes"], json!([{"episode_number": 1, "runtime": 44}, {"episode_number": 2, "runtime": 43}]));
@@ -245,6 +294,22 @@ mod tests {
         parsed.answer(&season_url(1437, 2), 200, season_body(2).as_bytes());
         refetch_record(&parsed, Some(TOKEN), SHOW, Some(2), TODAY).unwrap();
         assert_eq!(parsed.requests().len(), 2, "a parsed season asks that season only");
+    }
+
+    /// PR #15 review round 1, R4: a season TMDb answers 404 is reported missing, not merged, and the seasons after it
+    /// are still asked.
+    #[test]
+    fn a_season_answered_404_is_reported_missing() {
+        let t = RecordedTransport::new();
+        t.answer(&record_url(SHOW), 200, SHOW_BODY);
+        t.answer(&season_url(1437, 0), 200, season_body(0).as_bytes());
+        t.answer(&season_url(1437, 1), 404, b"{}");
+        t.answer(&season_url(1437, 2), 200, season_body(2).as_bytes());
+        let refetched = refetch_record(&t, Some(TOKEN), SHOW, None, TODAY).unwrap();
+        assert_eq!(refetched.seasons, SeasonsFetched { merged: vec![0, 2], missing: vec![1], ..SeasonsFetched::default() });
+        assert!(refetched.record.season(1).unwrap().episodes.is_empty());
+        let file: Value = serde_json::from_slice(&refetched.files[1].bytes).unwrap();
+        assert_eq!(file["seasons"][1].get("episodes"), None, "a missing season is not spliced");
     }
 
     #[test]

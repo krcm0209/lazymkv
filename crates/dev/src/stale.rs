@@ -63,7 +63,8 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
     if let Some(first_record) = records.first() {
         let id = status_record(status).ok_or_else(|| refused(failed_line(shown, first_record, NO_RECORD)))?;
         // Dev has no parsed season, so a TV record is fetched with every season it lists (Ruling T4-R4).
-        let (_, files) = refetch_record(t, Some(token), id, None, &today)
+        let files = refetch_record(t, Some(token), id, None, &today)
+            .map(|refetched| refetched.files)
             .map_err(|reason| refused(failed_line(shown, first_record, &reason_text(&reason))))?;
         for copy in &records {
             // Only a stale copy is written, so a phase 0 folder never gains a tmdb-record.json.

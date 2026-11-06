@@ -9,7 +9,7 @@ pub mod refetch;
 pub mod saved;
 pub mod transport;
 
-pub use chain::{run_round, seasons_to_fetch, Answers, ChainInputs, Lookup, LookupBook, LookupState};
+pub use chain::{run_round, seasons_to_fetch, status_file, Answers, ChainInputs, Lookup, LookupBook, LookupState};
 pub use live::{
     UreqTransport, BAD_ANSWER, BODY_TOO_LONG, CONNECTION_FAILED, MAX_BODY_BYTES, NO_HOST, REFUSED, TLS_FAILED,
 };
@@ -19,7 +19,10 @@ pub use lookups::{
 };
 pub use merge::merge_pages;
 pub use recorded::{Gate, RecordedTransport};
-pub use refetch::{refetch_record, refetch_search, stale_copies, status_record, StaleCopy};
+pub use refetch::{
+    refetch_record, refetch_search, refetch_seasons, stale_copies, status_record, RecordRefetch, SeasonsFetched,
+    StaleCopy,
+};
 pub use saved::{shape_of, slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 pub use transport::{
     user_agent, webhook_target, HttpTransport, OfflineTransport, Response, TransportError, WebhookTarget, OFFLINE,
