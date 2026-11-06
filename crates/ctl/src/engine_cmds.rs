@@ -70,25 +70,27 @@ pub(crate) fn relay(argv: &[String], env: Env) -> i32 {
     }
 }
 
-/// The line `talk` sends for a request, newline excluded: the envelope of `kind` and `payload` with id 1 (T28-c).
-fn request_line(kind: &str, payload: &Value) -> String {
-    let envelope = Envelope { v: PROTOCOL_VERSION, kind: kind.to_string(), id: Some(1), payload: payload.clone() };
+/// The line `talk` sends for a request, newline excluded: the envelope of `kind` and `payload` with id 1 (T28-c). It
+/// is built once, when the exchange is made, so the payload is moved in and the text is held once (PR #15 review
+/// round 1, R8).
+fn request_line(kind: &str, payload: Value) -> String {
+    let envelope = Envelope { v: PROTOCOL_VERSION, kind: kind.to_string(), id: Some(1), payload };
     serde_json::to_string(&envelope).expect("an envelope of JSON values serialises")
 }
 
-/// `exchange` unchanged, or Err(REQUEST_TOO_LONG) when its request's `request_line` is longer than MAX_LINE_BYTES
-/// bytes; an exchange that sends nothing passes.
+/// `exchange` unchanged, or Err(REQUEST_TOO_LONG) when its request line is longer than MAX_LINE_BYTES bytes; an
+/// exchange that sends nothing passes.
 fn within_line_limit(exchange: Exchange) -> Result<Exchange, String> {
     match &exchange.request {
-        Some((kind, payload)) if request_line(kind, payload).len() > MAX_LINE_BYTES => Err(REQUEST_TOO_LONG.to_string()),
+        Some(line) if line.len() > MAX_LINE_BYTES => Err(REQUEST_TOO_LONG.to_string()),
         _ => Ok(exchange),
     }
 }
 
 /// What one exchange sends and waits for.
 struct Exchange {
-    /// The request's type and payload, sent with id 1 (T28-c); None sends nothing.
-    request: Option<(&'static str, Value)>,
+    /// The request's line, newline excluded, serialised once and sent as it is measured (T28-c); None sends nothing.
+    request: Option<String>,
     /// What ends the exchange.
     wait: Wait,
 }
@@ -96,7 +98,7 @@ struct Exchange {
 impl Exchange {
     /// An exchange that sends `kind` with `payload` and waits for its reply.
     fn ask(kind: &'static str, payload: Value, answer: Answer) -> Exchange {
-        Exchange { request: Some((kind, payload)), wait: Wait::Reply(answer) }
+        Exchange { request: Some(request_line(kind, payload)), wait: Wait::Reply(answer) }
     }
 
     /// An exchange that sends nothing and waits for `wait`.
@@ -288,9 +290,9 @@ fn talk(env: Env, exchange: Exchange) -> i32 {
             return 4;
         }
     };
-    if let Some((kind, payload)) = request {
-        let line = request_line(kind, &payload) + "\n";
-        if writer.write_all(line.as_bytes()).and_then(|()| writer.flush()).is_err() {
+    if let Some(line) = request {
+        let sent = writer.write_all(line.as_bytes()).and_then(|()| writer.write_all(b"\n")).and_then(|()| writer.flush());
+        if sent.is_err() {
             let _ = writeln!(env.err, "{CLOSED}");
             return 4;
         }
@@ -404,7 +406,7 @@ fn print_json(out: &mut dyn Write, value: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::REQUEST_TOO_LONG;
+    use super::{Answer, Exchange, REQUEST_TOO_LONG};
     use crate::{run, Env, NOT_ELEVATED, NOT_RUNNING, NO_TRANSPORT, REFUSED};
     use lazymkv_core::ipc::{push_line, reply_error, reply_ok, OutputStream, Push, MAX_LINE_BYTES};
     use lazymkv_core::settings::SettingsProblem;
@@ -694,6 +696,22 @@ mod tests {
             (code, out.as_str(), err.as_str()),
             (1, "", "lazymkvctl: the settings were refused\nlazymkvctl: cache_mb: not a number\n")
         );
+    }
+
+    #[test]
+    fn an_exchange_sends_the_line_it_measured() {
+        let scratch = Scratch::new("ctl-measured");
+        let body = format!("{{\"staging_root\": \"{}\"}}", "a".repeat(70_000));
+        let file = scratch.write_path("long.json", &body);
+        let measured = Exchange::ask("settings_set", serde_json::from_str(&body).unwrap(), Answer::Nothing)
+            .request
+            .expect("an asking exchange keeps its request line");
+        assert!(measured.len() > 70_000 && !measured.ends_with('\n'));
+        let (ipc, connector) = MemoryIpc::new();
+        let server = peer(ipc, vec![SNAPSHOT.to_string()], Some(vec![reply_ok(Some(1), Value::Null)]));
+        let (code, _, _) = call(&["settings", "set", file.to_str().unwrap()], Some(&connector), b"", &scratch.0);
+        assert_eq!(code, 0);
+        assert_eq!(finish(server, connector), format!("{measured}\n"));
     }
 
     #[test]
