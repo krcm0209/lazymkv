@@ -519,8 +519,10 @@ pub fn scan_text_with_messages(
     out
 }
 
-/// A `/movie/{id}` answer as TMDb documents it: id, title, original_title, release_date, original_language, runtime
-/// (None writes null), external_ids {imdb_id}. The IMDb ID is synthetic: `tt` and the TMDb ID in seven digits. Spec 8.1.
+/// A movie's slim saved answer as a job folder keeps it (design part 8.4): id, title, original_title, release_date,
+/// original_language, runtime (None writes null), external_ids {imdb_id}, then `fetched_at` "2026-10-23", the fixed
+/// test date, so the copy is never stale (Ruling T4-R7). The IMDb ID is synthetic: `tt` and the TMDb ID in seven
+/// digits. Spec 8.1.
 pub fn tmdb_movie_json(
     id: i64,
     title: &str,
@@ -537,14 +539,16 @@ pub fn tmdb_movie_json(
         "original_language": original_language,
         "runtime": runtime,
         "external_ids": {"imdb_id": format!("tt{id:07}")},
+        "fetched_at": "2026-10-23",
     })
     .to_string()
 }
 
-/// A `/tv/{id}` answer with its seasons expanded as `/tv/{id}/season/{n}` gives them: id, name, original_name (the name
-/// again), first_air_date, original_language, external_ids {imdb_id, tvdb_id}, seasons[] {season_number, episode_count
-/// (the episodes given), episodes[] {episode_number, name, runtime}}. The IDs are synthetic: `tt` and the TMDb ID in seven
-/// digits, and 100000 plus the TMDb ID. Spec 8.1, 8.5.
+/// A TV show's slim saved answer as a job folder keeps it (design part 8.4), its seasons expanded as the season calls
+/// give them: id, name, original_name (the name again), first_air_date, original_language, external_ids {imdb_id,
+/// tvdb_id}, seasons[] {season_number, episode_count (the episodes given), episodes[] {episode_number, name, runtime}},
+/// then `fetched_at` "2026-10-23", the fixed test date, so the copy is never stale (Ruling T4-R7). The IDs are
+/// synthetic: `tt` and the TMDb ID in seven digits, and 100000 plus the TMDb ID. Spec 8.1, 8.5.
 pub fn tmdb_tv_json(
     id: i64,
     name: &str,
@@ -572,13 +576,17 @@ pub fn tmdb_tv_json(
         "original_language": original_language,
         "external_ids": {"imdb_id": format!("tt{id:07}"), "tvdb_id": id + 100_000},
         "seasons": seasons,
+        "fetched_at": "2026-10-23",
     })
     .to_string()
 }
 
-/// A `/search/multi` answer: results[] {media_type, id, title|name, original_title|original_name,
-/// release_date|first_air_date} from (media_type, id, title, original title, date), the movie fields for "movie" and the
-/// TV fields for any other media type, wrapped as TMDb pages it (page 1, total_pages 1, total_results). Spec 8.1.
+/// A search page's slim saved answer as design part 8.4 keeps it, without its `queries`: results[] {media_type, id,
+/// title|name, original_title|original_name, release_date|first_air_date} from (media_type, id, title, original title,
+/// date), the movie fields for "movie" and the TV fields for any other media type, then `fetched_at` "2026-10-23",
+/// the fixed test date, so the copy is never stale (Ruling T4-R7). The raw page's `page`, `total_pages` and
+/// `total_results` are not written, as `slim_search` never writes them (PR #15 review round 1, R12). The tests also
+/// serve it as a TMDb `/search/multi` answer, since `parse_search` and `slim_search` read only `results`. Spec 8.1.
 pub fn search_json(results: &[(&str, i64, &str, &str, &str)]) -> String {
     let rows: Vec<serde_json::Value> = results
         .iter()
@@ -590,7 +598,11 @@ pub fn search_json(results: &[(&str, i64, &str, &str, &str)]) -> String {
             }
         })
         .collect();
-    serde_json::json!({"page": 1, "results": rows, "total_pages": 1, "total_results": results.len()}).to_string()
+    serde_json::json!({
+        "results": rows,
+        "fetched_at": "2026-10-23",
+    })
+    .to_string()
 }
 
 /// A ustar archive of `entries` (name, data), each a regular file, ended by two zero blocks: the fixture appdata.tar
@@ -720,14 +732,14 @@ mod builder_tests {
             concat!(
                 r#"{"id":1417,"title":"Pan's Labyrinth","original_title":"El laberinto del fauno","#,
                 r#""release_date":"2006-10-11","original_language":"es","runtime":119,"#,
-                r#""external_ids":{"imdb_id":"tt0001417"}}"#,
+                r#""external_ids":{"imdb_id":"tt0001417"},"fetched_at":"2026-10-23"}"#,
             )
         );
         assert_eq!(
             tmdb_movie_json(7, "A", "A", "", "en", None),
             concat!(
                 r#"{"id":7,"title":"A","original_title":"A","release_date":"","original_language":"en","runtime":null,"#,
-                r#""external_ids":{"imdb_id":"tt0000007"}}"#,
+                r#""external_ids":{"imdb_id":"tt0000007"},"fetched_at":"2026-10-23"}"#,
             )
         );
     }
@@ -749,7 +761,7 @@ mod builder_tests {
                 r#""seasons":[{"season_number":3,"episode_count":2,"episodes":["#,
                 r#"{"episode_number":15,"name":"Example Fifteen","runtime":22},"#,
                 r#"{"episode_number":16,"name":"Example Sixteen","runtime":null}]},"#,
-                r#"{"season_number":0,"episode_count":0,"episodes":[]}]}"#,
+                r#"{"season_number":0,"episode_count":0,"episodes":[]}],"fetched_at":"2026-10-23"}"#,
             )
         );
     }
@@ -762,14 +774,14 @@ mod builder_tests {
                 ("tv", 2316, "The Office", "The Office", "2005-03-24"),
             ]),
             concat!(
-                r#"{"page":1,"results":["#,
+                r#"{"results":["#,
                 r#"{"media_type":"movie","id":1417,"title":"Pan's Labyrinth","#,
                 r#""original_title":"El laberinto del fauno","release_date":"2006-10-11"},"#,
                 r#"{"media_type":"tv","id":2316,"name":"The Office","original_name":"The Office","#,
                 r#""first_air_date":"2005-03-24"}"#,
-                r#"],"total_pages":1,"total_results":2}"#,
+                r#"],"fetched_at":"2026-10-23"}"#,
             )
         );
-        assert_eq!(search_json(&[]), r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#);
+        assert_eq!(search_json(&[]), r#"{"results":[],"fetched_at":"2026-10-23"}"#);
     }
 }

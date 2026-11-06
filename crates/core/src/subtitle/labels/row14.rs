@@ -1,6 +1,6 @@
 //! Spec section 17 row 14 (a) read from the spec text, its costly verdicts and the subtitle harness behind
-//! `lazymkv-dev retune --subtitles` (RP15, spec 15 "Rules against the stored evidence", Task 18). The module is private:
-//! `labels.rs` re-exports what other code uses.
+//! `lazymkv-dev retune --subtitles` (RP15, spec 15 "Rules against the stored evidence", Task 18). `labels.rs` re-exports
+//! what other code uses; the module is public since T4-16 for `media`, `recorded_discdb` and `Media`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -256,9 +256,10 @@ pub const TEXT_HINT: &str = "(give --text DIR or LAZYMKV_OCR_TEXT)";
 const COLUMN: usize = 22;
 
 /// What a recording is, for row 14's "1 feature film and 1 TV episode" (`media`): a feature film, a TV episode, or
-/// unknown when neither tmdb.json, TheDiscDB's answer nor the scan can be read.
+/// unknown when neither tmdb.json, TheDiscDB's answer nor the scan can be read. Def: Spec 17 row 14 (a); T4-16 makes it
+/// public. Use: T4-16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Media {
+pub enum Media {
     Film,
     Tv,
     Unknown,
@@ -426,8 +427,9 @@ pub fn harness(evidence: &dyn Tree, text: Option<&dyn Tree>, row14: &Row14, sett
 /// parse or is no hit gives none) and otherwise decides by structure (three or more episode-length groups within 15%
 /// of each other, or a season marker in the scan's volume label; a movie by default); Unknown only when the scan cannot
 /// be read either. Recordings of discs TheDiscDB does not know have no tmdb.json, and 8.2 still knows their kind, so
-/// their titles count towards row 14's "1 feature film and 1 TV episode". Spec 17 row 14 (a), 8.2.
-fn media(evidence: &dyn Tree, dir: &PathKey, typed: Option<&Disc>, settings: &Settings) -> (Media, &'static str) {
+/// their titles count towards row 14's "1 feature film and 1 TV episode". Def: Spec 17 row 14 (a), 8.2; T4-16 makes it
+/// public. Use: T4-16.
+pub fn media(evidence: &dyn Tree, dir: &PathKey, typed: Option<&Disc>, settings: &Settings) -> (Media, &'static str) {
     let path = dir.join("tmdb.json");
     if evidence.is_file(&path) {
         match read_json::<Tmdb>(evidence, &path) {
@@ -450,8 +452,9 @@ fn media(evidence: &dyn Tree, dir: &PathKey, typed: Option<&Disc>, settings: &Se
 }
 
 /// The recording's TheDiscDB answer as `lookup::discdb` parses it: thediscdb-hash.json's record, else the first record
-/// of thediscdb-discid.json that has titles; None when neither file is there, parses or is a hit. Spec 8.1.
-fn recorded_discdb(evidence: &dyn Tree, dir: &PathKey) -> Option<DiscDbRecord> {
+/// of thediscdb-discid.json that has titles; None when neither file is there, parses or is a hit. Def: Spec 8.1; T4-16
+/// makes it public. Use: T4-16.
+pub fn recorded_discdb(evidence: &dyn Tree, dir: &PathKey) -> Option<DiscDbRecord> {
     let read = |name: &str| {
         let path = dir.join(name);
         evidence.is_file(&path).then(|| read_text(evidence, &path, Encoding::Utf8Sig, Errors::Replace).ok()).flatten()

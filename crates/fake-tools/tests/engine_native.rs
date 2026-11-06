@@ -16,11 +16,11 @@ use lazymkv_core::testsupport::Scratch;
 use lazymkv_ctl::{run, Env};
 use lazymkv_dev::evidence::{skip, Ctx};
 use lazymkv_engine::native::{run_with, NativeOptions, ENGINE_RUNNING, NOT_ELEVATED};
-use lazymkv_engine::testkit::{ci_factor, Harness};
+use lazymkv_engine::testkit::{ci_factor, Harness, MemorySink};
 use lazymkv_platform::security::{test_name, TokenFacts};
 use lazymkv_platform::fakes::{MemorySecrets, RecordingEjector, ScriptedDrives};
 use lazymkv_platform::win::{own_token, program_data, EngineMutex, PipeServer, WinHost};
-use lazymkv_platform::{Host, StdProcessGuard};
+use lazymkv_platform::{Host, SecretStore, StdProcessGuard};
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
@@ -68,10 +68,12 @@ fn options(mutex: &str, pipe: &str) -> NativeOptions {
         processes: Some(Arc::new(StdProcessGuard)),
         secrets: Some(Arc::new(MemorySecrets::new())),
         http: Some(Arc::new(OfflineTransport)),
+        notify: Some(Box::new(MemorySink::new().0)),
         console: Some(Box::new(std::io::sink())),
         console_stop: Some(Box::new(|_| Ok(()))),
         token: None,
         program_data_var: None,
+        cleanup_minutes: None,
     }
 }
 
@@ -126,14 +128,58 @@ fn a_native_engine_files_a_stand_in_disc_through_the_real_pipe() {
     h.insert("tok0", "movie-direct");
     wait_for(&h, "the job to be Filed", JOB_CAP, |h| h.job_ids().first().is_some_and(|id| h.state_of(id) == "Filed"));
     assert!(h.library().join(FINAL).is_file());
+    wait_for(&h, "the filed notification", JOB_CAP, |h| h.notifications().iter().any(|n| n.event.as_str() == "filed"));
     let log = h.engine_log();
-    assert!(log.contains("was not delivered: no notification delivery in this build; it arrives in pull request 4"), "{log}");
+    assert!(!log.contains("was not delivered"), "{log}");
+    let events: Vec<&str> = h.notifications().iter().map(|n| n.event.as_str()).collect();
+    assert_eq!(events, ["disc_done", "filed"]);
     assert!(!log.contains("refused a pipe client"), "{log}");
     assert_eq!(ctl(&h, &["stop"]), (0, String::new(), String::new()));
     assert_eq!(h.native_exit(), 0);
     assert!(h.engine_log().ends_with(" engine stopped\n"));
     let mutex = format!(r"Global\{}", pipe.strip_prefix(r"\\.\pipe\").unwrap());
     assert!(EngineMutex::take(&mutex).is_ok(), "the stopped engine released its mutex");
+}
+
+const HOOK: &str = "http://127.0.0.1:9/api/webhook/hook-sentinel-7f3a"; // answered by the recorded transport only
+
+#[test]
+fn a_native_engine_with_no_webhook_set_logs_no_undelivered_line() {
+    if makemkv_runs_here() {
+        return;
+    }
+    let pipe = format!(r"\\.\pipe\{}", test_name("native-nohook"));
+    let h = Harness::new_native_with_webhook_sink(fake_tool(), &["movie-direct"], settings(), &pipe);
+    h.insert("tok0", "movie-direct");
+    wait_for(&h, "the job to be Filed", JOB_CAP, |h| h.job_ids().first().is_some_and(|id| h.state_of(id) == "Filed"));
+    assert!(h.http().posts().is_empty(), "{:?}", h.http().posts());
+    assert!(!h.engine_log().contains("was not delivered"), "{}", h.engine_log());
+    assert_eq!(ctl(&h, &["stop"]), (0, String::new(), String::new()));
+    assert_eq!(h.native_exit(), 0);
+}
+
+#[test]
+fn a_native_engine_posts_its_notifications_to_the_set_webhook() {
+    if makemkv_runs_here() {
+        return;
+    }
+    let pipe = format!(r"\\.\pipe\{}", test_name("native-hook"));
+    let h = Harness::new_native_with_webhook_sink(fake_tool(), &["movie-direct"], settings(), &pipe);
+    h.secrets().set("ha_webhook_url", HOOK).unwrap();
+    h.http().answer(HOOK, 200, b"");
+    h.insert("tok0", "movie-direct");
+    wait_for(&h, "two webhook posts", JOB_CAP, |h| h.http().posts().len() == 2);
+    let posts = h.http().posts();
+    let events: Vec<String> = posts.iter()
+        .map(|(_, _, body)| serde_json::from_slice::<Value>(body).unwrap()["event"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(events, ["disc_done", "filed"]);
+    assert!(posts.iter().all(|(url, headers, _)| url == HOOK
+        && headers.contains(&("Content-Type".to_string(), "application/json".to_string()))));
+    let log = h.engine_log();
+    assert!(!log.contains("was not delivered") && !log.contains("hook-sentinel-7f3a"), "{log}");
+    assert_eq!(ctl(&h, &["stop"]), (0, String::new(), String::new()));
+    assert_eq!(h.native_exit(), 0);
 }
 
 #[test]

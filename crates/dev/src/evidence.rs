@@ -3,6 +3,7 @@
 //! folder, a directory on disk as a `Tree`, and a recording named as a slug or a path.
 
 use crate::runner::{FakeRunner, RealRunner, Runner};
+use lazymkv_clients::{HttpTransport, UreqTransport};
 use lazymkv_core::recording::{decode_text, py_repr_str, read_text, text_mode, Encoding, Errors, Kind, Loader, MemTree, PathKey, ReadError, Tree};
 use lazymkv_core::robot::{parse, Scan};
 pub use lazymkv_core::recording::pathlib_str;
@@ -20,12 +21,17 @@ const SPEC: &str = "docs/superpowers/specs/2026-10-04-lazymkv-design.md";
 pub struct Ctx {
     /// The directory relative paths are taken against.
     pub cwd: PathBuf,
-    /// The environment variables the commands read: LAZYMKV_EVIDENCE, LAZYMKV_OCR_TEXT, TMPDIR, TEMP, TMP.
+    /// The environment variables the commands read: LAZYMKV_EVIDENCE, LAZYMKV_OCR_TEXT, TMPDIR, TEMP, TMP, and
+    /// TMDB_TOKEN for the refetch of a stale TMDb copy (design part 8.4).
     pub env: BTreeMap<String, String>,
     /// ffprobe and ffmpeg (and, for `now`, the clock programs).
     pub runner: Box<dyn Runner>,
     /// A fixed local time "YYYY-MM-DDTHH:MM:SS" for tests; None reads the system clock.
     pub clock: Option<String>,
+    /// The transport a local plan, decide or retune fetches a stale TMDb copy with (design part 8.4; Ruling T4-R10):
+    /// None in `from_process` and `for_test`, which asks through `OfflineTransport`; `with_live_transport` sets the
+    /// live one. The engine's in-process use of dev's library never reaches it. Def: T4-10. Use: T4-10.
+    pub http: Option<Arc<dyn HttpTransport>>,
 }
 
 impl Ctx {
@@ -38,6 +44,7 @@ impl Ctx {
                 .collect(),
             runner: Box::new(RealRunner),
             clock: None,
+            http: None,
         }
     }
 
@@ -48,7 +55,14 @@ impl Ctx {
             env: BTreeMap::new(),
             runner: Box::new(FakeRunner::absent()),
             clock: Some(TEST_CLOCK.to_string()),
+            http: None,
         }
+    }
+
+    /// `self` with `http` set to `UreqTransport::new()` (design parts 8.1, 8.4; Ruling T4-R10). Called only by
+    /// lazymkv-dev's and lazymkvctl's `main`. Def: T4-10. Use: T4-10.
+    pub fn with_live_transport(self) -> Ctx {
+        Ctx { http: Some(Arc::new(UreqTransport::new())), ..self }
     }
 
     /// Local time to the second, as datetime.now().isoformat(timespec="seconds"). std has no time zones and no date
@@ -135,17 +149,8 @@ fn utc_now() -> String {
 /// "YYYY-MM-DDTHH:MM:SS" of a count of seconds since 1970-01-01T00:00:00, by the days-to-civil algorithm of the
 /// proleptic Gregorian calendar.
 fn civil_time(seconds: u64) -> String {
-    let days = (seconds / 86_400) as i64;
     let rest = seconds % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
-    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+    let (year, month, day) = lazymkv_core::lookup::stale::civil_date(seconds);
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", year, month, day, rest / 3600, rest % 3600 / 60, rest % 60)
 }
 

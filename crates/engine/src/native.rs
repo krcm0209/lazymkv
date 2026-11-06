@@ -1,5 +1,6 @@
 //! The engine binary on Windows (design parts 3.1 to 3.8, 4.2; S28; Rulings W1 to W5, W19, W26, W27): the start-up
-//! sequence, the native `Platform`, and the wait for a stop.
+//! sequence, the native `Platform`, and the wait for a stop. Ruling W26's offline transport and undelivering sink are
+//! replaced by the live transport (design part 8.1) and the webhook notifier (design part 8.6).
 //!
 //! The start-up texts, each one line on standard error with exit 1 (Rulings W2 to W4, T3-23-d, PF3-S23-24-2):
 //! `NOT_ELEVATED`; no `--data` and no ProgramData folder in the registry, `NO_PROGRAM_DATA`; no `--data` and a
@@ -18,7 +19,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lazymkv_clients::{HttpTransport, OfflineTransport};
+use lazymkv_clients::{HttpTransport, UreqTransport};
 use lazymkv_platform::security::TokenFacts;
 use lazymkv_platform::win::{
     fail_critical_errors, on_console_stop, own_token, program_data, protect_data_folder, share_connector,
@@ -28,7 +29,9 @@ use lazymkv_platform::{
     native_guard, DriveWatcher, Ejector, Platform, ProcessGuard, SecretStore, MUTEX_NAME, PIPE_NAME,
 };
 
-use crate::{data_arg, start, EngineConfig, NoDelivery, Services, ShutdownHandle, StdTimers, USAGE};
+use crate::{
+    data_arg, start, EngineConfig, NotifySink, Services, ShutdownHandle, StdTimers, WebhookSink, CLEANUP_MINUTES, USAGE,
+};
 
 /// A start whose token is not elevated (design part 3.2; Ruling W3). Def: T3-23. Use: T3-23.
 pub const NOT_ELEVATED: &str = "lazymkv-engine: run lazymkv-engine elevated (design part 3.2)";
@@ -41,8 +44,8 @@ pub const STOPPED_STARTING: &str = "lazymkv-engine: stopped by the console while
 /// whole-branch review (F2)).
 const NO_PROGRAM_DATA: &str = "lazymkv-engine: the registry's ProgramData could not be read; give --data DIR";
 
-/// What `run_with` builds the engine from; each None takes the production part (Rulings W26, W27). Def: T3-23.
-/// Use: T3-23.
+/// What `run_with` builds the engine from; each None takes the production part (Rulings W26, W27; design parts 8.1,
+/// 8.6). Def: T3-23; T4-17 adds notify and cleanup_minutes. Use: T3-23, T4-17.
 pub struct NativeOptions {
     /// The mutex's name: `MUTEX_NAME`, or a test's own.
     pub mutex: String,
@@ -56,8 +59,11 @@ pub struct NativeOptions {
     pub processes: Option<Arc<dyn ProcessGuard>>,
     /// None: `CredentialStore::new()`.
     pub secrets: Option<Arc<dyn SecretStore>>,
-    /// None: `OfflineTransport` (Ruling W26).
+    /// None: `UreqTransport::new()` (design part 8.1).
     pub http: Option<Arc<dyn HttpTransport>>,
+    /// None: `WebhookSink::new(Arc::clone(&http), Arc::clone(&secrets))` over this run's transport and store (design
+    /// part 8.6).
+    pub notify: Option<Box<dyn NotifySink>>,
     /// None: standard error, written through the engine's console mirror (design part 3.5; Ruling W26; review round 1
     /// of pull request 3, V5).
     pub console: Option<Box<dyn Write + Send>>,
@@ -68,10 +74,14 @@ pub struct NativeOptions {
     /// The `ProgramData` variable compared with the registry's folder when no `--data` is given (design part 3.5;
     /// whole-branch review F2). None: the process's own variable.
     pub program_data_var: Option<OsString>,
+    /// The cleanup's period in minutes (design part 5.9; Ruling T4-R11); None runs no cleanup.
+    pub cleanup_minutes: Option<u32>,
 }
 
 impl NativeOptions {
-    /// `MUTEX_NAME`, `PIPE_NAME`, and every other field None (design parts 3.3, 4.2). Def: T3-23. Use: T3-23.
+    /// `MUTEX_NAME`, `PIPE_NAME`, `cleanup_minutes` `CLEANUP_MINUTES`, and every other field None, so the binary
+    /// builds the live transport and the webhook notifier (design parts 3.3, 4.2, 5.9, 8.1, 8.6). Def: T3-23; T4-17.
+    /// Use: T3-23, T4-17.
     pub fn production() -> NativeOptions {
         NativeOptions {
             mutex: MUTEX_NAME.to_string(),
@@ -81,20 +91,22 @@ impl NativeOptions {
             processes: None,
             secrets: None,
             http: None,
+            notify: None,
             console: None,
             console_stop: None,
             token: None,
             program_data_var: None,
+            cleanup_minutes: Some(CLEANUP_MINUTES),
         }
     }
 }
 
 /// Runs the engine on Windows until a `shutdown` request or the console's stop event stops it (design parts 3.1 to
-/// 3.8; Rulings W1 to W5, W19, W26): the arguments, the elevation check, the default data folder's place when no
-/// `--data` is given (whole-branch review F2), the mutex, the data folder, the first pipe instance, the console
-/// handler, the process's critical-error mode (`fail_critical_errors`, review round 1 of pull request 3, V6), then
-/// `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a usage error; every refusal's
-/// text goes to `err` (Step 3 lists them). Def: T3-23. Use: T3-23.
+/// 3.8, and design parts 8.1 and 8.6 (T4-17); Rulings W1 to W5, W19, W26): the arguments, the elevation check, the
+/// default data folder's place when no `--data` is given (whole-branch review F2), the mutex, the data folder, the
+/// first pipe instance, the console handler, the process's critical-error mode (`fail_critical_errors`, review round 1
+/// of pull request 3, V6), then `start`. Returns 0 after a clean stop, 1 for a refusal or a failed start, and 2 for a
+/// usage error; every refusal's text goes to `err` (Step 3 lists them). Def: T3-23; T4-17. Use: T3-23, T4-17.
 pub fn run_with(args: &[String], err: &mut dyn Write, options: NativeOptions) -> i32 {
     let data = match data_arg(args) {
         Ok(data) => data,
@@ -123,10 +135,12 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         processes,
         secrets,
         http,
+        notify,
         console,
         console_stop,
         token,
         program_data_var,
+        cleanup_minutes,
     } = options;
     // Design part 3.2; Ruling W3: the check only reads the token, so it comes before the mutex, the first step with an
     // effect.
@@ -171,6 +185,9 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
     let processes = processes.unwrap_or_else(native_guard);
     let awake = WinKeepAwake::new().map_err(|error| could_not_start(&error))?;
     let secrets: Arc<dyn SecretStore> = secrets.unwrap_or_else(|| Arc::new(CredentialStore::new()));
+    let http: Arc<dyn HttpTransport> = http.unwrap_or_else(|| Arc::new(UreqTransport::new()));
+    let notify: Box<dyn NotifySink> =
+        notify.unwrap_or_else(|| Box::new(WebhookSink::new(Arc::clone(&http), Arc::clone(&secrets))));
     // The one share connector of this run: its memory of refused credentials is its own (Review Focus 5), so every
     // consumer, the steps, the checks and the self-test, reads it through `Platform.shares`.
     let shares = share_connector(Arc::clone(&secrets));
@@ -184,8 +201,7 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         ipc: Arc::new(ipc),
         host: Arc::new(WinHost::new()),
     };
-    let http: Arc<dyn HttpTransport> = http.unwrap_or_else(|| Arc::new(OfflineTransport));
-    let services = Services { platform, http, notify: Box::new(NoDelivery), timers: Arc::new(StdTimers), steps: None };
+    let services = Services { platform, http, notify, timers: Arc::new(StdTimers), steps: None };
     let (resources, ctl) = match std::env::current_exe() {
         Ok(exe) => {
             let (resources, ctl) = binary_paths(&exe);
@@ -204,6 +220,7 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         path_var: std::env::var_os("PATH"),
         ctl,
         console: Some(console),
+        cleanup_minutes,
     };
     let engine = start(config, services).map_err(|error| could_not_start(&error))?;
     *lock(&slot) = Some(engine.shutdown_handle());
@@ -319,6 +336,14 @@ mod tests {
         for other in [r"D:\ProgramData", r"C:\ProgramData\lazymkv", r"C:\Data\ProgramData", r"C:\", "ProgramData", ""] {
             assert!(!same_folder(Path::new(other), registry), "{other}");
         }
+    }
+
+    #[test]
+    fn production_options_leave_http_and_notify_to_the_binary() {
+        let options = NativeOptions::production();
+        assert!(options.http.is_none() && options.notify.is_none());
+        assert_eq!(options.cleanup_minutes, Some(CLEANUP_MINUTES));
+        assert_eq!(CLEANUP_MINUTES, 60);
     }
 
     #[test]

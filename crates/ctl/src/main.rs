@@ -4,7 +4,7 @@
 fn main() {
     // As lazymkv-dev's main reads them, so a non-Unicode argument cannot panic and the exit codes stay identical (P23).
     let argv: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
-    let ctx = lazymkv_dev::evidence::Ctx::from_process();
+    let ctx = lazymkv_dev::evidence::Ctx::from_process().with_live_transport();
     #[cfg(windows)]
     let pipe = lazymkv_platform::win::PipeConnector::new(lazymkv_platform::PIPE_NAME);
     #[cfg(windows)]

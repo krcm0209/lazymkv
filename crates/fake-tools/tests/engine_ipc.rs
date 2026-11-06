@@ -9,16 +9,18 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use common::{Client, WAIT};
-use lazymkv_clients::OFFLINE;
+use lazymkv_clients::{record_url, search_url, OFFLINE};
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
-use lazymkv_core::job::{Action, Event, Failure, FailureClass, NotifyEvent, State};
+use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent, State};
+use lazymkv_core::lookup::name::disc_name;
+use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::plan::Mode;
 use lazymkv_core::record::{JobRecord, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
-use lazymkv_engine::NO_DELIVERY;
+use lazymkv_engine::NOTIFY_DRAIN_S;
 use lazymkv_platform::{IpcConnector, Reach, SecretStore};
 use lazymkv_tools::makemkv::{EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use serde_json::{json, Value};
@@ -169,6 +171,16 @@ fn seed(h: &Harness, n: u64, state: State) -> String {
     let dir = h.data().join("jobs").join(&id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("state.json"), serde_json::to_vec(&r).unwrap()).unwrap();
+    id
+}
+
+/// `seed(h, n, State::Filed)` with `filed_unix` set in the written `state.json` (design part 5.9).
+fn seed_filed(h: &Harness, n: u64, filed_unix: u64) -> String {
+    let id = seed(h, n, State::Filed);
+    let path = h.job_dir(&id).join("state.json");
+    let mut r: JobRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    r.filed_unix = Some(filed_unix);
+    fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
     id
 }
 
@@ -400,6 +412,29 @@ fn a_share_value_of_three_lines_is_refused_without_echoing_it() {
     assert!(!line.contains("sentinel"), "{line}");
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"].get(name), None);
     assert!(!h.engine_log().contains("sentinel"));
+}
+
+/// Ruling T4-R15: a webhook value that is not an http or https URL with a host is refused, never echoed, and not
+/// stored; a URL is stored.
+#[test]
+fn a_webhook_value_that_is_not_an_http_url_is_refused_without_echoing_it() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    for (name, value) in [("ha_webhook_url", "ftp://hook-sentinel-1c4b/x"), ("webhook_url", "hook-sentinel-1c4b"),
+                          ("webhook_url", "http:///hook-sentinel-1c4b")] {
+        let message = c.err("secret_set", json!({"name": name, "value": value}));
+        assert_eq!(message, format!("{name} could not be stored: the value must be an http or https URL with a host"));
+        assert_eq!(h.secrets().get(name), None, "{name}");
+    }
+    let mut d = Client::open(&h);
+    let line = d.line().unwrap();
+    assert!(!line.contains("sentinel"), "{line}");
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["payload"]["secrets"]["webhook_url"], json!({"set": false, "host": null}));
+    assert!(!h.engine_log().contains("sentinel"));
+    let url = "https://ha.local/api/webhook/hook-sentinel-1c4b";
+    assert_eq!(c.ok("secret_set", json!({"name": "webhook_url", "value": url})), Value::Null);
+    assert_eq!(h.secrets().get("webhook_url").as_deref(), Some(url));
 }
 
 #[test]
@@ -1398,6 +1433,8 @@ fn a_rip_again_beside_a_kept_lookup_pending_leaves_it_to_its_refeed_timer() {
     h.allow_persists();
     h.fire_timers();
     h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    // state.json is replaced before the transitions line is appended (store.rs), so the line gets its own wait.
+    h.wait("the LookupPending line", |h| h.transitions(&id).iter().any(|line| line.event == Some(Event::LookupPending)));
     let fed = h.transitions(&id).into_iter().find(|line| line.event == Some(Event::LookupPending)).unwrap();
     assert_eq!(fed.old, Some(State::Ejected { after_copy: false }));
     let record = h.record(&id);
@@ -1489,6 +1526,8 @@ fn approve_delivers_review_approved_when_the_slot_is_free() {
     assert!(matches!(h.record(&a).state, State::NeedsReview { .. }));
     c.ok("cancel", json!({"job": b}));
     c.until_state(Some(&a), "Decided");
+    // state.json is replaced before the transitions line is appended (store.rs), so the line gets its own wait.
+    h.wait("the ReviewApproved line", |h| h.transitions(&a).iter().any(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))));
     let approved = h.transitions(&a).into_iter().find(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))).unwrap();
     let event = serde_json::to_value(&approved.event).unwrap();
     assert_eq!(event["approved_reasons"], reasons);
@@ -1574,7 +1613,32 @@ fn the_engine_runs_the_makemkv_check_at_start_into_the_snapshot() {
     assert_eq!(makemkv["found"], json!("settings"));
     assert_eq!(makemkv["busy"], json!(false));
     let names: Vec<&str> = snapshot["selftest"]["checks"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root", "movies_root", "tmdb_token"]);
+    assert_eq!(names, ["makemkvcon", "mkvmerge", "ffprobe", "ffmpeg", "java", "staging_root", "tuning_root",
+                       "movies_root", "tmdb_token", "ha_webhook_url", "webhook_url"]);
+    assert!(h.http().connects().is_empty(), "a start opens no connection (S80)");
+}
+
+/// Design part 8.6, Ruling T4-R14: the self-test connects to the webhook's host and port, posts nothing, and an
+/// unset `webhook_url` passes.
+#[test]
+fn a_selftest_checks_each_webhook_by_host_and_port_and_posts_nothing() {
+    let h = stand_in(&["movie-direct"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let url = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
+    c.ok("secret_set", json!({"name": "ha_webhook_url", "value": url}));
+    h.http().connect_answer("ha.local", 8123, Ok(()));
+    let result = c.ok("run_selftest", Value::Null);
+    let ha = check(&result, "ha_webhook_url");
+    assert_eq!((&ha["ok"], &ha["detail"], &ha["path"]), (&json!(true), &json!("ha.local:8123 accepted a connection"), &Value::Null));
+    let generic = check(&result, "webhook_url");
+    assert_eq!((&generic["ok"], &generic["detail"]), (&json!(true), &json!("not set; its notifications are skipped")));
+    assert_eq!(h.http().connects(), [("ha.local".to_string(), 8123)]);
+    assert!(h.http().posts().is_empty());
+    assert!(!result.to_string().contains("hook-sentinel-7f3a"));
+    let mut d = Client::open(&h);
+    assert!(!d.line().unwrap().contains("hook-sentinel-7f3a"));
+    assert!(!h.engine_log().contains("hook-sentinel-7f3a"));
 }
 
 #[test]
@@ -1898,32 +1962,35 @@ fn the_token_check_runs_over_the_engines_transport() {
     assert!(h.http().requests().iter().any(|(url, _)| url == "https://api.themoviedb.org/3/authentication"));
 }
 
-// ---- The binary's transport and sink (spec 12; design part 3.5; Ruling W26) ----
+// ---- The engine's notifier (spec 12; design part 8.6; Ruling T4-R13) ----
 
-/// Spec 12 and design part 3.5: a notification the sink cannot deliver is logged in engine.log with its event, its job
-/// and the sink's reason, and never blocks the job. Under pull request 3's binary sink, `NoDelivery`, every
-/// notification is one (Ruling W26).
+const HA_URL: &str = "http://ha.local:8123/api/webhook/hook-sentinel-7f3a";
+
+/// Spec 12 and design part 8.6: a notification no channel accepts is logged in engine.log with its event, its job and
+/// the failed channel's name, never its URL, and never blocks the job.
 #[test]
-fn an_undelivered_notification_is_logged_with_its_reason() {
+fn an_undelivered_notification_is_logged_with_its_channel() {
     let h = stand_in(&[DISC_A], settings());
-    h.use_binary_services();
+    h.use_webhook_sink();
+    h.secrets().set("ha_webhook_url", HA_URL).unwrap();
+    h.http().answer(HA_URL, 500, b"");
     h.restart();
     h.scan_waits_for_lookups(false);
     h.insert("tok0", DISC_A);
     let id = id_of(&h, DISC_A);
-    let line = format!("notification disc_done for {id} was not delivered: {NO_DELIVERY}");
+    let line = format!("notification disc_done for {id} was not delivered: ha_webhook_url: HTTP 500 after 3 attempts");
     h.wait("the undelivered disc_done", |h| h.engine_log().contains(&line));
-    assert_eq!(NO_DELIVERY, "no notification delivery in this build; it arrives in pull request 4");
+    assert!(!h.engine_log().contains("hook-sentinel-7f3a"));
     assert!(h.notifications().is_empty(), "{:?}", h.notifications());
 }
 
-/// Ruling W26: with pull request 3's binary transport, `OfflineTransport`, every lookup is unreachable, so a disc goes
-/// through its disc phase and then waits in AwaitingLookup with its hourly timer, its waiting message naming the
-/// transport's reason; the recorded transport is never asked.
+/// Ruling T4-R16: with the offline transport every lookup is unreachable, so a disc goes through its disc phase and
+/// then waits in AwaitingLookup with its hourly timer, its waiting message naming the transport's reason; the
+/// recorded transport is never asked, and with no webhook set nothing is logged undelivered.
 #[test]
 fn with_the_offline_transport_a_disc_waits_for_its_lookups() {
     let h = stand_in(&[DISC_A], settings());
-    h.use_binary_services();
+    h.use_offline_services();
     h.restart();
     h.scan_waits_for_lookups(false);
     h.insert("tok0", DISC_A);
@@ -1932,12 +1999,30 @@ fn with_the_offline_transport_a_disc_waits_for_its_lookups() {
     h.settle();
     let record = h.record(&id);
     assert_eq!(record.state, State::AwaitingLookup { return_to: Box::new(State::Ejected { after_copy: false }) });
-    let message = record.message.unwrap_or_default();
-    assert!(message.contains(&format!("dischash: {OFFLINE}")), "{message}");
+    assert!(record.message.unwrap_or_default().contains(&format!("dischash: {OFFLINE}")));
     assert_eq!(h.timers().pending(), vec![60]);
     assert!(h.http().requests().is_empty(), "{:?}", h.http().requests());
-    let waiting = format!("notification waiting for {id} was not delivered: {NO_DELIVERY}");
-    assert!(h.engine_log().contains(&waiting), "{}", h.engine_log());
+    assert!(!h.engine_log().contains("was not delivered"), "no webhook is set: {}", h.engine_log());
+}
+
+/// Spec 12 and Ruling T4-R13: a restart loses a notification still being delivered, so a stop waits for the notifier
+/// at most `NOTIFY_DRAIN_S` while a webhook hangs.
+#[test]
+fn stop_returns_within_the_drain_bound_while_a_webhook_hangs() {
+    let h = stand_in(&[DISC_A], settings());
+    h.use_webhook_sink();
+    h.secrets().set("ha_webhook_url", HA_URL).unwrap();
+    let gate = h.http().gate(HA_URL);
+    h.restart();
+    h.scan_waits_for_lookups(false);
+    h.insert("tok0", DISC_A);
+    h.wait("a held POST", |h| !h.http().posts().is_empty());
+    let started = Instant::now();
+    h.restart();
+    let took = started.elapsed();
+    gate.open();
+    // The span holds the old engine's stop and the new engine's start; unscaled, it proves the stop gives up in time.
+    assert!(took < Duration::from_secs(NOTIFY_DRAIN_S + 10), "{took:?}");
 }
 
 // ---- Shutdown, progress, command and notifications ----
@@ -2431,4 +2516,105 @@ fn the_self_test_creates_a_missing_tuning_root_under_an_existing_parent() {
     let result = c.ok("run_selftest", Value::Null);
     assert_eq!(check(&result, "tuning_root")["ok"], json!(true), "{result}");
     assert!(tuning.is_dir());
+}
+
+// ---- The cleanup (design part 5.9; Ruling T4-R11) ----
+
+#[test]
+fn the_harness_never_runs_a_cleanup_unasked() {
+    let h = scripted(vec![]);
+    let id = seed_filed(&h, 1, 1_792_800_000 - 8 * 86_400);
+    fs::write(h.job_dir(&id).join("tmdb.json"), r#"{"id": 1, "fetched_at": "2020-01-01"}"#).unwrap();
+    fs::create_dir_all(h.staging().join(&id).join("rip")).unwrap();
+    h.restart();
+    h.settle();
+    assert!(h.job_dir(&id).join("tmdb.json").exists());
+    assert!(h.staging().join(&id).is_dir());
+    assert_eq!(h.timers().pending(), Vec::<u32>::new());
+    assert!(!h.engine_log().contains("cleanup:"), "{}", h.engine_log());
+    h.run_cleanup(); // one pass, on demand
+    assert!(!h.job_dir(&id).join("tmdb.json").exists());
+    assert!(!h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted its staging folder")), "{}", h.engine_log());
+}
+
+#[test]
+fn the_cleanup_runs_off_the_owner_thread() {
+    let h = scripted(vec![]);
+    let id = seed_filed(&h, 1, 1_792_800_000 - 8 * 86_400);
+    fs::create_dir_all(h.staging().join(&id).join("rip")).unwrap();
+    let stall = h.shares().stall(&h.staging().to_string_lossy());
+    h.schedule_cleanup(Duration::from_secs(3600));
+    h.restart();
+    assert!(stall.wait_for_caller(WAIT * ci_factor()), "the pass reached the staging share");
+    assert!(snapshot_within(&h, WAIT * ci_factor()).is_some(), "the owner answers while the pass waits");
+    assert!(h.busy(), "a running pass counts as busy (R24.c1)");
+    stall.release();
+    // The pass deletes and then logs, so the wait is on the log line (Ruling T11-R2).
+    let line = format!("cleanup: {id}: deleted its staging folder");
+    h.wait("the staging folder deleted", |h| h.engine_log().contains(&line));
+    assert!(!h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&line));
+}
+
+#[test]
+fn a_configured_cleanup_runs_once_at_start_and_again_each_period() {
+    let h = scripted(vec![]);
+    let id = seed(&h, 1, State::NeedsReview { held: Held::DispositionGate });
+    let copy = h.job_dir(&id).join("tmdb.json");
+    fs::write(&copy, r#"{"id": 1, "fetched_at": "2020-01-01"}"#).unwrap();
+    h.schedule_cleanup(Duration::from_millis(200));
+    h.restart();
+    // The pass deletes and then logs, so each wait is on the log line (Ruling T11-R2).
+    let first = format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-01)");
+    let next = format!("cleanup: {id}: deleted tmdb.json (fetched_at 2020-01-02)");
+    h.wait("the first pass", |h| h.engine_log().contains(&first));
+    assert!(!copy.exists());
+    fs::write(&copy, r#"{"id": 1, "fetched_at": "2020-01-02"}"#).unwrap();
+    h.wait("the next pass", |h| h.engine_log().contains(&next));
+    assert!(!copy.exists());
+    let log = h.engine_log();
+    assert!(log.contains(&first), "{log}");
+    assert!(log.contains(&next), "{log}");
+}
+
+#[test]
+fn a_new_token_reaches_the_next_round_without_a_restart() {
+    let h = stand_in(&["movie-direct", "movie-direct-lookup-refused"], settings()); // search answers 401
+    h.secrets().set("tmdb_token", "token-sentinel-5d2e").unwrap();
+    h.scan_waits_for_lookups(false);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    let id = id_of(&h, DISC_A);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.settle();
+    assert!(h.record(&id).message.unwrap().contains("search: TMDb refused the token (HTTP 401)"));
+    let name = disc_name(Some("Synthetic Movie"), Some("SYNTHETIC_MOVIE")).unwrap();
+    let scenario = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct");
+    h.http().answer(&search_url(&name.cleaned), 200, &fs::read(scenario.join("tmdb-search-answer.json")).unwrap());
+    h.http().answer(
+        &record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 }),
+        200,
+        &fs::read(scenario.join("tmdb-movie-answer.json")).unwrap(),
+    );
+    assert_eq!(c.ok("secret_set", json!({"name": "tmdb_token", "value": "token-sentinel-2b9c"})), Value::Null);
+    c.ok("retry", json!({"job": id}));
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    let bearers: Vec<String> = h
+        .http()
+        .requests()
+        .into_iter()
+        .filter(|(url, _)| *url == search_url(&name.cleaned))
+        .filter_map(|(_, headers)| headers.into_iter().find(|(k, _)| k == "Authorization").map(|(_, v)| v))
+        .collect();
+    // The refused search is asked with the first token in every round before AwaitingLookup (at arrival and before
+    // the file-phase slot), then once with the new token after the retry.
+    assert!(bearers.len() >= 2, "{bearers:?}");
+    assert_eq!(bearers.last().map(String::as_str), Some("Bearer token-sentinel-2b9c"), "{bearers:?}");
+    assert!(bearers[..bearers.len() - 1].iter().all(|b| b == "Bearer token-sentinel-5d2e"), "{bearers:?}");
+    for path in [h.data().join("engine.log"), h.job_dir(&id).join("job.log"), h.job_dir(&id).join("state.json")] {
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("token-sentinel-5d2e") && !text.contains("token-sentinel-2b9c"), "{}", path.display());
+    }
 }

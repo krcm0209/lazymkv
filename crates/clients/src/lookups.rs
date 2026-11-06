@@ -5,9 +5,12 @@
 //! Task 16's. Used by Tasks 16, 23, 26 and 29.
 
 use lazymkv_core::lookup::discdb::{parse_dischash, parse_discid, DiscDbRecord};
-use lazymkv_core::lookup::tmdb::{parse_movie, parse_search, parse_tv, TmdbIdentity, TmdbKind, TmdbRecord, TmdbSearch};
+use lazymkv_core::lookup::tmdb::{
+    parse_movie, parse_search, parse_season_answer, parse_tv, TmdbIdentity, TmdbKind, TmdbRecord, TmdbSearch,
+    TmdbSeason,
+};
 
-use crate::transport::{user_agent, HttpTransport, TransportError};
+use crate::transport::{user_agent, HttpTransport, TransportError, TIMEOUT_S};
 
 /// TheDiscDB's API root. Design part 8.1. Def: T15. Use: T16.
 pub const DISCDB: &str = "https://thediscdb.com/api";
@@ -46,6 +49,12 @@ pub fn record_url(id: TmdbIdentity) -> String {
     format!("{TMDB}/{}/{}?append_to_response=external_ids", id.kind.as_str(), id.id)
 }
 
+/// TMDb's season call (design parts 8.2 item 5, 8.5): `{TMDB}/tv/{show}/season/{season}`, no query string.
+/// Def: T4-4. Use: T4-4, T4-8, T4-19.
+pub fn season_url(show: i64, season: u32) -> String {
+    format!("{TMDB}/tv/{show}/season/{season}")
+}
+
 /// The call that checks a token: it passes on HTTP 200. Design part 8.1. Def: T15. Use: T26.
 pub fn authentication_url() -> String {
     format!("{TMDB}/authentication")
@@ -59,7 +68,7 @@ pub struct Fetched {
     pub body: Vec<u8>,
 }
 
-/// Why a lookup stays pending. Design part 8.3. Def: T15. Use: T16, T24.
+/// Why a lookup stays pending. Design part 8.3, Ruling R24.6. Def: T15 (`Stale`: T4-8). Use: T16, T24, T4-9, T4-10.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingReason {
     /// TMDb was not asked, because no token is set.
@@ -74,6 +83,26 @@ pub enum PendingReason {
     Status(u16),
     /// A 200 whose body the parser refused, or that is not UTF-8: the sentence names the URL.
     Unparsed(String),
+    /// A kept TMDb copy, the file named, is past the six-month limit or was deleted, and is fetched again (design part
+    /// 8.4, R-B4; Ruling T4-R7). Its status word is `000`. Def: T4-8. Use: T4-9, T4-10.
+    Stale(String),
+}
+
+/// Why a lookup is pending, in the words of Ruling R24.6 for the six reasons it names, and `<file> is more than six
+/// months old or was deleted, and is fetched again` for `Stale` (design part 8.3, 8.4). No text holds a token.
+/// Def: T4-8. Use: T4-9, T4-10.
+pub fn reason_text(reason: &PendingReason) -> String {
+    match reason {
+        PendingReason::NoToken => "no tmdb_token is set".to_string(),
+        PendingReason::TokenRefused => "TMDb refused the token (HTTP 401)".to_string(),
+        PendingReason::Timeout => format!("no answer within {TIMEOUT_S} s"),
+        PendingReason::Unreachable(text) => text.clone(),
+        PendingReason::Status(status) => format!("HTTP {status}"),
+        PendingReason::Unparsed(sentence) => sentence.clone(),
+        PendingReason::Stale(file) => {
+            format!("{file} is more than six months old or was deleted, and is fetched again")
+        }
+    }
 }
 
 /// The result of one lookup. `Answered` always carries a record (S46): TheDiscDB's 404, and a 200 that the parser reads
@@ -178,6 +207,19 @@ pub fn tmdb_record(t: &dyn HttpTransport, token: Option<&str>, id: TmdbIdentity)
         TmdbKind::Tv => parse_tv,
     };
     tmdb(t, token, record_url(id), |text, shown| parse(text, shown).map(Some))
+}
+
+/// One season of `show`, with the bearer token and the classes of design part 8.3; a 200 is read by
+/// `parse_season_answer`, and an answer whose `season_number` is not `season` is `Pending { Unparsed("<url>: the
+/// answer is season <m>, not season <n>") }`. Def: T4-4. Use: T4-4, T4-8.
+pub fn tmdb_season(t: &dyn HttpTransport, token: Option<&str>, show: i64, season: u32) -> Outcome<TmdbSeason> {
+    tmdb(t, token, season_url(show, season), |text, shown| {
+        let answer = parse_season_answer(text, shown)?;
+        if answer.season_number != season {
+            return Err(format!("{shown}: the answer is season {}, not season {season}", answer.season_number));
+        }
+        Ok(Some(answer))
+    })
 }
 
 #[cfg(test)]
@@ -293,5 +335,24 @@ mod tests {
         let ua = ("User-Agent".to_string(), user_agent());
         assert_eq!(requests[0], (dischash_url(FP), vec![ua.clone()]));
         assert_eq!(requests[1], (record_url(MOVIE), vec![("Authorization".to_string(), "Bearer test-token".to_string()), ua]));
+    }
+
+    #[test]
+    fn the_season_url_names_the_show_and_season() {
+        assert_eq!(season_url(1437, 1), "https://api.themoviedb.org/3/tv/1437/season/1");
+        let t = RecordedTransport::new();
+        t.answer(&season_url(900002, 2), 200, br#"{"season_number": 3, "episodes": []}"#);
+        assert_eq!(tmdb_season(&t, Some("token"), 900002, 2), Outcome::Pending {
+            reason: PendingReason::Unparsed(format!("{}: the answer is season 3, not season 2", season_url(900002, 2))),
+            fetched: Some(Fetched { url: season_url(900002, 2), status: 200, body: br#"{"season_number": 3, "episodes": []}"#.to_vec() }) });
+    }
+
+    #[test]
+    fn reason_text_keeps_r24_6s_texts() {
+        let texts = [(PendingReason::NoToken, "no tmdb_token is set"), (PendingReason::TokenRefused, "TMDb refused the token (HTTP 401)"),
+            (PendingReason::Timeout, "no answer within 10 s"), (PendingReason::Unreachable("down".into()), "down"),
+            (PendingReason::Status(503), "HTTP 503"), (PendingReason::Unparsed("x: bad".into()), "x: bad"),
+            (PendingReason::Stale("tmdb-record.json".into()), "tmdb-record.json is more than six months old or was deleted, and is fetched again")];
+        for (reason, text) in texts { assert_eq!(reason_text(&reason), text); }
     }
 }

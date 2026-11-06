@@ -7,6 +7,7 @@ pub mod evidence;
 pub mod forms;
 pub mod pyjson;
 pub mod runner;
+pub mod stale;
 #[cfg(test)]
 pub(crate) mod testutil;
 
@@ -41,6 +42,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("compare-scans", cmd::compare_scans::run as Command, "<A> <B>"),
     ("ocr-compare", cmd::ocr_compare::run as Command, "<tess> <ocrs> [--rec DIR] [--tag CODE]"),
     ("golden", cmd::golden::run as Command, "write|check [--evidence DIR] [--text DIR]"),
+    ("census", cmd::census::run as Command, "[--evidence DIR]"),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";

@@ -44,9 +44,6 @@ pub(crate) const NO_CLIENT: u64 = 0;
 /// How often a job may push progress (design part 9.2).
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
-/// The two secrets whose host the snapshot shows (design part 9.2).
-const WEBHOOK_SECRETS: [&str; 2] = ["ha_webhook_url", "webhook_url"];
-
 /// `discard`'s refusal (Ruling S76). Def: T26. Use: T26.
 pub(crate) const DISCARD_REFUSED: &str = "discard waits for phase 3's review commands (P2, R-A1)";
 /// `ui_quit`'s refusal (Ruling S76). Def: T26. Use: T26.
@@ -398,16 +395,10 @@ fn text_of(mut line: Vec<u8>) -> String {
     String::from_utf8_lossy(&line).into_owned()
 }
 
-/// The host of a webhook URL, without scheme, user, port or path (design part 9.2). Def: T26. Use: T26.
+/// The host of a webhook URL, without scheme, user, port or path (design part 9.2). None for a value that is not an
+/// http or https URL with a host (`webhook_target`'s reading). Def: T26. Use: T26.
 pub(crate) fn secret_host(url: &str) -> Option<String> {
-    let (_, rest) = url.split_once("://")?;
-    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
-    let host = match host_port.strip_prefix('[') {
-        Some(bracketed) => &bracketed[..bracketed.find(']')?],
-        None => host_port.split_once(':').map_or(host_port, |(host, _)| host),
-    };
-    (!host.is_empty() && !host.contains(char::is_whitespace)).then(|| host.to_string())
+    lazymkv_clients::webhook_target(url).map(|target| target.host)
 }
 
 /// Whether a job is finished: filed, failed or discarded (design part 9.2).
@@ -457,7 +448,7 @@ pub(crate) fn secret_states(secrets: &dyn SecretStore, shares: &BTreeSet<String>
     names
         .map(|name| {
             let value = secrets.get(&name);
-            let host = value.as_deref().filter(|_| WEBHOOK_SECRETS.contains(&name.as_str())).and_then(secret_host);
+            let host = value.as_deref().filter(|_| lazymkv_core::ipc::WEBHOOK_SECRETS.contains(&name.as_str())).and_then(secret_host);
             (name, SecretState { set: value.is_some(), host })
         })
         .collect()
@@ -837,6 +828,7 @@ mod tests {
         assert_eq!(secret_host("http://ha.local:8123/api/webhook/abc123").as_deref(), Some("ha.local"));
         assert_eq!(secret_host("https://user:pw@hooks.example.org/x").as_deref(), Some("hooks.example.org"));
         assert_eq!(secret_host("not a url"), None);
+        assert_eq!(secret_host("ftp://h/"), None);
     }
 
     fn record(n: u64, state: lazymkv_core::job::State) -> lazymkv_core::record::JobRecord {

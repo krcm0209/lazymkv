@@ -53,9 +53,10 @@ use lazymkv_tools::{
 };
 use serde_json::{json, Value};
 
-use crate::arrival::chain_inputs;
+use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
-    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refreshed_plan,
+    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
+    OwedCheck, Refetched,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -428,11 +429,12 @@ pub(crate) fn rip_started_text(title: &TitleRecord, host: &dyn Host) -> Option<S
     title.rip_started_ms.map(|unix_ms| host.local_time(unix_ms))
 }
 
-/// One lookup round on its own thread (design part 8.2): run_round over the locked book, each SavedFile written with
-/// write_atomic into the job folder (a write that fails is logged in engine.log); `done` gets `book.pending()` or
-/// chain_inputs' Err. The round holds the book for the whole round (R23.1). Each lookup the round leaves
-/// `Pending { Unparsed(sentence) }` writes the job.log line `lookup <word>: <sentence>` (design part 8.3, R24.6). A
-/// panic of the round is caught and given to `done` as an Err. Def: T23. Use: T23, T24.
+/// One lookup round on its own thread (design part 8.2): run_round over the locked book with `round_inputs` (the
+/// remembered identity, Ruling T4-R6), each SavedFile written with write_atomic into the job folder (a write that fails
+/// is logged in engine.log); `done` gets `book.pending()` or chain_inputs' Err. The round holds the book for the whole
+/// round (R23.1). Each lookup the round leaves `Pending { Unparsed(sentence) }` writes the job.log line
+/// `lookup <word>: <sentence>` (design part 8.3, R24.6). A panic of the round is caught and given to `done` as an Err.
+/// Def: T23. Use: T23, T24.
 pub(crate) fn spawn_round(
     job_dir: PathBuf,
     lookups: Arc<Mutex<LookupBook>>,
@@ -444,7 +446,7 @@ pub(crate) fn spawn_round(
 ) {
     thread::spawn(move || {
         let round = panic::catch_unwind(AssertUnwindSafe(|| {
-            let inputs = chain_inputs(&job_dir)?;
+            let inputs = round_inputs(&job_dir, &store)?;
             let mut book = lock(&lookups);
             run_round(http.as_ref(), token.as_deref(), &mut book, &inputs, &today, &mut |file| {
                 let path = job_dir.join(&file.name);
@@ -896,7 +898,10 @@ impl Step<'_> {
         }
     }
 
-    /// Plan (design part 5.4 step 5, S30): `core::plan::plan` over the scan, the book as it stands (R23.1: a book a
+    /// Plan (design part 5.4 step 5, S30): the job's stale TMDb copies fetched again first, unless a running round
+    /// holds the book (Ruling T4-R9; one that cannot be fetched gives PlanFailed { Unknown } with `refetch_stale`'s
+    /// sentences, read with `for_plan`, so a season still owed never fails it, Ruling RR1-R2a); then
+    /// `core::plan::plan` over the scan, the book as it stands (R23.1: a book a
     /// running round holds counts as empty, so every lookup is pending) and the remembered decision, persisted with
     /// one TitleRecord per planned title. A Copy plan gives PlanFailed { Unknown } (P1, design part 5.5). The data
     /// folder's remembered decision is copied to `<job>/remembered.json`; when there is none, when it is refused, or
@@ -909,6 +914,11 @@ impl Step<'_> {
         let record = &self.job.record;
         let (_, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         let inputs = chain_inputs(&self.job.job_dir).map_err(|error| unknown(failed, error))?;
+        // A running round is fetching fresh copies, and Plan then counts the book empty (R23.1).
+        if !matches!(self.job.lookups.try_lock(), Err(TryLockError::WouldBlock)) {
+            // A season still owed is a pending lookup, which the plan reads as lookup-pending (Ruling RR1-R2a).
+            self.refetch_copies(record.plan.as_ref()).for_plan().map_err(|reason| unknown(failed, reason))?;
+        }
         let book = match self.job.lookups.try_lock() {
             Ok(book) => book.clone(),
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
@@ -974,6 +984,24 @@ impl Step<'_> {
             Mode::Direct => event(Event::PlanDone { mode: Mode::Direct }),
             Mode::Copy => unknown(failed, COPY_PLAN),
         })
+    }
+
+    /// The job's stale TMDb copies fetched again before Plan or Decide reads them (design parts 8.4, 5.10; Ruling
+    /// T4-R9): `refetch_stale` with the runner's transport, `tmdb_token` and local date, each of its `log_lines` (a
+    /// copy or an owed season fetched again) written in job.log; Plan reads the result with `for_plan`, Decide with
+    /// `for_decide` (PR #15 review round 1, R2 follow-up, Ruling RR1-R2a).
+    fn refetch_copies(&self, plan: Option<&Plan>) -> Refetched {
+        let steps = self.steps;
+        let token = steps.secrets.get("tmdb_token");
+        let today = steps.host.local_date();
+        let job = self.job;
+        // Plan and Decide never wait on a round (Ruling RR1-R2b).
+        let (lookups, http) = (&job.lookups, steps.http.as_ref());
+        let refetched = refetch_stale(&job.job_dir, plan, lookups, http, token.as_deref(), &today, OwedCheck::TryLock);
+        for line in refetched.log_lines() {
+            self.log(&line);
+        }
+        refetched
     }
 
     /// Removes `<job>/remembered.json`, the copy an earlier Plan of the job made, when it is there; a removal that
@@ -1525,7 +1553,10 @@ impl Step<'_> {
         write_atomic(&path, text.as_bytes()).map_err(|error| shown(&error))
     }
 
-    /// Decide (design parts 5.7 step 11, 8.4): the record's plan, refreshed from the saved answers while it is
+    /// Decide (design parts 5.7 step 11, 8.4): the job's stale TMDb copies fetched again first (Ruling T4-R9; one that
+    /// cannot be fetched, or a season still owed (`for_decide`, Ruling RR1-R2a), gives LookupPending in Inspecting and
+    /// DecisionFailed { Unknown } otherwise, with
+    /// `refetch_stale`'s sentences); then the record's plan, refreshed from the saved answers while it is
     /// lookup-pending and persisted so (R24.2); each planned title failing with S32's sentence when it needs step 10,
     /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
     /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
@@ -1545,6 +1576,13 @@ impl Step<'_> {
     fn decide(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let mut plan = self.job_plan(failed)?.clone();
+        // A season still owed is the Err too, so no Decide runs with it missing (Ruling RR1-R2a).
+        if let Err(reason) = self.refetch_copies(Some(&plan)).for_decide() {
+            return Ok(match self.job.record.state {
+                State::Inspecting => with(Event::LookupPending, reason),
+                _ => unknown(failed, reason),
+            });
+        }
         let settings = &self.job.settings;
         let library = library_root(&plan, settings);
         if let Some(root) = library {

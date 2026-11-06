@@ -1366,3 +1366,48 @@ fn the_identity_serialises_with_its_fields_in_order() {
     );
     assert_eq!(serde_json::from_str::<Identity>(&text).unwrap(), identity);
 }
+
+#[test]
+fn the_entry_title_is_named_only_for_a_titled_record_without_a_tmdb_id() {
+    let knowing = without_tmdb_id("Knowing", 2009);
+    let wick = by_fingerprint(JOHN_WICK_UHD_BY_FINGERPRINT);
+    let untitled: DiscDbRecord = serde_json::from_str(r#"{"titles": []}"#).unwrap();
+    let with = |record| LookupInputs { discdb_by_fingerprint: Some(record), ..LookupInputs::default() };
+    assert_eq!(entry_search_title(&with(&knowing)), Some("Knowing".to_string()));
+    assert_eq!(entry_search_title(&with(&wick)), None);
+    assert_eq!(entry_search_title(&with(&untitled)), None);
+    assert_eq!(entry_search_title(&LookupInputs::default()), None);
+}
+
+#[test]
+fn the_entry_title_follows_the_record_discdb_match_picks() {
+    let untitled: DiscDbRecord = serde_json::from_str(r#"{"titles": []}"#).unwrap();
+    let knowing = without_tmdb_id("Knowing", 2009);
+    let example = without_tmdb_id("Example Film", 1986);
+    let only_id = LookupInputs { discdb_by_fingerprint: Some(&untitled), discdb_by_disc_id: Some(&knowing), ..LookupInputs::default() };
+    assert_eq!(entry_search_title(&only_id), Some("Knowing".to_string()));
+    let both = LookupInputs { discdb_by_fingerprint: Some(&example), discdb_by_disc_id: Some(&knowing), ..LookupInputs::default() };
+    assert_eq!(entry_search_title(&both), Some("Example Film".to_string()));
+}
+
+#[test]
+fn the_entry_title_is_trimmed_and_a_blank_one_is_none() {
+    let padded = without_tmdb_id("  Knowing  ", 2009);
+    let blank = without_tmdb_id("   ", 2009);
+    assert_eq!(entry_search_title(&LookupInputs { discdb_by_fingerprint: Some(&padded), ..LookupInputs::default() }), Some("Knowing".to_string()));
+    assert_eq!(entry_search_title(&LookupInputs { discdb_by_fingerprint: Some(&blank), ..LookupInputs::default() }), None);
+}
+
+#[test]
+fn search_queries_follow_the_entry_or_the_two_name_forms() {
+    let piranha = label("PIRANHA_3D");
+    assert_eq!(search_queries(&LookupInputs { name: Some(&piranha), ..LookupInputs::default() }), ["PIRANHA", "PIRANHA 3D"]);
+    let plain = label("SYNTHETIC_MOVIE");
+    assert_eq!(search_queries(&LookupInputs { name: Some(&plain), ..LookupInputs::default() }), ["SYNTHETIC MOVIE"]);
+    let generic = label("DVD_VIDEO");
+    assert!(search_queries(&LookupInputs { name: Some(&generic), ..LookupInputs::default() }).is_empty());
+    assert!(search_queries(&LookupInputs::default()).is_empty());
+    let knowing = without_tmdb_id("Knowing", 2009);
+    let entry = LookupInputs { name: Some(&piranha), discdb_by_fingerprint: Some(&knowing), ..LookupInputs::default() };
+    assert_eq!(search_queries(&entry), ["Knowing"], "S47: the entry's title alone (T4-R5)");
+}

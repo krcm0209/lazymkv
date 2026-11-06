@@ -22,11 +22,12 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::{search_url, HttpTransport, OfflineTransport, RecordedTransport};
+use lazymkv_clients::{search_url, HttpTransport, OfflineTransport, RecordedTransport, DISCDB, TMDB};
 use lazymkv_core::disc::bdmt_name;
 use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
@@ -48,8 +49,6 @@ use std::io::BufRead;
 #[cfg(windows)]
 use std::panic;
 #[cfg(windows)]
-use std::sync::mpsc::channel;
-#[cfg(windows)]
 use std::thread::JoinHandle;
 
 #[cfg(windows)]
@@ -66,7 +65,7 @@ use crate::owner::panic_text;
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
 use crate::{
-    EngineConfig, JobContext, NoDelivery, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers,
+    EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers, WebhookSink,
 };
 
 /// How often the harness looks again while it waits.
@@ -410,6 +409,17 @@ enum Queued {
     Remove(String),
 }
 
+/// The transport and sink the harness's `start` passes (Ruling T4-R16).
+#[derive(Clone, Copy)]
+enum ServicesMode {
+    /// The harness's `RecordedTransport` and `MemorySink`.
+    Recorded,
+    /// `OfflineTransport` and a `WebhookSink` over it (`use_offline_services`).
+    Offline,
+    /// The harness's `RecordedTransport` and a `WebhookSink` over it (`use_webhook_sink`).
+    Webhook,
+}
+
 /// A real engine over a scratch folder `<root>/{data, staging, library/Movies, tuning, volumes}`, with the platform
 /// fakes, scripted steps (or, from `new`, the real step runner on stand-in tools in `<root>/tools`), a memory sink and
 /// manual timers (design parts 12.1, 12.2, the interface sheet's helper list). Every
@@ -465,8 +475,16 @@ pub struct Harness {
     /// The persist fault a test armed, shared with every engine the harness starts (review round 1, V1).
     faults: Arc<Mutex<ArmedFault>>,
     engine: Mutex<Option<EngineHandle>>,
-    /// Whether `start` passes pull request 3's binary transport and sink, `use_binary_services`.
-    binary_services: AtomicBool,
+    /// The transport and sink `start` passes: the recorded ones by default, or a `WebhookSink` over the offline or
+    /// the recorded transport (`use_offline_services`, `use_webhook_sink`); a native harness passes its own
+    /// (`new_native`, `new_native_with_webhook_sink`).
+    services: Mutex<ServicesMode>,
+    /// The `EngineConfig.cleanup_minutes` the next `start` passes; None until `schedule_cleanup` (design part 5.9).
+    cleanup_minutes: Mutex<Option<u32>>,
+    /// The `TestHooks::cleanup_period` the next `start` passes (design part 5.9).
+    cleanup_period: Mutex<Option<Duration>>,
+    /// The running engine's cleanup ends, one `()` per pass (`TestHooks::cleanup_done`).
+    cleanup_done: Mutex<Option<Receiver<()>>>,
     /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
     /// once `native_exit`, `stop` or the drop took it.
     #[cfg(windows)]
@@ -507,7 +525,8 @@ impl Harness {
     ///   hex-decoded `hex`, or `size` zero bytes) and labels it with the file's `label`; any other name gets
     ///   `new_scripted`'s synthetic volume, whose lookups are unrecorded and stay pending.
     /// - The transport is the merged `http.json` through `RecordedTransport::from_file`, with the vars `fingerprint`
-    ///   and `disc_id` of the built volume and `search`, the search URL of its disc name.
+    ///   and `disc_id` of the built volume, `search`, the search URL of its disc name's cleaned form, and
+    ///   `search_tagged`, the search URL of its tagged form (J8's second search).
     /// - Its process guard is `TestGuard` (R23.2): a scan waits up to 5 s for the recorded lookups' files,
     ///   `on_spawn`'s actions run before the spawns they name, and every spawn is kept for `spawns`.
     /// - When the merged scenarios hold `lazymkvctl.json`, it copies `fake_tool` as `lazymkvctl` (with the system's
@@ -552,8 +571,10 @@ impl Harness {
         let http_file = tools.join("http.json");
         let (http, urls) = match (&disc, http_file.is_file()) {
             (Some((name, spec)), true) => recorded_http(&http_file, &folders.volumes.join(name), spec),
-            (None, true) => (RecordedTransport::from_file(&http_file, &[]).expect("the scenario's http.json"), 0),
-            (_, false) => (RecordedTransport::new(), 0),
+            (None, true) => {
+                (RecordedTransport::from_file(&http_file, &[]).expect("the scenario's http.json"), LookupUrls::default())
+            }
+            (_, false) => (RecordedTransport::new(), LookupUrls::default()),
         };
         let mut defaults = folders.defaults();
         defaults["tool_paths"] = Value::Object(tool_paths);
@@ -598,12 +619,17 @@ impl Harness {
             ipc: ipc as _,
             host: Arc::clone(&self.host) as _,
         };
-        let (http, notify): (Arc<dyn HttpTransport>, Box<dyn NotifySink>) =
-            if self.binary_services.load(Ordering::SeqCst) {
-                (Arc::new(OfflineTransport), Box::new(NoDelivery))
-            } else {
-                (Arc::clone(&self.http) as _, Box::new(MemorySink { list: Arc::clone(&self.sent) }))
-            };
+        let mode = *lock(&self.services);
+        let http: Arc<dyn HttpTransport> = match mode {
+            ServicesMode::Offline => Arc::new(OfflineTransport),
+            ServicesMode::Recorded | ServicesMode::Webhook => Arc::clone(&self.http) as _,
+        };
+        let notify: Box<dyn NotifySink> = match mode {
+            ServicesMode::Recorded => Box::new(MemorySink { list: Arc::clone(&self.sent) }),
+            ServicesMode::Offline | ServicesMode::Webhook => Box::new(
+                WebhookSink::new(Arc::clone(&http), Arc::clone(&self.secrets) as _).with_pause(Arc::new(|_| {})),
+            ),
+        };
         let services = Services {
             platform,
             http,
@@ -623,6 +649,7 @@ impl Harness {
             path_var: Some(OsString::new()),
             ctl: self.ctl.clone(),
             console: Some(Box::new(self.console_buffer())),
+            cleanup_minutes: *lock(&self.cleanup_minutes),
         };
         let hook = Arc::clone(&self.hook);
         let stop_after: StopAfter = Arc::new(move |transition: &Transition| {
@@ -644,7 +671,14 @@ impl Harness {
             let armed = lock(&armed);
             armed.as_ref().filter(|(_, applies)| applies(record, transition)).map(|(fault, _)| *fault)
         });
-        let hooks = TestHooks { stop_after: Some(stop_after), persist_faults: Some(persist_faults) };
+        let (cleanup_done, cleanup_ends) = channel::<()>();
+        *lock(&self.cleanup_done) = Some(cleanup_ends);
+        let hooks = TestHooks {
+            stop_after: Some(stop_after),
+            persist_faults: Some(persist_faults),
+            cleanup_done: Some(cleanup_done),
+            cleanup_period: *lock(&self.cleanup_period),
+        };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
         *lock(&self.engine) = Some(engine);
     }
@@ -1044,6 +1078,33 @@ impl Harness {
         &self.timers
     }
 
+    /// One cleanup pass through `Msg::Cleanup`; returns when the pass ends, and panics after 10 s times `ci_factor()`
+    /// (design part 5.9). Def: T4-11. Use: T4-11.
+    pub fn run_cleanup(&self) {
+        self.deliver();
+        let ends = lock(&self.cleanup_done);
+        let ends = ends.as_ref().expect("an engine has started");
+        while ends.try_recv().is_ok() {}
+        lock(&self.engine).as_ref().expect("an engine runs").cleanup_now();
+        let cap = WAIT_CAP * ci_factor();
+        if ends.recv_timeout(cap).is_err() {
+            panic!("run_cleanup: the pass did not end within {} s", cap.as_secs());
+        }
+    }
+
+    /// From the next `start`, `cleanup_minutes: Some(1)` with its period replaced by `period` (design part 5.9).
+    /// Def: T4-11. Use: T4-11.
+    pub fn schedule_cleanup(&self, period: Duration) {
+        *lock(&self.cleanup_minutes) = Some(1);
+        *lock(&self.cleanup_period) = Some(period);
+    }
+
+    /// The running engine's busy flag (Ruling R24.c1; a running pass counts); false when no engine runs.
+    /// Def: T4-11. Use: T4-11.
+    pub fn busy(&self) -> bool {
+        lock(&self.engine).as_ref().is_some_and(EngineHandle::busy)
+    }
+
     /// Waits until at least one timer is pending, then runs and drops every pending timer (design part 5.2). A
     /// transition is persisted before its actions run and StartTimer is one of them, so a test that fires as soon as
     /// it sees the state could otherwise find no timer and leave the job waiting for good (Ruling R29.c2a). Panics
@@ -1074,12 +1135,18 @@ impl Harness {
         self.lookups_wait.store(wait, Ordering::SeqCst);
     }
 
-    /// From the next `start`, that is the next `restart`, the engine gets pull request 3's binary transport and sink
-    /// (Ruling W26): `OfflineTransport` as `Services.http` and `NoDelivery` as `Services.notify`, so `http()` records
-    /// no request and `notifications()` stays empty. Def: T3-21. Use: T3-21.
-    pub fn use_binary_services(&self) {
+    /// From the next `start`: `OfflineTransport` and a `WebhookSink` over the harness's secrets with a no-op pause
+    /// (Ruling T4-R16). Def: T4-12. Use: T4-12.
+    pub fn use_offline_services(&self) {
         self.deliver();
-        self.binary_services.store(true, Ordering::SeqCst);
+        *lock(&self.services) = ServicesMode::Offline;
+    }
+
+    /// From the next `start`: the harness's `RecordedTransport` and a `WebhookSink` over its secrets with a no-op
+    /// pause, so `http().posts()` holds the deliveries and `notifications()` stays empty. Def: T4-12. Use: T4-12, T4-18.
+    pub fn use_webhook_sink(&self) {
+        self.deliver();
+        *lock(&self.services) = ServicesMode::Webhook;
     }
 
     /// A clone of the harness's `MemoryConnector`, which connects an IPC client to the running engine (design part
@@ -1161,15 +1228,28 @@ impl Harness {
     /// buffer of its own for standard error, and `NativeOptions { mutex: Global\<the pipe's name after
     /// \\.\pipe\>, pipe, drives: the harness's SharedDrives, ejector: its RecordingEjector with removals, processes:
     /// its TestGuard, secrets: its MemorySecrets, http: its recorded transport, console: its console buffer,
-    /// console_stop: a closure that keeps the handler, token: None, program_data_var: None }`. The real WinHost,
+    /// console_stop: a closure that keeps the handler, token: None, program_data_var: None, .. }`; `notify`: a
+    /// `MemorySink` over the harness's list, so `notifications()` reads it; `cleanup_minutes`: None. The real WinHost,
     /// WinKeepAwake and share connector run, so `host()`, `awake()` and `shares()` are not this engine's. It returns
     /// once a client through `pipe_client()` has read its snapshot line (60 s cap, 240 s under continuous integration,
     /// CI), and panics with `run_with`'s standard error when `run_with` returned first. `restart`, `run_until` and
     /// `run_until_event` are not for it. Native harnesses of one test process run one at a time (`NativeSlot`): the
     /// real WinHost shows S55 every running `makemkvcon64`, another native harness's stand-in included, so it first
     /// waits until no other is alive.
-    /// Def: T3-23. Use: T3-23.
+    /// Def: T3-23; T4-17. Use: T3-23, T4-17.
     pub fn new_native(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str) -> Harness {
+        Harness::native_with(fake_tool, scenarios, settings, pipe, false)
+    }
+
+    /// `new_native`, except that `NativeOptions.notify` is None, so the binary builds its own `WebhookSink` over the
+    /// harness's `MemorySecrets` and recorded transport (design part 8.6; W26 replaced); its waits are real, so a test
+    /// answers the webhook 2xx. Def: T4-17. Use: T4-17.
+    pub fn new_native_with_webhook_sink(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str) -> Harness {
+        Harness::native_with(fake_tool, scenarios, settings, pipe, true)
+    }
+
+    /// `new_native`'s body; `webhook_sink` leaves `NativeOptions.notify` None (`new_native_with_webhook_sink`).
+    fn native_with(fake_tool: &Path, scenarios: &[&str], settings: Value, pipe: &str, webhook_sink: bool) -> Harness {
         let slot = NativeSlot::take();
         let mut harness = Harness::prepared(fake_tool, scenarios, settings);
         harness.native_slot = Some(slot);
@@ -1198,10 +1278,13 @@ impl Harness {
             processes: Some(Arc::clone(&harness.processes)),
             secrets: Some(Arc::clone(&harness.secrets) as _),
             http: Some(Arc::clone(&harness.http) as _),
+            notify: (!webhook_sink)
+                .then(|| Box::new(MemorySink { list: Arc::clone(&harness.sent) }) as Box<dyn NotifySink>),
             console: Some(Box::new(harness.console_buffer())),
             console_stop: Some(Box::new(console_stop)),
             token: None,
             program_data_var: None,
+            cleanup_minutes: None,
         };
         let args = vec!["--data".to_string(), harness.data.display().to_string()];
         let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -1425,7 +1508,10 @@ impl Folders {
             hook: Arc::default(),
             faults: Arc::default(),
             engine: Mutex::default(),
-            binary_services: AtomicBool::new(false),
+            services: Mutex::new(ServicesMode::Recorded),
+            cleanup_minutes: Mutex::default(),
+            cleanup_period: Mutex::default(),
+            cleanup_done: Mutex::default(),
             #[cfg(windows)]
             native: Mutex::default(),
             #[cfg(windows)]
@@ -1475,17 +1561,25 @@ impl Runner {
 
 /// Ruling R23.2: stand-in runs are faster than the recorded lookups' file writes. Before it spawns a scan (arguments
 /// holding `info` and a `--profile=` argument), this guard waits, at most 5 s, until `<the profile's
-/// folder>/lookup-status.txt` has one line per distinct URL of the merged `http.json` and no line ends in `000`. The
-/// engine's planning still never waits, and the whole-job tests are deterministic. It relies on `run_round` applying
-/// each outcome to the book before it saves the status file. Before any spawn it runs the first `on_spawn` action not
-/// yet run whose needles the arguments hold (Task 24). Every spawn then goes to `native_guard()` through `retry_busy`
-/// (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake job runs it (Ruling W7), and
-/// `StdProcessGuard` elsewhere. Before all of that it keeps a copy of the spawn for `Harness::spawns` (Task T3-22).
+/// folder>/lookup-status.txt` holds a status line of each kind the merged `http.json` asks for and no line ends in
+/// `000` (Ruling T4-R1). Each `url` of its `answers` is read after the same variable substitution
+/// `RecordedTransport::from_file` applies; every distinct URL under `DISCDB` or `TMDB` then needs a line of its kind:
+/// a dischash URL a `dischash` line, a discid URL a `discid` line, a record URL (`/3/movie/<id>` or `/3/tv/<id>` with
+/// `append_to_response=external_ids`) its `tmdb <kind>/<id>` line, a season URL (`/3/tv/<id>/season/<n>`) its
+/// `season-<n>` line, and the search family (URLs under `/3/search/`, and any URL that still starts with `{` after
+/// the substitution, which is a search URL) at least as many lines whose key is `search`, `search-tagged` or
+/// `search-entry` as there are distinct search URLs. A URL under neither root (a webhook) needs no line, nor does a
+/// URL of none of those kinds. The engine's planning still never waits, and the whole-job tests are deterministic. It
+/// relies on `run_round` applying each outcome to the book before it saves the status file. Before any spawn it runs
+/// the first `on_spawn` action not yet run whose needles the arguments hold (Task 24). Every spawn then goes to
+/// `native_guard()` through `retry_busy` (Ruling R29.c4): the Job Object runner on Windows, so every Windows whole fake
+/// job runs it (Ruling W7), and `StdProcessGuard` elsewhere. Before all of that it keeps a copy of the spawn for
+/// `Harness::spawns` (Task T3-22).
 struct TestGuard {
     /// `scan_waits_for_lookups`.
     wait: Arc<AtomicBool>,
-    /// The distinct URLs of the merged `http.json`; 0 waits for nothing.
-    urls: usize,
+    /// The lookup URLs of the merged `http.json` by kind; empty waits for nothing.
+    urls: LookupUrls,
     /// `Harness::on_spawn`'s actions.
     hooks: SpawnHooks,
     /// Every spawn asked for, in order (`Harness::spawns`).
@@ -1509,10 +1603,10 @@ impl ProcessGuard for TestGuard {
         }
         let scan = spawn.args.iter().any(|arg| arg == "info");
         let profile = spawn.args.iter().find_map(|arg| arg.strip_prefix("--profile="));
-        if let (true, Some(profile)) = (scan && self.urls > 0 && self.wait.load(Ordering::SeqCst), profile) {
+        if let (true, Some(profile)) = (scan && !self.urls.is_empty() && self.wait.load(Ordering::SeqCst), profile) {
             let status = Path::new(profile).parent().map(|folder| folder.join("lookup-status.txt"));
             let deadline = Instant::now() + LOOKUP_WAIT_CAP;
-            while !status.as_deref().is_some_and(|status| answered(status, self.urls)) && Instant::now() < deadline {
+            while !status.as_deref().is_some_and(|status| answered(status, &self.urls)) && Instant::now() < deadline {
                 thread::sleep(POLL);
             }
         }
@@ -1520,11 +1614,76 @@ impl ProcessGuard for TestGuard {
     }
 }
 
-/// Whether `status` has `urls` lines and none ends in `000` (R23.2).
-fn answered(status: &Path, urls: usize) -> bool {
+/// The lookup URLs of a merged `http.json` by the status line each needs (Ruling T4-R1): the keys that need a line
+/// of their own, and the number of distinct search URLs, each needing one line of the search family.
+#[derive(Debug, Default, PartialEq)]
+struct LookupUrls {
+    /// `dischash`, `discid`, `tmdb <kind>/<id>` and `season-<n>`.
+    keys: BTreeSet<String>,
+    /// The distinct search URLs.
+    searches: usize,
+}
+
+impl LookupUrls {
+    /// Whether no URL needs a line, so the guard waits for nothing.
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.searches == 0
+    }
+}
+
+/// The status keys of a search line (Ruling T4-R1).
+const SEARCH_KEYS: [&str; 3] = ["search", "search-tagged", "search-entry"];
+
+/// Sorts the distinct `url`s of `document`'s `answers`, each with every `{name}` replaced from `vars` as
+/// `RecordedTransport::from_file` does, into `LookupUrls` (Ruling T4-R1): a URL that still starts with `{` or lies
+/// under `{TMDB}/search/` is a search URL; one under `DISCDB` needs `dischash` or `discid` by its path's first
+/// segment; one under `TMDB` needs `tmdb <kind>/<id>` for `/movie/<id>` or `/tv/<id>` with the query
+/// `append_to_response=external_ids`, and `season-<n>` for `/tv/<id>/season/<n>`; any other URL needs nothing.
+fn lookup_urls_by_kind(document: &Value, vars: &[(&str, &str)]) -> LookupUrls {
+    let urls: BTreeSet<String> = document["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|answer| answer["url"].as_str())
+        .map(|url| vars.iter().fold(url.to_string(), |url, (name, value)| url.replace(&format!("{{{name}}}"), value)))
+        .collect();
+    let mut found = LookupUrls::default();
+    for url in &urls {
+        if url.starts_with('{') || url.starts_with(&format!("{TMDB}/search/")) {
+            found.searches += 1;
+        } else if let Some(path) = url.strip_prefix(&format!("{DISCDB}/")) {
+            if let Some(kind @ ("dischash" | "discid")) = path.split('/').next() {
+                found.keys.insert(kind.to_string());
+            }
+        } else if let Some(path) = url.strip_prefix(&format!("{TMDB}/")) {
+            let (path, query) = path.split_once('?').unwrap_or((path, ""));
+            let segments: Vec<&str> = path.split('/').collect();
+            match segments.as_slice() {
+                [kind @ ("movie" | "tv"), id] if query == "append_to_response=external_ids" => {
+                    found.keys.insert(format!("tmdb {kind}/{id}"));
+                }
+                ["tv", _, "season", season] if query.is_empty() => {
+                    found.keys.insert(format!("season-{season}"));
+                }
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+/// Whether `status` holds a line of each kind `urls` needs and no line ends in `000` (Rulings R23.2, T4-R1): every
+/// key of `urls.keys` is a line's key (the text before its last space), and at least `urls.searches` lines have a
+/// search key.
+fn answered(status: &Path, urls: &LookupUrls) -> bool {
     fs::read_to_string(status).is_ok_and(|text| {
-        let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
-        lines.len() == urls && !lines.iter().any(|line| line.trim_end().ends_with("000"))
+        let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()).collect();
+        if lines.iter().any(|line| line.ends_with("000")) {
+            return false;
+        }
+        let keys: Vec<&str> = lines.iter().map(|line| line.rsplit_once(' ').map_or(*line, |(key, _)| key)).collect();
+        let searches = keys.iter().filter(|key| SEARCH_KEYS.contains(*key)).count();
+        urls.keys.iter().all(|key| keys.contains(&key.as_str())) && searches >= urls.searches
     })
 }
 
@@ -1578,9 +1737,10 @@ fn build_volume(root: &Path, spec: &Value) -> io::Result<()> {
 }
 
 /// The merged `http.json` with the vars of the scenario's disc, built at `root` (S31): `fingerprint` and `disc_id` in
-/// upper-case hex, and `search`, `search_url` of the cleaned disc name from `bdmt_eng.xml` and the label; with the
-/// number of distinct URLs in the file.
-fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, usize) {
+/// upper-case hex, `search`, `search_url` of the cleaned disc name from `bdmt_eng.xml` and the label, and
+/// `search_tagged`, `search_url` of its tagged form (J8's second search); with the file's lookup URLs by kind
+/// (`lookup_urls_by_kind`).
+fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, LookupUrls) {
     build_volume(root, spec).unwrap_or_else(|error| panic!("{}: {error}", root.display()));
     let files = list_files(root).expect("the harness lists the scenario's volume");
     let unit_key = unit_key_file(&files).and_then(|key| fs::read(root.join(&key.path)).ok());
@@ -1595,16 +1755,20 @@ fn recorded_http(file: &Path, root: &Path, spec: &Value) -> (RecordedTransport, 
         .and_then(bdmt_name);
     let name = disc_name(bdmt.as_deref(), Some(&label)).expect("the scenario's disc has a name");
     let search = search_url(&name.cleaned);
+    let search_tagged = search_url(&name.tagged);
     let fingerprint = meta.fingerprint.unwrap_or_default();
     let disc_id = meta.disc_id.unwrap_or_default();
-    let vars = [("fingerprint", fingerprint.as_str()), ("disc_id", disc_id.as_str()), ("search", search.as_str())];
+    let vars = [
+        ("fingerprint", fingerprint.as_str()),
+        ("disc_id", disc_id.as_str()),
+        ("search", search.as_str()),
+        ("search_tagged", search_tagged.as_str()),
+    ];
     let transport =
         RecordedTransport::from_file(file, &vars).unwrap_or_else(|error| panic!("the scenario's http.json: {error}"));
     let text = fs::read_to_string(file).expect("the scenario's http.json");
     let document: Value = serde_json::from_str(&text).expect("the scenario's http.json is JSON");
-    let urls: BTreeSet<&str> =
-        document["answers"].as_array().into_iter().flatten().filter_map(|answer| answer["url"].as_str()).collect();
-    (transport, urls.len())
+    (transport, lookup_urls_by_kind(&document, &vars))
 }
 
 /// Puts each key of `given` into `defaults`, and each key inside `tool_paths` into the default `tool_paths` (R22.5:
@@ -1621,5 +1785,62 @@ fn merge_settings(defaults: &mut Value, given: Value) {
             }
         }
         defaults.insert(key, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{answered, lookup_urls_by_kind};
+    use lazymkv_core::testsupport::Scratch;
+
+    #[test]
+    fn the_guard_wants_a_line_of_each_lookup_urls_kind_and_ignores_webhooks() {
+        let http = serde_json::json!({"answers": [
+            {"url": "https://thediscdb.com/api/dischash/{fingerprint}", "status": 404, "body": ""},
+            {"url": "https://thediscdb.com/api/discid/{disc_id}", "status": 404, "body": ""},
+            {"url": "{search}", "status": 200, "body": ""},
+            {"url": "{search}", "status": 200, "body": ""},
+            {"url": "{search_tagged}", "status": 200, "body": ""},
+            {"url": "https://api.themoviedb.org/3/movie/900001?append_to_response=external_ids",
+             "status": 200, "body": ""},
+            {"url": "http://127.0.0.1:9/api/webhook/hook-sentinel-7f3a", "status": 200, "body": ""}]});
+        // `{search}` is substituted to a TMDb search URL; `{search_tagged}` is given no var, so it still starts
+        // with `{` and is a search URL too. One distinct `{search}` URL plus the tagged one: two search URLs.
+        let search = lazymkv_clients::search_url("Synthetic Movie");
+        let vars = [("fingerprint", "AB12"), ("disc_id", "CD34"), ("search", search.as_str())];
+        let urls = lookup_urls_by_kind(&http, &vars);
+        assert_eq!(urls.searches, 2, "{urls:?}");
+        assert_eq!(
+            urls.keys.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["dischash", "discid", "tmdb movie/900001"],
+            "the webhook URL needs no line"
+        );
+        let scratch = Scratch::new("guard");
+        let status = scratch.0.join("lookup-status.txt");
+        let case = |text: &str| {
+            std::fs::write(&status, text).unwrap();
+            answered(&status, &urls)
+        };
+        assert!(case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\ntmdb movie/900001 200\n"));
+        // An entry title equal to the cleaned name: one more search line than search URLs passes.
+        assert!(case(
+            "dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\nsearch-entry 200\ntmdb movie/900001 200\n"
+        ));
+        // The record URL needs its own line: neither the search lines nor another record's line stands in for it.
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\nsearch-entry 200\n"));
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 200\ntmdb movie/900002 200\n"));
+        // Two search URLs want two search lines.
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\ntmdb movie/900001 200\n"));
+        assert!(!case("dischash 404\ndiscid 404\nsearch 200\nsearch-tagged 000\ntmdb movie/900001 200\n"));
+        // A season URL wants its season line.
+        let tv = serde_json::json!({"answers": [
+            {"url": "https://api.themoviedb.org/3/tv/900101?append_to_response=external_ids", "status": 200, "body": ""},
+            {"url": "https://api.themoviedb.org/3/tv/900101/season/1", "status": 200, "body": ""}]});
+        let tv_urls = lookup_urls_by_kind(&tv, &[]);
+        assert_eq!(tv_urls.keys.iter().map(String::as_str).collect::<Vec<_>>(), ["season-1", "tmdb tv/900101"]);
+        std::fs::write(&status, "tmdb tv/900101 200\n").unwrap();
+        assert!(!answered(&status, &tv_urls));
+        std::fs::write(&status, "season-1 200\ntmdb tv/900101 200\n").unwrap();
+        assert!(answered(&status, &tv_urls));
     }
 }

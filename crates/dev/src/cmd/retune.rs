@@ -11,6 +11,11 @@
 //! spec 14's default settings. Exit 0; 1 a costly verdict; 2 an argument, the spec's row 14, a subtitle labels file
 //! that does not validate, or an OCR text folder that is not there; 3 no evidence clone, no subtitle label, or a
 //! labelled track that could not be judged.
+//!
+//! Before either harness reads the evidence, each recording folder under it (every child folder but `.git`, in name
+//! order) passes the refetch gate of `crate::stale`, which prints each copy it fetched again on stderr: exit 3 when a
+//! TMDb copy of the folder is more than six months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch
+//! failed; design part 8.4, K15); an engine job folder is read as it is.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,6 +36,7 @@ use crate::evidence::{
     default_spec, ocr_text_dir, os_error_text, resolve_evidence, Ctx, DiskTree, Refused, EVIDENCE_SHOWN,
 };
 use crate::pyjson::{dumps, write_snapshot, Style};
+use crate::stale::{fetched_line, refresh_copies};
 use crate::{usage_error, Args};
 
 /// The synopsis after "usage: lazymkv-dev ".
@@ -103,6 +109,9 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         Ok(dir) => dir,
         Err(Refused { code, line }) => return fail(err, &line, code),
     };
+    if let Err(code) = refresh_evidence(ctx, &evidence, err) {
+        return code;
+    }
     let compare = match &compare_flag {
         None => None,
         Some(given) => match read_snapshot_file(&ctx.abs(given)) {
@@ -174,6 +183,35 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
     code
 }
 
+/// The refetch gate over the evidence (design part 8.4, K15; Ruling T4-R10): `refresh_copies` over each child folder
+/// of `evidence` but `.git`, in name order, shown as `corpus/owner/<name>`; each copy fetched again printed as
+/// `fetched_line`. Err holds the exit code after the refusal's line, printed bare. A folder that cannot be listed is
+/// left to `DiskTree::open`.
+fn refresh_evidence(ctx: &Ctx, evidence: &Path, err: &mut dyn Write) -> Result<(), i32> {
+    let Ok(entries) = std::fs::read_dir(evidence) else {
+        return Ok(());
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != ".git")
+        .collect();
+    names.sort();
+    for name in names {
+        let shown = format!("{EVIDENCE_SHOWN}/{name}");
+        match refresh_copies(ctx, &evidence.join(&name), &shown) {
+            Ok(fetched) => {
+                for file in fetched {
+                    let _ = writeln!(err, "{}", fetched_line("retune", &shown, &file));
+                }
+            }
+            Err(Refused { code, line }) => return Err(fail(err, &line, code)),
+        }
+    }
+    Ok(())
+}
+
 /// Prints `line` to stderr and returns `code`.
 fn fail(err: &mut dyn Write, line: &str, code: i32) -> i32 {
     let _ = writeln!(err, "{line}");
@@ -212,6 +250,9 @@ fn run_subtitles(
         Ok(dir) => dir,
         Err(Refused { code, line }) => return fail(err, &line, code),
     };
+    if let Err(code) = refresh_evidence(ctx, &evidence, err) {
+        return code;
+    }
     let tree = match DiskTree::open(&evidence, EVIDENCE_SHOWN) {
         Ok(tree) => tree,
         Err(e) => return fail(err, &os_error_text(&e, &evidence.display().to_string()), 3),

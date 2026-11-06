@@ -17,10 +17,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use lazymkv_clients::{HttpTransport, LookupBook};
+use lazymkv_clients::{reason_text, webhook_target, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::ipc::{
     is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
-    Notification, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+    Notification, OutputStream, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
+    WEBHOOK_SECRETS,
 };
 use lazymkv_core::job::{
     job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
@@ -36,9 +37,10 @@ use lazymkv_platform::{
     Spawn,
 };
 use lazymkv_tools::CancelToken;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
+use crate::cleanup::{run_pass, CleanupJob};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
@@ -46,10 +48,10 @@ use crate::ipc_server::{
     spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
     DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
-use crate::notify::{self, spawn_notifier, NotifySink};
+use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
-    child_words, command_answer, not_started, spawn_relay, RunningCommand, COMMAND_BUSY, COMMAND_NO_CTL,
-    COMMAND_WRITABLE,
+    child_words, command_answer, command_job, not_started, spawn_command_refetch, spawn_relay, CommandRefetch,
+    RunningCommand, COMMAND_BUSY, COMMAND_FORMS, COMMAND_NO_CTL, COMMAND_WRITABLE, STALE_EXIT,
 };
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
@@ -67,6 +69,9 @@ const DRIVE_POLL: Duration = Duration::from_millis(50);
 const WAIT_POLL: Duration = Duration::from_millis(20);
 /// The minutes after which an event `unpersisted` kept is fed again (Ruling W23).
 const REFEED_MINUTES: u32 = 1;
+/// The refusal of a webhook value that is not an http or https URL with a host (Ruling T4-R15), after `<name> could
+/// not be stored: `, as SHARE_VALUE_SHAPE is for a share. Def: T4-13. Use: T4-13.
+const WEBHOOK_VALUE_SHAPE: &str = "the value must be an http or https URL with a host";
 
 /// The actions whose step returns no event, so their result writes no `returned no event` line (design part 5.2, PF-6:
 /// `ExtractSubtitleEvidence` runs with `Decide` as one unit). Def: T22. Use: T22, T24.
@@ -162,6 +167,10 @@ pub(crate) struct TestHooks {
     /// The persists that meet a fault (`Store::with_faults`).
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) persist_faults: Option<PersistFaults>,
+    /// Sent once at the end of each cleanup pass (design part 5.9). Def: T4-11. Use: T4-11.
+    pub(crate) cleanup_done: Option<Sender<()>>,
+    /// Replaces the period `EngineConfig.cleanup_minutes` gives, tests only (design part 5.9). Def: T4-11. Use: T4-11.
+    pub(crate) cleanup_period: Option<Duration>,
 }
 
 /// Everything that reaches the owner thread, on its one channel (design part 4.4). Def: T22. Use: T22, T24, T26.
@@ -197,8 +206,17 @@ pub(crate) enum Msg {
     Log(String),
     /// The relay's child ended (design part 9.5): its `wait`, for the `command` request `id` of `client`.
     CommandDone { client: u64, id: Option<u64>, exit: io::Result<Option<i32>> },
+    /// The relay's refetch of the job's stale TMDb copies ended (design part 9.5; Ruling T4-R9), for the `command`
+    /// request `id` of `client` with its `words`: Ok, or the sentences of the copies not fetched again. Def: T4-9.
+    /// Use: T4-9.
+    CommandRefetched { client: u64, id: Option<u64>, words: Vec<String>, refetched: Result<(), String> },
     /// A client's reader thread saw its connection end (design part 9.2), so a command it runs is killed (Ruling W24).
     Gone { client: u64 },
+    /// Runs one cleanup pass on a thread of its own unless one runs (design part 5.9; Ruling T4-R11): the schedule
+    /// thread's and `EngineHandle::cleanup_now`'s message. Def: T4-11. Use: T4-11.
+    Cleanup,
+    /// The running cleanup pass ended (design part 5.9). Def: T4-11. Use: T4-11.
+    CleanupDone,
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -243,6 +261,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     };
     let store = Arc::new(store);
     let stop_after = hooks.stop_after;
+    let cleanup_done = hooks.cleanup_done;
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
     let outbox = Outbox::default();
     let promises = Arc::new(Mutex::new(Promises::default()));
@@ -270,6 +289,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv))
     });
     let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
+    let notify_stop = notify.stop_flag();
     let (delivered, notifier_done) = channel::<()>();
     let notifications = spawn_notifier(Box::new(Delivered { sink: notify, _done: delivered }), Arc::clone(&store));
     let (sender, inbox) = channel::<Msg>();
@@ -305,6 +325,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         Arc::clone(&drive_stop),
         present,
         selftest,
+        cleanup_done,
     );
     // Review round 1 of pull request 3 (R35): the thread's end, a panic included, drops `owner_exit`.
     let (owner_exit, owner_done) = channel::<()>();
@@ -313,6 +334,15 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         owner.run(inbox)
     });
     let drive = spawn_drive_thread(drives, sender.clone(), Arc::clone(&drive_stop));
+    // Design part 5.9: the cleanup's schedule, a pass at start and then each period, when the configuration asks.
+    let (cleanup_stop, cleanup_schedule) = match config.cleanup_minutes {
+        Some(minutes) => {
+            let period = hooks.cleanup_period.unwrap_or(Duration::from_secs(u64::from(minutes) * 60));
+            let (stop, stopped) = channel::<()>();
+            (Some(stop), Some(spawn_cleanup_schedule(sender.clone(), stopped, period)))
+        }
+        None => (None, None),
+    };
     let serve_stop = Arc::new(AtomicBool::new(false));
     let transport = Arc::clone(&ipc);
     let serve = spawn_serve(ipc, Arc::clone(&serve_stop), sender.clone());
@@ -322,7 +352,11 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         owner_done,
         drive,
         drive_stop,
+        cleanup_stop,
+        cleanup_schedule,
         notifier_done,
+        notify_stop,
+        #[cfg(any(test, feature = "testkit"))]
         busy,
         store,
         jobs: shown,
@@ -346,9 +380,17 @@ pub struct EngineHandle {
     drive: JoinHandle<()>,
     /// Raised to end the drive thread.
     drive_stop: Arc<AtomicBool>,
+    /// Dropped to end the cleanup's schedule thread (design part 5.9); None when no schedule runs.
+    cleanup_stop: Option<Sender<()>>,
+    /// The cleanup's schedule thread (design part 5.9); None when `EngineConfig.cleanup_minutes` is None.
+    cleanup_schedule: Option<JoinHandle<()>>,
     /// Closes when the notifier thread has delivered its last notification and ended.
     notifier_done: Receiver<()>,
+    /// The sink's stop flag, raised first by `stop` so the sink skips its waits (design part 8.6; Ruling T4-R13);
+    /// None for a sink that never waits.
+    notify_stop: Option<Arc<AtomicBool>>,
     /// The owner's `busy`, set after each message it handles.
+    #[cfg(any(test, feature = "testkit"))]
     busy: Arc<AtomicBool>,
     /// The data folder's store, for the `engine stopped` line.
     store: Arc<Store>,
@@ -373,11 +415,20 @@ impl EngineHandle {
         lock(&self.jobs).values().map(job_summary).collect()
     }
 
-    /// Whether the owner, after the last message it handled, had a step or a lookup round outstanding; false once it
-    /// has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet instead of 300 ms, and waits no
-    /// longer than that for it to clear (Ruling R24.c1). Def: T24. Use: T24 to T29.
+    /// Whether the owner, after the last message it handled, had a step, a lookup round or a cleanup pass (design part
+    /// 5.9) outstanding; false once it has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet
+    /// instead of 300 ms, and waits no longer than that for it to clear (Ruling R24.c1). Def: T24, T4-11. Use: T24 to
+    /// T29, T4-11.
+    #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
+    }
+
+    /// Asks the owner for one cleanup pass (design part 5.9): it sends `Msg::Cleanup`, which a running pass drops.
+    /// Def: T4-11. Use: T4-11.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn cleanup_now(&self) {
+        let _ = self.sender.send(Msg::Cleanup);
     }
 
     /// Polls `jobs` every 20 ms until `done` holds, and gives true; false once `timeout` has passed. Def: T22. Use: T22
@@ -416,36 +467,62 @@ impl EngineHandle {
     }
 
     /// Cancels every running step's CancelToken (CheckSpace and Eject included), drops their results, writes the
-    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk and a client's reader
-    /// and writer, which end with the client (design part 3.5, R22.10). The serve thread ends first: `stop` closes the
-    /// transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client connects while the
-    /// engine stops; then the drive thread, so every drive event it handed over is handled before the owner stops; the
-    /// owner then waits for every step, recording, eject and check it started, closes every client, and the notifier
-    /// delivers what was raised. Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write
-    /// what was queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at
-    /// most CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for
-    /// its volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
-    /// panics still reports (R22.11), so stop never waits on one. Err when the serve, drive or owner thread panicked.
-    /// Def: T22, T3-10, PR #14 review round 1 (V5). Use: T22 to T29, T3-23.
+    /// engine.log line `engine stopped` and joins every thread it started but an arrival's walk, a client's reader and
+    /// writer, which end with the client (design part 3.5, R22.10), and a notifier still delivering after
+    /// `NOTIFY_DRAIN_S`. First `stop` raises the sink's stop flag, so the sink skips its waits and gives each
+    /// notification still queued one attempt per channel (design part 8.6; Ruling T4-R13). The serve thread ends next:
+    /// `stop` closes the transport, which ends its waiting `accept` (engine.md:581 (a); Ruling W10), so no client
+    /// connects while the engine stops; then the drive thread, so every drive event it handed over is handled before
+    /// the owner stops; then the cleanup's schedule thread (design part 5.9), so it sends no more; the owner then waits
+    /// for every step, recording, eject, check and cleanup pass it started, closes every client, and the notifier
+    /// delivers what was raised, waited for at most `NOTIFY_DRAIN_S` (spec 12: a restart loses a notification still
+    /// being retried). Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write what was
+    /// queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at most
+    /// CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for its
+    /// volume is not waited for: it only reads, and its late result goes nowhere. The relay's refetch thread
+    /// is not waited for either (PR #15 review round 1, R1). A step, recording or eject that
+    /// panics still reports (R22.11), so stop never waits on one. A notifier still retrying when the drain bound passes
+    /// may append its `was not delivered` lines after `engine stopped`. Err when the serve, drive or owner thread
+    /// panicked.
+    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12. Use: T22 to T29, T3-23, T4-11, T4-12.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
-            sender, owner, drive, drive_stop, notifier_done, store, serve, serve_stop, ipc, clients, mirror, ..
+            sender,
+            owner,
+            drive,
+            drive_stop,
+            cleanup_stop,
+            cleanup_schedule,
+            notifier_done,
+            notify_stop,
+            store,
+            serve,
+            serve_stop,
+            ipc,
+            clients,
+            mirror,
+            ..
         } = self;
+        if let Some(notify_stop) = &notify_stop {
+            notify_stop.store(true, Ordering::SeqCst);
+        }
         serve_stop.store(true, Ordering::SeqCst);
         ipc.close();
         let served = serve.join();
         drive_stop.store(true, Ordering::SeqCst);
         let drive = drive.join();
+        drop(cleanup_stop);
+        let schedule = cleanup_schedule.map(JoinHandle::join);
         let _ = sender.send(Msg::Stop);
         drop(sender);
         let owner = owner.join();
-        let _ = notifier_done.recv();
+        let _ = notifier_done.recv_timeout(Duration::from_secs(NOTIFY_DRAIN_S));
         clients.drain(CLIENT_DRAIN);
         store.log("engine stopped");
         if let Some(mirror) = &mirror {
             let _ = mirror.drain(CONSOLE_DRAIN);
         }
-        if served.is_err() || drive.is_err() || owner.is_err() {
+        if served.is_err() || drive.is_err() || owner.is_err() || schedule.is_some_and(|joined| joined.is_err()) {
             return Err(io::Error::other("lazymkv-engine: an engine thread panicked"));
         }
         Ok(())
@@ -698,6 +775,19 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The cleanup's schedule thread (design part 5.9; Ruling T4-R11): it sends `Msg::Cleanup`, then waits `period` on
+/// `stop`, and again, until `stop` is dropped or the owner has stopped.
+fn spawn_cleanup_schedule(sender: Sender<Msg>, stop: Receiver<()>, period: Duration) -> JoinHandle<()> {
+    thread::spawn(move || loop {
+        if sender.send(Msg::Cleanup).is_err() {
+            break;
+        }
+        if !matches!(stop.recv_timeout(period), Err(RecvTimeoutError::Timeout)) {
+            break;
+        }
+    })
+}
+
 /// The drive thread (design part 4.4): it hands each drive event to the owner until `stop` is raised.
 fn spawn_drive_thread(mut drives: Box<dyn DriveWatcher>, sender: Sender<Msg>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -720,6 +810,10 @@ struct Delivered {
 impl NotifySink for Delivered {
     fn deliver(&mut self, notification: &Notification) -> Result<(), String> {
         self.sink.deliver(notification)
+    }
+
+    fn stop_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.sink.stop_flag()
     }
 }
 
@@ -917,13 +1011,18 @@ struct Owner {
     refeed_armed: BTreeSet<String>,
     /// The `command` that runs, one at a time (design part 9.5): taken by its `Msg::CommandDone` or by a stop.
     command: Option<RunningCommand>,
+    /// Whether a cleanup pass runs (design part 5.9): set by `Msg::Cleanup`, cleared by `Msg::CleanupDone`.
+    cleanup_running: bool,
+    /// Sent once at the end of each cleanup pass, for the testkit (`TestHooks::cleanup_done`).
+    cleanup_done: Option<Sender<()>>,
 }
 
 impl Owner {
     /// The owner over the store's jobs and drives.json (design parts 5.10, 7.4), after the restart sequence over the
     /// discs `present` in the drives (`Owner::restart`), showing `selftest` until the first `run_selftest`. Each loaded
     /// job but a Filed or Discarded one has its lookup book rebuilt from its folder (`rebuild_book`, S73). A refused
-    /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only.
+    /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only. Each
+    /// cleanup pass's end is sent on `cleanup_done` when it is Some (design part 5.9).
     #[allow(clippy::too_many_arguments)]
     fn load(
         store: Arc<Store>,
@@ -935,6 +1034,7 @@ impl Owner {
         drive_stop: Arc<AtomicBool>,
         present: Vec<(String, PathBuf)>,
         selftest: SelfTest,
+        cleanup_done: Option<Sender<()>>,
     ) -> Owner {
         let mut jobs = BTreeMap::new();
         for loaded in store.load_jobs() {
@@ -947,8 +1047,21 @@ impl Owner {
                     // answers (design part 8.4). A filed or discarded job runs no step.
                     let book = match record.state {
                         State::Filed | State::Discarded => LookupBook::default(),
-                        _ => rebuild_book(&job_dir),
+                        _ => rebuild_book(&job_dir, &parts.host.local_date()),
                     };
+                    // Ruling T4-R8: a stale copy is read as pending, and engine.log names each such file once.
+                    let mut stale_files: Vec<&str> = Vec::new();
+                    for state in book.states.values() {
+                        if let LookupState::Pending { reason: PendingReason::Stale(file) } = state {
+                            if !stale_files.contains(&file.as_str()) {
+                                stale_files.push(file);
+                            }
+                        }
+                    }
+                    for file in stale_files {
+                        let reason = reason_text(&PendingReason::Stale(file.to_string()));
+                        store.log(&format!("{}: {reason}", record.id));
+                    }
                     lock(&shown).insert(record.id.clone(), record.clone());
                     let lookups = Arc::new(Mutex::new(book));
                     let job = Job { record, settings, generation: 0, disc: None, lookups, edits: Vec::new() };
@@ -1001,6 +1114,8 @@ impl Owner {
             refeed: BTreeMap::new(),
             refeed_armed: BTreeSet::new(),
             command: None,
+            cleanup_running: false,
+            cleanup_done,
         };
         owner.restart(present);
         owner
@@ -1211,7 +1326,12 @@ impl Owner {
                 self.command = None;
                 self.reply(client, id, command_answer(exit));
             }
+            Msg::CommandRefetched { client, id, words, refetched } => {
+                self.on_command_refetched(client, id, words, refetched)
+            }
             Msg::Gone { client } => self.kill_command_of(client),
+            Msg::Cleanup => self.start_cleanup(),
+            Msg::CleanupDone => self.cleanup_ended(),
         }
     }
 
@@ -1219,7 +1339,8 @@ impl Owner {
     /// only its notifications performed, progress still goes out, and nothing new starts: drive events, arrivals,
     /// timers and lookup rounds are dropped, a new client is turned away and every request is refused. The shutdown
     /// stopped and answered a running command already (`stop_command`), so its end is dropped; a client that leaves
-    /// still kills a command it runs (Ruling T3-22-c).
+    /// still kills a command it runs (Ruling T3-22-c). A cleanup pass's end is handled as outside one, so `busy` never
+    /// stays set, and a new pass is not started (design part 5.9).
     fn quiet_message(&mut self, message: Msg) {
         match message {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
@@ -1240,8 +1361,50 @@ impl Owner {
             Msg::Connect(stream) => drop(stream),
             Msg::Log(line) => self.store.log(&line),
             Msg::Gone { client } => self.kill_command_of(client),
-            Msg::CommandDone { .. } => {}
-            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Stop => {}
+            Msg::CommandDone { .. } | Msg::CommandRefetched { .. } => {}
+            Msg::CleanupDone => self.cleanup_ended(),
+            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Cleanup | Msg::Stop => {}
+        }
+    }
+
+    /// `Msg::Cleanup` (design part 5.9, S40; Ruling T4-R11): unless a pass runs, one `CleanupJob` per job, in id order
+    /// and whatever its state, from its record, its own settings (ENG-19) and its lookup book, handed to a pass on a
+    /// thread of its own, which `shut_down` joins. The pass writes engine.log through the store, reads the stop flag
+    /// `shut_down` raises before each job (Ruling FR-1), and sends `Msg::CleanupDone` at its end.
+    fn start_cleanup(&mut self) {
+        if self.cleanup_running {
+            return;
+        }
+        let jobs: Vec<CleanupJob> = self
+            .jobs
+            .values()
+            .map(|job| CleanupJob {
+                id: job.record.id.clone(),
+                record: job.record.clone(),
+                staging_root: job.settings.staging_root.clone(),
+                keep_tuning_evidence: job.settings.keep_tuning_evidence,
+                retention_days: job.settings.retention_days,
+                lookups: Arc::clone(&job.lookups),
+            })
+            .collect();
+        self.cleanup_running = true;
+        let store = Arc::clone(&self.store);
+        let shares = Arc::clone(&self.parts.shares);
+        let data = self.parts.env.data.clone();
+        let (today, now) = (self.parts.host.local_date(), self.parts.host.now_unix());
+        let sender = self.sender.clone();
+        let stop = Arc::clone(&self.drive_stop);
+        self.threads.push(thread::spawn(move || {
+            run_pass(jobs, &data, shares.as_ref(), &today, now, &stop, &|line| store.log(&line));
+            let _ = sender.send(Msg::CleanupDone);
+        }));
+    }
+
+    /// `Msg::CleanupDone` (design part 5.9): no pass runs any more, and the testkit hears of it.
+    fn cleanup_ended(&mut self) {
+        self.cleanup_running = false;
+        if let Some(done) = &self.cleanup_done {
+            let _ = done.send(());
         }
     }
 
@@ -1252,11 +1415,11 @@ impl Owner {
     }
 
     /// After the restart sequence and after each message: finished threads dropped, KeepAwake held or released, and
-    /// the busy flag set (Ruling R24.c1).
+    /// the busy flag set (Ruling R24.c1), a running cleanup pass counting (design part 5.9).
     fn after_message(&mut self) {
         self.threads.retain(|thread| !thread.is_finished());
         self.keep_awake();
-        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty() || self.checking;
+        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty() || self.checking || self.cleanup_running;
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
@@ -2464,10 +2627,10 @@ impl Owner {
 
     /// `command` (design part 9.5; Rulings W24, W25): refused, in Ruling T3-22-b's order, while a command runs, when
     /// the engine has no `lazymkvctl`, when a non-elevated process could write `lazymkvctl` or its folder, for words
-    /// `child_words` refuses and when the child cannot be started. Otherwise the owner starts the child through
-    /// `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority with no extra
-    /// environment (S43), keeps its kill handle, and hands it to the relay thread, whose `Msg::CommandDone` replies
-    /// (`on_message`).
+    /// `child_words` refuses and when the child cannot be started. Words `child_words` accepts make the command run,
+    /// with no child yet: the job's stale TMDb copies are fetched again first, on a thread of its own
+    /// (`spawn_command_refetch`, Ruling T4-R9), whose `Msg::CommandRefetched` goes on (`on_command_refetched`). A
+    /// stop does not wait for that thread, as it does not wait for a lookup round (PR #15 review round 1, R1).
     fn command(&mut self, client: u64, id: Option<u64>, words: Vec<String>) {
         if self.command.is_some() {
             return self.reply(client, id, Err(COMMAND_BUSY.to_string()));
@@ -2483,37 +2646,98 @@ impl Owner {
         if ctl.parent().is_none_or(|folder| host.user_writable(folder)) || (ctl.is_file() && host.user_writable(&ctl)) {
             return self.reply(client, id, Err(COMMAND_WRITABLE.to_string()));
         }
+        if let Err(refusal) = self.command_words(&words) {
+            return self.reply(client, id, Err(refusal));
+        }
+        // `child_words` accepted the words, so they name a job the owner holds.
+        let Some(job) = command_job(&words).and_then(|job_id| self.jobs.get(&job_id)) else {
+            return self.reply(client, id, Err(COMMAND_FORMS.to_string()));
+        };
+        let work = CommandRefetch {
+            job_dir: self.store.job_dir(&job.record.id),
+            plan: job.record.plan.clone(),
+            lookups: Arc::clone(&job.lookups),
+            http: Arc::clone(&self.parts.http),
+            token: self.parts.secrets.get("tmdb_token"),
+            today: self.parts.host.local_date(),
+            store: Arc::clone(&self.store),
+        };
+        self.command = Some(RunningCommand { client, id, kill: None });
+        spawn_command_refetch(work, client, id, words, self.sender.clone());
+    }
+
+    /// `child_words` over the jobs the owner holds (design part 9.5).
+    fn command_words(&self, words: &[String]) -> Result<Vec<String>, String> {
         let job = |job_id: &str| {
             let titles = &self.jobs.get(job_id)?.record.titles;
             let keys: Vec<String> = titles.iter().map(|title| title.key.clone()).collect();
             Some((self.store.job_dir(job_id), keys))
         };
-        let args = match child_words(&words, &job) {
+        child_words(words, &job)
+    }
+
+    /// The relay's refetch ended (design part 9.5; Ruling T4-R9; K15). One for a command that no longer runs (its
+    /// client left, or a stop answered it) is dropped. Err ends the command with no child and no job transition: the
+    /// client gets the stderr line `lazymkvctl: <reason>` and the reply `{"exit_code": 3}`. Ok checks the words again
+    /// with `child_words`, as the flags follow the files as they now stand (a refusal is the reply), and starts the
+    /// child through `ProcessGuard::spawn`, which only creates the process (Ruling T3-22-e), at below-normal priority
+    /// with no extra environment (S43), keeps its kill handle, and hands it to the relay thread, whose
+    /// `Msg::CommandDone` replies (`on_message`). Def: T4-9. Use: T4-9.
+    fn on_command_refetched(&mut self, client: u64, id: Option<u64>, words: Vec<String>, refetched: Result<(), String>) {
+        let waiting = self.command.as_ref().is_some_and(|command| {
+            command.client == client && command.id == id && command.kill.is_none()
+        });
+        if !waiting {
+            return;
+        }
+        if let Err(reason) = refetched {
+            let push = Push::CommandOutput { stream: OutputStream::Stderr, line: format!("lazymkvctl: {reason}") };
+            self.parts.clients.send(client, push_line(&push, id));
+            self.command = None;
+            return self.reply(client, id, Ok(json!({ "exit_code": STALE_EXIT })));
+        }
+        let args = match self.command_words(&words) {
             Ok(args) => args,
-            Err(refusal) => return self.reply(client, id, Err(refusal)),
+            Err(refusal) => {
+                self.command = None;
+                return self.reply(client, id, Err(refusal));
+            }
+        };
+        let Some(ctl) = self.parts.ctl.clone() else {
+            self.command = None;
+            return self.reply(client, id, Err(COMMAND_NO_CTL.to_string()));
         };
         let spawn = Spawn { program: ctl, args, env: Vec::new(), below_normal: true };
         match self.parts.env.processes.spawn(&spawn) {
-            Err(error) => self.reply(client, id, Err(not_started(&error))),
+            Err(error) => {
+                self.command = None;
+                self.reply(client, id, Err(not_started(&error)));
+            }
             Ok(child) => {
-                self.command = Some(RunningCommand { client, id, kill: child.killer() });
+                self.command = Some(RunningCommand { client, id, kill: Some(child.killer()) });
                 let clients = Arc::clone(&self.parts.clients);
                 self.threads.push(spawn_relay(child, client, id, clients, self.sender.clone()));
             }
         }
     }
 
-    /// Kills the running command's child when `client` runs it, as its client left (Ruling T3-22-c); the relay then
-    /// reports its end. A kill that fails is logged.
-    fn kill_command_of(&self, client: u64) {
-        if let Some(command) = self.command.as_ref().filter(|command| command.client == client) {
-            self.kill_command(command);
+    /// Ends the running command when `client` runs it, as its client left (Ruling T3-22-c): a child is killed, and the
+    /// relay then reports its end; a command still fetching its stale copies, with no child, simply ends, and its
+    /// `Msg::CommandRefetched` is dropped. A kill that fails is logged.
+    fn kill_command_of(&mut self, client: u64) {
+        match self.command.as_ref().filter(|command| command.client == client) {
+            Some(command) if command.kill.is_none() => self.command = None,
+            Some(command) => self.kill_command(command),
+            None => {}
         }
     }
 
-    /// Kills `command`'s child; a kill that fails is logged (engine.log).
+    /// Kills `command`'s child, when it has one; a kill that fails is logged (engine.log).
     fn kill_command(&self, command: &RunningCommand) {
-        if let Err(error) = command.kill.kill() {
+        let Some(kill) = &command.kill else {
+            return;
+        };
+        if let Err(error) = kill.kill() {
             self.store.log(&format!("the command's lazymkvctl could not be killed: {error}"));
         }
     }
@@ -2587,10 +2811,14 @@ impl Owner {
 
     /// `secret_set` (design part 9.4, S77; Ruling W12): a name `is_secret_name` takes is stored through `SecretStore`,
     /// a share name's value only when `share_credential` reads it as a user name and a password on two lines, and a
-    /// share name joins the names the snapshot lists; the value is never echoed or logged.
+    /// share name joins the names the snapshot lists, and a webhook name's value only when `webhook_target` reads it
+    /// (Ruling T4-R15); the value is never echoed or logged.
     fn secret_set(&mut self, name: &str, value: &str) -> Result<Value, String> {
         if !is_secret_name(name) {
             return Err(not_a_secret(name));
+        }
+        if WEBHOOK_SECRETS.contains(&name) && webhook_target(value).is_none() {
+            return Err(format!("{name} could not be stored: {WEBHOOK_VALUE_SHAPE}"));
         }
         if !SECRET_NAMES.contains(&name) {
             share_credential(value).map_err(|shape| format!("{name} could not be stored: {shape}"))?;

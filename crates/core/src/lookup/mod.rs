@@ -7,6 +7,7 @@
 
 pub mod discdb;
 pub mod tmdb;
+pub mod stale;
 /// The disc's own name: spec 8.1's parsing, cleaning, generic names and plausibility, and 8.2's season marker (Task 4).
 pub mod name;
 
@@ -481,6 +482,33 @@ pub fn record_to_fetch(inputs: &LookupInputs<'_>) -> Option<tmdb::TmdbIdentity> 
     }
 }
 
+/// The title of S47's entry-title search (design part 8.2 item 3, spec 8.1; Ruling T4-R5): the trimmed media title of
+/// the TheDiscDB record `discdb_match` picks, when that record has a title and no TMDb ID; None when no record is in
+/// hand, or the picked one has a TMDb ID or no title. The year is never part of the query (`/search/multi` takes only
+/// `query`, S20); `search_by_entry` checks it. Pure. Def: T4-3. Use: T4-3 (chain, restart), T4-8 (`search_queries`).
+pub fn entry_search_title(inputs: &LookupInputs<'_>) -> Option<String> {
+    let (_, record) = discdb_match(inputs, &mut Vec::new())?;
+    if record.tmdb_identity().is_some() {
+        return None;
+    }
+    record.title_and_year().map(|(title, _)| title)
+}
+
+/// The queries of a search page (design part 8.2 items 2 and 3, 8.4; J8, S47): the entry title alone when
+/// `entry_search_title` names one (Ruling T4-R5); else, for a disc name that is not generic, its cleaned name, then its
+/// tagged name when the two differ once folded (`name::fold_name`); else none. Pure. Def: T4-8. Use: T4-9.
+pub fn search_queries(inputs: &LookupInputs<'_>) -> Vec<String> {
+    if let Some(title) = entry_search_title(inputs) {
+        return vec![title];
+    }
+    let Some(disc_name) = inputs.name.filter(|disc_name| !disc_name.generic) else { return Vec::new() };
+    let mut queries = vec![disc_name.cleaned.clone()];
+    if disc_name.has_tagged_form() {
+        queries.push(disc_name.tagged.clone());
+    }
+    queries
+}
+
 /// The step `identify` reached and what it rests on: the TheDiscDB record whose media may name the work, and the one
 /// plausible search result.
 struct IdentityFound<'a> {
@@ -647,7 +675,7 @@ fn plausible_by_name<'a>(
     disc_name: &name::DiscName,
     evidence: &mut Vec<String>,
 ) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
-    if name::fold_name(&disc_name.tagged) != name::fold_name(&disc_name.cleaned) {
+    if disc_name.has_tagged_form() {
         let found = plausible_for(search, &disc_name.tagged);
         if !found.is_empty() {
             evidence.push(plausible_sentence(&found, search, Some(&disc_name.tagged)));

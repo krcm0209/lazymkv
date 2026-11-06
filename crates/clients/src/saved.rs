@@ -17,6 +17,16 @@ pub struct SavedFile {
     pub bytes: Vec<u8>,
 }
 
+/// A slim copy as saved: pretty JSON and a final newline (T16 rulings). Moved here from the chain so the refetch
+/// writes the same bytes (design part 8.4); public so the engine writes an owed season's `tmdb-record.json` with them
+/// too (PR #15 review round 1, R2). Def: T4-8. Use: T4-8, T4-9.
+pub fn json_file(name: &str, value: &Value) -> SavedFile {
+    // Writing a `Value` into memory cannot fail: its map keys are strings and a Vec takes every byte.
+    let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_default();
+    bytes.push(b'\n');
+    SavedFile { name: name.to_string(), bytes }
+}
+
 /// Phase 0's slim keys, in phase 0's order (scripts/phase0/record-disc.ps1).
 const SLIM_FIELDS: [&str; 9] = [
     "id",
@@ -116,16 +126,66 @@ pub fn slim_record(raw: &Value, kind: TmdbKind, today: &str) -> Value {
     dated(slim, today)
 }
 
-/// The slim `tmdb-search.json`: only the results whose `media_type` is `movie` or `tv`, each with `media_type`, `id`
-/// and the kind's title, original title and date (`title`, `original_title`, `release_date` for a movie; `name`,
-/// `original_name`, `first_air_date` for tv) when present and not null. The page then gets `queries` (the one query
-/// searched) and `fetched_at`. Design parts 7.1 and 8.4 (S68, P29). Def: T15. Use: T16.
-pub fn slim_search(raw: &Value, query: &str, today: &str) -> Value {
-    let results = raw.get("results").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-    let results = results
+/// A raw season answer spliced into a slim `tmdb-record.json` (design part 7.1: "for a TV record, its seasons and
+/// episodes"; Ruling T4-R4; no season file is saved). The season whose `season_number` matches is rebuilt in place as
+/// `season_number`, `episode_count` (kept when present, else the number of episodes), `episodes` (each
+/// `episode_number` and `runtime` when present and not null, as `slim_record` keeps them); a season the file lacks is
+/// inserted before the first season with a higher number. A file without a `seasons` array, or an answer without a
+/// number, is left as it is. `fetched_at` stays last. Def: T4-4. Use: T4-4, T4-8.
+pub fn splice_season(record_file: &mut Value, season_raw: &Value) {
+    let Some(number) = season_raw.get("season_number").and_then(Value::as_u64) else { return };
+    let Some(seasons) = record_file.get_mut("seasons").and_then(Value::as_array_mut) else { return };
+    let number_of = |season: &Value| season.get("season_number").and_then(Value::as_u64);
+    let episodes = season_raw.get("episodes").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let listed = seasons.iter().position(|season| number_of(season) == Some(number));
+    let mut slim = Map::new();
+    slim.insert("season_number".to_string(), Value::from(number));
+    let count = listed
+        .and_then(|index| seasons[index].get("episode_count").filter(|count| !count.is_null()).cloned())
+        .unwrap_or_else(|| Value::from(episodes.len()));
+    slim.insert("episode_count".to_string(), count);
+    let episodes = episodes
         .iter()
-        .filter_map(|result| {
-            let kind: TmdbKind = result.get("media_type").and_then(Value::as_str)?.parse().ok()?;
+        .map(|episode| {
+            let mut slim = Map::new();
+            keep(&mut slim, episode, "episode_number");
+            keep(&mut slim, episode, "runtime");
+            Value::Object(slim)
+        })
+        .collect();
+    slim.insert("episodes".to_string(), Value::Array(episodes));
+    match listed {
+        Some(index) => seasons[index] = Value::Object(slim),
+        None => {
+            let at = seasons
+                .iter()
+                .position(|season| number_of(season).is_some_and(|other| other > number))
+                .unwrap_or(seasons.len());
+            seasons.insert(at, Value::Object(slim));
+        }
+    }
+}
+
+/// The slim `tmdb-search.json` of one or more pages (design parts 7.1 and 8.4; S68, P29, J8): each page's movie and tv
+/// results slimmed as before, in page order, where a result of a later page is left out when a kept result has its
+/// `media_type` and `id` (so the results are `merge_pages`'s); then `queries`, each page's query in order; then
+/// `fetched_at`. One page gives pull request 2's file byte for byte. Def: T4-2. Use: T4-2, T4-3, T4-8.
+pub fn slim_search(pages: &[(&Value, &str)], today: &str) -> Value {
+    let mut kept: Vec<(TmdbKind, Option<Value>)> = Vec::new();
+    let mut results = Vec::new();
+    for (index, (raw, _)) in pages.iter().enumerate() {
+        let page = raw.get("results").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        for result in page {
+            let Some(kind) = result.get("media_type").and_then(Value::as_str).and_then(|kind| kind.parse().ok()) else {
+                continue;
+            };
+            let key = (kind, result.get("id").cloned());
+            if index > 0 && kept.contains(&key) {
+                continue;
+            }
+            kept.push(key);
+            // A slim result: `media_type`, `id`, and the kind's title, original title and date when present and not
+            // null. A result of another media type was dropped above.
             let fields = match kind {
                 TmdbKind::Movie => ["title", "original_title", "release_date"],
                 TmdbKind::Tv => ["name", "original_name", "first_air_date"],
@@ -136,12 +196,13 @@ pub fn slim_search(raw: &Value, query: &str, today: &str) -> Value {
             for field in fields {
                 keep(&mut slim, result, field);
             }
-            Some(Value::Object(slim))
-        })
-        .collect();
+            results.push(Value::Object(slim));
+        }
+    }
+    let queries = pages.iter().map(|(_, query)| Value::String(query.to_string())).collect();
     let mut page = Map::new();
     page.insert("results".to_string(), Value::Array(results));
-    page.insert("queries".to_string(), Value::Array(vec![Value::String(query.to_string())]));
+    page.insert("queries".to_string(), Value::Array(queries));
     dated(page, today)
 }
 
@@ -149,6 +210,55 @@ pub fn slim_search(raw: &Value, query: &str, today: &str) -> Value {
 /// Def: T15. Use: T16.
 pub fn status_text(lines: &BTreeMap<String, String>) -> String {
     lines.iter().map(|(key, status)| format!("{key} {status}\n")).collect()
+}
+
+/// The shape record of design part 8.5 (P29, Ruling T4-R19): every scalar becomes its JSON type name ("string",
+/// "number", "boolean", "null"); an object keeps its keys, in order, with their values' shapes; an array becomes a
+/// one-element array of its elements' merged shape (`[]` when empty). Merging unites two objects' keys (first seen
+/// first) key by key, merges two arrays' element shapes, and otherwise joins the type names with `|` in the order
+/// object, array, string, number, boolean, null (`"number|null"`); an object or array meeting a scalar keeps only its
+/// type name (`"object|null"`). No value of the answer survives. Def: T4-19. Use: T4-19.
+pub fn shape_of(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(map.iter().map(|(key, value)| (key.clone(), shape_of(value))).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(shape_of).reduce(merge_shapes).into_iter().collect()),
+        Value::String(_) => Value::from("string"),
+        Value::Number(_) => Value::from("number"),
+        Value::Bool(_) => Value::from("boolean"),
+        Value::Null => Value::from("null"),
+    }
+}
+
+/// The order a shape joins type names in (Ruling T4-R19).
+const SHAPE_TYPES: [&str; 6] = ["object", "array", "string", "number", "boolean", "null"];
+
+/// Two shapes as one, by `shape_of`'s merge rules (Ruling T4-R19).
+fn merge_shapes(a: Value, b: Value) -> Value {
+    match (a, b) {
+        (Value::Object(mut a), Value::Object(b)) => {
+            for (key, shape) in b {
+                match a.get_mut(&key) {
+                    // get_mut and take, never remove and insert: serde_json's preserve_order map would reorder keys.
+                    Some(slot) => *slot = merge_shapes(std::mem::take(slot), shape),
+                    None => drop(a.insert(key, shape)),
+                }
+            }
+            Value::Object(a)
+        }
+        (Value::Array(a), Value::Array(b)) => Value::Array(a.into_iter().chain(b).reduce(merge_shapes).into_iter().collect()),
+        (a, b) => {
+            let names = |shape: &Value| -> Vec<String> {
+                match shape {
+                    Value::Object(_) => vec!["object".to_string()],
+                    Value::Array(_) => vec!["array".to_string()],
+                    other => other.as_str().unwrap_or_default().split('|').map(str::to_string).collect(),
+                }
+            };
+            let (a, b) = (names(&a), names(&b));
+            let joined: Vec<&str> = SHAPE_TYPES.into_iter().filter(|name| a.iter().chain(&b).any(|kept| kept == name)).collect();
+            Value::from(joined.join("|"))
+        }
+    }
 }
 
 // PF-17: only the tests below call this. Task 16's chain writes each status word from its `LookupState`, so the
@@ -210,7 +320,7 @@ mod tests {
              "release_date": "2001-02-03", "popularity": 1.5},
             {"media_type": "person", "id": 7, "name": "Someone"},
             {"media_type": "tv", "id": 5, "name": "Show", "original_name": "Show", "first_air_date": "2002-01-01"}]});
-        let text = serde_json::to_string(&slim_search(&raw, "SYNTHETIC MOVIE", "2026-10-23")).unwrap();
+        let text = serde_json::to_string(&slim_search(&[(&raw, "SYNTHETIC MOVIE")], "2026-10-23")).unwrap();
         assert_eq!(text, r#"{"results":[{"media_type":"movie","id":900001,"title":"Synthetic Movie","original_title":"Synthetic Movie","release_date":"2001-02-03"},{"media_type":"tv","id":5,"name":"Show","original_name":"Show","first_air_date":"2002-01-01"}],"queries":["SYNTHETIC MOVIE"],"fetched_at":"2026-10-23"}"#);
         assert_eq!(parse_search(&text, "tmdb-search.json").unwrap().results.len(), 2);
     }
@@ -230,4 +340,40 @@ mod tests {
         assert_eq!(status_text(&lines), "dischash 000\ndiscid 404\nsearch 000\ntmdb movie/900001 unparsed\n");
     }
 
+    #[test]
+    fn splice_season_adds_episodes_and_keeps_the_slim_order() {
+        let tv = json!({"id": 5, "name": "Show", "original_name": "Show", "first_air_date": "2002-01-01",
+            "original_language": "en", "seasons": [{"season_number": 0, "episode_count": 1}, {"season_number": 1},
+            {"season_number": 3, "episode_count": 2}]});
+        let mut file = slim_record(&tv, TmdbKind::Tv, "2026-10-23");
+        splice_season(&mut file, &json!({"season_number": 1, "name": "S1", "episodes": [
+            {"episode_number": 1, "name": "Pilot", "runtime": 44, "still_path": "/x.jpg"}, {"episode_number": 2, "runtime": null}]}));
+        splice_season(&mut file, &json!({"season_number": 2, "episodes": [{"episode_number": 1, "runtime": 0}]}));
+        let text = serde_json::to_string(&file).unwrap();
+        assert_eq!(text, r#"{"id":5,"name":"Show","original_name":"Show","first_air_date":"2002-01-01","original_language":"en","kind":"tv","seasons":[{"season_number":0,"episode_count":1},{"season_number":1,"episode_count":2,"episodes":[{"episode_number":1,"runtime":44},{"episode_number":2}]},{"season_number":2,"episode_count":1,"episodes":[{"episode_number":1,"runtime":0}]},{"season_number":3,"episode_count":2}],"fetched_at":"2026-10-23"}"#);
+        assert_eq!(parse_tv(&text, "tmdb-record.json").unwrap().episode_runtimes(None), vec![44]);
+    }
+
+    #[test]
+    fn shape_records_hold_names_and_types_only() {
+        let raw = json!({"id": 900001, "title": "Synthetic Movie", "adult": false, "imdb_id": null,
+            "genres": [{"id": 28, "name": "Action"}, {"id": 53, "name": null, "extra": true}], "videos": [],
+            "external_ids": {"imdb_id": "tt0900001", "tvdb_id": 7}, "mixed": [1, null, "x"],
+            "maybe": [{"a": 1}, null], "nested": [[1], [2.5, "y"]]});
+        let shape = shape_of(&raw);
+        assert_eq!(shape, json!({"id": "number", "title": "string", "adult": "boolean", "imdb_id": "null",
+            "genres": [{"id": "number", "name": "string|null", "extra": "boolean"}], "videos": [],
+            "external_ids": {"imdb_id": "string", "tvdb_id": "number"}, "mixed": ["string|number|null"],
+            "maybe": ["object|null"], "nested": [["string|number"]]}));
+        let keys: Vec<&str> = shape.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["id", "title", "adult", "imdb_id", "genres", "videos", "external_ids", "mixed", "maybe", "nested"]);
+        let genre: Vec<&str> = shape["genres"][0].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(genre, ["id", "name", "extra"]);
+        let text = serde_json::to_string(&shape).unwrap();
+        assert_eq!(text.find(|c: char| c.is_ascii_digit()), None, "{text}");
+        for value in ["Synthetic Movie", "Action", "tt0900001", "\"x\"", "\"y\""] {
+            assert!(!text.contains(value), "{value} in {text}");
+        }
+        assert_eq!(shape_of(&json!("x")), json!("string"));
+    }
 }

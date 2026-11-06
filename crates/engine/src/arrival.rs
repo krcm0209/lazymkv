@@ -19,6 +19,7 @@ use lazymkv_platform::Host;
 use lazymkv_tools::{list_files, snapshot};
 
 use crate::owner::{panic_text, Msg, StepResult, PANICKED};
+use crate::store::{remembered_file, Store};
 
 /// How often the wait for a volume looks for its root (design part 5.4).
 const READY_POLL: Duration = Duration::from_millis(100);
@@ -150,7 +151,28 @@ pub(crate) fn chain_inputs(job_dir: &Path) -> Result<ChainInputs, String> {
         .and_then(|first| fs::read(dl.join(first)).ok())
         .and_then(|bytes| bdmt_name(&String::from_utf8_lossy(&bytes)));
     let name = disc_name(bdmt.as_deref(), meta["volume_label"].as_str());
-    Ok(ChainInputs { fingerprint, disc_id, name })
+    Ok(ChainInputs { fingerprint, disc_id, name, remembered: None })
+}
+
+/// `chain_inputs` with the remembered identity (Ruling T4-R6): the job's own `remembered.json` when it reads Ok(Some)
+/// (the copy Plan applied, V14), else the data folder's `remembered/<fingerprint>.json`; an Err from either gives None
+/// and the engine.log line `<id>: the remembered decision is refused: <reason>` (Plan's line in `steps.rs`), `<id>`
+/// being the job folder's name. Err is chain_inputs' sentence. Def: T4-5. Use: T4-5.
+pub(crate) fn round_inputs(job_dir: &Path, store: &Store) -> Result<ChainInputs, String> {
+    let mut inputs = chain_inputs(job_dir)?;
+    let read = match remembered_file(&job_dir.join("remembered.json"), &inputs.fingerprint) {
+        Ok(None) => store.remembered(&inputs.fingerprint),
+        read => read,
+    };
+    inputs.remembered = match read {
+        Ok(read) => read.map(|(remembered, _)| remembered.tmdb),
+        Err(error) => {
+            let id = job_dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            store.log(&format!("{id}: the remembered decision is refused: {error}"));
+            None
+        }
+    };
+    Ok(inputs)
 }
 
 #[cfg(test)]
@@ -158,6 +180,11 @@ mod tests {
     use super::*;
     use lazymkv_core::lookup::name::NameSource;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
+    use std::fs;
+    use std::sync::Arc;
+
+    use crate::store::Store;
+    use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 
     #[test]
     fn a_bdmt_name_wins_over_the_volume_label_for_the_search() {
@@ -178,5 +205,46 @@ mod tests {
         let inputs = chain_inputs(&job.0).unwrap();
         assert_eq!(inputs.disc_id, None);
         assert_eq!(inputs.name.unwrap().source, NameSource::VolumeLabel);
+    }
+
+    const META: &str = r#"{"volume_label":"SYNTHETIC_MOVIE","format":"bluray","fingerprint":"ABC","disc_id":null,"file_count":5,"total_bytes":1,"captured_unix":7}"#;
+
+    fn remembered_text(fingerprint: &str, id: i64) -> String {
+        format!(r#"{{"format":"lazymkv remembered v1","fingerprint":"{fingerprint}","tmdb":{{"kind":"movie","id":{id}}},"titles":[]}}"#)
+    }
+
+    fn movie(id: i64) -> Option<TmdbIdentity> {
+        Some(TmdbIdentity { kind: TmdbKind::Movie, id })
+    }
+
+    #[test]
+    fn a_round_takes_the_jobs_remembered_copy_first_then_the_data_folders() {
+        let data = Scratch::new("round-data");
+        let store = Store::new(data.0.clone(), Arc::new(|| 7), None);
+        let job = Scratch::new("round-job");
+        job.write("meta.json", META);
+        assert_eq!(round_inputs(&job.0, &store).unwrap().remembered, None);
+        data.write("remembered/ABC.json", &remembered_text("ABC", 2));
+        assert_eq!(round_inputs(&job.0, &store).unwrap().remembered, movie(2));
+        job.write("remembered.json", &remembered_text("ABC", 1));
+        let inputs = round_inputs(&job.0, &store).unwrap();
+        assert_eq!(inputs.remembered, movie(1));
+        let plain = chain_inputs(&job.0).unwrap();
+        assert_eq!((inputs.fingerprint, inputs.disc_id, inputs.name), (plain.fingerprint, plain.disc_id, plain.name));
+    }
+
+    #[test]
+    fn a_remembered_file_for_another_disc_is_refused_and_the_round_has_none() {
+        let data = Scratch::new("round-refused-data");
+        let store = Store::new(data.0.clone(), Arc::new(|| 7), None);
+        let job = Scratch::new("round-refused-job");
+        job.write("meta.json", META);
+        data.write("remembered/ABC.json", &remembered_text("FFFF", 2));
+        assert_eq!(round_inputs(&job.0, &store).unwrap().remembered, None);
+        let id = job.0.file_name().unwrap().to_str().unwrap();
+        let path = data.0.join("remembered").join("ABC.json");
+        let line = format!("{id}: the remembered decision is refused: {}: it remembers the disc FFFF, not this disc (ABC)", path.display());
+        let log = fs::read_to_string(data.0.join("engine.log")).unwrap();
+        assert!(log.contains(&line), "{log}");
     }
 }

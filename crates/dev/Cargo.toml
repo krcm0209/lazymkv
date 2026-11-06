@@ -14,6 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 lazymkv-core = { path = "../core" }
+# TMDb's transport for the local refetch of a stale copy (design part 8.4; Ruling T4-R23, owner item 25).
+lazymkv-clients = { path = "../clients" }
+# `write_atomic` for the refetched copies (PR #15 review round 1, R9).
+lazymkv-platform = { path = "../platform" }
 serde.workspace = true
 serde_json.workspace = true
 
