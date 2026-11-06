@@ -565,6 +565,17 @@ impl Refetched {
     }
 }
 
+/// How `refetch_stale` takes the book to check the seasons it owes (PR #15 review round 1, R2 follow-up 2, Ruling
+/// RR1-R2b): `TryLock` skips the check while a round holds the book (Plan and Decide, on the owner's step, never wait
+/// on a round; the round asks the owed seasons itself, and Decide never runs beside one), `Wait` locks it and so waits
+/// for the round to end (the relay's refetch, on its own thread, whose child must never run with a season missing).
+/// Def: T4-9 (PR #15 review round 1, R2). Use: T4-9.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwedCheck {
+    TryLock,
+    Wait,
+}
+
 /// The job's stale TMDb copies fetched again (design parts 8.4, 5.10, 9.5; Rulings T4-R8, T4-R9), before Plan, Decide
 /// and the relay's child read them. The copies are `stale_copies` over `lookup-status.txt` (empty when absent) in a job
 /// folder on `today`; none asks nothing and gives the empty `Refetched`. A listed `tmdb.json` or `tmdb-record.json` is
@@ -586,8 +597,9 @@ impl Refetched {
 /// PR #15 review round 1, R2 (the owner's ruling): a TV refetch that stopped at a pending season still writes both
 /// record files and installs the record with the seasons it merged; the pending season and each after it stay
 /// `Pending` with its reason (owed), each with its sentence in `owed`. When no record copy is listed and the book owes
-/// seasons (`owed_by_book`, read with `try_lock`: a round that holds the book asks them itself, so the path is
-/// skipped), those seasons alone are asked with `refetch_seasons` before anything else, each one merged spliced into
+/// seasons (`owed_by_book`, the book taken as `owed_check` says: with `OwedCheck::TryLock` a round that holds the
+/// book asks them itself, so the path is skipped; with `OwedCheck::Wait` the check waits for that round, Ruling
+/// RR1-R2b), those seasons alone are asked with `refetch_seasons` before anything else, each one merged spliced into
 /// `record_file` and `tmdb-record.json` written from it (its `fetched_at` stays the record's), the states set as
 /// above, each season still pending in `owed`, and the status file written; a file that cannot be written is in
 /// `failed`. `fetched` holds the listed copies written again, in `TMDB_COPIES` order. Def: T4-9. Use: T4-9.
@@ -598,6 +610,7 @@ pub(crate) fn refetch_stale(
     http: &dyn HttpTransport,
     token: Option<&str>,
     today: &str,
+    owed_check: OwedCheck,
 ) -> Refetched {
     let status = fs::read_to_string(job_dir.join("lookup-status.txt")).unwrap_or_default();
     let copies = stale_copies(&status, &|file| fs::read(job_dir.join(file)).ok(), true, today);
@@ -606,6 +619,8 @@ pub(crate) fn refetch_stale(
     let record_listed = RECORD_COPIES.iter().any(|file| listed(file));
     let owed_seasons = if record_listed {
         None
+    } else if owed_check == OwedCheck::Wait {
+        owed_by_book(&lock())
     } else {
         match lookups.try_lock() {
             Ok(book) => owed_by_book(&book),
@@ -874,7 +889,7 @@ mod tests {
         token: Option<&str>,
         today: &str,
     ) -> Result<Vec<String>, String> {
-        let refetched = refetch_stale(job_dir, plan, lookups, http, token, today);
+        let refetched = refetch_stale(job_dir, plan, lookups, http, token, today, OwedCheck::TryLock);
         refetched.for_decide().map(|()| refetched.fetched)
     }
 
@@ -1026,7 +1041,7 @@ mod tests {
         t.answer(&lazymkv_clients::season_url(1437, 2), 429, b"{}");
         t.answer(&lazymkv_clients::season_url(1437, 3), 200, season_body(3).as_bytes());
         let book = rebuilt(&s);
-        let fetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        let fetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY, OwedCheck::TryLock);
         let asked = t.requests().len();
         (s, book, fetched, asked)
     }
@@ -1072,7 +1087,7 @@ mod tests {
         for n in [2, 3] {
             t.answer(&lazymkv_clients::season_url(1437, n), 200, season_body(n).as_bytes());
         }
-        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY, OwedCheck::TryLock);
         assert_eq!(refetched.for_decide(), Ok(()));
         assert_eq!(refetched.log_lines(), [
             "season 2 of the TMDb copy tmdb-record.json was fetched again",
@@ -1099,7 +1114,7 @@ mod tests {
         let t = RecordedTransport::new();
         t.fail(&lazymkv_clients::season_url(1437, 2), lazymkv_clients::TransportError::Timeout);
         t.answer(&lazymkv_clients::season_url(1437, 3), 200, season_body(3).as_bytes());
-        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY, OwedCheck::TryLock);
         assert_eq!(refetched.for_plan(), Ok(()));
         assert_eq!(refetched.for_decide(), Err([
             "tmdb-record.json: season 2 could not be fetched again: no answer within 10 s",
@@ -1121,9 +1136,39 @@ mod tests {
         let (s, book, _, _) = refetched_with_season_2_pending();
         let t = RecordedTransport::new();
         let held = lock(&book);
-        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Refetched::default());
+        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY, OwedCheck::TryLock), Refetched::default());
         drop(held);
         assert!(t.requests().is_empty());
+    }
+
+    /// PR #15 review round 1, R2 follow-up 2 (Ruling RR1-R2b): the relay's refetch waits for a round that holds the
+    /// book, then checks what is owed, so its child never runs with a season missing.
+    #[test]
+    fn the_relays_refetch_waits_for_a_round_holding_the_book_then_names_the_owed_season() {
+        let (s, book, _, _) = refetched_with_season_2_pending();
+        let t = RecordedTransport::new();
+        t.fail(&lazymkv_clients::season_url(1437, 2), lazymkv_clients::TransportError::Timeout);
+        let book = std::sync::Arc::new(book);
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let round = {
+            let book = std::sync::Arc::clone(&book);
+            let (held, release) = (held.0, release.1);
+            std::thread::spawn(move || {
+                let _guard = lock(&book);
+                held.send(()).unwrap();
+                release.recv().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            })
+        };
+        held.1.recv().unwrap();
+        release.0.send(()).unwrap();
+        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY, OwedCheck::Wait);
+        round.join().unwrap();
+        assert_eq!(t.requests().len(), 1, "season 2 is asked once the round let go of the book");
+        assert_eq!(refetched.for_decide(), Err([
+            "tmdb-record.json: season 2 could not be fetched again: no answer within 10 s",
+            "tmdb-record.json: season 3 could not be fetched again: no answer within 10 s",
+        ].join("; ")));
     }
 
     /// PR #15 review round 1, R2: a season a restart reads back as `000` beside a fresh record copy is owed, and the

@@ -56,7 +56,7 @@ use serde_json::{json, Value};
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
     engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
-    Refetched,
+    OwedCheck, Refetched,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -995,7 +995,9 @@ impl Step<'_> {
         let token = steps.secrets.get("tmdb_token");
         let today = steps.host.local_date();
         let job = self.job;
-        let refetched = refetch_stale(&job.job_dir, plan, &job.lookups, steps.http.as_ref(), token.as_deref(), &today);
+        // Plan and Decide never wait on a round (Ruling RR1-R2b).
+        let (lookups, http) = (&job.lookups, steps.http.as_ref());
+        let refetched = refetch_stale(&job.job_dir, plan, lookups, http, token.as_deref(), &today, OwedCheck::TryLock);
         for line in refetched.log_lines() {
             self.log(&line);
         }

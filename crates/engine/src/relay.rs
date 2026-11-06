@@ -15,7 +15,7 @@ use lazymkv_dev::forms::read_forms;
 use lazymkv_platform::{GuardedChild, KillHandle};
 use serde_json::{json, Value};
 
-use crate::file_phase::{refetch_stale, replay_options};
+use crate::file_phase::{refetch_stale, replay_options, OwedCheck};
 use crate::ipc_server::{no_job, Clients};
 use crate::owner::Msg;
 use crate::store::Store;
@@ -128,7 +128,9 @@ pub(crate) struct CommandRefetch {
 /// on a thread of its own, so the owner thread never waits on a request: `refetch_stale` over `work`, each of its
 /// `log_lines` in job.log, then `Msg::CommandRefetched` with the command's `client`, `id` and `words` and its
 /// `for_decide`: Ok, or Err with the sentences of the seasons still owed and of the copies not fetched again, so no
-/// child runs with a season missing (PR #15 review round 1, R2 follow-up, Ruling RR1-R2a). The
+/// child runs with a season missing (PR #15 review round 1, R2 follow-up, Ruling RR1-R2a). It checks the owed
+/// seasons with `OwedCheck::Wait`, so a round that holds the book is waited for first, on this thread (Ruling
+/// RR1-R2b). The
 /// thread is detached and `shut_down` does not wait for it, as it does not wait for a lookup round: `refetch_stale`
 /// reads no stop flag and may wait on TMDb requests, and a late `Msg::CommandRefetched` goes nowhere (PR #15 review
 /// round 1, R1; Ruling T3-22-d).
@@ -148,6 +150,7 @@ pub(crate) fn spawn_command_refetch(
             work.http.as_ref(),
             work.token.as_deref(),
             &work.today,
+            OwedCheck::Wait,
         );
         if let Some(job) = work.job_dir.file_name().and_then(|name| name.to_str()) {
             for line in fetched.log_lines() {
