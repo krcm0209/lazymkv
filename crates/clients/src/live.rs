@@ -4,7 +4,9 @@
 //! variant alone, so no URL, header, host or port ever reaches it (engine.md, "the token kept out of error text").
 
 use std::io;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use ureq::config::AutoHeaderValue;
@@ -93,10 +95,8 @@ impl HttpTransport for UreqTransport {
 
     fn connect(&self, host: &str, port: u16) -> Result<(), TransportError> {
         let started = Instant::now();
-        let addresses = match (host, port).to_socket_addrs() {
-            Ok(found) => found.collect::<Vec<_>>(),
-            Err(_) => return Err(unreachable(NO_HOST)),
-        };
+        let host = host.to_string();
+        let addresses = resolve_within(move || Ok((host.as_str(), port).to_socket_addrs()?.collect()), self.timeout)?;
         let mut last = unreachable(NO_HOST);
         for address in addresses {
             let left = self.timeout.saturating_sub(started.elapsed());
@@ -121,6 +121,28 @@ fn answer(sent: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result
     let status = response.status().as_u16();
     let body = response.body_mut().with_config().limit(MAX_BODY_BYTES).read_to_vec().map_err(from_ureq)?;
     Ok(Response { status, body })
+}
+
+/// Runs `resolve`, the host name's lookup, on a helper thread and waits for it at most `timeout` (PR #15 review round
+/// 1, R5), so a slow resolver gives `Timeout` within the transport's timeout. A failed lookup, or a helper whose answer
+/// never comes, is `Unreachable(NO_HOST)`; a helper that cannot be started is `Unreachable(CONNECTION_FAILED)`. The
+/// lookup's own error text is never read. A timed-out helper is left to finish on its own; it holds only the name.
+fn resolve_within(
+    resolve: impl FnOnce() -> io::Result<Vec<SocketAddr>> + Send + 'static,
+    timeout: Duration,
+) -> Result<Vec<SocketAddr>, TransportError> {
+    let (sent, answered) = mpsc::channel();
+    let helper = thread::Builder::new().name("lazymkv-resolve".to_string()).spawn(move || {
+        let _ = sent.send(resolve());
+    });
+    if helper.is_err() {
+        return Err(unreachable(CONNECTION_FAILED));
+    }
+    match answered.recv_timeout(timeout) {
+        Ok(Ok(found)) => Ok(found),
+        Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => Err(unreachable(NO_HOST)),
+        Err(RecvTimeoutError::Timeout) => Err(TransportError::Timeout),
+    }
 }
 
 fn unreachable(text: &str) -> TransportError {
@@ -318,6 +340,29 @@ mod tests {
         let t = UreqTransport::with_timeout(REFUSAL);
         assert_eq!(t.connect("127.0.0.1", open.local_addr().unwrap().port()), Ok(()));
         assert_eq!(t.connect("127.0.0.1", closed_port()), Err(TransportError::Unreachable(REFUSED.to_string())));
+    }
+
+    #[test]
+    fn a_resolution_slower_than_the_timeout_is_a_timeout_within_it() {
+        // The resolver is a closure that sleeps, so nothing is resolved and no network is used.
+        let started = Instant::now();
+        let resolved = resolve_within(|| { thread::sleep(Duration::from_secs(5)); Ok(Vec::new()) }, QUICK);
+        assert_eq!(resolved, Err(TransportError::Timeout));
+        // A "gives up in time" bound, well under the resolver's 5 s.
+        assert!(started.elapsed() < QUICK * 6, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_failed_resolution_is_no_host() {
+        let resolved = resolve_within(|| Err(io::Error::other("no such host sentinel-3c9b")), REFUSAL);
+        assert_eq!(resolved, Err(TransportError::Unreachable(NO_HOST.to_string())));
+        assert!(!format!("{resolved:?}").contains("sentinel-3c9b"), "{resolved:?}");
+    }
+
+    #[test]
+    fn a_quick_resolution_gives_its_addresses() {
+        let address: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert_eq!(resolve_within(move || Ok(vec![address]), REFUSAL), Ok(vec![address]));
     }
 
     #[test]
