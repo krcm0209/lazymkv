@@ -10,7 +10,7 @@ use std::path::Path;
 
 use lazymkv_clients::{
     reason_text, refetch_record, refetch_search, stale_copies, status_record, HttpTransport, OfflineTransport,
-    SavedFile, StaleCopy,
+    SavedFile, Seasons, StaleCopy,
 };
 use lazymkv_core::lookup::stale::TMDB_COPIES;
 use lazymkv_core::recording::Tree;
@@ -36,7 +36,8 @@ const NO_RECORD: &str = "no tmdb line of lookup-status.txt names the record";
 /// `JOB_STATE_FILE` and for one with nothing stale, asking nothing. Err is `Refused { code: 3, line }` naming
 /// `<shown>/<file>`; no text holds the token. A TV record whose refetch left a season pending writes a stale
 /// `tmdb.json` and refuses a stale `tmdb-record.json`, `<why>` being `season <n>: <reason>` (PR #15 review round 1,
-/// R2). Def: T4-10. Use: T4-10.
+/// R2); a TV record's seasons are asked only when `tmdb-record.json` is among the stale copies (R3). Def: T4-10.
+/// Use: T4-10.
 pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<String>, Refused> {
     if folder.join(JOB_STATE_FILE).is_file() {
         return Ok(vec![]);
@@ -64,8 +65,11 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
     let records: Vec<&StaleCopy> = copies.iter().filter(|copy| copy.file != SEARCH_COPY).collect();
     if let Some(first_record) = records.first() {
         let id = status_record(status).ok_or_else(|| refused(failed_line(shown, first_record, NO_RECORD)))?;
-        // Dev has no parsed season, so a TV record is fetched with every season it lists (Ruling T4-R4).
-        let refetched = refetch_record(t, Some(token), id, None, &today)
+        // Dev has no parsed season, so a TV record is fetched with every season it lists (Ruling T4-R4), and only when
+        // tmdb-record.json, the one copy that holds seasons, is stale (PR #15 review round 1, R3).
+        let record_stale = records.iter().any(|copy| copy.file == "tmdb-record.json");
+        let seasons = if record_stale { Seasons::Listed } else { Seasons::None };
+        let refetched = refetch_record(t, Some(token), id, seasons, &today)
             .map_err(|reason| refused(failed_line(shown, first_record, &reason_text(&reason))))?;
         // PR #15 review round 1, R2: a folder has no book to owe a season in, so a tmdb-record.json with a pending
         // season is not written (it would hide the hole) and fails the gate; tmdb.json holds no season and is written.
@@ -388,6 +392,22 @@ mod tests {
         let tmdb = fs::read_to_string(s.0.join("recs/show/tmdb.json")).unwrap();
         assert_eq!(fetched_at(&tmdb).as_deref(), Some("2026-10-13"), "the stale tmdb.json is written");
         assert_eq!(fs::read_to_string(s.0.join("recs/show/tmdb-record.json")).unwrap(), show_copy(STALE));
+    }
+
+    /// PR #15 review round 1, R3: a stale tmdb.json alone (a phase 0 folder) asks the TV record and no season, as
+    /// tmdb.json holds none.
+    #[test]
+    fn a_stale_tmdb_json_alone_asks_no_season() {
+        let s = Scratch::new("stale-tmdb-json-alone");
+        s.write("recs/show/lookup-status.txt", SHOW_STATUS);
+        s.write("recs/show/tmdb.json", show_copy(STALE));
+        let http = Arc::new(RecordedTransport::new());
+        http.answer(&show(), 200, SHOW_ANSWER.as_bytes());
+        let fetched = refresh_copies(&ctx_with(&s, &http, true), &s.0.join("recs/show"), "recs/show");
+        assert_eq!(fetched, Ok(vec!["tmdb.json".to_string()]));
+        let urls: Vec<String> = http.requests().into_iter().map(|(url, _)| url).collect();
+        assert_eq!(urls, [show()], "the record alone");
+        assert!(!s.0.join("recs/show/tmdb-record.json").exists());
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub use lookups::{
 pub use merge::merge_pages;
 pub use recorded::{Gate, RecordedTransport};
 pub use refetch::{
-    refetch_record, refetch_search, refetch_seasons, stale_copies, status_record, RecordRefetch, SeasonsFetched,
-    StaleCopy,
+    refetch_record, refetch_search, refetch_seasons, stale_copies, status_record, RecordRefetch, Seasons,
+    SeasonsFetched, StaleCopy,
 };
 pub use saved::{json_file, shape_of, slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 pub use transport::{

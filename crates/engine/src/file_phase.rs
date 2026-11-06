@@ -11,7 +11,7 @@ use std::sync::{Mutex, PoisonError};
 
 use lazymkv_clients::{
     json_file, reason_text, refetch_record, refetch_search, refetch_seasons, stale_copies, status_file, status_record,
-    ChainInputs, HttpTransport, Lookup, LookupBook, LookupState, PendingReason, RecordRefetch, SavedFile,
+    ChainInputs, HttpTransport, Lookup, LookupBook, LookupState, PendingReason, RecordRefetch, SavedFile, Seasons,
     SeasonsFetched, StaleCopy,
 };
 use lazymkv_core::job::State;
@@ -527,7 +527,8 @@ fn write_status(job_dir: &Path, book: &LookupBook, inputs: Option<&ChainInputs>)
 /// and the relay's child read them. The copies are `stale_copies` over `lookup-status.txt` (empty when absent) in a job
 /// folder on `today`; none asks nothing and gives Ok(vec![]). A listed `tmdb.json` or `tmdb-record.json` is fetched
 /// once for both with `refetch_record`, by the plan's TMDb identity, else the status file's record (`status_record`),
-/// and the season of `chain_inputs`' disc name when that reads; no identity fails both with `no TMDb ID names the
+/// asking the season of `chain_inputs`' disc name when that reads (`Seasons::One`), else every season the record
+/// lists (`Seasons::Listed`; PR #15 review round 1, R3); no identity fails both with `no TMDb ID names the
 /// record`. A listed `tmdb-search.json` is fetched with `refetch_search` over the file's `queries`, else
 /// `search_queries` over the book. Each fetched file is written with `write_atomic` (a record fetch writes both of its
 /// files, and one that cannot be written fails the copies of its fetch). The book is locked only to read the queries
@@ -598,7 +599,7 @@ pub(crate) fn refetch_stale(
         let season = name.as_ref().and_then(|name| name.season);
         let fetched = match identity {
             None => Err(PendingReason::Unparsed("no TMDb ID names the record".to_string())),
-            Some(id) => refetch_record(http, token, id, season, today),
+            Some(id) => refetch_record(http, token, id, season.map_or(Seasons::Listed, Seasons::One), today),
         };
         let fetched = fetched.and_then(|refetched| write_copies(job_dir, &refetched.files).map(|()| refetched));
         match fetched {
