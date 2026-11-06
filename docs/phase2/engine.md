@@ -8,7 +8,9 @@ request 2, on the branch `phase-2-thin-job` from `main` at `70ada2b`. Its plan i
 draft on 2026-10-25 with the owner's yes. The rulings below shorten "pull request" to PR, as the plan does. They cite
 the phase 2 design as "design part" and the design spec as "spec". Pull request 3, on the branch
 `phase-2-windows-pieces` from `main` at `dcd5924`, adds its own sections, each named for it; its plan is
-`docs/superpowers/plans/2026-10-27-phase-2-pr3-windows-pieces.md`, and it is pull request krcm0209/lazymkv#14.
+`docs/superpowers/plans/2026-10-27-phase-2-pr3-windows-pieces.md`, and it is pull request krcm0209/lazymkv#14. Pull
+request 4, on the branch `phase-2-live-lookups` from `main` at `891a0e7`, adds its own sections, each named for it; its
+plan is `docs/superpowers/plans/2026-11-04-phase-2-pr4-live-lookups.md`, and it is pull request krcm0209/lazymkv#15.
 
 ## Pull request 2: the thinnest whole job
 
@@ -49,6 +51,27 @@ stand-in disc goes from arrival to a filed file through the real start-up sequen
 real client, the Job Object runner and the Windows file moves (W27; `crates/fake-tools/tests/engine_native.rs`; CI run
 https://github.com/krcm0209/lazymkv/actions/runs/40866232126).
 
+## Pull request 4: live lookups and notifications
+
+Pull request 4 delivers design part 12.6 item 4:
+
+- the live HTTPS (HTTP over TLS) transport `UreqTransport` (`crates/clients`: ureq, rustls on ring, `webpki-roots`, a 10 s timeout, no redirect followed, no proxy, an 8 MiB cap on an answer, and error words that never hold a URL or a header; T4-6, T4-7);
+- design part 8.2's order whole: TheDiscDB by fingerprint and by disc ID, J8's tagged second search and its merged page, the entry-title search (S47), the record with `external_ids`, and a TV (television) record's seasons (T4-2 to T4-5);
+- design part 8.3's outcome classes and the remembered identity in the chain (T4-5);
+- stale TMDb copies fetched again before Plan, Decide and the relay's words, and K15's exit 3 in the relay and in `plan`, `decide` and `retune` (T4-8 to T4-10);
+- the cleanup of design part 5.9, at start and hourly (T4-11);
+- the webhook notifier of design part 8.6 and the self-test's webhook checks (T4-12, T4-13);
+- `lazymkvctl`'s 4 MiB check and `secret set tmdb_token` (T4-14);
+- dev's readers aligned with S46 and the search words, and `lazymkv-dev census` (T4-15, T4-16, A9);
+- the Windows binary passing the live transport, the notifier and the cleanup (W26 replaced, T4-17);
+- the live shape tests of design part 8.5 (T4-19).
+
+On the mini PC, through the deployed desktop task, a movie disc TheDiscDB does not know went from its arrival to a filed
+file in the test library: TheDiscDB answered 404 by fingerprint and by disc ID, TMDb's search gave the identity and the
+plan's identity step was `tmdb_one` (spec 8.1 step 4), the job was never held, so Owner decision 13's approval was not
+needed, and Home Assistant showed the `disc_done` and `filed` notifications and no `needs_review` (A3; Pull request 4 on
+the mini PC, below; CI run https://github.com/krcm0209/lazymkv/actions/runs/42232388792).
+
 ## How to run it
 
 Every cargo command runs on the mini PC through `scripts/box.sh`, one at a time (design part 12.5).
@@ -59,6 +82,11 @@ Every cargo command runs on the mini PC through `scripts/box.sh`, one at a time 
 - On Windows, `lazymkvctl`'s engine commands reach that engine through the pipe from any elevated process of the same account, an SSH (Secure Shell) session included; a process that is not elevated exits 4 with "lazymkvctl: run lazymkvctl elevated to reach the engine". On Linux and macOS they still exit 4 with "lazymkvctl: no engine transport exists in this build" (S38).
 - A console run on the mini PC copies `lazymkv-engine.exe` and `lazymkvctl.exe` out of `C:\lazymkv\target\release`, gives `--data C:\lazymkv\dev\data` with a `settings.json` naming local roots and stand-in tools, starts the engine over SSH and stops it with `lazymkvctl stop` from a second SSH session; its `engine.log` lines also go to standard error (design parts 3.1, 3.5). It is never used with a disc.
 - The desktop task: `scripts/box.sh cargo build --workspace --locked --release`, then `scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1'` copies the programs into `C:\lazymkv\run`, registers and starts the task `lazymkv-engine`, and waits for `lazymkvctl status` (P5, design part 3.1). The owner must be logged on at the mini PC's monitor.
+- The live shape tests (design part 8.5) run only on the mini PC: `scripts/box.sh "set LAZYMKV_EVIDENCE=C:\lazymkv\evidence\owner&& cargo test -p lazymkv-clients --locked --test live -- --ignored --test-threads=1"`, with `TMDB_TOKEN` set there; they write dated records into the mirror's `live-lookups` folder, which the controller copies into the clone and commits there, owner item 17.
+- The owner enters the TMDb token and the webhook URLs at the mini PC's elevated console: `$env:TMDB_TOKEN | C:\lazymkv\run\lazymkvctl.exe secret set tmdb_token`, and `lazymkvctl secret set ha_webhook_url` or `webhook_url` on standard input (A6).
+- `plan`, `decide` and `retune` over a recording folder fetch a TMDb copy more than six months old again with `TMDB_TOKEN`, and exit 3 naming it without the token (K15); an engine job folder is read as it is (T4-R10).
+- `lazymkv-dev census [--evidence DIR]` prints one line per recording of the clone; its output names the owner's discs and is never committed (A9).
+- A census session stops the engine with `lazymkvctl stop` over SSH before it and starts the task with `Start-ScheduledTask lazymkv-engine` after, each recorded here (A10).
 - The platform's hardware and desktop-session tests carry `#[ignore]`. Over SSH: `scripts/box.sh 'set LAZYMKV_TEST_DRIVE=D:&& cargo test -p lazymkv-platform --locked -- --ignored --test-threads=1 win::eject::'`. In the desktop session: `scripts/phase0/job.sh platform-ignored.ps1 <log name> -Filter <module path> [-Drive D:] [-ShareRoot <UNC folder>]`, then `scripts/phase0/wait.sh <log name>` (design part 12.4); the share folder is a Universal Naming Convention (UNC) path such as `\\unas-pro\media\lazymkv-staging\pr3-tests`, and a test's cue for the owner (`CUE: <text>`) is read with `findstr /c:"CUE:"`, anywhere in a line (Accepted in pull request 3, below).
 
 ## The crates
@@ -67,11 +95,11 @@ Every cargo command runs on the mini PC through `scripts/box.sh`, one at a time 
 |---|---|---|
 | `lazymkv-platform` | `lazymkv-core`; on Windows, `windows-sys` | The operating-system seams of design part 4.2 as traits (`DriveWatcher`, `Ejector`, `ProcessGuard`, `KeepAwake`, `ShareConnector`, `SecretStore`, `IpcTransport`, `IpcConnector`, `Autostart`, `Host`), the std process runner `StdProcessGuard`, `native_guard`, `write_atomic` and `rename_no_replace` (std on Linux and macOS, `MoveFileExW` on Windows, S13), the rules the Windows code applies, compiled everywhere (`security`, `localtime`, `shares`, `drives`, `eject`), the Windows implementations in `win` (design part 4.2), and the in-memory fakes behind the `fakes` feature |
 | `lazymkv-tools` | `lazymkv-core`, `lazymkv-platform`, `serde`, `serde_json` | The recorded run `run_recorded` (capture's recorder, moved here, S17), the tool lookup `find_tool` (design part 3.6, S18), the `makemkvcon` drivers (`list_drives`, `scan`, `rip`, `drive_index` and `save_debug_log`), the `mkvmerge` identification and remux, `ffprobe`, and the disc snapshot's file input and output (`snapshot`, R-B2); since pull request 3, `find_tool` keeps only absolute `PATH` folders a non-elevated process cannot write (W18), and `list_drives` takes a time limit (W20) |
-| `lazymkv-clients` | `lazymkv-core`, `serde`, `serde_json` | TheDiscDB and TMDb behind the `HttpTransport` trait, the `RecordedTransport` that replays `http.json` answers, the lookup book and its rounds (`LookupBook`, `run_round`), `lookup-status.txt` and the slim saved answers (design parts 8.1, 8.3, 8.4); since pull request 3, `OfflineTransport`, which the Windows binary passes until pull request 4 (W26) |
-| `lazymkv-engine` (bin `lazymkv-engine`) | `lazymkv-core`, `lazymkv-platform`, `lazymkv-tools`, `lazymkv-clients`, `lazymkv-dev`, `serde`, `serde_json`; the `testkit` feature adds `lazymkv-platform/fakes` and `lazymkv-core/testsupport` | The job owner over `core::job::reduce` and its steps (the job profile among them), the job store (`state.json`, `transitions.jsonl`, `drives.json`, `engine.log`, `job.log`), arrivals, the disc-phase token and the file-phase slot, space promises, the restart, the IPC (inter-process communication) server, the self-test, the `NotifySink`, and the test harness `testkit`; since pull request 3, the Windows start-up `native` (design parts 3.1 to 3.8), the `command` relay `relay` (S35) and `NoDelivery` |
+| `lazymkv-clients` | `lazymkv-core`, `serde`, `serde_json`, `ureq` (rustls on ring, `webpki-roots`) | TheDiscDB and TMDb behind the `HttpTransport` trait, the `RecordedTransport` that replays `http.json` answers, the lookup book and its rounds (`LookupBook`, `run_round`), `lookup-status.txt` and the slim saved answers (design parts 8.1, 8.3, 8.4); since pull request 3, `OfflineTransport`; since pull request 4, the live `UreqTransport`, the merged searches, seasons and refetch (`refetch`), `shape_of`, `OfflineTransport` kept as a test double |
+| `lazymkv-engine` (bin `lazymkv-engine`) | `lazymkv-core`, `lazymkv-platform`, `lazymkv-tools`, `lazymkv-clients`, `lazymkv-dev`, `serde`, `serde_json`; the `testkit` feature adds `lazymkv-platform/fakes` and `lazymkv-core/testsupport` | The job owner over `core::job::reduce` and its steps (the job profile among them), the job store (`state.json`, `transitions.jsonl`, `drives.json`, `engine.log`, `job.log`), arrivals, the disc-phase token and the file-phase slot, space promises, the restart, the IPC (inter-process communication) server, the self-test, the `NotifySink`, and the test harness `testkit`; since pull request 3, the Windows start-up `native` (design parts 3.1 to 3.8) and the `command` relay `relay` (S35); since pull request 4, the `WebhookSink` notifier, the cleanup task `cleanup` and the refetch before Plan, Decide and the relay (`NoDelivery` removed) |
 | `lazymkv-ctl` (bin `lazymkvctl`) | `lazymkv-core`, `lazymkv-platform`, `lazymkv-dev`, `serde_json` | `plan`, `decide` and `retune` run locally through `lazymkv_dev::dispatch`, and the engine commands of design part 9.6 over an `IpcConnector`; on Windows over `platform::win::PipeConnector` (Linux and macOS keep no transport, S38) |
 | `lazymkv-capture` (bin `lazymkv-capture`), changed | `lazymkv-core`, `serde`, `serde_json`, and now `lazymkv-tools` | Its commands as before; `capture disc` now calls `tools::snapshot`, and `disc.rs` is gone, its items moved to `core::snapshot` and `tools::snapshot` (R-B2) |
-| `lazymkv-dev` (bin `lazymkv-dev`), changed | `lazymkv-core`, `serde`, `serde_json` (unchanged) | `decide` split into `read_decide_inputs`, which reads a recording folder into a `DecideInputs` value, and the pure `decide_doc` (K5), with decide's three replay flags (S27); `Args::rest`, which `lazymkvctl` uses beside dev's existing `dispatch` (S85); since pull request 3, `forms::read_forms`, moved from `lazymkv-ctl` so that the engine's relay reads words as `lazymkvctl` does (W24) |
+| `lazymkv-dev` (bin `lazymkv-dev`), changed | `lazymkv-core`, `lazymkv-clients`, `serde`, `serde_json` | `decide` split into `read_decide_inputs`, which reads a recording folder into a `DecideInputs` value, and the pure `decide_doc` (K5), with decide's three replay flags (S27); `Args::rest`, which `lazymkvctl` uses beside dev's existing `dispatch` (S85); since pull request 3, `forms::read_forms`, moved from `lazymkv-ctl` so that the engine's relay reads words as `lazymkvctl` does (W24); since pull request 4, the stale-copy gate `stale` and `census` (design part 4.1's `dev` row amended to `core`, `ocr` (R-A5) and `clients`, T4-R23) |
 
 The disc snapshot's pure part is `core::snapshot`, and its file input and output is `tools::snapshot`; `capture disc`
 prints and writes the same bytes as before, which `crates/capture/tests/disc_snapshot.rs` pins. Amended at review
@@ -128,6 +156,29 @@ its TLS stack waits for pull request 4. `lazymkv-platform` enables 21 of the cra
 mini PC's cargo cache already held both crate files, so the first `--locked` build downloaded nothing; their hashes
 equal the checksums the owner approved.
 
+On 2026-11-04 the owner approved pull request 4's crate list, read from crates.io at Task 0, and on 2026-11-04 the
+`Cargo.lock` delta, read again on 2026-11-04: `ureq` 3.5.0 (MIT OR Apache-2.0), `base64` 0.23.1 (MIT OR Apache-2.0),
+`bytes` 1.12.1 (MIT), `cc` 1.9.0 (MIT OR Apache-2.0), `find-msvc-tools` 0.1.15 (MIT OR Apache-2.0), `getrandom` 0.2.17
+(MIT OR Apache-2.0), `http` 1.5.0 (MIT OR Apache-2.0), `httparse` 1.10.1 (MIT OR Apache-2.0), `log` 0.4.34 (MIT OR
+Apache-2.0), `once_cell` 1.21.4 (MIT OR Apache-2.0), `percent-encoding` 2.3.2 (MIT OR Apache-2.0), `ring` 0.17.14
+(Apache-2.0 AND ISC), `rustls` 0.23.46 (Apache-2.0 OR ISC OR MIT), `rustls-pki-types` 1.15.1 (MIT OR Apache-2.0),
+`rustls-webpki` 0.103.16 (ISC), `shlex` 2.0.1 (MIT OR Apache-2.0), `subtle` 2.6.1 (BSD-3-Clause), `untrusted` 0.9.0
+(ISC), `ureq-proto` 0.6.5 (MIT OR Apache-2.0), `utf8-zero` 0.8.1 (MIT OR Apache-2.0), `wasi`
+0.11.1+wasi-snapshot-preview1 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT), `webpki-roots` 1.0.10
+(CDLA-Permissive-2.0), `windows-sys` 0.52.0 (MIT OR Apache-2.0), `windows-targets` 0.52.6 (MIT OR Apache-2.0),
+`windows_aarch64_gnullvm` 0.52.6 (MIT OR Apache-2.0), `windows_aarch64_msvc` 0.52.6 (MIT OR Apache-2.0),
+`windows_i686_gnu` 0.52.6 (MIT OR Apache-2.0), `windows_i686_gnullvm` 0.52.6 (MIT OR Apache-2.0), `windows_i686_msvc`
+0.52.6 (MIT OR Apache-2.0), `windows_x86_64_gnu` 0.52.6 (MIT OR Apache-2.0), `windows_x86_64_gnullvm` 0.52.6 (MIT OR
+Apache-2.0), `windows_x86_64_msvc` 0.52.6 (MIT OR Apache-2.0), `zeroize` 1.9.1 (Apache-2.0 OR MIT), and the path edge
+`lazymkv-dev -> lazymkv-clients` (Owner decision 25). The lock's package count went from 46 to 79. Only
+`lazymkv-clients` depends on `ureq`, with default features off and rustls on the ring provider (design parts 4.7, 8.1).
+Each crate is the newest release published on or before 2026-10-21, the owner's plan-time cutoff, so `ureq` 3.5.1 and
+four other releases under 14 days old were declined, and the second reading found no difference from the first. Two
+licence terms are new to the lock, BSD-3-Clause (`subtle`) and the LLVM exception (`wasi`), and both were read out
+before the second yes. `windows-sys` now has two versions in the lock, 0.52.0 for `ring` and 0.61.2 for
+`lazymkv-platform`. The mini PC's first `--locked` build downloaded 9 crates, all in the delta, and asked for no tool
+beyond the MSVC (Microsoft Visual C++) tools already there.
+
 ## Rulings
 
 The plan of pull request 2 recorded the rulings S1 to S88: S1 to S54 in its Rulings section, under the group headings
@@ -135,7 +186,8 @@ below, and S55 to S88 in the tasks that settle them. Each task also recorded rul
 pre-flight rulings PF-1 to PF-34 were made after a check of the plan, before execution, and the rulings made during
 execution follow them. Each line says what was decided and, where it was recorded, why and the cost if wrong. Pull
 request 3's plan recorded the planner's rulings W1 to W28 and, in its tasks, rulings numbered T3-<task>-<letter>. They
-follow pull request 2's, with the owner's decisions of pull request 3 and its rulings made during execution.
+follow pull request 2's, with the owner's decisions of pull request 3 and its rulings made during execution. Pull
+request 4's plan recorded the planner's rulings T4-R1 to T4-R23 and, in its tasks, rulings numbered T4-<task>-<letter>.
 
 ### The plan's rulings (S1 to S54)
 
@@ -859,6 +911,162 @@ owner's yes before it was built; each stands until the owner overturns it.
 
 The owner may overturn any of them.
 
+### Pull request 4: the planner's rulings (T4-R1 to T4-R23)
+
+The planner's rulings of 2026-11-04 (the plan's Owner prerequisites item 26), where the design leaves the letter open;
+each names, in the plan, the task that builds it. On 2026-11-04 the owner answered the four that asked a yes (T4-R15,
+T4-R17, T4-R19 and T4-R21), overturned T4-R17, and let every other ruling stand.
+
+- T4-R1 (status words, design part 7.1). `lookup-status.txt`'s keys are `dischash`, `discid`, `search` (the cleaned name), `search-tagged` (J8's second search), `search-entry` (S47), `tmdb <kind>/<id>` (the record) and `season-<n>`, each first word unique so that dev's `lookup_statuses` holds, and `job.log`'s `lookup <word>: ...` lines use the same words, the record's staying `tmdb record`. R23.2's test guard counts per kind: every TheDiscDB, record and season URL of a scenario's merged `http.json` needs a status line of its kind, the search URLs at least as many `search`, `search-tagged` or `search-entry` lines, no line may end in `000`, and a URL under neither root (a webhook) needs none.
+- T4-R2 (one search file). `tmdb-search.json` holds the page the plan reads: the entry-title page when core's `entry_search_title` names a title, else the merged name page, its `queries` saying which; once a title is named, a name search's answer updates the book but never writes the file, and `rebuild_book` reads the file as the entry page when an answered `search-entry` line is there. Amended during execution by T3-R1 and T3-R2, below.
+- T4-R3 (partial J8). The two name searches are two lookups, TMDb stays pending until both answer, and the file is written with the cleaned page and one query, then rewritten merged with both queries.
+- T4-R4 (seasons). With a parsed season, that season only, fetched even when the record does not list it (a 404 is a miss); with none, every season the record lists, season 0 included (design part 8.2 item 5's letter), while spec 8.1's runtime check still leaves season 0 out. Each answer's episodes are spliced into `tmdb-record.json`, and no season file is saved.
+- T4-R5 (the entry search's query). The entry's title alone (S20: `query` is the only parameter); core checks the year.
+- T4-R6 (the remembered identity in the chain). A round's `ChainInputs.remembered` is the TMDb identity of the job's own `remembered.json` copy when it exists (V14), else of the data folder's `remembered/<FP>.json`, whose inner fingerprint must match, ASCII case ignored; a refused file gives none, and the round writes the `engine.log` line Plan writes.
+- T4-R7 (stale). A copy is stale when its `fetched_at` is missing or malformed, or when today is later than `fetched_at` plus six calendar months, the day clamped to the month's last day (2026-08-31 plus six months is 2027-02-28); a `fetched_at` after today is fresh, and a malformed `today` makes nothing stale. A missing `fetched_at` makes a copy stale, and a missing copy under a `200` status line counts as deleted, only in an engine job folder (one holding `state.json`). The cleanup deletes only a copy whose `fetched_at` reads as a date more than six months old.
+- T4-R8 (restart stays offline). `rebuild_book` reads a stale or deleted TMDb copy as `Pending { Stale(<file>) }`, so the engine's start sends no request (design part 4.4) and the next round or refetch asks again.
+- T4-R9 (where the engine refetches). Before every Plan (a job's first finds its copies fetched that day and asks nothing), before every Decide, and on the relay's own thread before `child_words`, with the TMDb ID from the plan in `state.json` and the queries from the file or, for a deleted page, `core::lookup::search_queries`. The relay's exit 3 is a `command_output` line `lazymkvctl: <reason>` on standard error, then `ok {"exit_code": 3}`, and `retune --jobs` keeps W25's `RETUNE_WAITS` refusal (exit 2); its exit 3 arrives with pull request 5.
+- T4-R10 (dev's fetch). `Ctx` gains `http`, which only `Ctx::with_live_transport`, called by the two binaries' `main`, sets to `UreqTransport::new()`; `TMDB_TOKEN` is read from `ctx.env`. The gate sits at the `plan`, `decide` and `retune` command entries only, so the engine's in-process use of dev's library never fetches, and a folder holding `state.json` (an engine job folder) and a `--tmdb-search` or `--tmdb-record` file given by hand are read as they are.
+- T4-R11 (the cleanup's schedule and reach). `EngineConfig.cleanup_minutes` (None in tests, `Some(60)` in the binary) drives a thread of its own, not `Services.timers`; the owner thread builds the pass's job list, and the cleanup thread deletes after `ShareConnector::reach` of the job's own settings' `staging_root` (ENG-19). A job whose book a round holds is skipped that pass, only `<32 lower-case hex>-<n>` folders are deleted, and `engine.log` gets a `cleanup: <job id>: ...` line for each deleted copy, each deleted staging folder and each staging folder not reached.
+- T4-R12 (transport). `HttpTransport` gains `post` and `connect(host, port)`; no redirect is followed (a 3xx is `Status(3xx)`, so a bearer token never reaches another host), no proxy is read from the environment, an answer over 8 MiB is `Unreachable(BODY_TOO_LONG)`, errors use a fixed vocabulary, and a POST carries `Content-Type: application/json`, without which Home Assistant leaves `trigger.json` empty.
+- T4-R13 (notifier). With both URLs unset nothing is logged (design part 8.6: "skipped"). A failed channel's reason is exactly one of `<name>: HTTP <n> after 3 attempts`, `<name>: no answer within 10 s after 3 attempts`, `<name>: <transport words> after 3 attempts` or `<name>: <outcome> after <n> attempt[s] (the engine was stopping)`, several joined with `"; "`. At stop the sink skips every wait and gives each channel one attempt per queued notification, and `EngineHandle::stop` waits at most `NOTIFY_DRAIN_S` (15 s) for the notifier.
+- T4-R14 (the self-test's webhook checks). `ha_webhook_url` then `webhook_url`, after `tmdb_token`; an unset URL is ok (`not set; its notifications are skipped`); the check is a TCP (Transmission Control Protocol) connection to the URL's host and port within 10 s, with no TLS handshake, and its details show `<host>:<port>` only.
+- T4-R15 (a webhook value's shape). `secret_set` refuses a webhook value that is not an http or https URL with a host, with `<name> could not be stored: the value must be an http or https URL with a host`, never echoing it; an addition beyond the sources, so the owner's yes was asked: yes, 2026-11-04.
+- T4-R16 (W26's doubles). `NoDelivery` and `NO_DELIVERY` are removed (by Task T4-17, with the binary's change), `OfflineTransport` stays as a test double with `OFFLINE = "the offline transport asks nothing (a test double)"`, and `Harness::use_binary_services` becomes `use_offline_services`.
+- T4-R17 (dev's readers). `plan`'s reader and `census` read TheDiscDB answers with an S46 reader of their own and read any `search`, `search-tagged`, `search-entry` or `season-<n>` key that is present and neither `200` nor `404` as TMDb pending, whether or not `--tmdb-search` is given (SR8 unchanged); `hit_rate::lookup` was to stay the Python port. Overturned by the owner on 2026-11-04: `hit_rate::lookup` is aligned with S46 too, and `hit-rate`'s pinned lines are re-pinned where they change (none changed over the clone, Task T4-15).
+- T4-R18 (4 MiB). `lazymkvctl` checks the whole serialised request line against `MAX_LINE_BYTES` before connecting, for every command, `secret set` included, and exits 2 with `REQUEST_TOO_LONG`.
+- T4-R19 (live records). A shape record replaces every scalar with its JSON type name, keeps objects' keys, and turns an array into a one-element array of its elements' merged shape; the live tests date their records, and the slim records' `fetched_at`, with the UTC (Coordinated Universal Time) date, since `clients` has no `platform` edge; the replay of saved records lives in `clients`' tests only, a narrowing of design part 8.5's "The core and clients tests replay the saved records", so the owner's yes was asked: yes, 2026-11-04.
+- T4-R20 (the several-playlist item). Pull request 4 closes, on CI, the identified case of pull request 3's ultra-high-definition (UHD) discs with several feature-length playlists: synthetic discs with two feature-length playlists and with three of the same length, each with a TheDiscDB record whose `MainMovie` item names the main playlist, rip that one title and file. The unidentified case stays open: a disc with several same-length playlists that TheDiscDB does not know, identified by TMDb alone, still has no main-title pick and plans copy mode (design part 5.5, phase 3).
+- T4-R21 (the unwritable remembered copy, the second half of the V14 item). Accepted as V14 left it, with no code: Decide reads only the job's own copy (R-B1), so a copy that cannot be written plans with the remembered identity and titles, decides without the track overrides, and the job's `engine.log` line names the failure, pinned by `an_unwritable_remembered_copy_decides_without_overrides_and_logs_it`; a narrowing of engine.md's V14 item, so the owner's yes was asked: yes, 2026-11-04.
+- T4-R22 (the census). The main title is the longest by seconds, the lower number on a tie; an unknown title prints `?`; the English count takes `eng` streams only and leaves out derived-forced-only ones; a disc is UHD when `meta.json`'s `format` is `bluray` and the main title's height is 2000 or more; a recording without `scan.txt` is listed with `?` columns (exit 0), and an unreadable file exits 2 (hit-rate's crash rule). The test's recordings are built at test time from public files under `corpus/`, and no test reads the clone.
+- T4-R23 (design part 4.1's crates table). The `dev` row's dependencies become `core`, `ocr` (R-A5) and `clients` (Owner decision 25), recorded in the crates table above; the design file stays unedited.
+
+### Pull request 4: the task-level rulings
+
+Each task of pull request 4's plan recorded its rulings beside its steps, named `T4-<task>-<letter>`; only Task T4-4
+recorded one.
+
+**Task T4-4** (TV records and their seasons)
+- T4-4-a. A `200` season answer that is no season is unparsed, never a season with no episodes: `parse_season_answer` gives `<shown>: the season answer has no episodes` when `episodes` is absent or null, and serde's sentence for another value that is not an array.
+
+### Pull request 4: the owner's decisions
+
+The plan's owner decisions, with the owner's answers: A1 to A11, taken on 2026-11-04 in the brainstorming before the
+plan, and items 12 to 25, which the plan's readers found. The recommended option was taken wherever there was one,
+except for item 14.
+
+- A1 (the new crates): `ureq` with rustls on the ring provider and `webpki-roots`, default features off except TLS; yes at plan time to the crate list read from crates.io, the variant of releases at least 14 days old (33 crates, 46 to 79 packages; the newest variant, with `ureq` 3.5.1 and four other releases under 14 days old, declined), and yes before the fetch to the hand-written `Cargo.lock` delta, read again on the branch with no difference (The Cargo.lock delta, above), 2026-11-04
+- A2 (Dependabot first, toolchain held): the five open Dependabot crate bumps merged before the branch (#13, #11, #10, #12 and #9, which left `main` at `891a0e7`), so the lock delta is only pull request 4's crates; the rust-toolchain bump to 1.99.1 (#8) waits for its own yes, and pull request 4 builds on 1.99.0, 2026-11-04
+- A3 (the mini PC run): one real movie disc through the deployed desktop task, identified live, ripped to the staging share and filed into the test library, with the Home Assistant webhook firing; design part 12.7's full checklist stays with pull request 6, 2026-11-04
+- A4 (channels): Home Assistant only: `ha_webhook_url` set for the run, `webhook_url` left unset and its path covered by tests on the recorded transport, 2026-11-04
+- A5 (TV): the lookup side only, a TheDiscDB TV record's `/tv/{id}` fetch, the season answers and `merge_season`; TV filing, `tv_root` and season sessions stay phase 4, and a TV disc is held with no path (design part 6.6), 2026-11-04
+- A6 (the TMDb token): the owner enters it at the mini PC's elevated console with `lazymkvctl secret set tmdb_token` on standard input, and nobody else types or sees it; `TMDB_TOKEN` stays set in the mini PC's environment for the live tests and local dev runs (design part 15 item 8), 2026-11-04
+- A7 (the Home Assistant automation): the controller drafts the webhook-trigger automation, a persistent notification carrying each event's fields, shows it to the owner and creates it through the session's Home Assistant connector only after the owner's yes; the webhook URL, a secret, reaches the engine by the owner's hand, 2026-11-04
+- A8 (the disc): no census now; the controller checks the owner's titles on thediscdb.com and picks a movie TheDiscDB does not know, so the search and the record fetch both run live, 2026-11-04
+- A9 (the census report): `lazymkv-dev census` joins pull request 4, one line per recorded disc under the evidence clone, read with the existing readers, tested on public files and never on `corpus/owner` (RP21), 2026-11-04; the census run over the clone at Task T4-20 Step 11a: no, 2026-11-06
+- A10 (census sessions): a later census session stops the engine with `lazymkvctl stop` before it and starts the task with `Start-ScheduledTask lazymkv-engine` after, both over SSH, each recorded here; none ran inside pull request 4, 2026-11-04
+- A11 (process): the plan written by a reader-architect-drafter-critic workflow, the branch `phase-2-live-lookups` from `main` after A2's merges, the pull request a draft from the first task's push, executed subagent-driven, one signed commit per task with no attribution line, every cargo command through `scripts/box.sh`, one at a time, 2026-11-04
+- 12 (the disc and step 10, S32): recommended: the controller picks the disc among the owner's titles TheDiscDB does not know, one that lists at most one English subtitle track and no closed captions on a public disc listing, and says so when proposing it, 2026-11-06
+- 13 (a hold in the run): recommended: a `NeedsReview` hold is approved unchanged with `lazymkvctl approve` and recorded as a finding; the job was never held, 2026-11-06
+- 14 (who sees the webhook ID, A7): not the recommended placeholder: the controller creates the automation with the real webhook trigger through the connector, the owner accepting that the ID appears in the session, and the URL still goes in only through `lazymkvctl secret set ha_webhook_url` at the console, 2026-11-06
+- 15 (typing the token at the console): recommended: `$env:TMDB_TOKEN | C:\lazymkv\run\lazymkvctl.exe secret set tmdb_token` in PowerShell at the elevated console, which shows nothing, and the webhook URL the same way, 2026-11-06
+- 16 (reading Home Assistant's state for the evidence): recommended: the controller reads Home Assistant's persistent notifications through the connector as the run's proof, never an automation trace, 2026-11-06
+- 17 (the live records' place and copy, design part 8.5): the folder `<LAZYMKV_EVIDENCE>\live-lookups\<yyyy-MM-dd>\` as recommended, and the controller, not the owner, copies the records into the evidence clone with `scp -r` and makes the signed commit there; the live tests run once, at Task T4-20 Step 2, and again only if a parser changes, 2026-11-04
+- 18 (what the notes name, A3): recommended: no film title or TMDb ID ("a movie disc TheDiscDB does not know"), and `<job id>`, `<film folder>` and `<ha host>` in place of the job ID, the film folder and the Home Assistant host, 2026-11-06
+- 19 (the desktop task's settings and the test library): recommended: pull request 3's `%ProgramData%\lazymkv\settings.json` reused unchanged, checked with `lazymkvctl settings get`, and experiment 9's clips left in the test library, 2026-11-06
+- 20 (the redeploy): recommended: pull request 3's Owner decisions 3 and 13 carry into pull request 4, and stopping the pull request 3 engine with `lazymkvctl stop` over SSH before the redeploy needs no further yes, 2026-11-06
+- 21 (pull request 3's several-playlist UHD discs on the mini PC): recommended: the live check is skipped, and Task T4-18's CI scenario stands as the evidence, 2026-11-06
+- 22 (the cleanup before the tuning evidence exists): recommended: a `Filed` job whose own settings have `keep_tuning_evidence` on counts as evidence-pending, so pull request 4's cleanup deletes none of its staging data, 2026-11-04
+- 23 (dev's local refetch and the evidence clone): recommended: dev's `plan`, `decide` and `retune` fetch a stale clone copy again with `TMDB_TOKEN` and replace it in place, and the owner commits or reverts it in the clone, 2026-11-04
+- 24 (census and stale copies): recommended: `census` is a report, never fetches, never exits 3 for a stale copy, and prints the title it reads, 2026-11-04
+- 25 (the path edge `dev -> clients`): yes: `lazymkv-dev` gains `lazymkv-clients` (Ruling T4-R23), 2026-11-04
+- Besides these, the plan's approval: yes, execute it subagent-driven (A11), after the owner's five merges of A2, 2026-11-04; and item 26's rulings: T4-R15, T4-R19 and T4-R21 yes, T4-R17 overturned, every other one standing, 2026-11-04 (Pull request 4: the planner's rulings, above)
+
+### Pull request 4: rulings made during execution
+
+The controller of the plan's execution made these while the tasks ran, from 2026-11-04 to 2026-11-06. The ones named PF4
+answer a pre-flight check of the plan (2026-11-04), which found 58 findings, 7 of them blocking, each ruled and the
+plan's text fixed before Task T4-1 committed it; the ones listed here change what the plan's tasks build, test or ask,
+and the others settled the plan's wording, anchors and counts only. The others keep the names of the execution's ledger:
+`T<task>-R<n>` for a finding of a task's review, `T<task>-M<n>` for a minor one, and `T<task>-CI` or `T-CI-<n>` for a CI
+run, where `<task>` is the task's number in this plan (T3-R1 is a ruling on Task T4-3, not a pull request 3 name). Each
+line says what was decided and, where it was recorded, why and the cost if wrong.
+
+**The pre-flight check**
+- PF4-1 (Task T4-1's version pick, blocking). Task T4-1 Step 1 reads crates.io with `lock_delta.py --published-by 2026-10-21`: each crate is the newest release, neither yanked nor a prerelease, published on or before 2026-10-21, the owner's plan-time cutoff, so `ureq` is 3.5.0, and the plan-time list's `utf8-zero` stands in place of `utf-8`, with no `fnv` (PF4-3). Cost if wrong: rework of Task T4-1.
+- PF4-22 and PF4-23 (Task T4-10's fixtures, blocking). The refetch test gives `plan` a TMDb identity as plan's existing tests with a TheDiscDB hit do (a `dischash 200` line and a record naming `"tmdb": "6537"`), and the copy without `fetched_at` is a record `parse_recorded` accepts, so both tests prove what their names say. Cost if wrong: rework of Task T4-10.
+- PF4-36 (Task T4-18's bearer assertion, blocking). The refused search is asked in every round before AwaitingLookup, so `a_new_token_reaches_the_next_round_without_a_restart` asserts that the last bearer is the new token, every earlier one the old token, and that there are at least two.
+- PF4-37 (Owner decision 17's answer, blocking). The controller copies the live records into the evidence clone with one `scp -r` and makes the signed commit there, touching only the new folder, and no subagent reads or writes the clone; the plan's Global Constraints, Task T4-20 Step 2 and How to run it say so.
+- PF4-49 (Task T4-9's `rebuild_book` rule against the restart tests, blocking; re-ruled after the plan's re-check). T4-R7 stands; core's `testsupport` writers of slim pages gain `"fetched_at": "2026-10-23"`, the fixed test date, in Task T4-8, and `a_200_whose_saved_file_does_not_parse_is_pending_and_no_line_is_not_asked` is re-pinned to `Pending { Stale(..) }` and renamed, since a copy whose `fetched_at` cannot be read is stale in a job folder and fetching it again is the remedy. Cost if wrong: one test's name and reason text.
+- PF4-50 (Task T4-9 against `a_missing_replay_file_adds_no_flag`, blocking). Under T4-R9 a deleted TMDb copy whose status line says `200` is fetched again before the relay's words, so the test splits into `a_missing_tmdb_copy_is_fetched_again_before_the_words` and `a_missing_replay_file_outside_the_lookups_adds_no_flag`.
+- PF4-8 to PF4-12 and PF4-38 (the T4-R17 overturn). Task T4-15 aligns `hit_rate::lookup` with S46 (`Ok(None)` from `parse_dischash` is a miss), renames `hit_rate_a_200_answer_that_is_not_a_disc_record_is_a_failure` to `..._is_a_miss`, and re-pins `hit-rate`'s lines where they change; the plan's Not covered line on `hit-rate` is removed.
+- PF4-18 (the census's object audio). The column reads the distinct object formats of the main title's audio streams, Atmos before DTS:X, each once.
+- PF4-29 (`quiet_message` and the cleanup). While the engine stops, `quiet_message` handles `Msg::CleanupDone` as the normal handler does and drops `Msg::Cleanup`.
+- PF4-35 (`secret_host`). No second URL reader: `secret_host` calls `lazymkv_clients::webhook_target`, so it is None for a URL that is not http or https.
+- PF4-40 (Task T4-17's native whole job). The test waits for the `filed` notification, as `whole_job.rs` does, before it asserts the list.
+- PF4-45 (Task T4-19's test that runs on CI). It only checks that the public ID files exist and name the IDs; no body is replayed through a transport, so S69 is untouched.
+- PF4-46 (the UTC date). The date arithmetic moves into `lazymkv_core` as `civil_date`, which dev's `civil_time` and the live tests call, rather than a second copy.
+- PF4-47 (R23.2's guard, re-ruled after the plan's re-check). The guard counts per kind, as T4-R1 says, and its test adds the case its name claims: a URL under neither root needs no status line. Cost if wrong: flaky whole-job tests.
+- PF4-53 (Task T4-9's tests). Each test fails before Task T4-9's code: the refetch tests assert that the record URL's request count grew by one, and the restart test reads the stale reading's own observable.
+
+**Task T4-2**
+- T2-M1 (no byte pin on the one-page file the chain writes). Carried into Task T4-3 as a test: a cleaned-only round's saved `tmdb-search.json` equals `slim_search` over the raw body, pretty and with a final `\n`. Cost if wrong: one extra test in Task T4-3's commit.
+- T2-M2 (a cleaned 404 beside a tagged 200 leaves `answers.search` None). The plan stands, parked for the owner: TMDb's `/search/multi` answers 200 with an empty list for no results, and both searches share the endpoint, so the split is implausible. Cost if wrong: such a disc decides with no search candidates and goes to the owner by hand.
+- T2-M3 (an untested rebuilt `NotAsked` tagged search, and the tagged-before-cleaned order). Parked for the final review of the branch.
+
+**Task T4-3**
+- T3-R1 (amends T4-R2). Both name-search saves are gated on no entry page in hand, so the name pages stay on disk until an entry page replaces them; before it, an entry search that failed left `search 200` with no file, and every restart asked TMDb again. Cost if wrong: one extra file write per round before the entry page lands.
+- T3-R2. When the entry title is no longer named, a search answered `200` with no page in hand (a restart read the file as the entry page) is reset to not asked, so the name pages are fetched again, pinned by a chain test. Cost if wrong: one repeated name search after a rare restart.
+- T3-R3. The status save that drops the `search-entry` line once TheDiscDB names the record is pinned by a chain test.
+
+**Task T4-4**
+- T4-M1. The result of `merge_parsed_season` is checked by a `debug_assert` stating the invariant (added in Task T4-5); release behaviour is unchanged.
+
+**Task T4-5**
+- T5-CI. Windows' red run on `7c8141b` (a hard 3 s bound in `owner::tests`, a file the branch does not touch, on a slow runner) is a timing flake, not the task's: the failed job was run again, a run the next push cancelled, and Windows passed on Task T4-6's `084cc3b`, whose run covers both commits. Cost if wrong: a real regression hides behind a flake.
+
+**Task T4-6**
+- T6-M1. `webhook_target` accepted a `+`-signed port, which a URL parser refuses, so the self-test could call reachable what the POST refuses; since Task T4-7 a port must be non-empty ASCII digits.
+- T6-CI. The macOS job of `084cc3b` never got a runner (GitHub's capacity, not the code) and was run again.
+
+**Task T4-7**
+- `04ceb92` was pushed while `084cc3b`'s macOS run still waited for a runner, since every pushed commit gets its own macOS run and the new run covers both tasks.
+- T7-CI. Two Windows failures on `04ceb92` were unscaled 5 s "does not block" bounds in `engine_ipc.rs`'s stalled-share tests, untouched on the branch, on a runner that took 288 s for a 60 s suite; the job was run again and passed. Cost if wrong: a real regression hides behind a flake.
+
+**Task T4-9**
+- T9-R1. After a search refetch with `search-tagged 200` on disk, `refetch_stale` also sets `answers.tagged` to the refetched page, the merge of both queries, so a later save of `tmdb-search.json` keeps the tagged query; pinned by a unit test.
+- T9-R2 (found on Task T4-11's CI run). Three of Task T4-9's file-phase tests read the failure event right after waiting on `state.json`, which `Store::persist` writes before it appends the event's line, so they now wait on the event itself. Cost if wrong: a test-only change.
+
+**Task T4-10**
+- T10-R1. `a_copy_without_fetched_at_outside_a_job_folder_is_read_as_it_is` passes `--allow-unmeasured` to `retune`, so the audio harness's own exit 3 over synthetic evidence cannot collide with the gate's. Cost if wrong: one flag in one test.
+- T10-R2. `retune` printing the fetched line for each refetched copy, beyond the brief, is accepted: standard error only, as `plan` and `decide` do, and never reached by the tests without a token or the goldens.
+
+**Task T4-11**
+- T11-R1. The tests' unshaped job folder name is an upper-case form of an ID with a hex letter, since the brief's ID had none and so was still a valid job ID. Cost if wrong: one test value.
+- T11-R2. The two cleanup harness tests wait on the `engine.log` line, since a pass deletes before it logs. Cost if wrong: a test-only change.
+
+**Task T4-12**
+- T12-R1. `stop_returns_within_the_drain_bound_while_a_webhook_hangs` bounds the restart by `NOTIFY_DRAIN_S` plus 10 s, unscaled, since the span includes the restart's start, and the test opens its gate before the assertion, so a failure never leaves two notifier threads parked.
+
+**Task T4-13**
+- T13-CI. Windows' red `owner::tests` run on `845a687`, in tests untouched on the branch, was a starved runner; the job was run again and passed.
+- T13-CQ. CodeQL's one alert, cleartext logging in `the_webhook_check_shows_only_host_and_port`, which formatted a loop variable named `secret` holding sentinels into a panic message, is fixed by naming the variable `needle` (`5907d72`); CodeQL then read 0 alerts.
+
+**Task T4-15**
+- T15-R1. The port-mapping guard pins the renamed `hit_rate` test, so `docs/phase1/rust-port-tests.md` names it `hit_rate_a_200_answer_that_is_not_a_disc_record_is_a_miss`, the Python column unchanged; `hit-rate`'s pinned lines did not change over the clone, so none was re-pinned.
+
+**Task T4-17**
+- T-CI-5. Ubuntu's red run on `f061544` was `a_rip_again_beside_a_kept_lookup_pending_leaves_it_to_its_refeed_timer` reading its transition line right after waiting on `state.json`, T9-R2's race in an earlier test; it waits on the line now (`8b7f2d4`), and a sweep of that race fixed two more tests (`1d88a49`). Cost if wrong: test-only changes.
+
+**Task T4-18**
+- T18-R1. The plan's synthetic TheDiscDB records lacked `segment_map`, which spec 8.3's title match needs, and its rip keys `t01-00801` and `t02-00802` did not follow spec 5's planned key, `t<plan position>-<stem>`, so the scenarios gain `segment_map` and the keys are `t00-00801` and `t00-00802`; a fixture defect, so T4-R20 and A5 hold. Cost if wrong: fixture bytes only.
+- T18-R2. The created files, the `mkvmerge -J` keys and standard output keep MakeMKV's title-number names, and only the argument check carries the plan's key.
+
+**Task T4-20**
+- T20-R1. A disc whose only English subtitle track is subtitles for the deaf and hard of hearing (SDH) qualifies under Owner decision 12, since step 10 runs only with two or more English streams, and the disc's title must have exactly one exact match on the first page of TMDb's search; of the two discs that qualified, the owner's yes named the recommended one. Cost if wrong: the run holds or lacks an identity, and Step 9 repeats with another disc.
+
+The owner may overturn any of them.
+
 ## Rulings on the open points
 
 These are the planner's rulings of 2026-10-24 on the nine points the plan left open (OPEN 1 to OPEN 9). The owner made
@@ -903,19 +1111,22 @@ The plans' "Not covered" lists, with the items the reviews of pull requests 2 an
 - a refused `LookupPending` fed from AwaitingLookup at a lookup round's end, which was not kept and left the job waiting with no timer: review round 1 of pull request 3 (R27, which also keeps a refused `LookupAnswered` or `EngineRestart` in AwaitingLookup and a refused `MakeMkvChanged` in AwaitingMakeMkv);
 - the self-test's MakeMKV check not reading `run.timed_out`: T3-19.
 
-**Pull request 4** (S40, S47):
-- `ureq`, the live shape tests, J8's tagged search and merge, and the entry-title search of design part 8.2 item 3;
-- TV (television) seasons;
-- webhook delivery and the webhook self-test check;
-- the stale-copy refetch and K15's exit 3 (until then the `command` relay's child reads the copies the job folder holds, W25);
-- the cleanup task (P4, R-B4);
-- the two divergences between the engine's lookup book and dev's readers that T16-r1 accepts: a dischash 200 whose body parses as no disc is `Miss` in the book but failed or pending for dev's `hit_rate::lookup`, and a search left pending writes `search 000`, which dev's plan reader does not read. PR 4 aligns dev's readers with S46 and teaches them the `search` word;
-- `ChainInputs` does not carry the remembered identity, so a disc whose remembered identity differs from the search's top result plans without a TMDb record for its own identity;
-- the engine never compares a remembered file's inner `fingerprint` with the disc's (`Store::remembered` checks only the format; dev's `--remembered` refuses another disc's file, so a misnamed file plans with its identity and then fails Decide with "no plan: ..."), and a remembered.json copy that cannot be written plans with the remembered identity and titles but decides without the track overrides; a copy an earlier Plan of the job left is removed then, and only one that can be neither replaced nor removed gives its own overrides to Decide (review round 1, V14; the final review's C7);
-- the live `ureq` transport must keep request headers, and so the TMDb token, out of error text;
-- a `settings set` file over 4 MiB ends with "the engine closed the connection" (exit 4) rather than the engine's own text; a size check against `MAX_LINE_BYTES` before connecting would give exit 2;
-- notification delivery (`NoDelivery` logs each notification undelivered until then, W26) and entering the TMDb token with `lazymkvctl secret set tmdb_token` (design part 15 item 8; Owner decision 16);
-- with the offline transport (W26) a disc whose scan holds several full-length playlists has no identity to pick its main title, so its plan needs whole-disc copy mode and its job fails from Scanned (P1, design part 5.5), as two ultra-high-definition (UHD) discs of pull request 3's desktop run did (one with two feature-length playlists, one with three of the same length), until pull request 4's lookups give the identity; a third disc of that run also failed from Scanned with the copy-mode message.
+**Pull request 4** (S40, S47): done. Each item and where it closed:
+- `ureq`: T4-1, T4-7;
+- the live shape tests: T4-19;
+- J8's tagged search and merge: T4-2;
+- the entry-title search of design part 8.2 item 3: T4-3;
+- TV seasons: T4-4 (filing stays phase 4, A5);
+- webhook delivery and the webhook self-test check: T4-12, T4-13, T4-17;
+- the stale-copy refetch and K15's exit 3: T4-8 to T4-10 (`retune --jobs` keeps W25's refusal);
+- the cleanup task (P4, R-B4): T4-11 (Owner decision 22's interim);
+- the two divergences between the engine's lookup book and dev's readers that T16-r1 accepts: T4-15 (`hit-rate` aligned with S46 too, T4-R17 overturned by the owner on 2026-11-04);
+- `ChainInputs` and the remembered identity: T4-5 (T4-R6);
+- the remembered file's inner `fingerprint`: T4-5, and the remembered.json copy that cannot be written accepted as T4-R21;
+- the token kept out of the live transport's error text: T4-7;
+- the 4 MiB check of a `settings set` file: T4-14 (T4-R18);
+- notification delivery and `secret set tmdb_token`: T4-12, T4-14, T4-17, the token entered by the owner at T4-20;
+- the several-playlist UHD discs: T4-18 for an identified disc (T4-R20), the unidentified case open below (Phase 3).
 
 **Pull request 5:**
 - step 10, step 10a, OCR (optical character recognition), the evidence trees, `probe-summary.json` and the `ffmpeg` driver;
@@ -927,17 +1138,20 @@ The plans' "Not covered" lists, with the items the reviews of pull requests 2 an
 - `lazymkvctl` making retune's other path flags (`--snapshot`, `--compare`, `--text`, `--evidence`) absolute once `retune --jobs` is relayed and its `--evidence` form is settled (review round 1 of pull request 3, V10);
 - `lazymkv-ocr.exe` and its below-normal run (`engine-task.ps1` copies it once it exists);
 - the release layout's `resources` folder in use;
-- layer 2 (real tools, MKVToolNix on CI). CI's commands stay unchanged in PR 2.
+- layer 2 (real tools, MKVToolNix on CI). CI's commands stay unchanged in PR 2;
+- design part 7.5's mirror of the cleanup's deletion into `<tuning_root>\recordings\<job id>\`, and the tuning evidence copy, after which Owner decision 22's interim ends (until then pull request 4's cleanup keeps the staging data of a `Filed` job whose settings keep tuning evidence).
 
 **Pull request 6:** `compare-job`.
 
-**Phase 3** (from pull request 3):
+**Phase 3** (from pull requests 3 and 4):
 - a share lost during File, Remux or Decide sends the job to AwaitingShare instead of failing with class `Unknown` (V7 option b);
 - the `path_collision` review that takes over L7;
 - a `secret unset` command;
 - listing stored share names (S77 stays);
 - `WNetCancelConnection2W` for lazymkv's deviceless connections, which live until logoff;
-- a time bound on a share call (pull request 3 only moves the calls off the owner thread).
+- a time bound on a share call (pull request 3 only moves the calls off the owner thread);
+- a disc with several same-length playlists that TheDiscDB does not know: identified by TMDb alone, it has no main-title pick and plans copy mode (T4-R20);
+- the reviewed identity (spec 11) carried in `ChainInputs`.
 
 **Phase 5:**
 - `Autostart` and the logon trigger, through Task Scheduler's Component Object Model (COM) interface (design part 3.9);
@@ -985,6 +1199,14 @@ request 3, R27).
 - once lazymkv's stored credential has connected a share, the deviceless connection lasts for the logon session, so later `reach` calls get in through it and `access` reports "the session's access" until logoff (`WNetCancelConnection2W` is phase 3's, above);
 - `testutil::cue` writes `CUE: <text>` with no leading newline, so libtest's progress text can share its line, and a reader of a desktop job's log searches for `CUE:` anywhere in a line (`findstr /c:"CUE:"`), not at a line's start (Task T3-25's first drive job).
 
+**Accepted in pull request 4 and left as they are:**
+- dev commands other than `plan`, `decide` and `retune` that read `tmdb.json` (`titles`, `levels-args`, `labels`, `golden`, `census`) never fetch a stale copy;
+- a `--tmdb-search` or `--tmdb-record` file given by hand, and any engine job folder, is read by dev as it is (T4-R10);
+- dev reads a folder without `lookup-status.txt` as nothing pending where the engine's book would be pending;
+- the replay of saved live records runs in `clients`' tests only (T4-R19), though design part 8.5 names `core` and `clients`;
+- https webhook delivery and the self-signed refusal of design part 8.1 are exercised only live on the mini PC, CI posting http over loopback only;
+- `retune --jobs` keeps W25's refusal (exit 2).
+
 ## Pull request 3 on the mini PC
 
 These runs were on the mini PC, each in the session it names; no secret, account name, user SID or drive serial is
@@ -1025,9 +1247,69 @@ written, and a run that printed `skipped:` counts as not run. Each line names th
   - the desktop jobs' logs `C:\lazymkv\phase0\logs\pr3-*.txt` (review round 1 added `pr3-rr1-token.txt` and `pr3-rr1-host.txt`);
   - no Credential Manager entry and no arranged connection, since step 8 was not run.
 
+## Pull request 4 on the mini PC
+
+These runs were on the mini PC, each in the session it names; no secret, webhook ID, account name, user SID or drive
+serial is written, the owner's disc is named only as "a movie disc TheDiscDB does not know", and a run that printed
+`skipped:` counts as not run. Each line names the step of Task T4-20 it records; the job ID, the film folder, the TMDb
+ID, the title and the Home Assistant host are written `<job id>`, `<film folder>`, `<id>`, `<title>` and `<ha host>`
+(Owner decision 18).
+
+- Step 0 (Task 0 Step 4's baseline), 2026-11-04, SSH, the baseline after A2's merges on 891a0e7: N0 2897 tests listed (capture 8, clients 32, core 1716, ctl 28, dev 420, engine 155, fake-tools 314, platform 186, tools 38), 2888 passed, 0 failed, 9 ignored, 45 skipped lines; Cargo.lock 46 packages, unchanged by the run; Downloaded lines only for serde_json 1.0.154 and unicode-normalization 0.1.26 (A2's crates; the rest were cached).
+- Step 1, 2026-11-06, SSH, the workspace with the evidence junction on f62ab5c: 3052 passed, 0 failed, 13 ignored, 40 skipped: lines (PR 3's 39 and the live-lookups replay); `--list` counts 3065 tests (pr4-test-list.txt).
+- Step 6, 2026-11-06, owner, the Home Assistant automation lazymkv notifications (mode queued, max 25, one webhook trigger, POST only, local only, each event its own persistent notification) created through the connector by the controller with its real webhook ID (owner item 14); read back once (alias, mode, trigger as shown); its configuration and traces are never read again.
+- Step 2, 2026-11-06, SSH, the live shape tests on f62ab5c: 4 passed; 0 failed, no skipped: line (TMDB_TOKEN set, never printed); requests dischash/76E63EBB5B66F73B0C37BFAB59B8ABA5, discid/8D0355F530C31D44912831F8637FF65ACBCD6886, search/multi PIRANHA and PIRANHA 3D, movie/245891, tv/1437, tv/1437/season/1; the replay saved_live_records_still_parse 1 passed, no skipped: line; ten records under live-lookups\2026-11-06 (27,990 bytes); no token pattern (findstr exit 1); copied with scp and committed in the clone by the controller on 2026-11-06 as d1d7af2 (signed, only live-lookups/2026-11-06/, not pushed).
+- Step 3, 2026-11-06, SSH, the release build of f62ab5c: Finished release in 4m 30s, 0 warnings, Cargo.lock unchanged.
+- Step 4, 2026-11-06, SSH, lazymkvctl stop of the PR 3 engine (owner item 20): exit 0; status then exit 4, lazymkvctl: no engine is running.
+- Step 5, 2026-11-06, desktop task, the redeploy by engine-task.ps1 -AcceptWritableBuild (owner item 20, PR 3 decisions 3 and 13): six accepted: lines (C:\lazymkv, src, target, target\release, lazymkv-engine.exe, lazymkvctl.exe, each lets Authenticated Users write), ENGINE-TASK-DONE status=ok, exit 0; status exit 0 with no job and no problems; findstr cleanup: in engine.log prints nothing (exit 1); task lazymkv-engine Running.
+- Step 7, 2026-11-06, owner, the secrets at the elevated console (owner item 15): tmdb_token by PowerShell pipe and ha_webhook_url by paste, each exit 0 and printed nothing; nobody else typed or saw either value.
+- Step 8, 2026-11-06, SSH, status after the secrets: tmdb_token set, ha_webhook_url set with host <ha host>, webhook_url not set, no job; settings get identical to PR 3's (share roots, tool_paths, keep_tuning_evidence true, tv_root unset, tmdb_only_autofile true, auto_threshold 0.85); selftest exit 0 with eleven checks all ok (makemkvcon 2.0.0, mkvmerge 100.0, ffprobe 9.0.2, ffmpeg 9.0.2, java 1.8.0_471 as PR 3's; the three roots take a write, a rename and a delete; tmdb_token TMDb answered 200 to the token; ha_webhook_url <ha host>:8123 accepted a connection; webhook_url not set; its notifications are skipped).
+- Step 9, 2026-11-06, owner, the disc (owner items 12 and 13): the controller picked, from the owner's blu-ray.com collection, a movie Blu-ray disc TheDiscDB does not know (no release of the title at all), with one English subtitle track (SDH) and no closed captions on its public listing, whose title has exactly one exact match on TMDb's first search page; the owner's yes named it; inserted at the monitor at 10:14 with no command; status read every 2 minutes: Ripping from 10:15, Remuxing by 10:34, Filed at 10:45, never NeedsReview or Failed; the disc was ejected after the rip and taken by the owner.
+- Step 10, 2026-11-06, SSH, <job id>\transitions.jsonl new states in order: Detected, Fingerprinted, Scanned, Planned (direct), Ripping, Ripping, RipVerified, Ejected, Inspecting, Inspecting, Decided (approved null), Remuxing, Remuxing, Verified, Filed.
+- Step 10, 2026-11-06, SSH, <job id>\lookup-status.txt: dischash 404, discid 404, search 200, tmdb movie/<id> 200; no search-tagged line (the name's forms do not differ), no search-entry line, no 000.
+- Step 10, 2026-11-06, SSH, <job id>\state.json plan.identity.step: tmdb_one (spec 8.1 step 4).
+- Step 10, 2026-11-06, SSH, <job id>\job.log: "step 10a did not run in this version" present; share access lines for //unas-pro/media/lazymkv-staging/engine and //unas-pro/media/lazymkv-test-library/Movies, each "the session's access".
+- Step 10, 2026-11-06, connector, Home Assistant persistent notifications read through the connector (owner item 16): "lazymkv: disc_done: <title>" (message "the disc phase is done and the disc was ejected", event disc_done, job <job id>, time 2026-11-06T10:33:53-05:00) and "lazymkv: filed: <title>" (message "filed at //unas-pro/media/lazymkv-test-library/Movies/<film folder>/<film folder> - 1080p.mkv", event filed, job <job id>, time 2026-11-06T10:45:13-05:00); no needs_review notification; the filed path is \\unas-pro\media\lazymkv-test-library\Movies\<film folder>\<film folder> - 1080p.mkv (the film folder is the title, year and {tmdb-<id>}).
+- Step 10, 2026-11-06, SSH, engine.log: no "cleanup:" line and no "was not delivered" line from this run (the four "was not delivered ... it arrives in pull request 4" lines carry PR 3 engine timestamps from before today's redeploy).
+- Step 10, 2026-11-06, SSH, findstr /s /m for the token pattern and for /api/webhook/ under %ProgramData%\lazymkv: nothing (exit 1 each).
+- Step 10, 2026-11-06, SSH, unas-pro paths in <job id>\state.json and job.log: \\unas-pro\media\lazymkv-staging\engine\<job id>\rip\t00-00020\ (and its one .mkv), \\unas-pro\media\lazymkv-test-library\Movies\<film folder>\ and Movies\.lazymkv-partial\<job id>-t00-00020.mkv.partial; nothing outside design part 12.7's roots (no tuning path written in this run).
+- Step 11, 2026-11-06, owner, Step 11 not run: owner item 21 (the several-playlist UHD live check is skipped; Task T4-18's CI scenario stands as the evidence).
+- Step 11a, 2026-11-06, owner, Step 11a not run: the owner declined the census run (A9) when asked on 2026-11-06.
+- Step 12, 2026-11-06, owner, the leftovers, each removed only by the owner:
+  - the redeployed task lazymkv-engine;
+  - the Credential Manager entries lazymkv:tmdb_token and lazymkv:ha_webhook_url (cmdkey /delete:lazymkv:<name>; secret unset is phase 3's);
+  - the job folder %ProgramData%\lazymkv\jobs\<job id>;
+  - its staging data under \\unas-pro\media\lazymkv-staging\engine\<job id>\ (kept by Owner decision 22 until pull request 5);
+  - the tuning data under \\unas-pro\media\lazymkv-tuning\engine\ (none written by this run);
+  - the filed file \\unas-pro\media\lazymkv-test-library\Movies\<film folder>\<film folder> - 1080p.mkv in the test library;
+  - the Home Assistant automation lazymkv notifications and its two persistent notifications;
+  - the live records in the mirror until the next re-mirror (the clone keeps the owner's copy);
+  - the dated live-lookups/2026-11-06 commit in the owner's clone (kept, pushed);
+  - TMDB_TOKEN in the mini PC's environment (A6, kept for the live tests);
+  - no Step 11 job folder (Step 11 not run).
+
 ## Tests
 
-`cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of commit `5698f26`, lists 2824 tests:
+`cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of commit `f62ab5c`, lists 3065 tests:
+1726 in `lazymkv-core`, 441 in `lazymkv-dev`, 8 in `lazymkv-capture`, 342 in `fake-tools`, 186 in `lazymkv-platform`, 38
+in `lazymkv-tools`, 93 in `lazymkv-clients`, 197 in `lazymkv-engine` and 34 in `lazymkv-ctl`. The baseline is 2897 at
+`891a0e7` (Task 0 Step 4), so pull request 4 added 168: 61 in `lazymkv-clients`, 42 in `lazymkv-engine`, 28 in
+`fake-tools`, 21 in `lazymkv-dev`, 10 in `lazymkv-core` and 6 in `lazymkv-ctl`, net of the tests it replaced or removed
+(174 added and 6 removed: in `lazymkv-clients` `the_offline_transport_answers_every_url_unreachable`, in
+`lazymkv-engine` `no_delivery_refuses_every_notification_with_its_sentence` and the restart test PF4-49 renamed, in
+`lazymkv-dev` the `hit-rate` test T4-15 renamed for its miss, and in `fake-tools` the missing-replay-file test PF4-50
+split in two and `an_undelivered_notification_is_logged_with_its_reason`, replaced by `..._with_its_channel`);
+`lazymkv-capture`, `lazymkv-platform` and `lazymkv-tools` gained none, and the commit of these notes adds none. The
+junction run passed 3052 and ignored 13, the ignored list gaining `lazymkv-clients`' four live tests; on CI run
+42232388792 windows passed 3052 and ignored 13, ubuntu passed 2932 and macos 2932, each ignoring 5; CodeQL's analysis of
+`f62ab5c` found 0 results, and no alert is open.
+
+Its `skipped:` lines are pull request 3's 39 and one more, `skipped: no live-lookups folder in the evidence clone; run
+the live tests on the mini PC (design part 8.5)`, from `lazymkv-clients`' `saved_live_records_still_parse`: it ran at
+Task T4-20 Step 2.3, after the live tests had written their records, and passed with no `skipped:` line.
+
+For pull request 3, `cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of commit
+`5698f26`, lists 2824 tests:
 1716 in `lazymkv-core`, 420 in `lazymkv-dev`, 8 in `lazymkv-capture`, 293 in `fake-tools`, 158 in `lazymkv-platform`, 36
 in `lazymkv-tools`, 32 in `lazymkv-clients`, 138 in `lazymkv-engine` and 23 in `lazymkv-ctl`. The baseline is pull
 request 2's 2573, below, so pull request 3 added 251: 137 in `lazymkv-platform`, 68 in `fake-tools`, 32 in
@@ -1081,13 +1363,13 @@ Before the fix wave, at commit `3a94d84`, the list held 2487 tests, and CI run 4
 | `crates/fake-tools/tests/makemkv_driver.rs` | The `makemkvcon` drivers: the drive listing; the scan, complete or not, with a licence message, a `MSG:1009`, past its limit or hanging after its final message; the rip, with the index guard, licence and read errors, an unreachable share, the exit wait, no success summary and a title folder that cannot be listed; and the one-`makemkvcon` check; since pull request 3, a drive listing given a time limit killed when it hangs, and one without a limit still waiting for its final message (T3-19) (design parts 5.3, 5.4, 5.6) |
 | `crates/fake-tools/tests/mkvmerge_ffprobe_driver.rs` | The `mkvmerge` identification and remux, with their exit codes, the header limit and progress, and the `ffprobe` driver (design parts 5.3, 5.7, 5.11) |
 | `crates/fake-tools/tests/engine_disc_phase.rs` | The disc phase from arrival to eject: the recording and the job profile, the drive listings (one the exit wait killed among them), the `MSG:1009` fallback, a copy plan, verify failures and index drift, the waiting states, a removal mid-rip, remembered decisions, the debug logs of the tuning evidence, the scan retry and the eject; since review round 1, the verify count kept in the record, a missing mkvmerge before the scan and before the rip, a header read that fails in Ripping (scenario `movie-direct-ident-error`), a title's staging folder that cannot be made, the share causes named at CheckSpace, and a stale remembered copy that Plan removes, also when its own copy cannot be written; since pull request 3, `rip-summary.json`'s `started` between `bytes` and `elapsed_s`, kept across a restart between the rip and its verification (T3-9), and a missing staging root made at CheckSpace under an existing parent but never a missing parent, with the share access line in `job.log` (T3-17); since review round 1 of pull request 3, CheckSpace reaching staging once, with no access line for a staging share that does not answer (R11, R33) (design parts 5.4 to 5.6, 5.8) |
-| `crates/fake-tools/tests/engine_file_phase.rs` | The file phase from the slot to the filed file: lookups left pending or answered late, Decide and `decide.json`, collisions, the remux, the verification and the filing; since review round 1, title folders that cannot be read at Probe, at the remux check (with the space short too) and at Remux, and a remembered decision's track overrides in `decide.json`, read from the job's copy at the first-pass Decide; since pull request 3, a library folder that cannot be read failing Decide while an absent one still reads as no file, Decide asking the library share first, and L7's present but inaccessible folder failing File, keeping the partial, and filed by a retry once it opens (T3-18); since review round 1 of pull request 3, a library share that stops answering during Decide failing it with nothing written (R28), and a missing library root failing Remux, never created (R25) (design parts 5.7, 6.4, 6.5, 8.3, 8.4) |
-| `crates/fake-tools/tests/engine_restart.rs` | Restarts in each state of the path, torn and lost transition lines, rebuilt books and promises, and Decide's inputs read back; since review round 1, the verify count across a restart, File asking the library share first (and, on Unix only, a partial file or a final folder that cannot be read), a second recording of a read-only disc into the same job folder, a restart in Ripping with the staging share gone, and the job's remembered track overrides read back; since pull request 3, the hard-link half state tested off Windows only (T3-4), a restart into Remuxing with the library share unreachable failing Remux without writing (T3-17), and transitions not persisted fed again at the retry timer (a lost `ToolMissing { Java }` stopping its report, a Planned and a RipVerified job, an Ejected job's slot grant and its refused `LookupPending`) with a stale refeed timer starting no lookup round (T3-20); since review round 1 of pull request 3, a resumed Remux step's refined promise counted before another job's rip check (R21), and an AwaitingLookup job's refused `LookupPending`, `LookupAnswered` and `EngineRestart` kept and fed again (R27) (design part 5.10, L1, L1a) |
-| `crates/fake-tools/tests/engine_ipc.rs` | The IPC server over the in-memory transport: the snapshot, every request and its refusals, retries (after a restart too), cancels, a step that panics, the self-test, slow clients and shutdown; since review round 1, transitions that cannot be persisted (a remux result and its failure, a slot grant, a slot delivery, a restart, a cancel, and the last title's verification, passed or failed twice, over the real steps), a waiting job's disc moved to the other drive, a forced or plain shutdown beside a pulled disc's stale step, a CheckSpace panic in Decided, `settings_set` over an unreadable or an absent settings.json, and Retry after the new waits and failures (a missing mkvmerge, an unreachable staging or library share); since pull request 3, a shutdown from the engine's own handle and the wait for it, and the console mirror of `engine.log` (T3-10), a two-line share value stored and one of three lines refused without echoing it (T3-13), a stalled staging share that leaves `status`, drive events and a restart answering, AwaitingShare kept while the free space cannot be read or the staging parent is missing, and the self-test's `reach` and a tuning root it makes (T3-17), a start check or self-test listing that hangs ended at the header limit and a check the exit wait killed reported not ok (T3-19), an undelivered notification logged and a disc waiting for its lookups with the offline transport (T3-21), and `command` refused without `lazymkvctl` beside the engine, in place of pull request 2's refusal test (T3-22); since review round 1 of pull request 3, a held console that stalls neither the engine nor its stop (V5), a share secret the store refuses, named and not listed (R24), a refused `MakeMkvChanged` kept and fed again after MakeMKV recorded the change (R27), a `rip_again` beside a kept `LookupPending` or slot grant leaving it to its refeed timer (V7), and a staging root that is a file waiting in AwaitingShare (V11) (design parts 3.7, 3.8, 9.1 to 9.4) |
+| `crates/fake-tools/tests/engine_file_phase.rs` | The file phase from the slot to the filed file: lookups left pending or answered late, Decide and `decide.json`, collisions, the remux, the verification and the filing; since review round 1, title folders that cannot be read at Probe, at the remux check (with the space short too) and at Remux, and a remembered decision's track overrides in `decide.json`, read from the job's copy at the first-pass Decide; since pull request 3, a library folder that cannot be read failing Decide while an absent one still reads as no file, Decide asking the library share first, and L7's present but inaccessible folder failing File, keeping the partial, and filed by a retry once it opens (T3-18); since review round 1 of pull request 3, a library share that stops answering during Decide failing it with nothing written (R28), and a missing library root failing Remux, never created (R25); since pull request 4, an unwritable remembered copy deciding without its overrides (T4-5, T4-R21), stale and deleted copies fetched again before Plan and Decide, or failing or waiting when they cannot be, and the engine never reading `TMDB_TOKEN` (T4-9), and identified discs with two feature-length or three same-length playlists ripping only their main title and a TV disc identified through its seasons held with no path (T4-18) (design parts 5.7, 6.4, 6.5, 8.3, 8.4) |
+| `crates/fake-tools/tests/engine_restart.rs` | Restarts in each state of the path, torn and lost transition lines, rebuilt books and promises, and Decide's inputs read back; since review round 1, the verify count across a restart, File asking the library share first (and, on Unix only, a partial file or a final folder that cannot be read), a second recording of a read-only disc into the same job folder, a restart in Ripping with the staging share gone, and the job's remembered track overrides read back; since pull request 3, the hard-link half state tested off Windows only (T3-4), a restart into Remuxing with the library share unreachable failing Remux without writing (T3-17), and transitions not persisted fed again at the retry timer (a lost `ToolMissing { Java }` stopping its report, a Planned and a RipVerified job, an Ejected job's slot grant and its refused `LookupPending`) with a stale refeed timer starting no lookup round (T3-20); since review round 1 of pull request 3, a resumed Remux step's refined promise counted before another job's rip check (R21), and an AwaitingLookup job's refused `LookupPending`, `LookupAnswered` and `EngineRestart` kept and fed again (R27); since pull request 4, a restart reading a stale copy as pending and asking nothing (T4-9, T4-R8) (design part 5.10, L1, L1a) |
+| `crates/fake-tools/tests/engine_ipc.rs` | The IPC server over the in-memory transport: the snapshot, every request and its refusals, retries (after a restart too), cancels, a step that panics, the self-test, slow clients and shutdown; since review round 1, transitions that cannot be persisted (a remux result and its failure, a slot grant, a slot delivery, a restart, a cancel, and the last title's verification, passed or failed twice, over the real steps), a waiting job's disc moved to the other drive, a forced or plain shutdown beside a pulled disc's stale step, a CheckSpace panic in Decided, `settings_set` over an unreadable or an absent settings.json, and Retry after the new waits and failures (a missing mkvmerge, an unreachable staging or library share); since pull request 3, a shutdown from the engine's own handle and the wait for it, and the console mirror of `engine.log` (T3-10), a two-line share value stored and one of three lines refused without echoing it (T3-13), a stalled staging share that leaves `status`, drive events and a restart answering, AwaitingShare kept while the free space cannot be read or the staging parent is missing, and the self-test's `reach` and a tuning root it makes (T3-17), a start check or self-test listing that hangs ended at the header limit and a check the exit wait killed reported not ok (T3-19), an undelivered notification logged and a disc waiting for its lookups with the offline transport (T3-21), and `command` refused without `lazymkvctl` beside the engine, in place of pull request 2's refusal test (T3-22); since review round 1 of pull request 3, a held console that stalls neither the engine nor its stop (V5), a share secret the store refuses, named and not listed (R24), a refused `MakeMkvChanged` kept and fed again after MakeMKV recorded the change (R27), a `rip_again` beside a kept `LookupPending` or slot grant leaving it to its refeed timer (V7), and a staging root that is a file waiting in AwaitingShare (V11); since pull request 4, the cleanup run at start and each period, off the owner thread and never unasked in the harness (T4-11), an undelivered notification logged with its channel and a stop within the drain bound while a webhook hangs (T4-12), the self-test's webhook checks by host and port and a webhook value that is not an http URL refused without echoing it (T4-13), and a new token reaching the next round without a restart (T4-18) (design parts 3.7, 3.8, 9.1 to 9.4) |
 | `crates/fake-tools/tests/ctl_engine.rs` | `lazymkvctl`'s engine commands against the real engine over the in-memory transport (design part 9.6) |
-| `crates/fake-tools/tests/engine_command.rs` | The `command` relay on a stand-in `lazymkvctl` (S35, design part 9.5): the child's words and replay flags, its lines as `command_output` to the requesting client only, its exit code, one command at a time, the refusals (unknown job or title, other words, `retune --jobs`, no `lazymkvctl`, a writable folder or program), below-normal priority, and a client that disconnects (T3-22); since review round 1 of pull request 3, a relative path flag that `lazymkvctl plan --job` sends again made absolute (V10) |
-| `crates/fake-tools/tests/engine_native.rs` | Windows only: the native whole job through the real start-up sequence, pipe and client (W27), the start-up refusals (a second engine, a data folder the user owns, a held pipe name, and, before the mutex, a token that is not elevated and a `ProgramData` variable that differs from the registry's), the console mirror, and a forced shutdown from the console handler (T3-23) |
-| `crates/fake-tools/tests/whole_job.rs` | The acceptance of design part 12.6 item 2: a media-arrival event takes a synthetic movie disc to a filed placeholder file; the transitions, the notifications, the job folder and the data folder are checked exactly, `lazymkv-dev decide` over the job folder prints `decide.json` without its two extra keys (R-B1), and no request goes without a recorded answer |
+| `crates/fake-tools/tests/engine_command.rs` | The `command` relay on a stand-in `lazymkvctl` (S35, design part 9.5): the child's words and replay flags, its lines as `command_output` to the requesting client only, its exit code, one command at a time, the refusals (unknown job or title, other words, `retune --jobs`, no `lazymkvctl`, a writable folder or program), below-normal priority, and a client that disconnects (T3-22); since review round 1 of pull request 3, a relative path flag that `lazymkvctl plan --job` sends again made absolute (V10); since pull request 4, a missing TMDb copy fetched again before the words, a missing file outside the lookups adding no flag, a relayed `plan` or `decide` with a stale copy it cannot fetch exiting 3 and leaving the job alone, and the refetch running off the owner thread (T4-9) |
+| `crates/fake-tools/tests/engine_native.rs` | Windows only: the native whole job through the real start-up sequence, pipe and client (W27), the start-up refusals (a second engine, a data folder the user owns, a held pipe name, and, before the mutex, a token that is not elevated and a `ProgramData` variable that differs from the registry's), the console mirror, and a forced shutdown from the console handler (T3-23); since pull request 4, a native engine posting its notifications to the set webhook and, with none set, logging no undelivered line (T4-17) |
+| `crates/fake-tools/tests/whole_job.rs` | The acceptance of design part 12.6 item 2: a media-arrival event takes a synthetic movie disc to a filed placeholder file; the transitions, the notifications, the job folder and the data folder are checked exactly, `lazymkv-dev decide` over the job folder prints `decide.json` without its two extra keys (R-B1), and no request goes without a recorded answer; since pull request 4, a tagged name filing with both searches saved and a webhook receiving `disc_done` and `filed` for a whole job (T4-18) |
 | `crates/fake-tools/tests/replay.rs` | The stand-in extensions of design part 12.2 (stderr replay, files named by `-o`, the response counter, hang and stop, the `ffmpeg` stem) |
 | `crates/fake-tools/tests/scripts.rs` | On every system, `engine-task.ps1` names its task, run folder and `folder_sddl`'s list; on Windows, it and `platform-ignored.ps1` parse in Windows PowerShell 5.1, and `platform-ignored.ps1` names its command (T3-24, T3-25); since review round 1 of pull request 3, on Windows, `engine-task.ps1`'s functions are called alone from its syntax tree: the `-Data` check, the no-answer text and data folder, the writers check on a file, and the read-back's aliases (V13, V15, G1, R4) |
 | `crates/capture/tests/disc_snapshot.rs` | `capture disc`'s output, byte for byte, across the R-B2 move |
@@ -1097,6 +1379,10 @@ Before the fix wave, at commit `3a94d84`, the list held 2487 tests, and CI run 4
 | `crates/dev/src/cmd/decide.rs` (`mod tests`, over `crates/dev/src/cmd/decide/characterisation/`) | `decide`'s output across the K5 split against the stored documents, the reader and the pure renderer, and decide's replay flags; since review round 1, a remembered decision's track overrides, re-keyed to the rip title under the eng selection, and `replay_remembered` |
 | Each new crate's unit tests (`lazymkv-platform`, `lazymkv-tools`, `lazymkv-clients`, `lazymkv-engine`, `lazymkv-ctl`) and core's new modules (`record`, `ipc`, `robot::lines`, `ustar`, `snapshot`) | The fakes and the std helpers; the recorder, the tool lookup and the drivers' argument builders; the lookups, the recorded transport and the saved answers; the reducer loop, the store, the timers and the self-test over the scripted harness; ctl's routing and its engine commands against a scripted peer; the record and message shapes; since review round 1, in `lazymkv-engine`, persist faults, a lost transitions line, persist errors naming their file and the Windows state.json retry, a moved disc's drive, `failure_event` and a CheckSpace panic in Planned, `Store::settings_file`, the space checks' named causes and estimates, and title folders that cannot be listed or emptied; in `lazymkv-tools`, writable nav copies and a title folder that cannot be listed; in core's `record`, a title record without `verify_failures`; since pull request 3, in `lazymkv-platform`'s fakes, `FakeShares`' stall, access and free-space error, `MemoryIpc::close` and `FakeHost`'s local time, settable clock and writable paths; in `lazymkv-engine`, the accept rule, the drain and `send_waiting`, the relay's words, refusals and answer, the native start-up texts and the run folder, `NoDelivery` and the undelivered line, the steps a transition releases, a made root and the rebuilt Remux promise (T3-17-a), the share re-check's waits, `started` from the record, the fingerprint's snapshot set aside, and a film folder that cannot be listed; in `lazymkv-tools`, the tool lookup's `PATH`, `resources` and settings rules (W18); in `lazymkv-clients`, `OfflineTransport`; in `lazymkv-ctl`, `status` over a test pipe (Windows); in `lazymkv-dev`, `read_forms`; in core's `ipc` and `record`, the share credential's split and `rip_started_ms`; since review round 1 of pull request 3, in `lazymkv-platform`'s fakes, a stream that comes while `close` runs (R13), no access for an unreachable root (R22), `MemorySecrets` refusing every set (R24), and reach and free-space counters, a delayed reach answer (R11, R28, R33, R34); in `lazymkv-platform`, a write whose move fails leaving no temporary file (R17); in `lazymkv-engine`, the not-Unicode argument (R5), the console mirror's queue in `store.rs` (V5), the relay's forwarding, which waits for room (R19), `take_one` (R54), the events kept after a refused persist (R27), a released Remux promise left released by its refinement (R30), the snapshot swap's rollback and a leftover put back (V12), a root that is a file (V11), the share re-check's made staging root (R26), no free space read from a staging share that does not answer (R34), and the self-test asking a share that did not answer only once (R36); in `lazymkv-tools`, a writable `resources` program (V2) and, on Windows, a debug log that is a link (V14); in `lazymkv-ctl`, a relayed plan's or decide's relative path flags made absolute (V10) |
 | `crates/dev/tests/clone_values.rs` | Ruling RP21, now over `corpus/scenarios/` too: no scenario holds a value only the evidence clone holds |
+| `crates/clients/tests/live.rs` | The live shape checks of design part 8.5: `#[ignore]` requests to TheDiscDB and TMDb on the mini PC, the shape record, the public IDs, and the replay of the clone's saved records (T4-19) |
+| `crates/clients/src/live.rs` | The live transport over loopback listeners only: headers, status, timeout, no redirect, no proxy, the 8 MiB cap and error words that hold no URL or header (T4-7) |
+| `crates/engine/src/cleanup.rs` | The cleanup of design part 5.9 (T4-11) |
+| `crates/dev/src/cmd/census.rs` | The census over recordings built at test time from public files (A9, T4-16) |
 
 `no_scenario_holds_a_clone_value` needs the evidence clone (`LAZYMKV_EVIDENCE`) and skips without it, so the RP21
 guard over `corpus/scenarios/` runs only in the mini PC's junction run, not on CI. With the clone, on the mini PC:
