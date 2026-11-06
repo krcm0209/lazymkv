@@ -135,8 +135,9 @@ pub fn refetch_seasons(
 /// TMDb's record `id` fetched again (design part 8.4; Ruling T4-R4): a `RecordRefetch` with the parsed record and the
 /// slim `tmdb.json` and `tmdb-record.json` dated `today`; for a TV record, the seasons of Ruling T4-R4 (`[n]` for a
 /// parsed season `n`, else every season the record lists) fetched too with `refetch_seasons`, its `seasons` saying
-/// which were merged and which TMDb answered 404. Err `Status(404)` when TMDb has no such record, else the record's or
-/// a season's pending reason (`NoToken` asks nothing). Def: T4-8. Use: T4-9, T4-10, T4-11.
+/// which were merged, which TMDb answered 404, and the first pending one and those after it, not asked: the files
+/// then hold the record and the seasons merged before it (PR #15 review round 1, R2). Err `Status(404)` when TMDb has
+/// no such record, else the record's own pending reason (`NoToken` asks nothing). Def: T4-8. Use: T4-9, T4-10, T4-11.
 pub fn refetch_record(
     t: &dyn HttpTransport,
     token: Option<&str>,
@@ -159,9 +160,6 @@ pub fn refetch_record(
             None => record.seasons.iter().map(|listed| listed.season_number).collect(),
         };
         seasons = refetch_seasons(t, token, &mut record, &mut file, &asked);
-        if let Some((_, reason)) = seasons.pending.take() {
-            return Err(reason);
-        }
     }
     Ok(RecordRefetch { record, files: vec![tmdb, json_file("tmdb-record.json", &file)], seasons })
 }
@@ -310,6 +308,62 @@ mod tests {
         assert!(refetched.record.season(1).unwrap().episodes.is_empty());
         let file: Value = serde_json::from_slice(&refetched.files[1].bytes).unwrap();
         assert_eq!(file["seasons"][1].get("episodes"), None, "a missing season is not spliced");
+    }
+
+    /// SHOW with season 0 answered, season 1 answered 429 and season 2 recorded but never reached.
+    fn season_1_pending() -> RecordedTransport {
+        let t = RecordedTransport::new();
+        t.answer(&record_url(SHOW), 200, SHOW_BODY);
+        t.answer(&season_url(1437, 0), 200, season_body(0).as_bytes());
+        t.answer(&season_url(1437, 1), 429, b"{}");
+        t.answer(&season_url(1437, 2), 200, season_body(2).as_bytes());
+        t
+    }
+
+    /// PR #15 review round 1, R2: a pending season keeps the record, its files and the season merged before it.
+    #[test]
+    fn a_pending_season_keeps_the_record_and_the_seasons_before_it() {
+        let t = season_1_pending();
+        let refetched = refetch_record(&t, Some(TOKEN), SHOW, None, TODAY).unwrap();
+        assert_eq!(refetched.seasons, SeasonsFetched {
+            merged: vec![0],
+            missing: vec![],
+            pending: Some((1, PendingReason::Status(429))),
+            unasked: vec![2],
+        });
+        assert_eq!(refetched.record.season(0).unwrap().episodes.len(), 2);
+        assert_eq!(refetched.files.iter().map(|file| file.name.as_str()).collect::<Vec<_>>(), ["tmdb.json", "tmdb-record.json"]);
+        let file: Value = serde_json::from_slice(&refetched.files[1].bytes).unwrap();
+        assert_eq!(file["seasons"][0]["episodes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(file["fetched_at"], json!(TODAY));
+    }
+
+    /// PR #15 review round 1, R2 (the owner's ruling): the requests stop at the first pending season.
+    #[test]
+    fn a_pending_season_stops_the_season_requests_and_leaves_the_rest_unasked() {
+        let t = season_1_pending();
+        refetch_record(&t, Some(TOKEN), SHOW, None, TODAY).unwrap();
+        let urls: Vec<String> = t.requests().into_iter().map(|(url, _)| url).collect();
+        assert_eq!(urls, [record_url(SHOW), season_url(1437, 0), season_url(1437, 1)]);
+    }
+
+    /// PR #15 review round 1, R2: `refetch_seasons` asks the seasons it is given and splices only those.
+    #[test]
+    fn refetch_seasons_splices_only_the_seasons_it_fetched() {
+        let raw: Value = serde_json::from_slice(SHOW_BODY).unwrap();
+        let mut record = lazymkv_core::lookup::tmdb::parse_tv(std::str::from_utf8(SHOW_BODY).unwrap(), "tv-1437").unwrap();
+        let mut file = slim_record(&raw, TmdbKind::Tv, "2026-10-01");
+        let before = file.clone();
+        let t = RecordedTransport::new();
+        t.answer(&season_url(1437, 2), 200, season_body(2).as_bytes());
+        let fetched = refetch_seasons(&t, Some(TOKEN), &mut record, &mut file, &[2]);
+        assert_eq!(fetched, SeasonsFetched { merged: vec![2], ..SeasonsFetched::default() });
+        assert_eq!(t.requests().len(), 1);
+        assert_eq!((&file["seasons"][0], &file["seasons"][1]), (&before["seasons"][0], &before["seasons"][1]));
+        assert_eq!(file["seasons"][2]["episodes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(file["fetched_at"], json!("2026-10-01"), "the record's date stays");
+        assert_eq!(record.season(2).unwrap().episodes.len(), 2);
+        assert!(record.season(1).unwrap().episodes.is_empty());
     }
 
     #[test]

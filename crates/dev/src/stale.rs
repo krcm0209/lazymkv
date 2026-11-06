@@ -34,7 +34,9 @@ const NO_RECORD: &str = "no tmdb line of lookup-status.txt names the record";
 /// Fetches again each TMDb copy of `folder` that is stale (design part 8.4, R-B4, K15; Rulings T4-R7, T4-R10) and
 /// replaces it, giving the names it replaced in `TMDB_COPIES` order; Ok(vec![]) for a folder holding
 /// `JOB_STATE_FILE` and for one with nothing stale, asking nothing. Err is `Refused { code: 3, line }` naming
-/// `<shown>/<file>`; no text holds the token. Def: T4-10. Use: T4-10.
+/// `<shown>/<file>`; no text holds the token. A TV record whose refetch left a season pending writes a stale
+/// `tmdb.json` and refuses a stale `tmdb-record.json`, `<why>` being `season <n>: <reason>` (PR #15 review round 1,
+/// R2). Def: T4-10. Use: T4-10.
 pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<String>, Refused> {
     if folder.join(JOB_STATE_FILE).is_file() {
         return Ok(vec![]);
@@ -63,15 +65,24 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
     if let Some(first_record) = records.first() {
         let id = status_record(status).ok_or_else(|| refused(failed_line(shown, first_record, NO_RECORD)))?;
         // Dev has no parsed season, so a TV record is fetched with every season it lists (Ruling T4-R4).
-        let files = refetch_record(t, Some(token), id, None, &today)
-            .map(|refetched| refetched.files)
+        let refetched = refetch_record(t, Some(token), id, None, &today)
             .map_err(|reason| refused(failed_line(shown, first_record, &reason_text(&reason))))?;
+        // PR #15 review round 1, R2: a folder has no book to owe a season in, so a tmdb-record.json with a pending
+        // season is not written (it would hide the hole) and fails the gate; tmdb.json holds no season and is written.
+        let mut owed = None;
         for copy in &records {
+            if let (Some((n, reason)), "tmdb-record.json") = (&refetched.seasons.pending, copy.file) {
+                owed = Some(refused(failed_line(shown, copy, &format!("season {n}: {}", reason_text(reason)))));
+                continue;
+            }
             // Only a stale copy is written, so a phase 0 folder never gains a tmdb-record.json.
-            if let Some(file) = files.iter().find(|file| file.name == copy.file) {
+            if let Some(file) = refetched.files.iter().find(|file| file.name == copy.file) {
                 write_copy(folder, file).map_err(|error| refused(failed_line(shown, copy, &error.to_string())))?;
                 replaced.push(file.name.clone());
             }
+        }
+        if let Some(refused) = owed {
+            return Err(refused);
         }
     }
     if let Some(search) = copies.iter().find(|copy| copy.file == SEARCH_COPY) {
@@ -339,6 +350,44 @@ mod tests {
             assert!(!err.contains(TOKEN));
             assert_eq!(fs::read_to_string(s.0.join("recs/film/tmdb.json")).unwrap(), copy(STALE));
         }
+    }
+
+    /// TV show 1437 listing seasons 1 and 2 (made up but for its ID).
+    const SHOW_ANSWER: &str = r#"{"id": 1437, "name": "Made Up Show", "original_name": "Made Up Show",
+ "first_air_date": "2002-09-20", "original_language": "en", "external_ids": {"imdb_id": "tt0303461"},
+ "seasons": [{"season_number": 1, "episode_count": 2}, {"season_number": 2, "episode_count": 2}]}"#;
+    const SHOW_STATUS: &str = "\u{feff}dischash 404\r\ndiscid 404\r\ntmdb tv/1437 200\r\n";
+    fn show() -> String { record_url(TmdbIdentity { kind: TmdbKind::Tv, id: 1437 }) }
+    fn season(n: u32) -> String { lazymkv_clients::season_url(1437, n) }
+    fn season_answer(n: u32) -> String {
+        json!({"season_number": n, "episodes": [{"episode_number": 1, "runtime": 44}, {"episode_number": 2, "runtime": 43}]})
+            .to_string()
+    }
+    fn show_copy(fetched: &str) -> String {
+        format!(r#"{{"id": 1437, "name": "Made Up Show", "kind": "tv", "seasons": [], "fetched_at": "{fetched}"}}"#)
+    }
+
+    /// PR #15 review round 1, R2: a pending season still writes a stale tmdb.json (it holds no season), and refuses
+    /// a stale tmdb-record.json, which would hide the hole, with exit 3 naming the season.
+    #[test]
+    fn a_pending_season_writes_the_stale_tmdb_json_and_refuses_tmdb_record_json() {
+        let s = Scratch::new("stale-pending-season");
+        s.write("recs/show/lookup-status.txt", SHOW_STATUS);
+        s.write("recs/show/tmdb.json", show_copy(STALE));
+        s.write("recs/show/tmdb-record.json", show_copy(STALE));
+        let http = Arc::new(RecordedTransport::new());
+        http.answer(&show(), 200, SHOW_ANSWER.as_bytes());
+        http.answer(&season(1), 200, season_answer(1).as_bytes());
+        http.answer(&season(2), 429, b"{}");
+        let refused = refresh_copies(&ctx_with(&s, &http, true), &s.0.join("recs/show"), "recs/show").unwrap_err();
+        assert_eq!(refused, Refused {
+            code: 3,
+            line: "recs/show/tmdb-record.json: the TMDb copy is more than six months old (fetched_at 2026-01-01) and \
+                   could not be fetched again: season 2: HTTP 429".to_string(),
+        });
+        let tmdb = fs::read_to_string(s.0.join("recs/show/tmdb.json")).unwrap();
+        assert_eq!(fetched_at(&tmdb).as_deref(), Some("2026-10-13"), "the stale tmdb.json is written");
+        assert_eq!(fs::read_to_string(s.0.join("recs/show/tmdb-record.json")).unwrap(), show_copy(STALE));
     }
 
     #[test]

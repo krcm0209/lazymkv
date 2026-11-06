@@ -18,8 +18,9 @@ pub struct SavedFile {
 }
 
 /// A slim copy as saved: pretty JSON and a final newline (T16 rulings). Moved here from the chain so the refetch
-/// writes the same bytes (design part 8.4).
-pub(crate) fn json_file(name: &str, value: &Value) -> SavedFile {
+/// writes the same bytes (design part 8.4); public so the engine writes an owed season's `tmdb-record.json` with them
+/// too (PR #15 review round 1, R2). Def: T4-8. Use: T4-8, T4-9.
+pub fn json_file(name: &str, value: &Value) -> SavedFile {
     // Writing a `Value` into memory cannot fail: its map keys are strings and a Vec takes every byte.
     let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_default();
     bytes.push(b'\n');

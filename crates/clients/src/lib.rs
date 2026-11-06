@@ -23,7 +23,7 @@ pub use refetch::{
     refetch_record, refetch_search, refetch_seasons, stale_copies, status_record, RecordRefetch, SeasonsFetched,
     StaleCopy,
 };
-pub use saved::{shape_of, slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
+pub use saved::{json_file, shape_of, slim_record, slim_search, slim_tmdb, splice_season, status_text, SavedFile};
 pub use transport::{
     user_agent, webhook_target, HttpTransport, OfflineTransport, Response, TransportError, WebhookTarget, OFFLINE,
     TIMEOUT_S,

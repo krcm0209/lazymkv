@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use lazymkv_clients::{
-    reason_text, refetch_record, refetch_search, stale_copies, status_file, status_record, ChainInputs, HttpTransport,
-    Lookup, LookupBook, LookupState, PendingReason, RecordRefetch, SavedFile, SeasonsFetched, StaleCopy,
+    json_file, reason_text, refetch_record, refetch_search, refetch_seasons, stale_copies, status_file, status_record,
+    ChainInputs, HttpTransport, Lookup, LookupBook, LookupState, PendingReason, RecordRefetch, SavedFile,
+    SeasonsFetched, StaleCopy,
 };
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::search_queries;
+use lazymkv_core::lookup::tmdb::TmdbRecord;
 use lazymkv_core::naming::{edition_label, NamedPath};
 use lazymkv_core::plan::movie::{LibraryFacts, THEATRICAL_CUT};
 use lazymkv_core::plan::{refresh_identity, Plan};
@@ -444,21 +446,70 @@ fn answer_stale(book: &mut LookupBook, file: &str) {
     }
 }
 
-/// The states of a record fetched again (design part 8.4; PR #15 review round 1, R4): `Record` is
-/// `Answered { status: 200 }`; each season `seasons` merged is `Answered { status: 200 }` (added when the book lacks
-/// it, so the status file names it); each season it reports missing, and each `Season(n)` of the book it neither
-/// merged nor reported (the record no longer lists it), is `Answered { status: 404 }`.
+/// The seasons a refetch owes (PR #15 review round 1, R2): the pending one and each after it, not asked, all with
+/// the pending season's reason, in the order asked.
+fn owed(seasons: &SeasonsFetched) -> Vec<(u32, &PendingReason)> {
+    let Some((n, reason)) = &seasons.pending else { return Vec::new() };
+    std::iter::once((*n, reason)).chain(seasons.unasked.iter().map(|m| (*m, reason))).collect()
+}
+
+/// The states of the seasons a refetch asked (design part 8.4; PR #15 review round 1, R4 and R2): each season merged
+/// is `Answered { status: 200 }` (added when the book lacks it, so the status file names it), each reported missing
+/// `Answered { status: 404 }`, and each owed (`owed`) `Pending` with its reason, so the next round or refetch asks it.
+fn answer_seasons(book: &mut LookupBook, seasons: &SeasonsFetched) {
+    for n in &seasons.merged {
+        book.states.insert(Lookup::Season(*n), LookupState::Answered { status: 200 });
+    }
+    for n in &seasons.missing {
+        book.states.insert(Lookup::Season(*n), LookupState::Answered { status: 404 });
+    }
+    for (n, reason) in owed(seasons) {
+        book.states.insert(Lookup::Season(n), LookupState::Pending { reason: reason.clone() });
+    }
+}
+
+/// The states of a record fetched again (design part 8.4; PR #15 review round 1, R4 and R2): `Record` is
+/// `Answered { status: 200 }`; each `Season(n)` of the book the refetch neither merged nor reported (the record no
+/// longer lists it) is `Answered { status: 404 }`; then `answer_seasons`.
 fn answer_record(book: &mut LookupBook, seasons: &SeasonsFetched) {
     book.states.insert(Lookup::Record, LookupState::Answered { status: 200 });
+    let owed: Vec<u32> = owed(seasons).into_iter().map(|(n, _)| n).collect();
     for (lookup, state) in book.states.iter_mut() {
         if let Lookup::Season(n) = lookup {
-            if !seasons.merged.contains(n) {
+            if !seasons.merged.contains(n) && !owed.contains(n) {
                 *state = LookupState::Answered { status: 404 };
             }
         }
     }
-    for n in &seasons.merged {
-        book.states.insert(Lookup::Season(*n), LookupState::Answered { status: 200 });
+    answer_seasons(book, seasons);
+}
+
+/// `tmdb-record.json: season <n> could not be fetched again: <reason>` for each season `owed` names, in order, the
+/// reason being `reason_text`'s (PR #15 review round 1, R2).
+fn owed_sentences(seasons: &SeasonsFetched) -> Vec<String> {
+    owed(seasons)
+        .into_iter()
+        .map(|(n, reason)| format!("tmdb-record.json: season {n} could not be fetched again: {}", reason_text(reason)))
+        .collect()
+}
+
+/// What the book owes of an answered TV record whose copies are fresh (PR #15 review round 1, R2): when `Record` is
+/// `Answered { status: 200 }` with a record and `record_file` in hand and one or more `Season(n)` are `Pending` (any
+/// reason, so a restart that read `000` or `429` back still owes it), a copy of the record and its file and those
+/// seasons in order; else None.
+fn owed_by_book(book: &LookupBook) -> Option<(TmdbRecord, Value, Vec<u32>)> {
+    let answered = matches!(book.states.get(&Lookup::Record), Some(LookupState::Answered { status: 200 }));
+    let seasons: Vec<u32> = book
+        .states
+        .iter()
+        .filter_map(|(lookup, state)| match (lookup, state) {
+            (Lookup::Season(n), LookupState::Pending { .. }) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    match (&book.answers.record, &book.record_file) {
+        (Some(record), Some(file)) if answered && !seasons.is_empty() => Some((record.clone(), file.clone(), seasons)),
+        _ => None,
     }
 }
 
@@ -487,9 +538,18 @@ fn write_status(job_dir: &Path, book: &LookupBook, inputs: Option<&ChainInputs>)
 /// `Pending { Stale(<first failed file of its fetch>) }`, so the next round asks them again. A record fetched again
 /// sets its states with `answer_record` in place of the flip above (each season merged answered 200, one TMDb
 /// answered 404 or the record no longer lists answered 404), and once it is installed `lookup-status.txt` is written
-/// from the book with `status_file` over `chain_inputs`, the book locked (PR #15 review round 1, R4). Ok holds the
-/// listed copies fetched again, in `TMDB_COPIES` order; Err joins a `stale_sentence` per copy not fetched again, then
-/// the sentence of a status file that could not be written, with "; ".
+/// from the book with `status_file` over `chain_inputs`, the book locked (PR #15 review round 1, R4).
+///
+/// PR #15 review round 1, R2 (the owner's ruling): a TV refetch that stopped at a pending season still writes both
+/// record files and installs the record with the seasons it merged; the pending season and each after it stay
+/// `Pending` with its reason (owed) and each adds the sentence `tmdb-record.json: season <n> could not be fetched
+/// again: <reason>` to the Err. When no record copy is listed and the book owes seasons (`owed_by_book`), those
+/// seasons alone are asked with `refetch_seasons` before anything else, each one merged spliced into `record_file`
+/// and `tmdb-record.json` written from it (its `fetched_at` stays the record's), the states set as above and the
+/// status file written; a season still pending there stays owed without a sentence, as a pending lookup the round
+/// also asks, and only a file that cannot be written fails. Ok holds the listed copies fetched again, in
+/// `TMDB_COPIES` order; Err joins the owed seasons' sentences, a `stale_sentence` per copy not fetched again, then the
+/// sentence of a status file that could not be written, with "; ".
 /// Def: T4-9. Use: T4-9.
 pub(crate) fn refetch_stale(
     job_dir: &Path,
@@ -501,16 +561,39 @@ pub(crate) fn refetch_stale(
 ) -> Result<Vec<String>, String> {
     let status = fs::read_to_string(job_dir.join("lookup-status.txt")).unwrap_or_default();
     let copies = stale_copies(&status, &|file| fs::read(job_dir.join(file)).ok(), true, today);
-    if copies.is_empty() {
+    let lock = || lookups.lock().unwrap_or_else(PoisonError::into_inner);
+    let listed = |file: &str| copies.iter().any(|copy| copy.file == file);
+    let record_listed = RECORD_COPIES.iter().any(|file| listed(file));
+    let owed_seasons = if record_listed { None } else { owed_by_book(&lock()) };
+    if copies.is_empty() && owed_seasons.is_none() {
         return Ok(Vec::new());
     }
-    let lock = || lookups.lock().unwrap_or_else(PoisonError::into_inner);
     let inputs = chain_inputs(job_dir).ok();
     let name = inputs.as_ref().and_then(|inputs| inputs.name.clone());
-    let listed = |file: &str| copies.iter().any(|copy| copy.file == file);
     let mut failed: BTreeMap<&str, PendingReason> = BTreeMap::new();
     let mut installed = false;
-    if RECORD_COPIES.iter().any(|file| listed(file)) {
+    let mut season_sentences = Vec::new();
+    if let Some((mut record, mut file, seasons)) = owed_seasons {
+        let fetched = refetch_seasons(http, token, &mut record, &mut file, &seasons);
+        let written = if fetched.merged.is_empty() {
+            Ok(())
+        } else {
+            write_copies(job_dir, &[json_file("tmdb-record.json", &file)])
+        };
+        match written {
+            Ok(()) => {
+                let mut book = lock();
+                if !fetched.merged.is_empty() {
+                    book.answers.record = Some(record);
+                    book.record_file = Some(file);
+                }
+                answer_seasons(&mut book, &fetched);
+                installed = true;
+            }
+            Err(reason) => season_sentences.push(reason_text(&reason)),
+        }
+    }
+    if record_listed {
         let identity = plan.and_then(|plan| plan.identity.tmdb).or_else(|| status_record(&status));
         let season = name.as_ref().and_then(|name| name.season);
         let fetched = match identity {
@@ -527,6 +610,7 @@ pub(crate) fn refetch_stale(
                 book.record_file = record_file;
                 answer_record(&mut book, &seasons);
                 installed = true;
+                season_sentences = owed_sentences(&seasons);
             }
             Err(reason) => {
                 for file in RECORD_COPIES.into_iter().filter(|file| listed(file)) {
@@ -570,7 +654,7 @@ pub(crate) fn refetch_stale(
             }
         }
     }
-    if failed.is_empty() {
+    if failed.is_empty() && season_sentences.is_empty() {
         if installed {
             write_status(job_dir, &lock(), inputs.as_ref())?;
         }
@@ -592,10 +676,10 @@ pub(crate) fn refetch_stale(
             status_error = write_status(job_dir, &book, inputs.as_ref()).err();
         }
     }
-    let mut sentences: Vec<String> = copies
-        .iter()
-        .filter_map(|copy| failed.get(copy.file).map(|reason| stale_sentence(job_dir, copy, reason)))
-        .collect();
+    let mut sentences = season_sentences;
+    sentences.extend(
+        copies.iter().filter_map(|copy| failed.get(copy.file).map(|reason| stale_sentence(job_dir, copy, reason))),
+    );
     sentences.extend(status_error);
     Err(sentences.join("; "))
 }
@@ -868,6 +952,115 @@ mod tests {
         assert_eq!(saved["seasons"][1].get("episodes"), None);
         assert_eq!(saved["seasons"][2]["episodes"].as_array().map(Vec::len), Some(2));
         assert_eq!(book.record_file.as_ref(), Some(&saved));
+    }
+
+    const HTTP_429: LookupState = LookupState::Pending { reason: PendingReason::Status(429) };
+
+    /// `stale_show(&[1, 2, 3])` refetched once with season 1 answered and season 2 answered 429 (season 3 never
+    /// reached): the folder, the book and the refetch's result.
+    fn refetched_with_season_2_pending() -> (Scratch, Mutex<LookupBook>, Result<Vec<String>, String>, usize) {
+        let s = stale_show(&[1, 2, 3]);
+        let t = RecordedTransport::new();
+        t.answer(&lazymkv_clients::record_url(SHOW), 200, show_body(&[1, 2, 3]).as_bytes());
+        t.answer(&lazymkv_clients::season_url(1437, 1), 200, season_body(1).as_bytes());
+        t.answer(&lazymkv_clients::season_url(1437, 2), 429, b"{}");
+        t.answer(&lazymkv_clients::season_url(1437, 3), 200, season_body(3).as_bytes());
+        let book = rebuilt(&s);
+        let fetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        let asked = t.requests().len();
+        (s, book, fetched, asked)
+    }
+
+    /// PR #15 review round 1, R2 (the owner's ruling): a partial TV refetch writes both record files with the season
+    /// it merged, stops at the pending season, and owes that season and the one after it in the book and in
+    /// lookup-status.txt; the refetch still fails, naming each owed season.
+    #[test]
+    fn a_refetch_with_one_pending_season_writes_the_record_files_and_owes_that_season() {
+        let (s, book, fetched, asked) = refetched_with_season_2_pending();
+        assert_eq!(fetched, Err([
+            "tmdb-record.json: season 2 could not be fetched again: HTTP 429",
+            "tmdb-record.json: season 3 could not be fetched again: HTTP 429",
+        ].join("; ")));
+        assert_eq!(asked, 3, "the record, season 1 and season 2");
+        for file in RECORD_COPIES {
+            let text = std::fs::read_to_string(s.0.join(file)).unwrap();
+            assert_eq!(lazymkv_core::lookup::stale::fetched_at(&text).as_deref(), Some(TODAY), "{file}");
+        }
+        let saved: Value = serde_json::from_slice(&std::fs::read(s.0.join("tmdb-record.json")).unwrap()).unwrap();
+        assert_eq!(saved["seasons"][0]["episodes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(saved["seasons"][1].get("episodes"), None);
+        let book = lock(&book);
+        assert_eq!(book.states[&Lookup::Record], ANSWERED_200);
+        assert_eq!(book.states[&Lookup::Season(1)], ANSWERED_200);
+        assert_eq!(book.states[&Lookup::Season(2)], HTTP_429);
+        assert_eq!(book.states[&Lookup::Season(3)], HTTP_429);
+        assert!(book.answers.record.is_some() && book.record_file.is_some());
+        assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 429\nseason-3 429\ntmdb tv/1437 200\n");
+    }
+
+    /// PR #15 review round 1, R2: the next refetch, with no copy stale, asks only the owed seasons and splices them
+    /// into tmdb-record.json.
+    #[test]
+    fn the_next_refetch_asks_only_the_owed_season() {
+        let (s, book, _, _) = refetched_with_season_2_pending();
+        let t = RecordedTransport::new();
+        for n in [2, 3] {
+            t.answer(&lazymkv_clients::season_url(1437, n), 200, season_body(n).as_bytes());
+        }
+        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
+        let urls: Vec<String> = t.requests().into_iter().map(|(url, _)| url).collect();
+        assert_eq!(urls, [lazymkv_clients::season_url(1437, 2), lazymkv_clients::season_url(1437, 3)]);
+        let saved: Value = serde_json::from_slice(&std::fs::read(s.0.join("tmdb-record.json")).unwrap()).unwrap();
+        for at in 0..3 {
+            assert_eq!(saved["seasons"][at]["episodes"].as_array().map(Vec::len), Some(2), "season {}", at + 1);
+        }
+        let book = lock(&book);
+        assert_eq!(book.record_file.as_ref(), Some(&saved));
+        assert_eq!(book.answers.record.as_ref().unwrap().season(3).unwrap().episodes.len(), 2);
+        assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 200\nseason-3 200\ntmdb tv/1437 200\n");
+    }
+
+    /// PR #15 review round 1, R2: an owed season still pending on the next refetch stops it there and stays owed, as a
+    /// pending lookup the round also asks; with no copy stale the step goes on (no sentence).
+    #[test]
+    fn an_owed_season_still_pending_stays_owed_and_the_step_goes_on() {
+        let (s, book, _, _) = refetched_with_season_2_pending();
+        let before = std::fs::read(s.0.join("tmdb-record.json")).unwrap();
+        let t = RecordedTransport::new();
+        t.fail(&lazymkv_clients::season_url(1437, 2), lazymkv_clients::TransportError::Timeout);
+        t.answer(&lazymkv_clients::season_url(1437, 3), 200, season_body(3).as_bytes());
+        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
+        assert_eq!(t.requests().len(), 1, "the refetch stops at season 2");
+        let timeout = LookupState::Pending { reason: PendingReason::Timeout };
+        assert_eq!(lock(&book).states[&Lookup::Season(2)], timeout);
+        assert_eq!(lock(&book).states[&Lookup::Season(3)], timeout);
+        assert_eq!(std::fs::read(s.0.join("tmdb-record.json")).unwrap(), before, "nothing merged, nothing written");
+        assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 000\nseason-3 000\ntmdb tv/1437 200\n");
+    }
+
+    /// PR #15 review round 1, R2: a season a restart reads back as `000` beside a fresh record copy is owed, and the
+    /// refetch asks it alone, keeping the record's fetched_at.
+    #[test]
+    fn an_owed_season_read_back_after_a_restart_is_asked_again() {
+        let s = Scratch::new("owed-season");
+        s.write("lookup-status.txt", "dischash 404\nseason-1 200\nseason-2 000\ntmdb tv/1437 200\n");
+        let raw: Value = serde_json::from_str(&show_body(&[1, 2])).unwrap();
+        let mut file = lazymkv_clients::slim_record(&raw, lazymkv_core::lookup::tmdb::TmdbKind::Tv, "2026-10-01");
+        lazymkv_clients::splice_season(&mut file, &serde_json::from_str(&season_body(1)).unwrap());
+        s.write("tmdb-record.json", format!("{}\n", serde_json::to_string_pretty(&file).unwrap()));
+        s.write("tmdb.json", r#"{"id": 1437, "fetched_at": "2026-10-01"}"#);
+        let book = rebuilt(&s);
+        assert!(matches!(lock(&book).states[&Lookup::Season(2)], LookupState::Pending { .. }));
+        let t = RecordedTransport::new();
+        t.answer(&lazymkv_clients::season_url(1437, 2), 200, season_body(2).as_bytes());
+        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
+        assert_eq!(t.requests().len(), 1);
+        assert_eq!(lock(&book).states[&Lookup::Season(2)], ANSWERED_200);
+        let text = std::fs::read_to_string(s.0.join("tmdb-record.json")).unwrap();
+        assert_eq!(lazymkv_core::lookup::stale::fetched_at(&text).as_deref(), Some("2026-10-01"));
+        let saved: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(saved["seasons"][1]["episodes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 200\ntmdb tv/1437 200\n");
     }
 
     /// A /search/multi first page holding the one movie `id`.
