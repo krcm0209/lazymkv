@@ -811,6 +811,33 @@ fn a_first_decide_with_a_stale_copy_it_cannot_fetch_waits_for_its_lookup() {
     assert!(events(&h, &id).contains(&Event::LookupPending));
 }
 
+/// Sets `season-1 000` in the job's lookup-status.txt beside its fresh TV record copies, so a restart's book owes
+/// season 1 (PR #15 review round 1, R2), and has every later request for season 1 time out.
+fn owe_season_1(h: &Harness, id: &str) {
+    let path = h.job_dir(id).join("lookup-status.txt");
+    let status = fs::read_to_string(&path).unwrap();
+    assert!(status.contains("season-1 200\n"), "{status}");
+    fs::write(&path, status.replace("season-1 200\n", "season-1 000\n")).unwrap();
+    h.http().fail(&lazymkv_clients::season_url(900101, 1), lazymkv_clients::TransportError::Timeout);
+}
+
+/// PR #15 review round 1, R2 follow-up (Ruling RR1-R2a): a first Decide whose fresh TV record still owes a season the
+/// refetch cannot fetch waits for its lookup, and never decides with the season missing.
+#[test]
+fn a_first_decide_with_an_owed_season_it_cannot_fetch_waits_for_its_lookup() {
+    let h = harness(&["tv-direct-series"], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Inspecting");
+    owe_season_1(&h, &id);
+    h.restart();
+    // The store replaces state.json before it appends the transition's line, so the wait is on the event (Ruling T9-R2).
+    h.wait("LookupPending", |h| events(h, &id).contains(&Event::LookupPending));
+    assert_eq!(h.state_of(&id), "AwaitingLookup");
+    let message = h.record(&id).message.unwrap();
+    assert!(message.contains("tmdb-record.json: season 1 could not be fetched again: no answer within 10 s"), "{message}");
+}
+
 #[test]
 fn a_decide_in_decided_after_a_restart_with_a_stale_copy_it_cannot_fetch_fails_unknown() {
     let h = harness(&[], json!({}));

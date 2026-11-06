@@ -82,9 +82,13 @@ fn body_json(fetched: &Fetched) -> Option<Value> {
 /// T4-10.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SeasonsFetched {
+    /// The seasons answered, merged into the record and spliced into its file, in the order asked.
     pub merged: Vec<u32>,
+    /// The seasons TMDb answered 404, in the order asked: nothing is merged or spliced for them.
     pub missing: Vec<u32>,
+    /// The first season left pending, with its reason; the requests stop there (the owner's ruling on R2).
     pub pending: Option<(u32, PendingReason)>,
+    /// The seasons after the pending one, in order, not asked.
     pub unasked: Vec<u32>,
 }
 
@@ -93,8 +97,11 @@ pub struct SeasonsFetched {
 /// T4-9, T4-10.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordRefetch {
+    /// The parsed record, with each merged season's episodes.
     pub record: TmdbRecord,
+    /// The slim `tmdb.json` and `tmdb-record.json`, in that order, dated the refetch's `today`.
     pub files: Vec<SavedFile>,
+    /// What the record's seasons gave (empty for a movie and for `Seasons::None`).
     pub seasons: SeasonsFetched,
 }
 

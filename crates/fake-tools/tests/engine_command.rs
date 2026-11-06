@@ -200,6 +200,28 @@ fn a_relayed_decide_with_a_stale_copy_it_cannot_fetch_exits_3_and_leaves_the_job
     assert_eq!(h.state_of(&id), "Filed");
 }
 
+/// PR #15 review round 1, R2 follow-up (Ruling RR1-R2a): a relayed plan of a job whose fresh TV record owes a season
+/// the refetch cannot fetch exits 3 naming the season, and no child runs with the season missing.
+#[test]
+fn a_relayed_plan_with_an_owed_season_it_cannot_fetch_exits_3_naming_the_season() {
+    let h = stand_in(&["movie-direct", "tv-direct-series", "command-relay"]);
+    h.insert("tok0", "movie-direct");
+    h.run_until("NeedsReview");
+    let id = h.job_ids().pop().expect("the held job");
+    let path = h.job_dir(&id).join("lookup-status.txt");
+    let status = fs::read_to_string(&path).unwrap();
+    assert!(status.contains("season-1 200\n"), "{status}");
+    fs::write(&path, status.replace("season-1 200\n", "season-1 000\n")).unwrap();
+    h.http().fail(&lazymkv_clients::season_url(900101, 1), lazymkv_clients::TransportError::Timeout);
+    h.restart();
+    let mut c = client(&h);
+    let (outputs, reply) = c.command(&["plan", "--job", &id]);
+    assert_eq!(reply, exit(3, 1));
+    assert_eq!(outputs, [pair("stderr", "lazymkvctl: tmdb-record.json: season 1 could not be fetched again: no answer within 10 s")]);
+    assert!(ctl_spawns(&h).is_empty());
+    assert_eq!(h.state_of(&id), "NeedsReview");
+}
+
 #[test]
 fn the_relays_refetch_runs_off_the_owner_thread() {
     let (h, id) = filed();

@@ -125,9 +125,10 @@ pub(crate) struct CommandRefetch {
 }
 
 /// The job's stale TMDb copies fetched again before a relayed `plan` or `decide` (design part 9.5; Ruling T4-R9; K15),
-/// on a thread of its own, so the owner thread never waits on a request: `refetch_stale` over `work`, the job.log line
-/// `the TMDb copy <file> was fetched again` for each copy fetched again, then `Msg::CommandRefetched` with the
-/// command's `client`, `id` and `words` and Ok, or Err with the sentences of the copies not fetched again. The
+/// on a thread of its own, so the owner thread never waits on a request: `refetch_stale` over `work`, each of its
+/// `log_lines` in job.log, then `Msg::CommandRefetched` with the command's `client`, `id` and `words` and its
+/// `for_decide`: Ok, or Err with the sentences of the seasons still owed and of the copies not fetched again, so no
+/// child runs with a season missing (PR #15 review round 1, R2 follow-up, Ruling RR1-R2a). The
 /// thread is detached and `shut_down` does not wait for it, as it does not wait for a lookup round: `refetch_stale`
 /// reads no stop flag and may wait on TMDb requests, and a late `Msg::CommandRefetched` goes nowhere (PR #15 review
 /// round 1, R1; Ruling T3-22-d).
@@ -148,13 +149,13 @@ pub(crate) fn spawn_command_refetch(
             work.token.as_deref(),
             &work.today,
         );
-        let refetched = fetched.map(|files| {
-            if let Some(job) = work.job_dir.file_name().and_then(|name| name.to_str()) {
-                for file in files {
-                    work.store.job_log(job, &format!("the TMDb copy {file} was fetched again"));
-                }
+        if let Some(job) = work.job_dir.file_name().and_then(|name| name.to_str()) {
+            for line in fetched.log_lines() {
+                work.store.job_log(job, &line);
             }
-        });
+        }
+        // A season still owed is the Err too, so no child runs with it missing (Ruling RR1-R2a).
+        let refetched = fetched.for_decide();
         // An owner that is gone has stopped and answered the command already (Ruling T3-22-d).
         let _ = owner.send(Msg::CommandRefetched { client, id, words, refetched });
     }));

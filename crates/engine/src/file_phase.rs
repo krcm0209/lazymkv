@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, TryLockError};
 
 use lazymkv_clients::{
     json_file, reason_text, refetch_record, refetch_search, refetch_seasons, stale_copies, status_file, status_record,
@@ -523,13 +523,55 @@ fn write_status(job_dir: &Path, book: &LookupBook, inputs: Option<&ChainInputs>)
         .map_err(|error| format!("{}: the lookup status could not be written: {error}", path.display()))
 }
 
+/// What `refetch_stale` did (design part 8.4; PR #15 review round 1, R2 follow-up, Ruling RR1-R2a): the copies written
+/// again in `TMDB_COPIES` order, the owed seasons merged on the owed-season path, the sentence of each season still
+/// owed, and the sentence of each copy not fetched again (then of a status file that could not be written). A Plan
+/// reads it with `for_plan`, a Decide and the relay with `for_decide`. Def: T4-9 (PR #15 review round 1, R2). Use:
+/// T4-9.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Refetched {
+    /// The copies written again, each one's job.log line `the TMDb copy <file> was fetched again`.
+    pub(crate) fetched: Vec<String>,
+    /// The owed seasons fetched and merged into tmdb-record.json, each one's job.log line `season <n> of the TMDb copy
+    /// tmdb-record.json was fetched again`.
+    pub(crate) seasons: Vec<u32>,
+    /// `tmdb-record.json: season <n> could not be fetched again: <reason>` for each season still owed.
+    pub(crate) owed: Vec<String>,
+    /// A `stale_sentence` per copy not fetched again, then a copy or status file that could not be written.
+    pub(crate) failed: Vec<String>,
+}
+
+impl Refetched {
+    /// The job.log lines of what was fetched again: `fetched`'s, then `seasons`'. Def: T4-9 (PR #15 review round 1,
+    /// R2). Use: T4-9.
+    pub(crate) fn log_lines(&self) -> Vec<String> {
+        let copies = self.fetched.iter().map(|file| format!("the TMDb copy {file} was fetched again"));
+        let seasons =
+            self.seasons.iter().map(|n| format!("season {n} of the TMDb copy tmdb-record.json was fetched again"));
+        copies.chain(seasons).collect()
+    }
+
+    /// A Plan's reading (Ruling RR1-R2a): Err joins `failed` with "; "; a season still owed is a pending lookup, which
+    /// Plan reads as lookup-pending, so it goes on. Def: T4-9 (PR #15 review round 1, R2). Use: T4-9.
+    pub(crate) fn for_plan(&self) -> Result<(), String> {
+        if self.failed.is_empty() { Ok(()) } else { Err(self.failed.join("; ")) }
+    }
+
+    /// A Decide's and the relay's reading (Ruling RR1-R2a): Err joins `owed`, then `failed`, with "; ", so neither
+    /// decides, nor runs a child, with a season missing. Def: T4-9 (PR #15 review round 1, R2). Use: T4-9.
+    pub(crate) fn for_decide(&self) -> Result<(), String> {
+        let sentences: Vec<&str> = self.owed.iter().chain(&self.failed).map(String::as_str).collect();
+        if sentences.is_empty() { Ok(()) } else { Err(sentences.join("; ")) }
+    }
+}
+
 /// The job's stale TMDb copies fetched again (design parts 8.4, 5.10, 9.5; Rulings T4-R8, T4-R9), before Plan, Decide
 /// and the relay's child read them. The copies are `stale_copies` over `lookup-status.txt` (empty when absent) in a job
-/// folder on `today`; none asks nothing and gives Ok(vec![]). A listed `tmdb.json` or `tmdb-record.json` is fetched
-/// once for both with `refetch_record`, by the plan's TMDb identity, else the status file's record (`status_record`),
-/// asking the season of `chain_inputs`' disc name when that reads (`Seasons::One`), else every season the record
-/// lists (`Seasons::Listed`; PR #15 review round 1, R3); no identity fails both with `no TMDb ID names the
-/// record`. A listed `tmdb-search.json` is fetched with `refetch_search` over the file's `queries`, else
+/// folder on `today`; none asks nothing and gives the empty `Refetched`. A listed `tmdb.json` or `tmdb-record.json` is
+/// fetched once for both with `refetch_record`, by the plan's TMDb identity, else the status file's record
+/// (`status_record`), asking the season of `chain_inputs`' disc name when that reads (`Seasons::One`), else every
+/// season the record lists (`Seasons::Listed`; PR #15 review round 1, R3); no identity fails both with `no TMDb ID
+/// names the record`. A listed `tmdb-search.json` is fetched with `refetch_search` over the file's `queries`, else
 /// `search_queries` over the book. Each fetched file is written with `write_atomic` (a record fetch writes both of its
 /// files, and one that cannot be written fails the copies of its fetch). The book is locked only to read the queries
 /// and to install an answer, never across a request: the record and `record_file`, or the page into `answers.entry`
@@ -543,15 +585,12 @@ fn write_status(job_dir: &Path, book: &LookupBook, inputs: Option<&ChainInputs>)
 ///
 /// PR #15 review round 1, R2 (the owner's ruling): a TV refetch that stopped at a pending season still writes both
 /// record files and installs the record with the seasons it merged; the pending season and each after it stay
-/// `Pending` with its reason (owed) and each adds the sentence `tmdb-record.json: season <n> could not be fetched
-/// again: <reason>` to the Err. When no record copy is listed and the book owes seasons (`owed_by_book`), those
-/// seasons alone are asked with `refetch_seasons` before anything else, each one merged spliced into `record_file`
-/// and `tmdb-record.json` written from it (its `fetched_at` stays the record's), the states set as above and the
-/// status file written; a season still pending there stays owed without a sentence, as a pending lookup the round
-/// also asks, and only a file that cannot be written fails. Ok holds the listed copies fetched again, in
-/// `TMDB_COPIES` order; Err joins the owed seasons' sentences, a `stale_sentence` per copy not fetched again, then the
-/// sentence of a status file that could not be written, with "; ".
-/// Def: T4-9. Use: T4-9.
+/// `Pending` with its reason (owed), each with its sentence in `owed`. When no record copy is listed and the book owes
+/// seasons (`owed_by_book`, read with `try_lock`: a round that holds the book asks them itself, so the path is
+/// skipped), those seasons alone are asked with `refetch_seasons` before anything else, each one merged spliced into
+/// `record_file` and `tmdb-record.json` written from it (its `fetched_at` stays the record's), the states set as
+/// above, each season still pending in `owed`, and the status file written; a file that cannot be written is in
+/// `failed`. `fetched` holds the listed copies written again, in `TMDB_COPIES` order. Def: T4-9. Use: T4-9.
 pub(crate) fn refetch_stale(
     job_dir: &Path,
     plan: Option<&Plan>,
@@ -559,21 +598,30 @@ pub(crate) fn refetch_stale(
     http: &dyn HttpTransport,
     token: Option<&str>,
     today: &str,
-) -> Result<Vec<String>, String> {
+) -> Refetched {
     let status = fs::read_to_string(job_dir.join("lookup-status.txt")).unwrap_or_default();
     let copies = stale_copies(&status, &|file| fs::read(job_dir.join(file)).ok(), true, today);
     let lock = || lookups.lock().unwrap_or_else(PoisonError::into_inner);
     let listed = |file: &str| copies.iter().any(|copy| copy.file == file);
     let record_listed = RECORD_COPIES.iter().any(|file| listed(file));
-    let owed_seasons = if record_listed { None } else { owed_by_book(&lock()) };
+    let owed_seasons = if record_listed {
+        None
+    } else {
+        match lookups.try_lock() {
+            Ok(book) => owed_by_book(&book),
+            Err(TryLockError::Poisoned(poisoned)) => owed_by_book(&poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    };
+    let mut done = Refetched::default();
     if copies.is_empty() && owed_seasons.is_none() {
-        return Ok(Vec::new());
+        return done;
     }
     let inputs = chain_inputs(job_dir).ok();
     let name = inputs.as_ref().and_then(|inputs| inputs.name.clone());
     let mut failed: BTreeMap<&str, PendingReason> = BTreeMap::new();
     let mut installed = false;
-    let mut season_sentences = Vec::new();
+    let mut write_failed = Vec::new();
     if let Some((mut record, mut file, seasons)) = owed_seasons {
         let fetched = refetch_seasons(http, token, &mut record, &mut file, &seasons);
         let written = if fetched.merged.is_empty() {
@@ -590,8 +638,10 @@ pub(crate) fn refetch_stale(
                 }
                 answer_seasons(&mut book, &fetched);
                 installed = true;
+                done.seasons = fetched.merged.clone();
+                done.owed = owed_sentences(&fetched);
             }
-            Err(reason) => season_sentences.push(reason_text(&reason)),
+            Err(reason) => write_failed.push(reason_text(&reason)),
         }
     }
     if record_listed {
@@ -611,7 +661,7 @@ pub(crate) fn refetch_stale(
                 book.record_file = record_file;
                 answer_record(&mut book, &seasons);
                 installed = true;
-                season_sentences = owed_sentences(&seasons);
+                done.owed = owed_sentences(&seasons);
             }
             Err(reason) => {
                 for file in RECORD_COPIES.into_iter().filter(|file| listed(file)) {
@@ -655,12 +705,8 @@ pub(crate) fn refetch_stale(
             }
         }
     }
-    if failed.is_empty() && season_sentences.is_empty() {
-        if installed {
-            write_status(job_dir, &lock(), inputs.as_ref())?;
-        }
-        return Ok(copies.iter().map(|copy| copy.file.to_string()).collect());
-    }
+    let written = copies.iter().filter(|copy| !failed.contains_key(copy.file));
+    done.fetched = written.map(|copy| copy.file.to_string()).collect();
     let mut status_error = None;
     {
         let mut book = lock();
@@ -677,12 +723,12 @@ pub(crate) fn refetch_stale(
             status_error = write_status(job_dir, &book, inputs.as_ref()).err();
         }
     }
-    let mut sentences = season_sentences;
-    sentences.extend(
+    done.failed = write_failed;
+    done.failed.extend(
         copies.iter().filter_map(|copy| failed.get(copy.file).map(|reason| stale_sentence(job_dir, copy, reason))),
     );
-    sentences.extend(status_error);
-    Err(sentences.join("; "))
+    done.failed.extend(status_error);
+    done
 }
 
 #[cfg(test)]
@@ -819,6 +865,19 @@ mod tests {
         s
     }
 
+    /// `refetch_stale` read as a Decide reads it: Ok holds the copies fetched again; Err the owed and failed sentences.
+    fn decided(
+        job_dir: &Path,
+        plan: Option<&Plan>,
+        lookups: &Mutex<LookupBook>,
+        http: &dyn HttpTransport,
+        token: Option<&str>,
+        today: &str,
+    ) -> Result<Vec<String>, String> {
+        let refetched = refetch_stale(job_dir, plan, lookups, http, token, today);
+        refetched.for_decide().map(|()| refetched.fetched)
+    }
+
     fn lock(book: &Mutex<LookupBook>) -> std::sync::MutexGuard<'_, LookupBook> {
         book.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -827,7 +886,7 @@ mod tests {
     fn refetch_stale_of_fresh_copies_asks_nothing() {
         let s = stale_folder(&[("tmdb.json", "2026-10-01"), ("tmdb-record.json", "2026-10-01")]);
         let t = RecordedTransport::new();
-        assert_eq!(refetch_stale(&s.0, None, &Mutex::default(), &t, None, "2026-10-23"), Ok(vec![]));
+        assert_eq!(decided(&s.0, None, &Mutex::default(), &t, None, "2026-10-23"), Ok(vec![]));
         assert!(t.requests().is_empty());
     }
 
@@ -836,7 +895,7 @@ mod tests {
         let s = stale_folder(&[("tmdb.json", "2026-01-01")]); // tmdb-record.json deleted
         let (t, book) = (RecordedTransport::new(), Mutex::new(LookupBook::default()));
         lock(&book).states.insert(Lookup::Record, LookupState::Answered { status: 200 });
-        let error = refetch_stale(&s.0, None, &book, &t, None, "2026-10-23").unwrap_err();
+        let error = decided(&s.0, None, &book, &t, None, "2026-10-23").unwrap_err();
         assert_eq!(error, [
             "tmdb.json: the TMDb copy is more than six months old (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set",
             "tmdb-record.json: the TMDb copy was deleted and could not be fetched again: no tmdb_token is set",
@@ -900,7 +959,7 @@ mod tests {
         t.answer(&lazymkv_clients::season_url(1437, 1), 200, season_body(1).as_bytes());
         t.answer(&lazymkv_clients::season_url(1437, 2), 404, b"{}");
         let book = rebuilt(&s);
-        let fetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        let fetched = decided(&s.0, None, &book, &t, Some(TOKEN), TODAY);
         assert_eq!(fetched, Ok(vec!["tmdb.json".to_string(), "tmdb-record.json".to_string()]));
         assert_eq!(lock(&book).states[&Lookup::Season(1)], ANSWERED_200);
         assert_eq!(lock(&book).states[&Lookup::Season(2)], ANSWERED_404);
@@ -920,7 +979,7 @@ mod tests {
             t.answer(&lazymkv_clients::season_url(1437, n), 200, season_body(n).as_bytes());
         }
         let book = rebuilt(&s);
-        assert!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY).is_ok());
+        assert!(decided(&s.0, None, &book, &t, Some(TOKEN), TODAY).is_ok());
         assert_eq!(t.requests().len(), 3, "season 3 is not asked");
         assert_eq!(lock(&book).states[&Lookup::Season(3)], ANSWERED_404);
         assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 200\nseason-3 404\ntmdb tv/1437 200\n");
@@ -937,7 +996,7 @@ mod tests {
         t.answer(&lazymkv_clients::season_url(1437, 1), 404, b"{}");
         t.answer(&lazymkv_clients::season_url(1437, 2), 200, season_body(2).as_bytes());
         let book = rebuilt(&s);
-        assert!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY).is_ok());
+        assert!(decided(&s.0, None, &book, &t, Some(TOKEN), TODAY).is_ok());
         let book = lock(&book);
         let seasons: Vec<(Lookup, LookupState)> = book
             .states
@@ -959,7 +1018,7 @@ mod tests {
 
     /// `stale_show(&[1, 2, 3])` refetched once with season 1 answered and season 2 answered 429 (season 3 never
     /// reached): the folder, the book and the refetch's result.
-    fn refetched_with_season_2_pending() -> (Scratch, Mutex<LookupBook>, Result<Vec<String>, String>, usize) {
+    fn refetched_with_season_2_pending() -> (Scratch, Mutex<LookupBook>, Refetched, usize) {
         let s = stale_show(&[1, 2, 3]);
         let t = RecordedTransport::new();
         t.answer(&lazymkv_clients::record_url(SHOW), 200, show_body(&[1, 2, 3]).as_bytes());
@@ -978,10 +1037,15 @@ mod tests {
     #[test]
     fn a_refetch_with_one_pending_season_writes_the_record_files_and_owes_that_season() {
         let (s, book, fetched, asked) = refetched_with_season_2_pending();
-        assert_eq!(fetched, Err([
+        assert_eq!(fetched.for_decide(), Err([
             "tmdb-record.json: season 2 could not be fetched again: HTTP 429",
             "tmdb-record.json: season 3 could not be fetched again: HTTP 429",
         ].join("; ")));
+        assert_eq!(fetched.for_plan(), Ok(()), "a Plan goes on with the seasons pending (Ruling RR1-R2a)");
+        assert_eq!(fetched.log_lines(), [
+            "the TMDb copy tmdb.json was fetched again",
+            "the TMDb copy tmdb-record.json was fetched again",
+        ]);
         assert_eq!(asked, 3, "the record, season 1 and season 2");
         for file in RECORD_COPIES {
             let text = std::fs::read_to_string(s.0.join(file)).unwrap();
@@ -1008,7 +1072,12 @@ mod tests {
         for n in [2, 3] {
             t.answer(&lazymkv_clients::season_url(1437, n), 200, season_body(n).as_bytes());
         }
-        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
+        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        assert_eq!(refetched.for_decide(), Ok(()));
+        assert_eq!(refetched.log_lines(), [
+            "season 2 of the TMDb copy tmdb-record.json was fetched again",
+            "season 3 of the TMDb copy tmdb-record.json was fetched again",
+        ]);
         let urls: Vec<String> = t.requests().into_iter().map(|(url, _)| url).collect();
         assert_eq!(urls, [lazymkv_clients::season_url(1437, 2), lazymkv_clients::season_url(1437, 3)]);
         let saved: Value = serde_json::from_slice(&std::fs::read(s.0.join("tmdb-record.json")).unwrap()).unwrap();
@@ -1021,22 +1090,40 @@ mod tests {
         assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 200\nseason-3 200\ntmdb tv/1437 200\n");
     }
 
-    /// PR #15 review round 1, R2: an owed season still pending on the next refetch stops it there and stays owed, as a
-    /// pending lookup the round also asks; with no copy stale the step goes on (no sentence).
+    /// PR #15 review round 1, R2 follow-up (Ruling RR1-R2a): an owed season still pending on the next refetch stops it
+    /// there and stays owed; a Plan reads that as a pending lookup and goes on, a Decide and the relay as the Err.
     #[test]
-    fn an_owed_season_still_pending_stays_owed_and_the_step_goes_on() {
+    fn an_owed_season_still_pending_stays_owed_and_a_plan_goes_on() {
         let (s, book, _, _) = refetched_with_season_2_pending();
         let before = std::fs::read(s.0.join("tmdb-record.json")).unwrap();
         let t = RecordedTransport::new();
         t.fail(&lazymkv_clients::season_url(1437, 2), lazymkv_clients::TransportError::Timeout);
         t.answer(&lazymkv_clients::season_url(1437, 3), 200, season_body(3).as_bytes());
-        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
+        let refetched = refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY);
+        assert_eq!(refetched.for_plan(), Ok(()));
+        assert_eq!(refetched.for_decide(), Err([
+            "tmdb-record.json: season 2 could not be fetched again: no answer within 10 s",
+            "tmdb-record.json: season 3 could not be fetched again: no answer within 10 s",
+        ].join("; ")));
+        assert!(refetched.log_lines().is_empty());
         assert_eq!(t.requests().len(), 1, "the refetch stops at season 2");
         let timeout = LookupState::Pending { reason: PendingReason::Timeout };
         assert_eq!(lock(&book).states[&Lookup::Season(2)], timeout);
         assert_eq!(lock(&book).states[&Lookup::Season(3)], timeout);
         assert_eq!(std::fs::read(s.0.join("tmdb-record.json")).unwrap(), before, "nothing merged, nothing written");
         assert_eq!(status_of(&s), "dischash 404\nseason-1 200\nseason-2 000\nseason-3 000\ntmdb tv/1437 200\n");
+    }
+
+    /// PR #15 review round 1, R2 follow-up: the owed-season path never waits on a book a running round holds; that
+    /// round asks the owed seasons itself.
+    #[test]
+    fn the_owed_seasons_are_not_asked_while_a_round_holds_the_book() {
+        let (s, book, _, _) = refetched_with_season_2_pending();
+        let t = RecordedTransport::new();
+        let held = lock(&book);
+        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Refetched::default());
+        drop(held);
+        assert!(t.requests().is_empty());
     }
 
     /// PR #15 review round 1, R2: a season a restart reads back as `000` beside a fresh record copy is owed, and the
@@ -1054,7 +1141,7 @@ mod tests {
         assert!(matches!(lock(&book).states[&Lookup::Season(2)], LookupState::Pending { .. }));
         let t = RecordedTransport::new();
         t.answer(&lazymkv_clients::season_url(1437, 2), 200, season_body(2).as_bytes());
-        assert_eq!(refetch_stale(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
+        assert_eq!(decided(&s.0, None, &book, &t, Some(TOKEN), TODAY), Ok(vec![]));
         assert_eq!(t.requests().len(), 1);
         assert_eq!(lock(&book).states[&Lookup::Season(2)], ANSWERED_200);
         let text = std::fs::read_to_string(s.0.join("tmdb-record.json")).unwrap();
@@ -1083,7 +1170,7 @@ mod tests {
             let stale = LookupState::Pending { reason: PendingReason::Stale("tmdb-search.json".into()) };
             lock(&book).states.insert(lookup, stale);
         }
-        let fetched = refetch_stale(&s.0, None, &book, &t, Some("token-sentinel-5d2e"), "2026-10-23");
+        let fetched = decided(&s.0, None, &book, &t, Some("token-sentinel-5d2e"), "2026-10-23");
         assert_eq!(fetched, Ok(vec!["tmdb-search.json".to_string()]));
         let book = lock(&book);
         assert_eq!(book.states[&Lookup::Search], LookupState::Answered { status: 200 });
