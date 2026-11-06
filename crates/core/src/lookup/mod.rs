@@ -503,7 +503,7 @@ pub fn search_queries(inputs: &LookupInputs<'_>) -> Vec<String> {
     }
     let Some(disc_name) = inputs.name.filter(|disc_name| !disc_name.generic) else { return Vec::new() };
     let mut queries = vec![disc_name.cleaned.clone()];
-    if name::fold_name(&disc_name.tagged) != name::fold_name(&disc_name.cleaned) {
+    if disc_name.has_tagged_form() {
         queries.push(disc_name.tagged.clone());
     }
     queries
@@ -675,7 +675,7 @@ fn plausible_by_name<'a>(
     disc_name: &name::DiscName,
     evidence: &mut Vec<String>,
 ) -> Vec<(tmdb::TmdbIdentity, &'a tmdb::TmdbSearchResult)> {
-    if name::fold_name(&disc_name.tagged) != name::fold_name(&disc_name.cleaned) {
+    if disc_name.has_tagged_form() {
         let found = plausible_for(search, &disc_name.tagged);
         if !found.is_empty() {
             evidence.push(plausible_sentence(&found, search, Some(&disc_name.tagged)));

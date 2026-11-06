@@ -354,6 +354,16 @@ pub struct DiscName {
     pub season_marker: bool,
 }
 
+impl DiscName {
+    /// Whether the name has a tagged form worth its own search: `tagged` differs from `cleaned` once both are folded
+    /// (`fold_name`, so `Piranha (US)` and `Piranha US` are one name). It is the one definition of ruling J8's second
+    /// query and of ruling H1's tagged-first plausibility; core's queries and plausibility, the live round and the
+    /// restart all ask it. Pure: no I/O. Def: T4-8 (PR #15 review round 1, R10). Use: T4-9, T4-13.
+    pub fn has_tagged_form(&self) -> bool {
+        fold_name(&self.tagged) != fold_name(&self.cleaned)
+    }
+}
+
 /// `text` trimmed, when Some and not blank.
 fn given(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
@@ -751,6 +761,19 @@ mod tests {
             release_date: None,
             first_air_date: Some("2005-03-24".to_string()),
         }
+    }
+
+    #[test]
+    fn has_tagged_form_holds_only_when_the_folded_forms_differ() {
+        let tagged = disc_name(Some("PIRANHA_3D"), None).unwrap();
+        assert_ne!(tagged.tagged, tagged.cleaned);
+        assert!(tagged.has_tagged_form());
+        let plain = disc_name(Some("Casablanca"), None).unwrap();
+        assert!(!plain.has_tagged_form());
+        let mut punctuation = disc_name(Some("Piranha"), None).unwrap();
+        punctuation.cleaned = "Piranha (US)".to_string();
+        punctuation.tagged = "Piranha US".to_string();
+        assert!(!punctuation.has_tagged_form());
     }
 
     #[test]

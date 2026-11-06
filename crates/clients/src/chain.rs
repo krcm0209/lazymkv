@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use lazymkv_core::lookup::discdb::DiscDbRecord;
-use lazymkv_core::lookup::name::{fold_name, DiscName};
+use lazymkv_core::lookup::name::DiscName;
 use lazymkv_core::lookup::tmdb::{merge_parsed_season, TmdbIdentity, TmdbKind, TmdbRecord, TmdbSearch};
 use lazymkv_core::lookup::{entry_search_title, record_to_fetch, LookupInputs};
 use serde_json::Value;
@@ -279,7 +279,7 @@ pub fn run_round(
     }
     if let Some(searched) = searched {
         book.states.entry(Lookup::Search).or_insert(LookupState::NotAsked);
-        if fold_name(&searched.tagged) != fold_name(&searched.cleaned) {
+        if searched.has_tagged_form() {
             book.states.entry(Lookup::TaggedSearch).or_insert(LookupState::NotAsked);
         }
     }

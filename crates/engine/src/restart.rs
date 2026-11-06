@@ -9,7 +9,6 @@ use lazymkv_clients::{seasons_to_fetch, stale_copies, Answers, Lookup, LookupBoo
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::discdb::{parse_dischash, parse_discid};
 use lazymkv_core::lookup::entry_search_title;
-use lazymkv_core::lookup::name::fold_name;
 use lazymkv_core::lookup::tmdb::{parse_movie, parse_search, parse_tv, TmdbKind};
 use lazymkv_core::record::{DrivesFile, JobRecord};
 
@@ -267,7 +266,7 @@ pub(crate) fn rebuild_book(job_dir: &Path, today: &str) -> LookupBook {
         }
         if let Some(name) = inputs.name.as_ref().filter(|name| !name.generic) {
             chain.push(Lookup::Search);
-            if fold_name(&name.tagged) != fold_name(&name.cleaned) {
+            if name.has_tagged_form() {
                 chain.push(Lookup::TaggedSearch);
             }
         }
