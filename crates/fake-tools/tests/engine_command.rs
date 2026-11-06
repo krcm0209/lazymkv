@@ -219,6 +219,30 @@ fn the_relays_refetch_runs_off_the_owner_thread() {
     assert_eq!(json_of(&h.job_dir(&id).join("tmdb-record.json"))["fetched_at"], json!("2026-10-23"));
 }
 
+/// Review round 1 of pull request 15, R1: the relay's refetch thread is not joined at shutdown, as a lookup round is
+/// not, so a stop never waits on a TMDb request that has no stop flag. The gate stays closed while the engine exits.
+#[test]
+fn a_shutdown_while_a_relayed_command_refetches_answers_without_waiting_for_the_refetch() {
+    let (h, id) = filed();
+    stale(&h, &id, "tmdb-record.json");
+    let url = lazymkv_clients::record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 });
+    let record_asks = |h: &Harness| h.http().requests().iter().filter(|(u, _)| *u == url).count();
+    let before = record_asks(&h);
+    let gate = h.http().gate(&url);
+    let mut a = client(&h);
+    let asked = a.send("command", json!({ "words": ["plan", "--job", &id] }));
+    h.wait("the refetch's request", |h| record_asks(h) == before + 1);
+    let mut b = client(&h);
+    assert_eq!(b.ok("shutdown", json!({"force": false})), Value::Null);
+    let exited = h.wait_for_exit(WAIT * ci_factor());
+    gate.open(); // the detached refetch ends, whatever the result
+    assert!(exited, "the engine's exit waited for the refetch's request");
+    match a.reply_to(asked).1 {
+        Reply::Error { message, .. } => assert_eq!(message, STOPPING),
+        other => panic!("the command was answered {other:?}"),
+    }
+}
+
 #[test]
 fn the_clients_own_words_come_after_the_built_ones() {
     let (h, id) = filed();

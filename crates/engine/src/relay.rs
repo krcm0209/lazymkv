@@ -127,7 +127,10 @@ pub(crate) struct CommandRefetch {
 /// The job's stale TMDb copies fetched again before a relayed `plan` or `decide` (design part 9.5; Ruling T4-R9; K15),
 /// on a thread of its own, so the owner thread never waits on a request: `refetch_stale` over `work`, the job.log line
 /// `the TMDb copy <file> was fetched again` for each copy fetched again, then `Msg::CommandRefetched` with the
-/// command's `client`, `id` and `words` and Ok, or Err with the sentences of the copies not fetched again.
+/// command's `client`, `id` and `words` and Ok, or Err with the sentences of the copies not fetched again. The
+/// thread is detached and `shut_down` does not wait for it, as it does not wait for a lookup round: `refetch_stale`
+/// reads no stop flag and may wait on TMDb requests, and a late `Msg::CommandRefetched` goes nowhere (PR #15 review
+/// round 1, R1; Ruling T3-22-d).
 /// Def: T4-9. Use: T4-9.
 pub(crate) fn spawn_command_refetch(
     work: CommandRefetch,
@@ -135,8 +138,8 @@ pub(crate) fn spawn_command_refetch(
     id: Option<u64>,
     words: Vec<String>,
     owner: Sender<Msg>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
+) {
+    drop(thread::spawn(move || {
         let fetched = refetch_stale(
             &work.job_dir,
             work.plan.as_ref(),
@@ -154,7 +157,7 @@ pub(crate) fn spawn_command_refetch(
         });
         // An owner that is gone has stopped and answered the command already (Ruling T3-22-d).
         let _ = owner.send(Msg::CommandRefetched { client, id, words, refetched });
-    })
+    }));
 }
 
 /// The reply to a `command` once its child ended (design parts 9.3, 9.5): `{"exit_code": <code>}`, `NO_EXIT_CODE`

@@ -479,7 +479,8 @@ impl EngineHandle {
     /// being retried). Last, `stop` waits at most `CLIENT_DRAIN` for the closed clients' writers to write what was
     /// queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at most
     /// CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for its
-    /// volume is not waited for: it only reads, and its late result goes nowhere. A step, recording or eject that
+    /// volume is not waited for: it only reads, and its late result goes nowhere. The relay's refetch thread
+    /// is not waited for either (PR #15 review round 1, R1). A step, recording or eject that
     /// panics still reports (R22.11), so stop never waits on one. A notifier still retrying when the drain bound passes
     /// may append its `was not delivered` lines after `engine stopped`. Err when the serve, drive or owner thread
     /// panicked.
@@ -2628,7 +2629,8 @@ impl Owner {
     /// the engine has no `lazymkvctl`, when a non-elevated process could write `lazymkvctl` or its folder, for words
     /// `child_words` refuses and when the child cannot be started. Words `child_words` accepts make the command run,
     /// with no child yet: the job's stale TMDb copies are fetched again first, on a thread of its own
-    /// (`spawn_command_refetch`, Ruling T4-R9), whose `Msg::CommandRefetched` goes on (`on_command_refetched`).
+    /// (`spawn_command_refetch`, Ruling T4-R9), whose `Msg::CommandRefetched` goes on (`on_command_refetched`). A
+    /// stop does not wait for that thread, as it does not wait for a lookup round (PR #15 review round 1, R1).
     fn command(&mut self, client: u64, id: Option<u64>, words: Vec<String>) {
         if self.command.is_some() {
             return self.reply(client, id, Err(COMMAND_BUSY.to_string()));
@@ -2661,7 +2663,7 @@ impl Owner {
             store: Arc::clone(&self.store),
         };
         self.command = Some(RunningCommand { client, id, kill: None });
-        self.threads.push(spawn_command_refetch(work, client, id, words, self.sender.clone()));
+        spawn_command_refetch(work, client, id, words, self.sender.clone());
     }
 
     /// `child_words` over the jobs the owner holds (design part 9.5).
