@@ -260,11 +260,12 @@ pub(crate) fn rebuild_book(job_dir: &Path, today: &str) -> LookupBook {
         return book;
     }
     let mut chain = vec![Lookup::Dischash];
-    if let Ok(inputs) = chain_inputs(job_dir) {
+    let inputs = chain_inputs(job_dir).ok();
+    if let Some(inputs) = inputs.as_ref() {
         if inputs.disc_id.is_some() {
             chain.push(Lookup::Discid);
         }
-        if let Some(name) = inputs.name.filter(|name| !name.generic) {
+        if let Some(name) = inputs.name.as_ref().filter(|name| !name.generic) {
             chain.push(Lookup::Search);
             if fold_name(&name.tagged) != fold_name(&name.cleaned) {
                 chain.push(Lookup::TaggedSearch);
@@ -280,8 +281,8 @@ pub(crate) fn rebuild_book(job_dir: &Path, today: &str) -> LookupBook {
     let answered = matches!(book.states.get(&Lookup::Record), Some(LookupState::Answered { .. }));
     let tv_record = book.answers.record.as_ref().filter(|record| answered && record.identity.kind == TmdbKind::Tv);
     if let Some(record) = tv_record {
-        let name = chain_inputs(job_dir).ok().and_then(|inputs| inputs.name);
-        for n in seasons_to_fetch(record, name.as_ref()) {
+        let name = inputs.as_ref().and_then(|inputs| inputs.name.as_ref());
+        for n in seasons_to_fetch(record, name) {
             book.states.entry(Lookup::Season(n)).or_insert(LookupState::NotAsked);
         }
     }
