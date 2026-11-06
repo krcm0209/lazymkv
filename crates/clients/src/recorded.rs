@@ -309,6 +309,13 @@ mod tests {
         let posting = t.clone();
         std::thread::spawn(move || sent.send(posting.post(HOOK, &[], b"{}")).unwrap());
         assert!(got.recv_timeout(Duration::from_millis(200)).is_err());
+        // The post is recorded before the gate, but a starved runner may not have started the thread yet. The wait
+        // scales as the engine's `ci_factor` does (R29.c2): by 4 when `CI` is set.
+        let scale = if std::env::var_os("CI").is_some() { 4 } else { 1 };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5) * scale;
+        while t.posts().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(t.posts().len(), 1);
         gate.open();
         assert_eq!(got.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(Response { status: 200, body: Vec::new() }));

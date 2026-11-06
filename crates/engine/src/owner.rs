@@ -1368,8 +1368,8 @@ impl Owner {
 
     /// `Msg::Cleanup` (design part 5.9, S40; Ruling T4-R11): unless a pass runs, one `CleanupJob` per job, in id order
     /// and whatever its state, from its record, its own settings (ENG-19) and its lookup book, handed to a pass on a
-    /// thread of its own, which `shut_down` joins. The pass writes engine.log through the store and sends
-    /// `Msg::CleanupDone` at its end.
+    /// thread of its own, which `shut_down` joins. The pass writes engine.log through the store, reads the stop flag
+    /// `shut_down` raises before each job (Ruling FR-1), and sends `Msg::CleanupDone` at its end.
     fn start_cleanup(&mut self) {
         if self.cleanup_running {
             return;
@@ -1392,8 +1392,9 @@ impl Owner {
         let data = self.parts.env.data.clone();
         let (today, now) = (self.parts.host.local_date(), self.parts.host.now_unix());
         let sender = self.sender.clone();
+        let stop = Arc::clone(&self.drive_stop);
         self.threads.push(thread::spawn(move || {
-            run_pass(jobs, &data, shares.as_ref(), &today, now, &|line| store.log(&line));
+            run_pass(jobs, &data, shares.as_ref(), &today, now, &stop, &|line| store.log(&line));
             let _ = sender.send(Msg::CleanupDone);
         }));
     }

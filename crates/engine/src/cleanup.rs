@@ -1,11 +1,13 @@
-//! The cleanup task (design part 5.9, S40, P4, R-B4, L11; Ruling T4-R11): one pass over every job the owner holds,
-//! run on a thread of its own. It deletes the TMDb copies past TMDb's six-month limit in every job's folder, whatever
-//! the job's state, and the staging folder of each filed job past its retention. It never touches `tuning_root`,
-//! never touches anything under `jobs/` but the three TMDb copies, and never follows a link out of a staging folder.
+//! The cleanup task (design part 5.9, S40, P4, R-B4, L11; Rulings T4-R11, FR-1): one pass over every job the owner
+//! holds, run on a thread of its own. It deletes the TMDb copies past TMDb's six-month limit in every job's folder,
+//! whatever the job's state, and the staging folder of each filed job past its retention. It never touches
+//! `tuning_root`, never touches anything under `jobs/` but the three TMDb copies, and never follows a link out of a
+//! staging folder.
 
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
 use lazymkv_clients::LookupBook;
@@ -63,12 +65,15 @@ pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
         && !record.notes.iter().any(|noted| noted.note == Note::TuningEvidencePending)
 }
 
-/// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Ruling T4-R11). For each job: a name
-/// not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book another holder has locked is
-/// skipped this pass, and the book stays locked by the pass to the job's end; each TMDb copy in `<data>/jobs/<id>/`
-/// whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy without one is left to
-/// the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is deleted once its share
-/// answers, without following any link inside it. Every deletion and failure gives `log` one engine.log line.
+/// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each
+/// job the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
+/// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book
+/// another holder has locked is skipped this pass, and the book stays locked by the pass to the job's end; each TMDb
+/// copy in `<data>/jobs/<id>/` whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy
+/// without one is left to the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is
+/// deleted once its share answers, without following any link inside it. The share of each staging root is asked
+/// once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives `log` one engine.log
+/// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped.
 /// Def: T4-11. Use: T4-11.
 pub(crate) fn run_pass(
     jobs: Vec<CleanupJob>,
@@ -76,9 +81,14 @@ pub(crate) fn run_pass(
     shares: &dyn ShareConnector,
     today: &str,
     now_unix: u64,
+    stop: &AtomicBool,
     log: &dyn Fn(String),
 ) {
+    let mut roots = Vec::new();
     for job in jobs {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         let id = job.id.as_str();
         if !job_id_shaped(id) {
             log(format!("cleanup: {id}: left alone: the name is not shaped like a job ID"));
@@ -95,9 +105,45 @@ pub(crate) fn run_pass(
             continue;
         }
         if let Some(root) = &job.staging_root {
-            delete_staging_folder(root, id, shares, log);
+            if reached(&mut roots, root, shares) {
+                delete_staging_folder(root, id, log);
+            }
         }
     }
+    for RootReach { root, failure, skipped } in roots {
+        if let Some(why) = failure {
+            log(format!("cleanup: the staging root {root} was not reached: {why}; {skipped} job(s) skipped"));
+        }
+    }
+}
+
+/// One staging root as a pass found it (Ruling FR-1): the failure text when its share did not answer, and how many
+/// jobs it skipped for that.
+struct RootReach {
+    root: String,
+    failure: Option<String>,
+    skipped: usize,
+}
+
+/// Whether the share of `root` answered this pass: asked on the root's first job only, its answer kept in `roots`,
+/// and a job under a root that did not answer counted as skipped.
+fn reached(roots: &mut Vec<RootReach>, root: &str, shares: &dyn ShareConnector) -> bool {
+    let index = match roots.iter().position(|known| known.root == root) {
+        Some(index) => index,
+        None => {
+            let failure = match shares.reach(root) {
+                Reach::Unreachable(why) => Some(why),
+                Reach::Reachable => None,
+            };
+            roots.push(RootReach { root: root.to_string(), failure, skipped: 0 });
+            roots.len() - 1
+        }
+    };
+    let known = &mut roots[index];
+    if known.failure.is_some() {
+        known.skipped += 1;
+    }
+    known.failure.is_none()
 }
 
 /// Deletes each TMDb copy in `folder` whose `fetched_at` is a real date past the six-month limit on `today`.
@@ -125,13 +171,9 @@ fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String
     }
 }
 
-/// Deletes `<root>/<id>` once the share holding `root` answers. `fs::remove_dir_all` removes a symbolic link or a
-/// junction inside the folder without following it.
-fn delete_staging_folder(root: &str, id: &str, shares: &dyn ShareConnector, log: &dyn Fn(String)) {
-    if let Reach::Unreachable(why) = shares.reach(root) {
-        log(format!("cleanup: {id}: the staging folder was not reached: {why}"));
-        return;
-    }
+/// Deletes `<root>/<id>`, the share holding `root` having answered this pass. `fs::remove_dir_all` removes a symbolic
+/// link or a junction inside the folder without following it.
+fn delete_staging_folder(root: &str, id: &str, log: &dyn Fn(String)) {
     let folder = Path::new(root).join(id);
     if matches!(fs::symlink_metadata(&folder), Err(error) if error.kind() == ErrorKind::NotFound) {
         return;
@@ -189,7 +231,8 @@ mod tests {
         let root = staging(folders);
         let jobs = jobs.into_iter().map(|job| CleanupJob { staging_root: Some(root.clone()), ..job }).collect();
         let lines = RefCell::new(Vec::new());
-        run_pass(jobs, &folders.0.join("data"), shares, today, now, &|line| lines.borrow_mut().push(line));
+        let stop = AtomicBool::new(false);
+        run_pass(jobs, &folders.0.join("data"), shares, today, now, &stop, &|line| lines.borrow_mut().push(line));
         lines.into_inner()
     }
 
@@ -422,7 +465,58 @@ mod tests {
         shares.set_reach(&staging(&folders), Reach::Unreachable("the share did not answer".into()));
         let lines = pass(&folders, vec![job(1, State::Filed, Some(NOW - 7 * DAY - 1))], &shares, TODAY, NOW);
         assert!(folders.0.join("staging").join(&id).join("rip/t00/b.mkv").is_file());
-        assert_eq!(lines, [format!("cleanup: {id}: the staging folder was not reached: the share did not answer")]);
+        let root = staging(&folders);
+        assert_eq!(
+            lines,
+            [format!("cleanup: the staging root {root} was not reached: the share did not answer; 1 job(s) skipped")]
+        );
+    }
+
+    #[test]
+    fn two_filed_jobs_under_one_unreached_staging_root_reach_it_once_and_log_one_line() {
+        let folders = Scratch::new("cleanup-unreached-once");
+        let (first, second) = (id(1), id(2));
+        folders.write(&format!("staging/{first}/rip/t00/b.mkv"), "b");
+        folders.write(&format!("staging/{second}/rip/t00/b.mkv"), "b");
+        let root = staging(&folders);
+        let shares = FakeShares::new();
+        shares.set_reach(&root, Reach::Unreachable("the share did not answer".into()));
+        let filed = Some(NOW - 7 * DAY - 1);
+        let lines = pass(&folders, vec![job(1, State::Filed, filed), job(2, State::Filed, filed)], &shares, TODAY, NOW);
+        assert_eq!(shares.reaches(&root), 1);
+        assert!(folders.0.join("staging").join(&first).join("rip/t00/b.mkv").is_file());
+        assert!(folders.0.join("staging").join(&second).join("rip/t00/b.mkv").is_file());
+        assert_eq!(
+            lines,
+            [format!("cleanup: the staging root {root} was not reached: the share did not answer; 2 job(s) skipped")]
+        );
+    }
+
+    #[test]
+    fn a_pass_whose_stop_flag_is_raised_after_its_first_job_reaches_no_further_share() {
+        let folders = Scratch::new("cleanup-stop");
+        let (first, second) = (id(1), id(2));
+        folders.write(&format!("staging/{first}/rip/t00/b.mkv"), "b");
+        folders.write(&format!("other-staging/{second}/rip/t00/b.mkv"), "b");
+        let root = staging(&folders);
+        let other = folders.0.join("other-staging").display().to_string();
+        let filed = Some(NOW - 7 * DAY - 1);
+        let jobs = vec![
+            CleanupJob { staging_root: Some(root.clone()), ..job(1, State::Filed, filed) },
+            CleanupJob { staging_root: Some(other.clone()), ..job(2, State::Filed, filed) },
+        ];
+        let shares = FakeShares::new();
+        let stop = AtomicBool::new(false);
+        let lines = RefCell::new(Vec::new());
+        // The engine stops while the first job's line is written.
+        run_pass(jobs, &folders.0.join("data"), &shares, TODAY, NOW, &stop, &|line| {
+            stop.store(true, Ordering::SeqCst);
+            lines.borrow_mut().push(line);
+        });
+        assert_eq!((shares.reaches(&root), shares.reaches(&other)), (1, 0));
+        assert!(!folders.0.join("staging").join(&first).exists());
+        assert!(folders.0.join("other-staging").join(&second).join("rip/t00/b.mkv").is_file());
+        assert_eq!(lines.into_inner(), [format!("cleanup: {first}: deleted its staging folder")]);
     }
 
     #[test]

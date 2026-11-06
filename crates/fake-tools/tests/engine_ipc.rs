@@ -2547,7 +2547,7 @@ fn the_cleanup_runs_off_the_owner_thread() {
     h.schedule_cleanup(Duration::from_secs(3600));
     h.restart();
     assert!(stall.wait_for_caller(WAIT * ci_factor()), "the pass reached the staging share");
-    assert!(snapshot_within(&h, Duration::from_secs(2)).is_some(), "the owner answers while the pass waits");
+    assert!(snapshot_within(&h, WAIT * ci_factor()).is_some(), "the owner answers while the pass waits");
     assert!(h.busy(), "a running pass counts as busy (R24.c1)");
     stall.release();
     // The pass deletes and then logs, so the wait is on the log line (Ruling T11-R2).

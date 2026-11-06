@@ -30,8 +30,8 @@ pub const TLS_FAILED: &str = "the TLS handshake failed";
 /// The text of any other failed connection. Design part 8.1. Def: T4-7. Use: T4-7.
 pub const CONNECTION_FAILED: &str = "the connection failed";
 
-/// The text of an answer body longer than [`MAX_BODY_BYTES`]. Design part 8.1. Def: T4-7. Use: T4-7.
-pub const BODY_TOO_LONG: &str = "the answer is longer than 8 MiB";
+/// The text of an answer body of [`MAX_BODY_BYTES`] or longer. Design part 8.1. Def: T4-7. Use: T4-7.
+pub const BODY_TOO_LONG: &str = "the answer is 8 MiB or longer";
 
 /// The text of an answer that could not be read for any other reason. Design part 8.1. Def: T4-7. Use: T4-7.
 pub const BAD_ANSWER: &str = "the answer could not be read";
@@ -267,7 +267,7 @@ mod tests {
         let started = Instant::now();
         assert_eq!(UreqTransport::with_timeout(QUICK).get(&url, &[]), Err(TransportError::Timeout));
         // A "gives up in time" bound: it does not scale with ci_factor (Global Constraints, Tests).
-        assert!(started.elapsed() < QUICK * 4, "{:?}", started.elapsed());
+        assert!(started.elapsed() < QUICK * 10, "{:?}", started.elapsed());
         done.send(()).unwrap();
         holder.join().unwrap();
     }

@@ -927,8 +927,8 @@ T4-R17, T4-R19 and T4-R21), overturned T4-R17, and let every other ruling stand.
 - T4-R8 (restart stays offline). `rebuild_book` reads a stale or deleted TMDb copy as `Pending { Stale(<file>) }`, so the engine's start sends no request (design part 4.4) and the next round or refetch asks again.
 - T4-R9 (where the engine refetches). Before every Plan (a job's first finds its copies fetched that day and asks nothing), before every Decide, and on the relay's own thread before `child_words`, with the TMDb ID from the plan in `state.json` and the queries from the file or, for a deleted page, `core::lookup::search_queries`. The relay's exit 3 is a `command_output` line `lazymkvctl: <reason>` on standard error, then `ok {"exit_code": 3}`, and `retune --jobs` keeps W25's `RETUNE_WAITS` refusal (exit 2); its exit 3 arrives with pull request 5.
 - T4-R10 (dev's fetch). `Ctx` gains `http`, which only `Ctx::with_live_transport`, called by the two binaries' `main`, sets to `UreqTransport::new()`; `TMDB_TOKEN` is read from `ctx.env`. The gate sits at the `plan`, `decide` and `retune` command entries only, so the engine's in-process use of dev's library never fetches, and a folder holding `state.json` (an engine job folder) and a `--tmdb-search` or `--tmdb-record` file given by hand are read as they are.
-- T4-R11 (the cleanup's schedule and reach). `EngineConfig.cleanup_minutes` (None in tests, `Some(60)` in the binary) drives a thread of its own, not `Services.timers`; the owner thread builds the pass's job list, and the cleanup thread deletes after `ShareConnector::reach` of the job's own settings' `staging_root` (ENG-19). A job whose book a round holds is skipped that pass, only `<32 lower-case hex>-<n>` folders are deleted, and `engine.log` gets a `cleanup: <job id>: ...` line for each deleted copy, each deleted staging folder and each staging folder not reached.
-- T4-R12 (transport). `HttpTransport` gains `post` and `connect(host, port)`; no redirect is followed (a 3xx is `Status(3xx)`, so a bearer token never reaches another host), no proxy is read from the environment, an answer over 8 MiB is `Unreachable(BODY_TOO_LONG)`, errors use a fixed vocabulary, and a POST carries `Content-Type: application/json`, without which Home Assistant leaves `trigger.json` empty.
+- T4-R11 (the cleanup's schedule and reach). `EngineConfig.cleanup_minutes` (None in tests, `Some(60)` in the binary) drives a thread of its own, not `Services.timers`; the owner thread builds the pass's job list, and the cleanup thread deletes after `ShareConnector::reach` of the job's own settings' `staging_root` (ENG-19), asked once per root per pass (FR-1). A job whose book a round holds is skipped that pass, only `<32 lower-case hex>-<n>` folders are deleted, and `engine.log` gets a `cleanup: <job id>: ...` line for each deleted copy and each deleted staging folder, and one `cleanup: the staging root <root> was not reached: ...` line per pass for each root not reached (FR-1).
+- T4-R12 (transport). `HttpTransport` gains `post` and `connect(host, port)`; no redirect is followed (a 3xx is `Status(3xx)`, so a bearer token never reaches another host), no proxy is read from the environment, an answer of 8 MiB or longer is `Unreachable(BODY_TOO_LONG)`, errors use a fixed vocabulary, and a POST carries `Content-Type: application/json`, without which Home Assistant leaves `trigger.json` empty.
 - T4-R13 (notifier). With both URLs unset nothing is logged (design part 8.6: "skipped"). A failed channel's reason is exactly one of `<name>: HTTP <n> after 3 attempts`, `<name>: no answer within 10 s after 3 attempts`, `<name>: <transport words> after 3 attempts` or `<name>: <outcome> after <n> attempt[s] (the engine was stopping)`, several joined with `"; "`. At stop the sink skips every wait and gives each channel one attempt per queued notification, and `EngineHandle::stop` waits at most `NOTIFY_DRAIN_S` (15 s) for the notifier.
 - T4-R14 (the self-test's webhook checks). `ha_webhook_url` then `webhook_url`, after `tmdb_token`; an unset URL is ok (`not set; its notifications are skipped`); the check is a TCP (Transmission Control Protocol) connection to the URL's host and port within 10 s, with no TLS handshake, and its details show `<host>:<port>` only.
 - T4-R15 (a webhook value's shape). `secret_set` refuses a webhook value that is not an http or https URL with a host, with `<name> could not be stored: the value must be an http or https URL with a host`, never echoing it; an addition beyond the sources, so the owner's yes was asked: yes, 2026-11-04.
@@ -1064,6 +1064,9 @@ line says what was decided and, where it was recorded, why and the cost if wrong
 
 **Task T4-20**
 - T20-R1. A disc whose only English subtitle track is subtitles for the deaf and hard of hearing (SDH) qualifies under Owner decision 12, since step 10 runs only with two or more English streams, and the disc's title must have exactly one exact match on the first page of TMDb's search; of the two discs that qualified, the owner's yes named the recommended one. Cost if wrong: the run holds or lacks an identity, and Step 9 repeats with another disc.
+
+**The final review**
+- FR-1 (final review, 2026-11-06): a cleanup pass asks `reach` once per distinct staging root and keeps the answer for the rest of the pass, writes one `cleanup: the staging root <root> was not reached: <text>; <k> job(s) skipped` line for each root not reached in place of each job's line, and reads the engine's stop flag before each job, so `lazymkvctl stop` waits on at most one share call, since the Filed jobs it reaches grow without limit and `shut_down` joins the pass; it amends T4-R11. Cost if wrong: a pass skips a root that became reachable during it, and the next hour's pass catches it.
 
 The owner may overturn any of them.
 
@@ -1290,17 +1293,18 @@ ID, the title and the Home Assistant host are written `<job id>`, `<film folder>
 
 ## Tests
 
-`cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of commit `f62ab5c`, lists 3065 tests:
-1726 in `lazymkv-core`, 441 in `lazymkv-dev`, 8 in `lazymkv-capture`, 342 in `fake-tools`, 186 in `lazymkv-platform`, 38
-in `lazymkv-tools`, 93 in `lazymkv-clients`, 197 in `lazymkv-engine` and 34 in `lazymkv-ctl`. The baseline is 2897 at
-`891a0e7` (Task 0 Step 4), so pull request 4 added 168: 61 in `lazymkv-clients`, 42 in `lazymkv-engine`, 28 in
+`cargo test --workspace --locked -- --list` on the mini PC (Windows), on the tree of the final review's fix commit,
+lists 3067 tests: 1726 in `lazymkv-core`, 441 in `lazymkv-dev`, 8 in `lazymkv-capture`, 342 in `fake-tools`, 186 in `lazymkv-platform`, 38
+in `lazymkv-tools`, 93 in `lazymkv-clients`, 199 in `lazymkv-engine` and 34 in `lazymkv-ctl`. The baseline is 2897 at
+`891a0e7` (Task 0 Step 4), so pull request 4 added 170: 61 in `lazymkv-clients`, 44 in `lazymkv-engine`, 28 in
 `fake-tools`, 21 in `lazymkv-dev`, 10 in `lazymkv-core` and 6 in `lazymkv-ctl`, net of the tests it replaced or removed
-(174 added and 6 removed: in `lazymkv-clients` `the_offline_transport_answers_every_url_unreachable`, in
+(176 added and 6 removed: in `lazymkv-clients` `the_offline_transport_answers_every_url_unreachable`, in
 `lazymkv-engine` `no_delivery_refuses_every_notification_with_its_sentence` and the restart test PF4-49 renamed, in
 `lazymkv-dev` the `hit-rate` test T4-15 renamed for its miss, and in `fake-tools` the missing-replay-file test PF4-50
 split in two and `an_undelivered_notification_is_logged_with_its_reason`, replaced by `..._with_its_channel`);
-`lazymkv-capture`, `lazymkv-platform` and `lazymkv-tools` gained none, and the commit of these notes adds none. The
-junction run passed 3052 and ignored 13, the ignored list gaining `lazymkv-clients`' four live tests; on CI run
+`lazymkv-capture`, `lazymkv-platform` and `lazymkv-tools` gained none, the commit of these notes adds none, and the
+final review's fix commit adds FR-1's two cleanup tests in `lazymkv-engine` (3065 at `f62ab5c`). The junction run of
+`f62ab5c` passed 3052 and ignored 13, the ignored list gaining `lazymkv-clients`' four live tests; on CI run
 42232388792 windows passed 3052 and ignored 13, ubuntu passed 2932 and macos 2932, each ignoring 5; CodeQL's analysis of
 `f62ab5c` found 0 results, and no alert is open.
 

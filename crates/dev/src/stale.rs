@@ -12,6 +12,7 @@ use lazymkv_clients::{
     reason_text, refetch_record, refetch_search, stale_copies, status_record, HttpTransport, OfflineTransport,
     SavedFile, StaleCopy,
 };
+use lazymkv_core::lookup::stale::TMDB_COPIES;
 use lazymkv_core::recording::Tree;
 use serde_json::Value;
 
@@ -40,6 +41,10 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
     }
     let status = fs::read_to_string(folder.join(STATUS_FILE)).unwrap_or_default();
     let status = status.strip_prefix('\u{feff}').unwrap_or(&status);
+    // No TMDb copy, nothing stale: the clock (a PowerShell start on Windows) is read only once a copy is there.
+    if !TMDB_COPIES.iter().any(|file| folder.join(file).is_file()) {
+        return Ok(vec![]);
+    }
     let today = ctx.today();
     let copies = stale_copies(status, &|name| fs::read(folder.join(name)).ok(), false, &today);
     let Some(first) = copies.first() else {
