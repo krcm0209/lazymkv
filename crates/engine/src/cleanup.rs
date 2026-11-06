@@ -68,9 +68,10 @@ pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
 /// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each
 /// job the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
 /// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book
-/// another holder has locked is skipped this pass, and the book stays locked by the pass to the job's end; each TMDb
-/// copy in `<data>/jobs/<id>/` whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy
-/// without one is left to the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is
+/// another holder has locked is skipped this pass, and the pass holds the book only while it deletes the job's TMDb
+/// copies, never across the share's reach or the staging deletion (PR #15 review round 1, R6); each TMDb copy in
+/// `<data>/jobs/<id>/` whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy without
+/// one is left to the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is
 /// deleted once its share answers, without following any link inside it. The share of each staging root is asked
 /// once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives `log` one engine.log
 /// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped.
@@ -95,12 +96,16 @@ pub(crate) fn run_pass(
             continue;
         }
         // A round or a refetch holds the book: the job waits for the next pass. A poisoned book is taken as it stands.
-        let _book = match job.lookups.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => continue,
-        };
-        delete_stale_copies(&data.join("jobs").join(id), id, today, log);
+        // The book is held only while the copies are deleted, never across the share's reach or the staging deletion,
+        // since the owner thread takes it blocking (PR #15 review round 1, R6).
+        {
+            let _book = match job.lookups.try_lock() {
+                Ok(guard) => guard,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => continue,
+            };
+            delete_stale_copies(&data.join("jobs").join(id), id, today, log);
+        }
         if !retention_due(&job, now_unix) {
             continue;
         }
@@ -196,6 +201,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     const NOW: u64 = 1_792_800_000;
     const TODAY: &str = "2026-10-23";
@@ -517,6 +523,28 @@ mod tests {
         assert!(!folders.0.join("staging").join(&first).exists());
         assert!(folders.0.join("other-staging").join(&second).join("rip/t00/b.mkv").is_file());
         assert_eq!(lines.into_inner(), [format!("cleanup: {first}: deleted its staging folder")]);
+    }
+
+    #[test]
+    fn a_pass_holds_no_book_while_it_reaches_the_staging_share() {
+        let folders = Scratch::new("cleanup-book-free");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/rip/t00/b.mkv"), "b");
+        let shares = FakeShares::new();
+        let gate = shares.stall(&staging(&folders));
+        let job = job(1, State::Filed, Some(NOW - 7 * DAY - 1));
+        let book = Arc::clone(&job.lookups);
+        std::thread::scope(|scope| {
+            let passing = scope.spawn(|| pass(&folders, vec![job], &shares, TODAY, NOW));
+            let waited = gate.wait_for_caller(Duration::from_secs(10));
+            // The owner takes the book blocking; the pass must not hold it while the share is asked.
+            let free = book.try_lock().is_ok();
+            gate.release();
+            let lines = passing.join().unwrap();
+            assert!(waited, "the pass never reached the staging share");
+            assert!(free, "the pass held the job's book across the share's reach");
+            assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+        });
     }
 
     #[test]
