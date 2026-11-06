@@ -2,7 +2,8 @@
 //! `decide` and `retune` read a recording folder, each TMDb copy in it that is more than six months old is fetched
 //! again with the token of TMDB_TOKEN and replaced in place, or the command exits 3 naming it. A copy without a
 //! `fetched_at` is read as it is, and so is an engine job folder (one holding `state.json`): the engine fetches its
-//! own copies again. No text here holds the token.
+//! own copies again. A copy is written through `lazymkv_platform::write_atomic` (a temporary file beside it, flushed,
+//! then renamed over it; PR #15 review round 1, R9). No text here holds the token.
 
 use std::fs;
 use std::io::Write;
@@ -10,10 +11,11 @@ use std::path::Path;
 
 use lazymkv_clients::{
     reason_text, refetch_record, refetch_search, stale_copies, status_record, HttpTransport, OfflineTransport,
-    SavedFile, Seasons, StaleCopy,
+    Seasons, StaleCopy,
 };
 use lazymkv_core::lookup::stale::TMDB_COPIES;
 use lazymkv_core::recording::Tree;
+use lazymkv_platform::write_atomic;
 use serde_json::Value;
 
 use crate::evidence::{Ctx, Recording, Refused};
@@ -26,8 +28,6 @@ pub const JOB_STATE_FILE: &str = "state.json";
 const STATUS_FILE: &str = "lookup-status.txt";
 /// The copy of TMDb's search, fetched again from its own `queries`.
 const SEARCH_COPY: &str = "tmdb-search.json";
-/// What the temporary file of a write is named after: `<file>.lazymkv-tmp`, beside the copy.
-const TEMP_SUFFIX: &str = ".lazymkv-tmp";
 /// Why a stale record copy cannot be fetched again when the status file names no record.
 const NO_RECORD: &str = "no tmdb line of lookup-status.txt names the record";
 
@@ -81,7 +81,7 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
             }
             // Only a stale copy is written, so a phase 0 folder never gains a tmdb-record.json.
             if let Some(file) = refetched.files.iter().find(|file| file.name == copy.file) {
-                write_copy(folder, file).map_err(|error| refused(failed_line(shown, copy, &error.to_string())))?;
+                write_atomic(&folder.join(&file.name), &file.bytes).map_err(|error| refused(failed_line(shown, copy, &error.to_string())))?;
                 replaced.push(file.name.clone());
             }
         }
@@ -93,7 +93,7 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
         let queries = search_queries(&folder.join(SEARCH_COPY));
         let (_, file) = refetch_search(t, Some(token), &queries, &today)
             .map_err(|reason| refused(failed_line(shown, search, &reason_text(&reason))))?;
-        write_copy(folder, &file).map_err(|error| refused(failed_line(shown, search, &error.to_string())))?;
+        write_atomic(&folder.join(&file.name), &file.bytes).map_err(|error| refused(failed_line(shown, search, &error.to_string())))?;
         replaced.push(file.name);
     }
     Ok(replaced)
@@ -170,17 +170,6 @@ fn search_queries(path: &Path) -> Vec<String> {
         .and_then(Value::as_array)
         .map(|queries| queries.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default()
-}
-
-/// Writes `file` over its copy in `folder`: the bytes to `<name>.lazymkv-tmp` beside it, then a rename over the copy.
-/// A failed write or rename removes the temporary file.
-fn write_copy(folder: &Path, file: &SavedFile) -> std::io::Result<()> {
-    let temp = folder.join(format!("{}{TEMP_SUFFIX}", file.name));
-    let result = fs::write(&temp, &file.bytes).and_then(|()| fs::rename(&temp, folder.join(&file.name)));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
 }
 
 #[cfg(test)]
