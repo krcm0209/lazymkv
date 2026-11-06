@@ -581,11 +581,12 @@ pub fn tmdb_tv_json(
     .to_string()
 }
 
-/// A search page's slim saved answer as a job folder keeps it (design part 8.4): results[] {media_type, id,
+/// A search page's slim saved answer as design part 8.4 keeps it, without its `queries`: results[] {media_type, id,
 /// title|name, original_title|original_name, release_date|first_air_date} from (media_type, id, title, original title,
-/// date), the movie fields for "movie" and the TV fields for any other media type, with page 1, total_pages 1 and
-/// total_results, then `fetched_at` "2026-10-23", the fixed test date, so the copy is never stale (Ruling T4-R7).
-/// Spec 8.1.
+/// date), the movie fields for "movie" and the TV fields for any other media type, then `fetched_at` "2026-10-23",
+/// the fixed test date, so the copy is never stale (Ruling T4-R7). The raw page's `page`, `total_pages` and
+/// `total_results` are not written, as `slim_search` never writes them (PR #15 review round 1, R12). The tests also
+/// serve it as a TMDb `/search/multi` answer, since `parse_search` and `slim_search` read only `results`. Spec 8.1.
 pub fn search_json(results: &[(&str, i64, &str, &str, &str)]) -> String {
     let rows: Vec<serde_json::Value> = results
         .iter()
@@ -598,10 +599,7 @@ pub fn search_json(results: &[(&str, i64, &str, &str, &str)]) -> String {
         })
         .collect();
     serde_json::json!({
-        "page": 1,
         "results": rows,
-        "total_pages": 1,
-        "total_results": results.len(),
         "fetched_at": "2026-10-23",
     })
     .to_string()
@@ -776,14 +774,14 @@ mod builder_tests {
                 ("tv", 2316, "The Office", "The Office", "2005-03-24"),
             ]),
             concat!(
-                r#"{"page":1,"results":["#,
+                r#"{"results":["#,
                 r#"{"media_type":"movie","id":1417,"title":"Pan's Labyrinth","#,
                 r#""original_title":"El laberinto del fauno","release_date":"2006-10-11"},"#,
                 r#"{"media_type":"tv","id":2316,"name":"The Office","original_name":"The Office","#,
                 r#""first_air_date":"2005-03-24"}"#,
-                r#"],"total_pages":1,"total_results":2,"fetched_at":"2026-10-23"}"#,
+                r#"],"fetched_at":"2026-10-23"}"#,
             )
         );
-        assert_eq!(search_json(&[]), r#"{"page":1,"results":[],"total_pages":1,"total_results":0,"fetched_at":"2026-10-23"}"#);
+        assert_eq!(search_json(&[]), r#"{"results":[],"fetched_at":"2026-10-23"}"#);
     }
 }
