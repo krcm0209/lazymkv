@@ -58,7 +58,7 @@ const API_DIR: &str = "corpus/thediscdb-api";
 /// tmdb.json; for a pinned log its TheDiscDB answer): its displayed path when the answer file exists (None: no answer
 /// file is on disk, because the lookup was not made or failed before the recorder wrote one; its line in
 /// lookup-status.txt says which) and the answer word "hit", "miss", "failed" or "n/a". For a recording's TheDiscDB
-/// answers the word comes from `discdb_answer` (through `hit_rate::lookup`); for its tmdb.json it is `tmdb_answer`'s
+/// answers the word comes from `discdb_answer`; for its tmdb.json it is `tmdb_answer`'s
 /// (the same words over a TMDb record); for a pinned log "hit" when a record was read, else "n/a". RP14. Def: T15.
 /// Use: T15, T16.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1559,7 +1559,7 @@ mod tests {
         assert_eq!(doc.inputs.tmdb_record.as_deref(), Some("movie.json"));
         assert_eq!(doc.plan.identity.original_language.as_deref(), Some("fr"));
         // Without lookup-status.txt no lookup has a status line: every answer file there is parsed and used, and each
-        // answer word is "n/a" (`hit_rate::lookup` and `tmdb_answer` with no status).
+        // answer word is "n/a" (`discdb_answer` and `tmdb_answer` with no status).
         film_recording(&tmp, "rec2");
         fs::remove_file(tmp.0.join("rec2").join("lookup-status.txt")).unwrap();
         let doc = doc_of(&tmp, "rec2", &PlanOptions::default()).unwrap();

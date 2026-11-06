@@ -4,6 +4,7 @@
 //! every lookup answered; 1 otherwise; 2 where the Python crashed (no argument; the folder or a meta.json unreadable; a
 //! lookup-status.txt not UTF-8).
 
+use crate::cmd::plan::discdb_answer;
 use crate::evidence::{run_on_folder, Ctx};
 use lazymkv_core::recording::files::{lookup_statuses, Meta};
 use lazymkv_core::recording::{decode_text, read_json, Encoding, Errors, Ordered, PathKey, Tree};
@@ -31,13 +32,6 @@ pub fn statuses(tree: &dyn Tree, disc: &PathKey) -> Result<Ordered<String>, Stri
     Ok(lookup_statuses(&text))
 }
 
-/// `hit`, `miss`, `failed` or `n/a` for the answer file `path` given the lookup's HTTP status, read as S46 reads it
-/// (`plan::discdb_answer`; Ruling T4-R17, overturned by the owner on 2026-11-04, so a dischash 200 that is no disc
-/// record is a miss, where the Python read it as failed). Def: T4-15. Use: T4-15.
-pub fn lookup(tree: &dyn Tree, path: &PathKey, status: Option<&str>, discid: bool) -> &'static str {
-    crate::cmd::plan::discdb_answer(tree, path, status, discid)
-}
-
 /// Writes hit_rate.main's lines for the recordings directly in `root` as it goes, and returns the exit code; Err
 /// where the Python crashed, after the lines written so far. Py: hit_rate.main.
 pub fn report(tree: &dyn Tree, root: &PathKey, out: &mut dyn Write) -> Result<i32, String> {
@@ -48,8 +42,8 @@ pub fn report(tree: &dyn Tree, root: &PathKey, out: &mut dyn Write) -> Result<i3
         }
         let meta: Meta = read_json(tree, &disc.join("meta.json"))?;
         let status = statuses(tree, &disc)?;
-        let by_hash = lookup(tree, &disc.join("thediscdb-hash.json"), status.get("dischash").map(String::as_str), false);
-        let by_id = lookup(tree, &disc.join("thediscdb-discid.json"), status.get("discid").map(String::as_str), true);
+        let by_hash = discdb_answer(tree, &disc.join("thediscdb-hash.json"), status.get("dischash").map(String::as_str), false);
+        let by_id = discdb_answer(tree, &disc.join("thediscdb-discid.json"), status.get("discid").map(String::as_str), true);
         rows.push((by_hash, by_id));
         // str(meta.get('format')): the format, or "None" without one.
         let format = meta.format.as_deref().unwrap_or("None");
