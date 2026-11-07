@@ -8,6 +8,9 @@ mod lookup;
 pub mod makemkv;
 /// The mkvmerge drivers: the identification and the remux (design parts 5.3, 5.7). Def: T14. Use: T23, T24.
 pub mod mkvmerge;
+/// The OCR worker's driver: its arguments, its one environment variable, its time cap and how its run ended (design
+/// parts 5.3, 10.7, 10.8; K2). Def: T5-9. Use: T5-10, T5-15.
+pub mod ocr;
 mod record;
 mod snapshot;
 
@@ -18,8 +21,10 @@ pub use makemkv::{
     MakemkvFlags, RipOutcome, RipRun, ScanOutcome, StagingHealth,
 };
 pub use mkvmerge::{gui_progress, ident, ident_args, remux, remux_args};
+pub use ocr::{end_reason, ocr_args, run_worker, WorkerEnd, RTEN_NUM_THREADS};
 pub use record::{
-    run_recorded, tee_lines, with_suffix, CancelToken, Clock, LineAction, Limits, RealClock, RunResult, ToolCtx,
+    run_recorded, run_recorded_in, tee_lines, with_suffix, CancelToken, Clock, LineAction, Limits, RealClock,
+    RunResult, ToolCtx,
 };
 pub use snapshot::{list_files, snapshot};
 

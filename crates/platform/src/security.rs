@@ -314,6 +314,16 @@ mod tests {
         );
     }
 
+    /// R5-code-38: on Windows the worker's thread count reaches it only through `Spawn::env`; an inherited value is
+    /// dropped, so a variable the owner set for the engine never sizes the worker's pool.
+    #[test]
+    fn rten_num_threads_reaches_the_child_only_through_the_spawns_own_variables() {
+        let inherited = || pairs(&[("RTEN_NUM_THREADS", "8"), ("PATH", "p")]);
+        let extra = [("RTEN_NUM_THREADS".to_string(), "3".to_string())];
+        assert_eq!(child_environment(inherited(), &extra), pairs(&[("PATH", "p"), ("RTEN_NUM_THREADS", "3")]));
+        assert_eq!(child_environment(inherited(), &[]), pairs(&[("PATH", "p")]));
+    }
+
     #[test]
     fn the_production_names_are_the_designs() {
         assert_eq!(PIPE_NAME, r"\\.\pipe\lazymkv");

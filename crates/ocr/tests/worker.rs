@@ -5,15 +5,24 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::mpsc;
+use std::time::Duration;
 
+use lazymkv_core::ipc::OutputStream;
+use lazymkv_core::settings::Settings;
 use lazymkv_core::subtitle::bitmap::evidence::{read_run_json, whole_records};
 use lazymkv_core::subtitle::bitmap::mkv::read_stream as read_mks;
 use lazymkv_core::subtitle::bitmap::{CODEC_PGS, CODEC_VOBSUB};
 use lazymkv_core::testsupport::mks::{
     idx_text, mks, pgs_display_set, vobsub_unit, MksBlock, MksEncoding, MksShape, MksTrack,
 };
+use lazymkv_core::testsupport::Scratch;
 use lazymkv_ocr::stream::{main_with, USAGE};
 use lazymkv_ocr::{engine_id, read_png_grey};
+use lazymkv_platform::fakes::FakeHost;
+use lazymkv_platform::StdProcessGuard;
+use lazymkv_tools::ocr::{ocr_args, run_worker, WorkerEnd};
+use lazymkv_tools::{with_suffix, CancelToken, Limits, ToolCtx};
 use serde_json::Value;
 
 const VIDEO: (u32, u32) = (1920, 1080);
@@ -361,4 +370,58 @@ fn the_worker_writes_nothing_outside_out() {
     assert_eq!(names(&out), ["s0", "sub-0.ocr.jsonl", "sub-0.run.json"]);
     assert_eq!(fs::read(&evidence).unwrap(), pgs_file(), "the evidence file is only read");
     let _ = fs::remove_dir_all(&root);
+}
+
+/// One English PGS track of 40 made-up events whose block widths differ, so each is a distinct crop the worker would
+/// read: block shapes only, no glyph and no font (RP21).
+fn cap_kill_evidence() -> Vec<u8> {
+    let track = MksTrack {
+        number: 1,
+        kind: 17,
+        codec_id: "S_HDMV/PGS".to_string(),
+        codec_private: Vec::new(),
+        language: "eng".to_string(),
+        encoding: MksEncoding::None,
+    };
+    let blocks: Vec<MksBlock> = (0..40u32)
+        .map(|i| {
+            let set = pgs_display_set((1920, 1080), &[(0, 400, 900, 600 + 8 * i, 60, 1)], &[(1, [16, 128, 128, 255])]);
+            MksBlock::new(1, i64::from(i) * 2_000, set)
+        })
+        .collect();
+    mks(&[track], &blocks, &MksShape::default())
+}
+
+/// R3-worker-60 and T5-R10: the cap's kill is reached through `run_worker`'s `cap` parameter, never a setting; the
+/// worker is the release's own binary under the recorder the engine uses (K2).
+#[test]
+fn the_real_worker_past_an_injected_cap_is_killed() {
+    let scratch = Scratch::new("ocr-cap-kill");
+    let work = scratch.0.join("work").join("ocr-job-title");
+    let out = work.join("s0");
+    std::fs::create_dir_all(&out).unwrap();
+    let evidence = work.join("evidence.mks");
+    std::fs::write(&evidence, cap_kill_evidence()).unwrap();
+    let args = ocr_args(&evidence, 0, 64, &out);
+    let capture = work.join("s0.capture.txt");
+    let program = PathBuf::from(env!("CARGO_BIN_EXE_lazymkv-ocr"));
+    let (sender, receiver) = mpsc::channel();
+    let at = capture.clone();
+    std::thread::spawn(move || {
+        let host = FakeHost::new("2026-11-06", 1_790_000_000);
+        let limits = Limits::from_settings(&Settings::default());
+        let ctx = ToolCtx {
+            guard: &StdProcessGuard,
+            host: &host,
+            limits: &limits,
+            cancel: CancelToken::default(),
+            on_output: &|_: OutputStream, _: &str| {},
+            on_progress: &|_: f64| {},
+        };
+        let _ = sender.send(run_worker(&ctx, &program, &args, &at, Duration::from_millis(1)).map_err(|e| e.to_string()));
+    });
+    // The bound proves the kill, so it is not scaled.
+    let end = receiver.recv_timeout(Duration::from_secs(30)).expect("the worker was not killed within 30 s of a 1 ms cap");
+    assert_eq!(end, Ok(WorkerEnd::TimedOut));
+    assert!(with_suffix(&capture, ".exit.json").exists());
 }
