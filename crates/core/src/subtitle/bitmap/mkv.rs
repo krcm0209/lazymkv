@@ -598,6 +598,28 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_assembled_file_with_long_size_vints_reads_as_the_shortest_encoded_one() {
+        // The same file as the hand-assembled test above, with the Segment's size as an 8-byte VINT (58 bytes) and
+        // the Cluster's as a 4-byte VINT (13 bytes), the longer encodings libebml and mkvmerge write.
+        let head: [&[u8]; 6] = [
+            &[0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x88],
+            b"matroska",
+            &[0x15, 0x49, 0xA9, 0x66, 0x87, 0x2A, 0xD7, 0xB1, 0x83, 0x0F, 0x42, 0x40],
+            &[0x16, 0x54, 0xAE, 0x6B, 0x94, 0xAE, 0x92, 0xD7, 0x81, 0x01, 0x83, 0x81, 0x11, 0x86, 0x8A],
+            b"S_HDMV/PGS",
+            &[0x1F, 0x43, 0xB6, 0x75, 0x10, 0x00, 0x00, 0x0D, 0xE7, 0x82, 0xEE, 0x48, 0xA3, 0x87, 0x81, 0x00, 0x67, 0x80],
+        ];
+        let segment: &[u8] = &[0x18, 0x53, 0x80, 0x67, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3A];
+        let mut parts: Vec<&[u8]> = vec![head[0], head[1], segment];
+        parts.extend_from_slice(&head[2..]);
+        parts.push(b"abc");
+        let bytes = parts.concat();
+        let stream = read_stream(&bytes, 0).unwrap();
+        assert_eq!((stream.track, stream.codec), (1, Some(SubCodec::Pgs)));
+        assert_eq!(read(&bytes, 0), [(61.103, 3, b"abc".to_vec())]);
+    }
+
+    #[test]
     fn the_reader_skips_void_and_crc_elements_and_reads_unknown_size_clusters() {
         let shape = MksShape { void_elements: true, crc32: true, unknown_size_clusters: true, ..MksShape::default() };
         let blocks = [block(1, 1_000, b"one"), block(1, 1_400, b"two"), block(1, 5_000, b"three")];

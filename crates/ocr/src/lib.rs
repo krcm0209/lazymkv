@@ -62,6 +62,9 @@ fn line_rect(b: &LineBox) -> Vec<RotatedRect> {
 /// ceiled and clamped to the image.
 fn word_union(line: &[RotatedRect], image: &Grey) -> Option<LineBox> {
     let rect = bounding_rect(line.iter())?;
+    if !(rect.left().is_finite() && rect.top().is_finite() && rect.right().is_finite() && rect.bottom().is_finite()) {
+        return None;
+    }
     let (w, h) = (image.width as f32, image.height as f32);
     let left = rect.left().floor().clamp(0.0, w);
     let top = rect.top().floor().clamp(0.0, h);
@@ -217,6 +220,15 @@ mod tests {
             encoder.write_header().unwrap().write_image_data(&[0u8; 12]).unwrap();
         }
         assert_eq!(read_png_grey(&bytes), Err("not an 8-bit grey PNG".to_string()));
+    }
+
+    #[test]
+    fn word_union_of_a_rectangle_with_a_nan_coordinate_is_no_box_and_does_not_panic() {
+        let image = ramp();
+        let nan = RotatedRect::from_rect(RectF::from_tlhw(f32::NAN, f32::NAN, 2.0, 4.0));
+        assert_eq!(word_union(&[nan], &image), None);
+        let sound = RotatedRect::from_rect(RectF::from_tlhw(1.0, 1.0, 2.0, 4.0));
+        assert!(word_union(&[sound], &image).is_some());
     }
 
     #[test]

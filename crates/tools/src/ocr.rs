@@ -81,8 +81,13 @@ fn worker_end(run: &RunResult, stderr_first: &str) -> WorkerEnd {
 /// The first line of the file at `path`, without its `\n` and the `\r` before it; empty when the file is empty or
 /// cannot be read.
 fn first_line(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap_or_default();
-    let line = bytes.split(|byte| *byte == b'\n').next().unwrap_or(&[]);
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        if std::io::BufRead::read_until(&mut std::io::BufReader::new(file), b'\n', &mut bytes).is_err() {
+            bytes.clear();
+        }
+    }
+    let line = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     String::from_utf8_lossy(line).into_owned()
 }

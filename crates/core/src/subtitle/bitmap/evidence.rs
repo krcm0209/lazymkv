@@ -599,6 +599,23 @@ mod tests {
     }
 
     #[test]
+    fn summary_json_writes_a_repeated_stream_number_once_with_the_later_values_and_every_unread_entry_has_a_why() {
+        let [read_zero, unread_three] = streams();
+        let later_zero = StreamSummary { outcome: StreamOutcome::Unread("later-sentinel".to_string()), exit: Some(1),
+            wall_ms: 77, ..read_zero.clone() };
+        let listed = [read_zero, unread_three, later_zero];
+        let value: Value = serde_json::from_str(&summary_json(&listed)).unwrap();
+        let entries = value["streams"].as_array().unwrap();
+        let numbers: Vec<i64> = entries.iter().map(|entry| entry["n"].as_i64().unwrap()).collect();
+        assert_eq!(numbers, [3, 0], "one entry per stream number, in the order of each number's last listing");
+        assert_eq!(entries[1], json!({"n": 0, "codec": "S_HDMV/PGS", "read": false, "why": "later-sentinel",
+            "exit": 1, "wall_ms": 77}));
+        for entry in entries.iter().filter(|entry| entry["read"] == json!(false)) {
+            assert!(entry["why"].is_string(), "{entry}");
+        }
+    }
+
+    #[test]
     fn summary_json_gives_a_read_streams_run_totals_text_counts_and_versions() {
         let value: Value = serde_json::from_str(&summary_json(&streams()[..1])).unwrap();
         let entry = &value["streams"][0];
