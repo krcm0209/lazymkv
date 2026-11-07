@@ -22,3 +22,5 @@ pub mod decide;
 pub mod golden;
 pub mod plan;
 pub mod census;
+#[cfg(feature = "ocr-trial")]
+pub mod ocr_trial;

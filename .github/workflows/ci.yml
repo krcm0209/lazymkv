@@ -132,6 +132,16 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --workspace --locked
 
+      # A2 and Ruling T5-R27: the ocr-trial feature links lazymkv-ocr, which only ubuntu builds (call 23), so its one
+      # build and test run here, on this job's rten build (T5-R52).
+      - name: Build lazymkv-dev with the ocr-trial feature (Linux)
+        if: runner.os == 'Linux'
+        run: cargo build -p lazymkv-dev --features ocr-trial --locked
+
+      - name: Test the ocr-trial feature (Linux)
+        if: runner.os == 'Linux'
+        run: cargo test -p lazymkv-dev --features ocr-trial --locked ocr_trial
+
       - name: Test (without lazymkv-ocr)
         if: runner.os != 'Linux'
         run: cargo test --workspace --exclude lazymkv-ocr --locked

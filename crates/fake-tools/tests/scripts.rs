@@ -2,7 +2,8 @@
 //! on Windows its functions are called alone from its syntax tree; the script itself never runs, since running it
 //! registers a task, which needs the owner's yes (Owner decision 3). On Windows,
 //! `scripts/phase0/platform-ignored.ps1`, the desktop-session run of the platform's ignored tests (design part 12.4;
-//! Task T3-25), is read and parsed here too, never run.
+//! Task T3-25), and `scripts/phase0/engine-ocr-trial.ps1`, the OCR trial's desktop-session steps (design part 10.9;
+//! pull request 5's Task 10), are read and parsed here too, never run.
 
 use std::fs;
 #[cfg(windows)]
@@ -202,6 +203,48 @@ fn the_platform_ignored_script_parses_and_runs_one_session_of_platform_tests() {
         assert!(text.contains(line), "platform-ignored.ps1 lacks: {line}");
     }
     assert!(!text.contains("ScheduledTask"), "the script registers nothing; run-interactive.ps1 does");
+}
+
+/// Design part 10.9 (Rulings T5-R45, T5-R62): the OCR trial's desktop-session script reads the rows from
+/// trial-tracks.txt, lets a slug or a label reach only a path or a check, sets RTEN_NUM_THREADS=3 for arm R' alone and
+/// runs no build. It is read here, and parsed on Windows; it never runs in a test.
+#[test]
+fn the_engine_ocr_trial_script_parses_sets_rten_num_threads_for_rows_and_prints_numbers_only() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("scripts").join("phase0").join("engine-ocr-trial.ps1");
+    let text = fs::read_to_string(&script).unwrap_or_else(|error| panic!("{}: {error}", script.display()));
+    for needle in [
+        "[Parameter(Mandatory)][ValidateSet('inventory', 'read', 'rows', 'compare', 'f3')][string]$Step",
+        r#"$Tracks = "$P0\trial-tracks.txt""#,
+        "$ClearMax = 64",
+        "$env:RTEN_NUM_THREADS = '3'",
+        "Remove-Item Env:RTEN_NUM_THREADS",
+        "'--clear-max', [string]$ClearMax",
+        "subs-ocr-engine",
+        "Assert-Quiet",
+        "'RESULT ok'",
+    ] {
+        assert!(text.contains(needle), "engine-ocr-trial.ps1 lacks: {needle}");
+    }
+    let code: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.starts_with('#')).collect();
+    for absent in ["cargo build", "cargo test", "cargo run", "write-host", "ocrs-trial.exe", "makemkvcon64.exe"] {
+        assert!(!code.iter().any(|line| line.to_ascii_lowercase().contains(absent)), "engine-ocr-trial.ps1 runs or prints {absent}");
+    }
+    let allowed = [
+        "[string]$Slug = ''", "[string]$Label = ''", "if ($Slug -and ", "if ($Label -and ", "$rows += [pscustomobject]@{",
+        "$rec = ", "$text = ", "$engineOut = ", "$title = @(", "$f3Dir = ",
+    ];
+    for line in code.iter().filter(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("slug") || lower.contains("label")
+    }) {
+        assert!(allowed.iter().any(|start| line.starts_with(start)), "a slug or a label reaches more than a path or a check: {line}");
+    }
+    #[cfg(windows)]
+    {
+        assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+        let errors = parse_errors(&script);
+        assert!(errors.is_empty(), "{errors}");
+    }
 }
 
 /// Review round 1 of pull request 3 (V13): the task's argument line is not quoted, Task Scheduler may expand a percent

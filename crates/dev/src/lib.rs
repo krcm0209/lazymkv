@@ -43,6 +43,8 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("ocr-compare", cmd::ocr_compare::run as Command, "<tess> <ocrs> [--rec DIR] [--tag CODE]"),
     ("golden", cmd::golden::run as Command, "write|check [--evidence DIR] [--text DIR]"),
     ("census", cmd::census::run as Command, "[--evidence DIR]"),
+    #[cfg(feature = "ocr-trial")]
+    ("ocr-trial", cmd::ocr_trial::run as Command, cmd::ocr_trial::SYNOPSIS),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";
@@ -320,6 +322,18 @@ mod tests {
             assert!(text.contains(&format!("  {} {}\n", name, synopsis)), "{}", text);
         }
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn the_help_lists_ocr_trial_only_with_the_feature() {
+        let ctx = evidence::Ctx::for_test(Path::new("."));
+        let (mut out, mut err): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+        assert_eq!(dispatch(&ctx, &words(&["--help"]), &mut out, &mut err), 0);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.contains("\n  ocr-trial "), cfg!(feature = "ocr-trial"), "{text}");
+        let (mut out, mut err): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+        let code = dispatch(&ctx, &words(&["ocr-trial", "--help"]), &mut out, &mut err);
+        assert_eq!(code, if cfg!(feature = "ocr-trial") { 0 } else { 2 });
     }
 
     #[test]

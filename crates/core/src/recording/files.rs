@@ -215,11 +215,18 @@ impl OcrSummary {
     }
 }
 
-/// One entry of subs-ocr/sub-<n>.frames.json (a list): the frame number and its OCR line count.
+/// One entry of subs-ocr/sub-<n>.frames.json (a list): the frame number, its OCR line count and, when the reading has
+/// them, its two times (R6-phase0-16, 18).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct FrameEntry {
     pub frame: i64,
     pub lines: Option<i64>,
+    /// The frame's time in seconds from the file's start (showinfo's pts_time), absent in older readings (R6-phase0-16,
+    /// 18). Def: T5-10. Use: T5-10.
+    pub t: Option<f64>,
+    /// `t` plus the file's start time, the packets' pts_time; absent in the proof of concept's readings (R6-phase0-16,
+    /// 18; T5-R24). Def: T5-10. Use: T5-10.
+    pub pts: Option<f64>,
 }
 
 /// One record of sub-<n>.ocr.jsonl or ocrs-s<n>[-crop<pad>].jsonl. Holds subtitle text: in memory only, never
@@ -518,6 +525,18 @@ mod tests {
         assert_eq!(title_of(&summary), Some(2));
         let frames: Vec<FrameEntry> = serde_json::from_str(r#"[{"frame": 4, "lines": 2}, {"frame": 5}]"#).unwrap();
         assert_eq!((frames[0].frame, frames[0].lines, frames[1].lines), (4, Some(2), None));
+    }
+
+    #[test]
+    fn a_frames_json_entry_without_t_or_pts_reads_with_both_none() {
+        let frames: Vec<FrameEntry> = serde_json::from_str(
+            r#"[{"frame": 0, "file": "f-00000000.png", "t": 0.25, "pts": 61.353, "chars": 0, "lines": 0, "markers": {"bracket": 0}},
+                {"frame": 1, "t": 0.5}, {"frame": 2, "lines": 1}]"#,
+        )
+        .unwrap();
+        assert_eq!((frames[0].t, frames[0].pts), (Some(0.25), Some(61.353)));
+        assert_eq!((frames[1].t, frames[1].pts), (Some(0.5), None));
+        assert_eq!((frames[2].t, frames[2].pts, frames[2].lines), (None, None, Some(1)));
     }
 
     #[test]

@@ -121,7 +121,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 /// parent's tmdb.json and the files of the folder's subs/ and subs-ocr/ (the only files the rule reads), so that the
 /// rest of the parent is not walked; and the folder's key in it. For ".", "/" and the like (no name), the folder is
 /// its own parent, as Path('.').parent is Path('.').
-fn rec_folder_tree(ctx: &Ctx, arg: &str) -> (Box<dyn Tree>, PathKey) {
+pub(crate) fn rec_folder_tree(ctx: &Ctx, arg: &str) -> (Box<dyn Tree>, PathKey) {
     let (text, parent, name) = pathlib_split(arg);
     let name = if name == "." { String::new() } else { name };
     let rec_dir = ctx.abs(arg);
@@ -144,7 +144,7 @@ fn rec_folder_tree(ctx: &Ctx, arg: &str) -> (Box<dyn Tree>, PathKey) {
 
 /// Adds every file directly in `dir` under `key`; nothing when `dir` cannot be listed (its files are then missing,
 /// as they were for the Python).
-fn add_folder_files(tree: &mut MemTree, key: &PathKey, dir: &Path) {
+pub(crate) fn add_folder_files(tree: &mut MemTree, key: &PathKey, dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
