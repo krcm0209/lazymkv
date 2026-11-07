@@ -2,8 +2,10 @@
 //! evidence.mks (`mkv`), the decoders, the preparation and the row line finder. Nothing here reads a file, a process
 //! or a clock (RP19).
 
+pub mod lines;
 pub mod mkv;
 pub mod pgs;
+pub mod prepare;
 pub mod vobsub;
 
 /// The two bitmap subtitle codecs the worker reads (design part 10.3); any other codec is refused by the caller
