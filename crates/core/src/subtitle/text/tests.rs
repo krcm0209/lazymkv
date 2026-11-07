@@ -1479,7 +1479,7 @@ impl Title {
 /// st.main(['--rec', rec, '--text', text] + orig) over the title's files: (exit code, stdout, stderr).
 fn main_run(title: &Title, orig_lang: Option<&str>) -> (i32, String, String) {
     let tree = title.tree();
-    let run = subs_run(&tree, &PathKey::new("rec"), &tree, &PathKey::new("text"), orig_lang, 64, &Rule::default());
+    let run = subs_run(&tree, &PathKey::new("rec"), &tree, &PathKey::new("text"), orig_lang, 64, &Rule::default(), &[]);
     let text = |lines: &[String]| lines.iter().map(|line| format!("{line}\n")).collect::<String>();
     (run.exit_code, text(&run.stdout), text(&run.stderr))
 }
@@ -1566,6 +1566,38 @@ mod files {
         title.files.remove("text/sub-0.ocr.jsonl");
         let (code, _, _) = main_run(&title, None);
         assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn a_subs_run_with_an_unread_stream_names_it_instead_of_phase_0s_hint() {
+        let mut title = write_title(true);
+        let pgs: serde_json::Value =
+            serde_json::from_str::<serde_json::Value>(&title.files["rec/subs/sub-0.packets.json"]).unwrap()["packets"]
+                .clone();
+        title.add_stream(1, "eng", "HDMV PGS", pgs);
+        let tree = title.tree();
+        let (rec, text, rule) = (PathKey::new("rec"), PathKey::new("text"), Rule::default());
+        let unread = [(1, "time cap of 60.0 s reached after 12 of 20 events".to_string())];
+        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule, &unread);
+        assert_eq!((run.exit_code, run.stdout.len(), run.analysis.is_none()), (2, 0, true));
+        assert_eq!(run.stderr, ["stream s1 eng: not read by the engine: time cap of 60.0 s reached after 12 of 20 events"]);
+        assert!(!run.stderr.iter().any(|line| line.contains("ocr-subs.ps1")), "{:?}", run.stderr);
+        // The engine's word refuses the title even where the stream's text is there, and a stream the index does not
+        // list is named with the tag und.
+        let unread = [(0, "lazymkv-ocr exited with code 101".to_string()), (7, "made-up reason".to_string())];
+        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule, &unread);
+        assert_eq!(
+            run.stderr,
+            [
+                "stream s0 eng: not read by the engine: lazymkv-ocr exited with code 101",
+                "stream s7 und: not read by the engine: made-up reason",
+            ]
+        );
+        // With no unread stream the stream without text is phase 0's input error with its hint, as the golden reads it.
+        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule, &[]);
+        assert_eq!((run.exit_code, run.stderr.len()), (2, 1));
+        assert!(run.stderr[0].starts_with("stream s1 eng: no OCR text (no sub-1.ocr.jsonl in "), "{:?}", run.stderr);
+        assert!(run.stderr[0].ends_with("); read it with ocr-subs.ps1"), "{:?}", run.stderr);
     }
 }
 
@@ -1715,13 +1747,13 @@ mod added_title {
     #[test]
     fn subs_run_prints_the_pythons_lines() {
         let tree = mixed_title(None);
-        let run = subs_run(&tree, &PathKey::new("rec"), &tree, &PathKey::new("text"), Some("en"), 64, &Rule::default());
+        let run = subs_run(&tree, &PathKey::new("rec"), &tree, &PathKey::new("text"), Some("en"), 64, &Rule::default(), &[]);
         assert_eq!((run.exit_code, run.stderr.len()), (0, 0), "{:?}", run.stderr);
         assert_eq!(run.stdout, E2E_EN);
         assert_eq!(run.orig_lang.as_deref(), Some("en"));
         // No --orig-lang: the original language comes from <rec>/../tmdb.json, and T6 keeps the commentary.
         let tree = mixed_title(Some("fr"));
-        let run = subs_run(&tree, &PathKey::new("rec"), &tree, &PathKey::new("text"), None, 64, &Rule::default());
+        let run = subs_run(&tree, &PathKey::new("rec"), &tree, &PathKey::new("text"), None, 64, &Rule::default(), &[]);
         assert_eq!((run.exit_code, run.stderr.len()), (0, 0), "{:?}", run.stderr);
         assert_eq!(run.stdout, E2E_FR);
         assert_eq!(run.orig_lang.as_deref(), Some("fr"));
@@ -1731,7 +1763,7 @@ mod added_title {
     fn subs_json_holds_numbers_and_decisions_only() {
         let tree = mixed_title(None);
         let text = PathKey::new("text");
-        let run = subs_run(&tree, &PathKey::new("rec"), &tree, &text, Some("en"), 64, &Rule::default());
+        let run = subs_run(&tree, &PathKey::new("rec"), &tree, &text, Some("en"), 64, &Rule::default(), &[]);
         let doc = subs_json(&run, "text", &tree, &text);
         let written = serde_json::to_string(&doc).unwrap();
         // No line, word or word pair of the OCR text reaches the document.
@@ -1791,19 +1823,19 @@ mod added_title {
         let text = PathKey::new("text");
         let rule = Rule::default();
         let tree = title(r#"{"packets": [{"pts_time": "x", "size": "4000"}]}"#);
-        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule);
+        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule, &[]);
         assert_eq!((run.exit_code, run.stdout.len()), (2, 0));
         assert_eq!(run.stderr, ["cannot read the input: could not convert string to float: 'x'"]);
         let tree = title(r#"{"packets": [{"pts_time": "1.000", "size": "4k"}]}"#);
-        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule);
+        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule, &[]);
         assert_eq!(run.stderr, ["cannot read the input: invalid literal for int() with base 10: '4k'"]);
         let empty = MemTree::new("tmp", "tmp");
-        let run = subs_run(&empty, &rec, &empty, &text, None, 64, &rule);
+        let run = subs_run(&empty, &rec, &empty, &text, None, 64, &rule, &[]);
         assert_eq!(run.stderr, ["cannot read the input: [Errno 2] No such file or directory: 'tmp/rec/subs/index.json'"]);
         // A tmdb.json that is not JSON crashed the Python; the port says so and exits 2 (port spec 3.4).
         let mut tree = title(r#"{"packets": [{"pts_time": "1.000", "size": "4000"}]}"#);
         tree.insert_file("tmdb.json", b"not json".to_vec());
-        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule);
+        let run = subs_run(&tree, &rec, &tree, &text, None, 64, &rule, &[]);
         assert_eq!((run.exit_code, run.stdout.len()), (2, 0));
         assert!(run.stderr[0].starts_with("cannot read the input: "), "{:?}", run.stderr);
         assert_eq!(run.analysis, None);

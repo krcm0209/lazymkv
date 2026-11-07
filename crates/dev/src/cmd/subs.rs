@@ -106,6 +106,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         orig_lang.as_deref(),
         clear_max_bytes,
         &Rule::default(),
+        &[],
     );
     for line in &run.stdout {
         let _ = writeln!(out, "{line}");

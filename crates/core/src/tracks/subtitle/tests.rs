@@ -172,6 +172,7 @@ fn default_facts_hold_no_evidence() {
     assert!(facts.text.is_none());
     assert!(facts.remembered.is_none());
     assert!(facts.reviewed.is_none());
+    assert!(facts.unread.is_empty());
     let measured = SubtitleFacts { events: BTreeMap::from([(2, vec![1.0, 4.5])]), ..SubtitleFacts::default() };
     assert_ne!(measured, facts);
     assert_eq!(measured.events[&2], vec![1.0, 4.5]);
@@ -900,9 +901,9 @@ mod roles {
     use crate::settings::Settings;
     use crate::subtitle::text::{Decision, Role};
     use crate::tracks::subtitle::{
-        confidence, decide_subtitles, text_disagreements, Band, DialoguePick, SubtitleCase, SubtitleDecision, SubtitleDrop,
-        SubtitleFacts, SubtitleTrack, SUBTITLE_ALIGNMENT_CONFIDENCE, SUBTITLE_AMBIGUOUS_CONFIDENCE, SUBTITLE_FLAGS_CONFIDENCE,
-        SUBTITLE_ONE_FULL_CONFIDENCE,
+        confidence, decide_subtitles, text_disagreements, unread_detail, Band, DialoguePick, SubtitleCase, SubtitleDecision,
+        SubtitleDrop, SubtitleFacts, SubtitleTrack, SUBTITLE_ALIGNMENT_CONFIDENCE, SUBTITLE_AMBIGUOUS_CONFIDENCE,
+        SUBTITLE_FLAGS_CONFIDENCE, SUBTITLE_ONE_FULL_CONFIDENCE,
     };
     use crate::tracks::SubtitleRole;
 
@@ -2075,6 +2076,82 @@ mod roles {
         let decision = decide_subtitles(&title, &evidence, &Settings::default());
         assert_eq!((decision.notes.len(), decision.reviews.len()), (0, 0));
         assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+    }
+
+    /// A cap reason as step 10 writes it (design part 10.8); the numbers are made up.
+    const CAP_REASON: &str = "time cap of 60.0 s reached after 12 of 20 events";
+
+    #[test]
+    fn an_unread_stream_gives_one_subtitle_text_unread_note_and_no_review() {
+        assert_eq!(unread_detail(3, CAP_REASON), "stream 3 was not read: time cap of 60.0 s reached after 12 of 20 events");
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, ENG_PGS]);
+        let measured = facts(vec![(1, regular_events()), (2, sdh_events()), (3, forced_events())]);
+        let read = decide_subtitles(&title, &measured, &Settings::default());
+        let evidence = SubtitleFacts { unread: BTreeMap::from([(3, CAP_REASON.to_string())]), ..measured.clone() };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        let mut notes = read.notes.clone();
+        notes.push(Noted {
+            note: Note::SubtitleTextUnread,
+            stream: Some(3),
+            detail: "stream 3 was not read: time cap of 60.0 s reached after 12 of 20 events".to_string(),
+        });
+        assert_eq!(decision.notes, notes);
+        // The note is a fact: it raises no review, and the counts and timing decide as they did.
+        assert_eq!(decision.reviews, read.reviews);
+        assert_eq!(
+            (decision.kept, decision.dropped, decision.case, decision.confidence),
+            (read.kept, read.dropped, read.case, read.confidence)
+        );
+    }
+
+    #[test]
+    fn a_title_with_an_unread_stream_uses_no_text_of_its_other_streams() {
+        // Stream 2's text differs from the counts (a_title_without_unread_streams_decides_as_before); stream 1 was not
+        // read, so the title's text adds no review (design part 10.8).
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        let text = BTreeMap::from([(2, verdict(Role::Regular))]);
+        let evidence = SubtitleFacts {
+            text: Some(&text),
+            unread: BTreeMap::from([(1, "lazymkv-ocr exited with code 101".to_string())]),
+            ..facts(vec![(1, regular_events()), (2, sdh_events())])
+        };
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.notes,
+            vec![Noted {
+                note: Note::SubtitleTextUnread,
+                stream: Some(1),
+                detail: "stream 1 was not read: lazymkv-ocr exited with code 101".to_string(),
+            }]
+        );
+        assert_eq!(decision.reviews, Vec::<ReviewReason>::new());
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Alignment, 0.85));
+        assert_eq!(
+            decision.kept,
+            vec![
+                track(1, SubtitleRole::Regular, Some(1000), "alignment"),
+                track(2, SubtitleRole::Sdh, Some(1200), "alignment"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_title_without_unread_streams_decides_as_before() {
+        let title = bluray(&[VIDEO, ENG_PGS, ENG_PGS, SPA_PGS]);
+        let text = BTreeMap::from([(2, verdict(Role::Regular))]);
+        let evidence = SubtitleFacts { text: Some(&text), ..facts(vec![(1, regular_events()), (2, sdh_events())]) };
+        assert!(evidence.unread.is_empty());
+        let decision = decide_subtitles(&title, &evidence, &Settings::default());
+        assert_eq!(
+            decision.notes,
+            vec![Noted {
+                note: Note::SubtitleTextDisagrees,
+                stream: Some(2),
+                detail: "stream 2: the text reads regular, the counts keep it as sdh (8.7 \"Text\")".to_string(),
+            }]
+        );
+        assert_eq!(decision.reviews, vec![ReviewReason::SubtitleAmbiguous]);
+        assert_eq!((decision.case, decision.confidence), (SubtitleCase::Ambiguous, 0.60));
     }
 
     #[test]

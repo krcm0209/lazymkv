@@ -205,6 +205,8 @@ pub(crate) fn engine_decide_inputs(
         probes: Ok(Some(probes.clone())),
         subs_index: Ok(None),
         packets: BTreeMap::new(),
+        // Task 15 reads the job folder's subs-ocr\summary.json.
+        unread: Ok(Vec::new()),
     };
     Ok(DecideInputs {
         slug: job.record.id.clone(),

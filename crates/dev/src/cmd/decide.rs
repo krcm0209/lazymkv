@@ -49,7 +49,7 @@ use lazymkv_core::lookup::discdb::{match_titles, DiscDbRecord, DiscDbTitle};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbRecord};
 use lazymkv_core::plan::movie::LibraryFacts;
 use lazymkv_core::plan::{Plan, PlannedTitle};
-use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, Selection, SubsIndexEntry};
+use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, OcrSummary, Selection, SubsIndexEntry};
 use lazymkv_core::recording::{py_repr_str, read_json, read_text, text_mode, Encoding, Errors, PathKey, Tree};
 use lazymkv_core::reconcile::{reconcile, Report, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::remembered;
@@ -211,7 +211,8 @@ pub struct FactsSummary {
     pub verdict_reference: Option<u32>,
     /// Streams with a text-rule decision from the subtitles section that the decision used (8.7 "Text"): empty where 6.4
     /// step 10 does not run (`tracks::subtitle::step10_runs`: fewer than two English or no-language subtitle streams in
-    /// the file), since `decide_subtitles` then leaves the text out.
+    /// the file), since `decide_subtitles` then leaves the text out, and empty when the title has a stream step 10 did not
+    /// read (design part 10.8).
     pub text_streams: Vec<u32>,
     /// Selected streams MakeMKV removed from the file (`MSG:4047`, 6.2 step 7).
     pub removed: Vec<u32>,
@@ -273,6 +274,10 @@ pub struct FileFacts {
     pub subs_index: Result<Option<Vec<SubsIndexEntry>>, String>,
     /// `verify::read_packets_file` for every index entry's `n`, mapped or not; empty without an index.
     pub packets: BTreeMap<i64, PacketsFile>,
+    /// The streams step 10 did not read, from <label>/subs-ocr/summary.json (`OcrSummary::unread`, design part 10.8):
+    /// Ok(empty) when the file is absent; Err "<shown>: <serde error>" when it does not parse. Def: T5-2. Use: T5-2,
+    /// T5-15.
+    pub unread: Result<Vec<(i64, String)>, String>,
 }
 
 /// Everything `decide_doc` renders for one rip label (K5, R-B1, design part 5.7 step 3). `read_decide_inputs`
@@ -369,6 +374,7 @@ pub fn read_decide_inputs(
         probes: read_probes(tree, &label_dir),
         subs_index: index,
         packets,
+        unread: read_unread(tree, &label_dir),
     };
     Ok(DecideInputs {
         slug: rec.slug.clone(),
@@ -534,7 +540,9 @@ fn reading_folder(text: &Path, slug: &str, label: &str) -> Option<(PathBuf, Stri
 /// The title's subtitle outcome: subs_run over the label folder with the OCR text reading_folder finds, as SubsJson
 /// when it exits 0; otherwise skipped with subtitle_text.py's stderr lines joined by "; " (no subs/index.json, no
 /// sub-<n>.ocr.jsonl for any stream, or an English or no-language bitmap stream without one). Skipped too without
-/// `text`, or when no folder holds the text.
+/// `text`, or when no folder holds the text. The streams `<label>/subs-ocr/summary.json` marks unread are passed to
+/// `subs_run`, which then refuses the title with one line per stream (design part 10.8, T5-R51); a summary.json that
+/// does not parse skips the section with its error.
 fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>) -> SubtitleEntry {
     let text = match text {
         Some(text) => text,
@@ -549,9 +557,14 @@ fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>) -> Subtit
         Ok(tree) => tree,
         Err(error) => return SubtitleEntry::Skipped { skipped: format!("{}: {}", shown, error) },
     };
+    let unread = match read_unread(&rec.tree, &rec.dir.join(label)) {
+        Ok(unread) => unread,
+        Err(error) => return SubtitleEntry::Skipped { skipped: error },
+    };
     let rule = TextRule::default();
     let root = PathKey::root();
-    let outcome = subs_run(&rec.tree, &rec.dir.join(label), &text_tree, &root, None, rule.CLEAR_MAX_BYTES, &rule);
+    let outcome =
+        subs_run(&rec.tree, &rec.dir.join(label), &text_tree, &root, None, rule.CLEAR_MAX_BYTES, &rule, &unread);
     if outcome.exit_code == 0 {
         SubtitleEntry::Results(subs_json(&outcome, &reading, &text_tree, &root))
     } else {
@@ -757,6 +770,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
     };
     let verdicts = content_verdicts(&doc.audio, &report);
     let text = text_decisions(&doc.subtitles, &inputs.file.subs_index, &report, settings)?;
+    let unread = unread_streams(&inputs.file.unread, &inputs.file.subs_index, &report)?;
     // The lookup answers exactly as the plan section parsed them (a non-200 answer is left unparsed there).
     let answers = inputs.answers.as_ref().map_err(Clone::clone)?;
     let record = record_for_naming(plan.plan.identity.tmdb, answers.recorded.clone());
@@ -773,7 +787,11 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
         event_streams: events.keys().copied().collect(),
         verdict_streams: verdicts.by_stream.keys().copied().collect(),
         verdict_reference: verdicts.reference,
-        text_streams: if step10_runs(&title, &removed) { text.keys().copied().collect() } else { Vec::new() },
+        text_streams: if step10_runs(&title, &removed) && unread.is_empty() {
+            text.keys().copied().collect()
+        } else {
+            Vec::new()
+        },
         removed: removed.iter().copied().collect(),
     };
     let decision_inputs = DecisionInputs {
@@ -798,6 +816,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
             text: (!text.is_empty()).then_some(&text),
             remembered: remembered_subtitles.as_deref(),
             reviewed: None,
+            unread,
         },
         record: record.as_ref(),
         library: &inputs.library,
@@ -1023,6 +1042,18 @@ fn read_probes(tree: &dyn Tree, label_dir: &PathKey) -> Result<Option<FfprobeStr
     read_json(tree, &path).map(Some).map_err(|error| format!("{}: {}", tree.display(&path), error))
 }
 
+/// <label>/subs-ocr/summary.json's unread streams (`OcrSummary::unread`, design part 10.8, T5-R51) as (`n`, `why`):
+/// Ok(empty) when the file is absent; Err "<path>: <serde's message>" when it does not parse.
+fn read_unread(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(i64, String)>, String> {
+    let path = label_dir.join(&format!("{READING}/summary.json"));
+    if !tree.is_file(&path) {
+        return Ok(Vec::new());
+    }
+    read_json::<OcrSummary>(tree, &path)
+        .map(|summary| summary.unread())
+        .map_err(|error| format!("{}: {}", tree.display(&path), error))
+}
+
 /// ffprobe's profile of every audio stream of the file (6.4 step 9: "DTS-HD MA", "DTS"), keyed by scan stream, the
 /// rendering half of `read_probes`; streams without a profile are left out. Empty without ffprobe-streams.json.
 fn profiles_by_stream(probes: Option<&FfprobeStreams>, report: &VerifyReport) -> BTreeMap<u32, String> {
@@ -1056,6 +1087,25 @@ fn read_subs(
         }
         Err(error) => (Err(error), BTreeMap::new()),
     }
+}
+
+/// The unread streams of `FileFacts.unread` keyed by scan stream, each with its reason (design part 10.8): mapped by
+/// `n` through `verify::subs_streams` and `verify::by_scan_stream`, so a stream in no index entry is left out (as
+/// `text_decisions` maps the text). Empty when the label has no subs/index.json; Err with the summary's error, then
+/// the index's.
+fn unread_streams(
+    unread: &Result<Vec<(i64, String)>, String>,
+    index: &Result<Option<Vec<SubsIndexEntry>>, String>,
+    report: &VerifyReport,
+) -> Result<BTreeMap<u32, String>, String> {
+    let unread = unread.as_ref().map_err(Clone::clone)?;
+    let index = match index {
+        Ok(Some(index)) => index,
+        Ok(None) => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.clone()),
+    };
+    let by_n: BTreeMap<i64, String> = unread.iter().cloned().collect();
+    Ok(by_scan_stream(&by_n, &subs_streams(index, report)))
 }
 
 /// The database title matched to scan title `number` (spec 8.3 "Database titles are matched to scan titles",
@@ -2482,6 +2532,102 @@ SINFO:0,4,6,0,"PGS"
         assert_eq!(kept_subtitles(&stricter.decision), forced_kept_tracks(40));
         assert_eq!(stricter.facts.text_streams, Vec::<u32>::new());
         assert_eq!(stricter.decision.confidences.track, 0.90);
+    }
+
+    /// A cap reason as step 10 writes it into summary.json (design part 10.8); the numbers are made up.
+    const UNREAD_REASON: &str = "time cap of 60.0 s reached after 12 of 20 events";
+
+    /// `<label>/subs-ocr/summary.json` as Task 6's `summary_json` writes it: n 0 read, n 1 unread with UNREAD_REASON.
+    fn unread_summary(label: &Path) {
+        let summary = json!({"streams": [
+            {"n": 0, "codec": "S_HDMV/PGS", "read": true},
+            {"n": 1, "codec": "S_HDMV/PGS", "read": false, "why": UNREAD_REASON}
+        ]});
+        write(&label.join("subs-ocr/summary.json"), format!("{summary}\n"));
+    }
+
+    #[test]
+    fn decide_reads_unread_streams_from_the_recordings_summary() {
+        let tmp = Scratch::new("decision-unread");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        forced_kept(&root);
+        let label = root.join("recs/disc-b/forced-kept");
+        unread_summary(&label);
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, "forced-kept", None, None, &PlanOptions::default()).unwrap();
+        assert_eq!(inputs.file.unread, Ok(vec![(1, UNREAD_REASON.to_string())]));
+        // n 1 is file track 6, scan stream 6. Stream 5's text alone would raise subtitle_ambiguous
+        // (sub_clear_max_bytes_counts_the_events_and_another_text_rule_leaves_the_text_out); with an unread stream the
+        // title's text is not used.
+        let decided = decided_with(&root, "forced-kept", |_, doc| with_text(doc, &[(0, Some(Role::Sdh))])).unwrap();
+        assert_eq!(subtitle_notes(&decided), [(Note::SubtitleTextUnread, Some(6))]);
+        let noted = &decided.decision.subtitles.notes[0];
+        assert_eq!(noted.detail, "stream 6 was not read: time cap of 60.0 s reached after 12 of 20 events");
+        assert!(decided.decision.notes.contains(noted), "{:?}", decided.decision.notes);
+        assert_eq!(decided.facts.text_streams, Vec::<u32>::new());
+        assert_eq!(kept_subtitles(&decided.decision), forced_kept_tracks(40));
+        assert_eq!(decided.decision.subtitles.reviews, Vec::<ReviewReason>::new());
+        assert_eq!(decided.decision.reviews, [ReviewReason::IdentityUnknown]);
+        assert_eq!(decided.decision.confidences.track, 0.90);
+        // A summary.json that does not parse skips the decision with its path and serde's message.
+        write(&label.join("subs-ocr/summary.json"), "not json");
+        let error = decided_with(&root, "forced-kept", |_, _| {}).unwrap_err();
+        assert!(error.starts_with("recs/disc-b/forced-kept/subs-ocr/summary.json: "), "{error}");
+    }
+
+    #[test]
+    fn decide_gives_an_unread_streams_title_the_unread_line_as_its_subtitles_section() {
+        let tmp = Scratch::new("subtitles-unread");
+        let root = tmp.0.clone();
+        let label = recording(&root);
+        // s1 has no text because step 10 did not read it, and summary.json says why.
+        subtitles(&label, Some(&root.join("ocr-copy")), &[1]);
+        unread_summary(&label);
+        let doc = doc_of(&root, "eng-only", Some("ocr-copy"), None).unwrap();
+        let skipped = format!("stream s1 eng: not read by the engine: {UNREAD_REASON}");
+        assert_eq!(doc.subtitles, SubtitleEntry::Skipped { skipped });
+        assert!(doc.reviews.is_empty());
+        assert_eq!(doc.reconcile.exit_code, 0);
+        // Without OCR text the section is decide's no-text line, as before.
+        let doc = doc_of(&root, "eng-only", None, None).unwrap();
+        assert_eq!(doc.subtitles, no_text_entry());
+        // A summary.json that does not parse skips the section with its path and serde's message.
+        write(&label.join("subs-ocr/summary.json"), "not json");
+        let doc = doc_of(&root, "eng-only", Some("ocr-copy"), None).unwrap();
+        match doc.subtitles {
+            SubtitleEntry::Skipped { skipped } => {
+                assert!(skipped.starts_with("recs/disc-a/eng-only/subs-ocr/summary.json: "), "{skipped}")
+            }
+            other => panic!("the subtitles section was not skipped: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_phase_0_summary_without_read_keys_gives_no_unread_stream() {
+        let tmp = Scratch::new("decision-phase-0-summary");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        forced_kept(&root);
+        let text = |_: &mut PlanDoc, doc: &mut DecideDoc| with_text(doc, &[(0, Some(Role::Sdh))]);
+        let before = decided_with(&root, "forced-kept", text).unwrap();
+        // ocr-subs.ps1's summary.json, which Windows PowerShell 5.1 writes as UTF-8 with a byte order mark: no read key.
+        let stream = |n: i64| {
+            json!({"n": n, "language": "eng", "codec": "hdmv_pgs_subtitle", "canvas": "1920x1080", "frames": 80,
+                   "text_frames": 40, "lines": 52,
+                   "markers": {"bracket": 0, "note": 0, "hash": 0, "speaker": 0, "upper": 0},
+                   "pts_offset": 0, "ffmpeg_s": 1.2, "tesseract_s": 3.4})
+        };
+        let summary = json!({"slug": "disc-b", "label": "forced-kept", "render": "native", "skipped": [],
+                             "streams": [stream(0), stream(1)]});
+        write(&root.join("recs/disc-b/forced-kept/subs-ocr/summary.json"), format!("\u{feff}{summary}\n"));
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let inputs = read_decide_inputs(&ctx, &rec, "forced-kept", None, None, &PlanOptions::default()).unwrap();
+        assert_eq!(inputs.file.unread, Ok(Vec::new()));
+        assert_eq!(decided_with(&root, "forced-kept", text).unwrap(), before);
+        assert_eq!(before.decision.subtitles.reviews, [ReviewReason::SubtitleAmbiguous]);
     }
 
     /// A made-up MSG:2003 read error (spec 9.4): the error text, the drive (made up) and the offset.

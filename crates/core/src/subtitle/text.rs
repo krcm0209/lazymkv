@@ -2291,7 +2291,11 @@ pub struct SubsRun {
 /// main's flow after argument parsing: load_title, the two input checks, `orig_lang` or else
 /// `<rec>/../tmdb.json`'s original_language, the header line, analyse. The folders are printed as the trees display
 /// them (`str(Path)`). A tmdb.json that cannot be read crashed the Python; here it is "cannot read the input: ..."
-/// and exit 2 (port spec 3.4). Py: subtitle_text.main.
+/// and exit 2 (port spec 3.4). `unread` (design part 10.8, T5-R51) holds the streams `subs-ocr\summary.json` marks
+/// unread as (`n`, `why`); when it is not empty the title is refused before the two checks for missing text, one line
+/// per stream, so its text adds no review, and phase 0's hint `read it with ocr-subs.ps1` stays for a stream without
+/// text that no summary marks unread. Every caller but decide's passes `&[]`. Py: subtitle_text.main. Def: T5-2.
+/// Use: T5-2, T5-15.
 pub fn subs_run(
     rec_tree: &dyn Tree,
     rec: &PathKey,
@@ -2300,6 +2304,7 @@ pub fn subs_run(
     orig_lang: Option<&str>,
     clear_max_bytes: i64,
     rule: &Rule,
+    unread: &[(i64, String)],
 ) -> SubsRun {
     let mut run =
         SubsRun { stdout: Vec::new(), stderr: Vec::new(), exit_code: 2, tracks: Vec::new(), orig_lang: None, analysis: None };
@@ -2309,6 +2314,15 @@ pub fn subs_run(
             run.stderr.push(format!("cannot read the input: {error}"));
             return run;
         }
+    }
+    // Design part 10.8: a stream the engine did not read refuses the title, one line per stream, before the checks
+    // for missing text.
+    if !unread.is_empty() {
+        for (n, why) in unread {
+            let tag = run.tracks.iter().find(|t| t.n == *n).map_or("und", |t| t.tag.as_str());
+            run.stderr.push(format!("stream s{n} {tag}: not read by the engine: {why}"));
+        }
+        return run;
     }
     let rec_shown = rec_tree.display(rec);
     let text_shown = text_tree.display(text);
