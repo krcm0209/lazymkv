@@ -1,7 +1,10 @@
 //! Test support (port spec section 5, "Ported tests"): Python's random.Random, so that the ported tests draw the same
 //! synthetic signals as the Python tests. Compiled for this crate's tests and, through the `testsupport` feature,
 //! for lazymkv-dev's integration tests. Task 4 adds the synthetic level series here; phase 1's Task 2 adds the robot
-//! log builders (spec 9.4) and the TMDb answer builders (spec 8.1, in TMDb's documented shapes).
+//! log builders (spec 9.4) and the TMDb answer builders (spec 8.1, in TMDb's documented shapes). Pull request 5's
+//! Task 3 adds the made-up Matroska writer `mks` (design part 10.3).
+
+pub mod mks;
 
 const N: usize = 624;
 const M: usize = 397;
