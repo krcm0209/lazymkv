@@ -244,3 +244,97 @@ pub fn idx_text(width: u32, height: u32, palette: &[[u8; 3]; 16]) -> Vec<u8> {
     )
     .into_bytes()
 }
+
+/// A big-endian 16-bit field of a made-up PGS or VobSub byte layout.
+fn be16(value: u32) -> [u8; 2] {
+    assert!(value <= 0xFFFF, "a 16-bit field holds {value}");
+    [(value >> 8) as u8, value as u8]
+}
+
+/// One PGS segment: its type, its 16-bit body length and its body.
+fn pgs_segment(kind: u8, body: &[u8]) -> Vec<u8> {
+    let length = u32::try_from(body.len()).expect("a PGS segment body below 2^32 bytes");
+    let mut segment = vec![kind];
+    segment.extend(be16(length));
+    segment.extend_from_slice(body);
+    segment
+}
+
+/// One PGS display set of made-up solid rectangles, standing alone (an epoch start): objects are
+/// `(object id, x, y, width, height, colour index)`, width below 16384; palette entries are
+/// `(index, [Y, Cr, Cb, alpha])` of palette 0. Def: T5-4. Use: T5-4, T5-8, T5-9, T5-13, T5-24.
+pub fn pgs_display_set(
+    video: (u32, u32),
+    objects: &[(u16, u32, u32, u32, u32, u8)],
+    palette: &[(u8, [u8; 4])],
+) -> Vec<u8> {
+    let count = u8::try_from(objects.len()).expect("at most 255 objects in a composition");
+    let mut composition = Vec::new();
+    composition.extend(be16(video.0));
+    composition.extend(be16(video.1));
+    // Frame rate, composition number 1, state epoch start, palette update flag 0, palette 0, object count.
+    composition.extend([0x10, 0x00, 0x01, 0x80, 0x00, 0x00, count]);
+    for &(id, x, y, ..) in objects {
+        composition.extend(be16(u32::from(id)));
+        composition.extend([0x00, 0x00]);
+        composition.extend(be16(x));
+        composition.extend(be16(y));
+    }
+    let mut window = vec![0x01, 0x00];
+    for value in [0, 0, video.0, video.1] {
+        window.extend(be16(value));
+    }
+    let mut palette_body = vec![0x00, 0x00];
+    for (index, entry) in palette {
+        palette_body.push(*index);
+        palette_body.extend(entry);
+    }
+    let mut set = pgs_segment(0x16, &composition);
+    set.extend(pgs_segment(0x17, &window));
+    set.extend(pgs_segment(0x14, &palette_body));
+    for &(id, _, _, width, height, colour) in objects {
+        assert!(width < 16384, "a PGS run of {width} pixels needs more than 14 bits");
+        let row = [0x00, 0xC0 | (width >> 8) as u8, width as u8, colour, 0x00, 0x00];
+        let rle: Vec<u8> = (0..height).flat_map(|_| row).collect();
+        let declared = u32::try_from(rle.len() + 4).expect("PGS object data below 2^32 bytes");
+        assert!(declared < 1 << 24, "PGS object data of {declared} bytes needs more than 24 bits");
+        let mut body = be16(u32::from(id)).to_vec();
+        body.extend([0x00, 0xC0, (declared >> 16) as u8, (declared >> 8) as u8, declared as u8]);
+        body.extend(be16(width));
+        body.extend(be16(height));
+        body.extend(rle);
+        set.extend(pgs_segment(0x15, &body));
+    }
+    set.extend([0x80, 0x00, 0x00]);
+    set
+}
+
+/// One VobSub subpicture unit of a made-up solid rectangle: `area` is `(x, y, width, height)` with
+/// `x + width - 1` and `y + height - 1` at most 4095; every pixel has the 2-bit code `fill` (0 to 3); `colours[c]`
+/// is the idx palette index and `alphas[c]` the contrast nibble of code `c`. Def: T5-4. Use: T5-4, T5-8.
+pub fn vobsub_unit(area: (u32, u32, u32, u32), fill: u8, colours: [u8; 4], alphas: [u8; 4]) -> Vec<u8> {
+    let (x, y, width, height) = area;
+    assert!(width > 0 && height > 0 && x + width - 1 <= 4095 && y + height - 1 <= 4095, "a VobSub area of 12 bits");
+    assert!(fill <= 3, "a 2-bit pixel code, not {fill}");
+    let (x2, y2) = (x + width - 1, y + height - 1);
+    let top_rows = height.div_ceil(2);
+    // Every row is the nibbles 0 0 0 fill: a run of 0, which fills the row.
+    let rows: Vec<u8> = (0..top_rows + height / 2).flat_map(|_| [0x00, fill]).collect();
+    let control = 4 + u32::try_from(rows.len()).expect("VobSub rows below 2^32 bytes");
+    let mut unit = vec![0x00, 0x00];
+    unit.extend(be16(control));
+    unit.extend(rows);
+    unit.extend([0x00, 0x00]);
+    unit.extend(be16(control));
+    unit.extend([0x03, (colours[3] << 4) | colours[2], (colours[1] << 4) | colours[0]]);
+    unit.extend([0x04, (alphas[3] << 4) | alphas[2], (alphas[1] << 4) | alphas[0]]);
+    unit.extend([0x05, (x >> 4) as u8, ((x & 0x0F) << 4 | x2 >> 8) as u8, x2 as u8]);
+    unit.extend([(y >> 4) as u8, ((y & 0x0F) << 4 | y2 >> 8) as u8, y2 as u8]);
+    unit.push(0x06);
+    unit.extend(be16(4));
+    unit.extend(be16(4 + 2 * top_rows));
+    unit.extend([0x01, 0xFF]);
+    let size = u32::try_from(unit.len()).expect("a VobSub unit below 2^32 bytes");
+    unit[0..2].copy_from_slice(&be16(size));
+    unit
+}
