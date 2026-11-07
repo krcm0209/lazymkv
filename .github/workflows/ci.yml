@@ -51,11 +51,43 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
 
+      # lazymkv-ocr (rten and ocrs) builds and runs on ubuntu only; macOS and Windows build and test the rest of the
+      # workspace, and the mini PC builds the Windows worker (notes call 23, F1).
       - name: Build
+        if: runner.os == 'Linux'
         run: cargo build --workspace --locked
 
+      - name: Build (without lazymkv-ocr)
+        if: runner.os != 'Linux'
+        run: cargo build --workspace --exclude lazymkv-ocr --locked
+
       - name: Test
+        if: runner.os == 'Linux'
         run: cargo test --workspace --locked
+
+      - name: Test (without lazymkv-ocr)
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --exclude lazymkv-ocr --locked
+
+      # Only lazymkv-ocr links rten: lazymkvctl carries the model bytes alone, the engine starts the worker process, and
+      # lazymkv-dev links it only with --features ocr-trial (notes A2, E3, call 23; K1). cargo tree either reports that
+      # rten matches no package in the package's graph or prints its inverse tree; neither may start a line with rten.
+      - name: rten links only into lazymkv-ocr
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for package in lazymkv-ctl lazymkv-engine lazymkv-dev; do
+            if out="$(cargo tree -p "$package" -e normal -i rten --locked 2>&1)"; then status=0; else status=$?; fi
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -q '^rten'; then
+              echo "$package links rten; only lazymkv-ocr may (notes A2 and E3)" >&2
+              exit 1
+            fi
+            if [ "$status" -ne 0 ] && ! printf '%s\n' "$out" | grep -q 'did not match any packages'; then
+              echo "cargo tree failed for $package" >&2
+              exit 1
+            fi
+          done
 
   guard:
     name: repository guards

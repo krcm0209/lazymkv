@@ -12,6 +12,8 @@ testsupport = []
 [dependencies]
 md-5.workspace = true
 sha1.workspace = true
+# The zlib inflater of evidence.mks (design parts 4.7 and 10.3).
+miniz_oxide.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true

@@ -12,12 +12,20 @@ path = "src/lib.rs"
 name = "lazymkv-dev"
 path = "src/main.rs"
 
+[features]
+# lazymkv-dev ocr-trial (design part 10.9): the OCR worker's crate and its driver. Off by default and on only for the
+# trial's builds, so no other dev build links rten (notes A2; K1).
+ocr-trial = ["dep:lazymkv-ocr", "dep:lazymkv-tools"]
+
 [dependencies]
 lazymkv-core = { path = "../core" }
 # TMDb's transport for the local refetch of a stale copy (design part 8.4; Ruling T4-R23, owner item 25).
 lazymkv-clients = { path = "../clients" }
 # `write_atomic` for the refetched copies (PR #15 review round 1, R9).
 lazymkv-platform = { path = "../platform" }
+# Behind the ocr-trial feature only (notes A2).
+lazymkv-ocr = { path = "../ocr", optional = true }
+lazymkv-tools = { path = "../tools", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 

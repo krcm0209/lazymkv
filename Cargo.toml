@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/capture", "crates/fake-tools", "crates/dev", "crates/platform", "crates/tools", "crates/clients", "crates/engine", "crates/ctl"]
+members = ["crates/core", "crates/capture", "crates/fake-tools", "crates/dev", "crates/platform", "crates/tools", "crates/clients", "crates/engine", "crates/ctl", "crates/ocr-models", "crates/ocr"]
 
 [workspace.package]
 edition = "2021"
@@ -19,6 +19,58 @@ fancy-regex = "0.20"
 unicode-normalization = "0.1"
 # The Windows API declarations, used by lazymkv-platform only and pinned exactly (design parts 4.3, 4.5, 4.7; P33).
 windows-sys = "=0.61.2"
-# The blocking HTTP client of the lookups and the notifier: rustls on the ring provider with webpki-roots compiled in,
-# default features off except TLS; used by lazymkv-clients only (design parts 4.7 and 8.1; P33, A1).
+# The blocking HTTP (Hypertext Transfer Protocol) client of the lookups and the notifier: rustls on the ring provider
+# with webpki-roots compiled in, default features off except TLS (Transport Layer Security); used by lazymkv-clients
+# and by lazymkv-ocr-models' build script (design parts 4.7, 8.1 and 10.11; P33, A1; T5-R36).
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+# The OCR engine and the runtime of its two models, used by lazymkv-ocr only and pinned exactly: ocrs 0.13.1 needs
+# rten 0.26, and a second rten minor in the tree would be an incompatible copy (design parts 4.5, 4.7 and 10.7; notes
+# call 1, A1, A2).
+ocrs = { version = "=0.13.1", default-features = false, features = ["onnx"] }
+rten = { version = "=0.26.0", default-features = false }
+# The line rectangles ocrs's recognize_text takes, which ocrs does not re-export; pinned to the version rten 0.26.0
+# pulls in, so the lock keeps one entry (T5-R63).
+rten-imageproc = "=0.26.0"
+# The OCR evidence's 8-bit grey crops, used by lazymkv-ocr (design parts 4.7 and 10.12).
+png = "0.18"
+# The models' SHA-256 check, used by lazymkv-ocr-models (normal and build) and lazymkvctl's tests (design parts 4.7
+# and 10.11; T5-R36).
+sha2 = "0.11"
+# The zlib inflater of evidence.mks's compressed blocks, used by lazymkv-core; the 0.8 line png already pulls in
+# (design parts 4.7 and 10.3).
+miniz_oxide = "0.8"
+
+# ocrs, rten and its rten-* crates build optimised in the dev profile, which the test profile inherits, so the worker's
+# tests on CI and the mini PC run at release speed (T5-R42; notes F1).
+[profile.dev.package.ocrs]
+opt-level = 3
+
+[profile.dev.package.rten]
+opt-level = 3
+
+[profile.dev.package.rten-base]
+opt-level = 3
+
+[profile.dev.package.rten-gemm]
+opt-level = 3
+
+[profile.dev.package.rten-imageproc]
+opt-level = 3
+
+[profile.dev.package.rten-onnx]
+opt-level = 3
+
+[profile.dev.package.rten-parallel]
+opt-level = 3
+
+[profile.dev.package.rten-shape-inference]
+opt-level = 3
+
+[profile.dev.package.rten-simd]
+opt-level = 3
+
+[profile.dev.package.rten-tensor]
+opt-level = 3
+
+[profile.dev.package.rten-vecmath]
+opt-level = 3

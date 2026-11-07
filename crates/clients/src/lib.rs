@@ -76,4 +76,38 @@ mod tests {
             assert!(version.starts_with("1."), "webpki-roots {version} is not 1.x, the CDLA-Permissive-2.0 line (design part 4.7)");
         }
     }
+
+    /// The versions Cargo.lock holds for one package name, in the file's order.
+    fn locked_versions(wanted: &str) -> Vec<String> {
+        locked_packages().into_iter().filter(|(name, _)| name == wanted).map(|(_, version)| version).collect()
+    }
+
+    #[test]
+    fn the_lock_pins_ocrs_0_13_1_and_holds_one_rten_at_0_26_0() {
+        for (wanted, pin) in [("ocrs", "0.13.1"), ("rten", "0.26.0")] {
+            let versions = locked_versions(wanted);
+            assert!(!versions.is_empty(), "Cargo.lock lacks {wanted}");
+            assert_eq!(versions, [pin], "Cargo.lock holds {wanted} {versions:?}, not {pin} alone (notes call 1)");
+        }
+        let rten_crates: Vec<String> =
+            locked_packages().into_iter().map(|(name, _)| name).filter(|name| name.starts_with("rten-")).collect();
+        assert!(rten_crates.iter().any(|name| name == "rten-imageproc"), "Cargo.lock lacks rten-imageproc");
+        let mut distinct = rten_crates.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), rten_crates.len(), "Cargo.lock holds a second version of an rten crate {rten_crates:?} (design part 4.5)");
+    }
+
+    #[test]
+    fn the_lock_holds_one_ureq_and_one_miniz_oxide_on_the_0_8_line() {
+        assert_eq!(
+            locked_versions("ureq"),
+            ["3.5.0"],
+            "Cargo.lock must hold the one ureq that lazymkv-clients and lazymkv-ocr-models' build script share (T5-R36)"
+        );
+        let on_0_8: Vec<String> =
+            locked_versions("miniz_oxide").into_iter().filter(|version| version.starts_with("0.8.")).collect();
+        assert!(!on_0_8.is_empty(), "Cargo.lock lacks miniz_oxide on the 0.8 line (design part 4.7)");
+        assert_eq!(on_0_8.len(), 1, "Cargo.lock holds miniz_oxide {on_0_8:?}; core's inflater shares png's one 0.8 (design part 4.7)");
+    }
 }

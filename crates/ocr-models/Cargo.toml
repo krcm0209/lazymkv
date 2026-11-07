@@ -1,0 +1,15 @@
+[package]
+name = "lazymkv-ocr-models"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# pins.rs's SHA-256 check, which the library and the build script share (design part 10.11; T5-R36).
+sha2.workspace = true
+
+[build-dependencies]
+# The download of the two pinned models when LAZYMKV_OCRS_MODELS is unset, which only CI's models job does (notes
+# calls 2 and 3; T5-R36, T5-R41).
+ureq.workspace = true
+sha2.workspace = true

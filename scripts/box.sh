@@ -15,7 +15,8 @@ scp -q -o BatchMode=yes "$ARCHIVE" "$HOST:C:/lazymkv/src.tgz"
 ssh -o BatchMode=yes "$HOST" 'tar -xzf C:\lazymkv\src.tgz -C C:\lazymkv\src && del C:\lazymkv\src.tgz'
 if [ "$#" -gt 0 ]; then
   status=0
-  ssh -o BatchMode=yes "$HOST" "cd /d C:\\lazymkv\\src && set CARGO_TARGET_DIR=C:\\lazymkv\\target&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& $*" || status=$?
+  # LAZYMKV_OCRS_MODELS: the two OCR models phase 0 placed there, so no build on the mini PC downloads them (notes call 2).
+  ssh -o BatchMode=yes "$HOST" "cd /d C:\\lazymkv\\src && set CARGO_TARGET_DIR=C:\\lazymkv\\target&& set LAZYMKV_OCRS_MODELS=C:\\lazymkv\\phase0\\models&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& $*" || status=$?
   # cargo writes Cargo.lock on the mini PC; bring it back so it can be committed.
   scp -q -o BatchMode=yes "$HOST:C:/lazymkv/src/Cargo.lock" Cargo.lock 2>/dev/null || true
   exit "$status"
