@@ -2,6 +2,8 @@
 //! evidence.mks (`mkv`), the decoders, the preparation and the row line finder. Nothing here reads a file, a process
 //! or a clock (RP19).
 
+pub mod cap;
+pub mod evidence;
 pub mod lines;
 pub mod mkv;
 pub mod pgs;
