@@ -1,10 +1,8 @@
 # The OCR trial
 
-The optical character recognition (OCR) trial of the phase 2 design, part 10.9 (P17, P26, P34; pull request 5's notes B2, B3, F3 and calls 8 and 19), ran on the mini PC (Intel J4125, 4 cores) twice: first on 2026-11-07 on commit `9b7e45b1d1cbe9315f19e19cd895bea2c5f8378f` (continuous integration (CI) run 42432584243 green on ubuntu, macos and windows; CodeQL 0 open alerts), which failed parity, and again on 2026-11-08 on commit `164099d62bf00e1504617e3a1a6ee79473c90428` (CI run 42520167404 green on the three systems; CodeQL 0 open alerts), the fix of what the first run found. The figures below are the second run's; the first run's are in this file's version at commit ebf3883 and summarised at the end. The tracks are named by their row in part 10.9's table. This file holds no subtitle text.
+The optical character recognition (OCR) trial of the phase 2 design, part 10.9 (P17, P26, P34; pull request 5's notes B2, B3, F3 and calls 8 and 19), ran on the mini PC (Intel J4125, 4 cores) twice: first on 2026-11-07 on commit `9b7e45b1d1cbe9315f19e19cd895bea2c5f8378f` (continuous integration (CI) run 42432584243 green on ubuntu, macos and windows; CodeQL 0 open alerts), which failed parity, and again on 2026-11-08 on commit `164099d62bf00e1504617e3a1a6ee79473c90428` (CI run 42520167404 green on the three systems; CodeQL 0 open alerts), the fix of what the first run found. The second run's parity was judged by `lazymkv-dev ocr-trial parity` as amended in commit `c6111d6` on the owner's ruling of 2026-11-08 (part 10.9: a count may differ by one event; everything else exact), run again over the unchanged arm outputs. The figures below are the second run's; the first run's are in this file's version at commit ebf3883 and summarised at the end. The tracks are named by their row in part 10.9's table. This file holds no subtitle text.
 
-Verdict: FAIL (parity)
-
-The pull request stops here and goes to the owner (B3); nothing is built for the Tesseract route of part 10.10 before the owner decides.
+Verdict: PASS
 
 ## The arms
 
@@ -38,7 +36,7 @@ Phase 0's reference figures on the same machine: Tesseract about 95 ms per frame
 
 ## Parity
 
-Parity fails: R does not match F on every track in the counts CUE, LABEL, CHEV, M, SO, CS, ODD, NOTE and CAPS_CUE, in caps_style, the class and the readable verdict, in the side of every EXP-14 section 3 threshold for letter_events, wordlike and each stopword share, in the language verdict, in CB's band in both directions for rows 4 and 5, and in every stream's role, review and note. Rows 1, 4, 5 and 6 match on everything; row 2 differs in ODD by one event (F 1, R 0) and row 3 in LABEL and M by one event (F 18 and 42, R 17 and 41). Every stream's role, review and note agree on all six rows.
+Parity passes: R matches F on every track in the counts CUE, LABEL, CHEV, M, SO, CS, ODD, NOTE and CAPS_CUE within one event (the rule as amended on 2026-11-08; equal counts before), in caps_style, the class and the readable verdict, in the side of every EXP-14 section 3 threshold for letter_events, wordlike and each stopword share, in the language verdict, in CB's band in both directions for rows 4 and 5, and in every stream's role, review and note. Rows 1, 4, 5 and 6 match on everything; row 2 differs in ODD by one event (F 1, R 0: F reads an extra line that is a lone opening bracket) and row 3 in LABEL and M by one event (F 18 and 42, R 17 and 41: R reads one speaker label's colon as a period). Under the equal-counts rule those two single events failed parity; the owner amended the rule rather than chase exact equality against a reference with its own misreads.
 
 | Row | Arm | CUE | LABEL | CHEV | M | SO | CS | ODD | NOTE | CAPS_CUE | caps_style | class | readable | language | decision |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -67,7 +65,7 @@ Row 3: letter_events 1.000 both; wordlike F 0.992, R 0.996; stopword shares en F
 Rows 4 and 5: row 4 letter_events 1.000 both, wordlike F 0.996, R 0.991, stopword shares en F 0.388, R 0.398, es, fr and de 0.000 both; row 5 letter_events 1.000 both, wordlike F 0.862, R 0.864, stopword shares en 0.012 both, es F 0.277, R 0.285, fr 0.011 both, de 0.000 both; every share on the same side of its threshold; CB between the two streams F 0.003/0.002, R 0.003/0.002, the same band in both directions. The title's other streams are not in the trial.
 Row 6: letter_events F 0.995, R 0.997; wordlike 0.980 both; stopword shares en F 0.386, R 0.395, es 0.002 both, fr F 0.001, R 0.000, de 0.000 both; every share on the same side of its threshold. The title's text stream (set aside first as closed captions, a text stream) and its six non-English bitmap streams (dropped by tag) are not read by either arm and agree.
 
-Differing measures: row 1 none; row 2 ODD; row 3 LABEL and M; rows 4, 5 and 6 none. Between F and R, `parity` gives a character error rate (CER) and an exact-match share per row over the events it paired, computed as `ocr-compare` computes them (reported only): row 1 0.033, 0.614; row 2 0.020, 0.623; row 3 0.027, 0.600; row 4 0.021, 0.762; row 5 0.021, 0.636; row 6 0.012, 0.784.
+Differing measures under the amended rule: none on any row (under equal counts: row 2 ODD; row 3 LABEL and M). Between F and R, `parity` gives a character error rate (CER) and an exact-match share per row over the events it paired, computed as `ocr-compare` computes them (reported only): row 1 0.033, 0.614; row 2 0.020, 0.623; row 3 0.027, 0.600; row 4 0.021, 0.762; row 5 0.021, 0.636; row 6 0.012, 0.784.
 
 ## The owner's labels (F3, report only)
 
