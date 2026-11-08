@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common::Client;
-use lazymkv_core::job::{Action, Event, FailureClass, Held, NotifyEvent, State, Tool, WaitReason};
+use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent, OutputCause, State, Tool, WaitReason};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::lookup::IdentityStep;
 use lazymkv_core::review::ReviewReason;
@@ -19,6 +19,9 @@ use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_engine::testkit::Harness;
 use lazymkv_platform::{Host, Reach, SecretStore};
+use lazymkv_tools::exe_name;
+use lazymkv_tools::ffprobe::packets_args;
+use lazymkv_tools::mkvmerge::extract_args;
 use serde_json::{json, Value};
 
 const KEY: &str = "t00-00800";
@@ -358,6 +361,148 @@ fn two_english_subtitle_streams_fail_the_decision_until_step_10_exists() {
     assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
     assert_eq!(record.message.as_deref(), Some("subtitle evidence (step 10) is not built in this version"));
     assert!(!h.job_dir(&id).join(KEY).join("decide.json").exists());
+}
+
+const TWO_SUBS: &str = "movie-direct-two-subs";
+
+/// Inserts movie-direct and waits until its Decide, or the step before it, fed DecisionDone or DecisionFailed; until
+/// Task 15 a title that needs step 10 fails there with S32's sentence.
+fn until_decided(h: &Harness) -> String {
+    h.insert("tok0", "movie-direct");
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    let decided = |h: &Harness| {
+        h.transitions(&id).iter().any(|line| {
+            matches!(line.event, Some(Event::DecisionDone { .. }) | Some(Event::DecisionFailed { .. }))
+        })
+    };
+    h.wait("the decision", decided);
+    h.settle();
+    id
+}
+
+/// The arguments of every spawn holding the argument `word` exactly, in order.
+fn spawns_with(h: &Harness, word: &str) -> Vec<Vec<String>> {
+    h.spawns().into_iter().filter(|s| s.args.iter().any(|a| a == word)).map(|s| s.args).collect()
+}
+
+/// `<staging>/<id>/evidence/<KEY>.mks` and the staged raw file `<staging>/<id>/rip/<KEY>/title_t00.mkv`.
+fn evidence_and_raw(h: &Harness, id: &str) -> (PathBuf, PathBuf) {
+    let job = h.staging().join(id);
+    (job.join("evidence").join(format!("{KEY}.mks")), job.join("rip").join(KEY).join("title_t00.mkv"))
+}
+
+#[test]
+fn step_10_writes_the_evidence_file_the_subtitle_index_and_one_packet_list_per_stream() {
+    let h = harness(&[TWO_SUBS], json!({}));
+    let id = until_decided(&h);
+    let (evidence, raw) = evidence_and_raw(&h, &id);
+    assert_eq!(fs::read(&evidence).unwrap(), b"lazymkv-test-mks");
+    assert_eq!(spawns_with(&h, "-D"), vec![extract_args(&evidence, &[2, 3], &raw)]);
+    assert_eq!(spawns_with(&h, "-select_streams"), vec![packets_args(0, &evidence), packets_args(1, &evidence)]);
+    let dir = h.job_dir(&id).join(KEY);
+    assert_eq!(fs::read(dir.join("evidence-mkvmerge.txt")).unwrap(), b"#GUI#progress 100%\n");
+    for n in 0..2 {
+        let packets = dir.join("subs").join(format!("sub-{n}.packets.json"));
+        assert_eq!(fs::read(&packets).unwrap(), fs::read(h.tools().join(format!("packets-s{n}.json"))).unwrap());
+        assert!(dir.join("subs").join(format!("sub-{n}.packets.json.exit.json")).is_file());
+    }
+    let index = dir.join("subs").join("index.json");
+    assert_eq!(json_of(&index), json!([
+        {"n": 0, "track_id": 2, "language": "eng", "codec": "HDMV PGS", "track_name": null, "forced": null, "default": null},
+        {"n": 1, "track_id": 3, "language": "eng", "codec": "HDMV PGS", "track_name": null, "forced": null, "default": null}
+    ]));
+    assert!(fs::read_to_string(&index).unwrap().ends_with("}\n]\n"), "pretty JSON and a final newline");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(&format!("run {KEY}/evidence-mkvmerge.txt: ")), "{log}");
+    assert!(log.contains(&format!("ended {KEY}/subs/sub-1.packets.json: exit 0 after ")), "{log}");
+}
+
+#[test]
+fn probe_summary_json_holds_its_seven_keys_and_no_remux_test_key() {
+    let h = harness(&[TWO_SUBS], json!({}));
+    let id = until_decided(&h);
+    let path = h.job_dir(&id).join(KEY).join("probe-summary.json");
+    let summary = json_of(&path);
+    let keys: Vec<&str> = summary.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["ok", "result", "file", "file_bytes", "subtitle_tracks", "evidence_bytes", "evidence_ms"]);
+    let (_, raw) = evidence_and_raw(&h, &id);
+    assert_eq!(
+        (&summary["ok"], &summary["result"], &summary["file"]),
+        (&json!(true), &json!("ok"), &json!(raw.display().to_string()))
+    );
+    assert_eq!((&summary["file_bytes"], &summary["subtitle_tracks"]), (&json!(16), &json!(2)));
+    assert_eq!(summary["evidence_bytes"], json!(16));
+    assert!(summary["evidence_ms"].is_u64(), "{summary}");
+    assert!(fs::read_to_string(&path).unwrap().ends_with("}\n"));
+}
+
+#[test]
+fn a_title_with_one_english_subtitle_stream_runs_no_extraction() {
+    let h = harness(&["movie-direct-one-sub"], json!({}));
+    let id = until_decided(&h);
+    assert!(spawns_with(&h, "-D").is_empty() && spawns_with(&h, "-select_streams").is_empty());
+    assert!(!h.staging().join(&id).join("evidence").exists());
+    let dir = h.job_dir(&id).join(KEY);
+    for absent in ["subs", "probe-summary.json", "evidence-mkvmerge.txt"] {
+        assert!(!dir.join(absent).exists(), "{absent}");
+    }
+}
+
+#[test]
+fn mkvmerge_exit_1_is_accepted_and_exit_2_fails_the_decision() {
+    let warned = harness(&[TWO_SUBS, "movie-direct-two-subs-extract-warn"], json!({}));
+    let id = until_decided(&warned);
+    assert_eq!(spawns_with(&warned, "-select_streams").len(), 2);
+    assert_eq!(json_of(&warned.job_dir(&id).join(KEY).join("probe-summary.json"))["ok"], json!(true));
+
+    let h = harness(&[TWO_SUBS, "movie-direct-two-subs-extract-error"], json!({}));
+    let id = until_decided(&h);
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    assert_eq!(record.message.as_deref(), Some("mkvmerge exited with code 2"));
+    assert!(spawns_with(&h, "-select_streams").is_empty());
+    let summary = json_of(&h.job_dir(&id).join(KEY).join("probe-summary.json"));
+    assert_eq!((&summary["ok"], &summary["result"]), (&json!(false), &json!("FAILED: mkvmerge exited with code 2")));
+    assert_eq!((&summary["subtitle_tracks"], &summary["evidence_bytes"]), (&json!(2), &Value::Null));
+    assert!(!h.job_dir(&id).join(KEY).join("subs").join("index.json").exists());
+}
+
+#[test]
+fn a_missing_mkvmerge_waits_as_tool_missing() {
+    let h = harness(&[TWO_SUBS], json!({}));
+    let mkvmerge = h.tools().join(exe_name(Tool::Mkvmerge));
+    // Removed when the probe starts, so the disc phase had it and only step 10 finds it missing.
+    h.on_spawn(&["-show_streams"], move || fs::remove_file(&mkvmerge).unwrap());
+    let id = run_to(&h, "AwaitingTool");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Inspecting) });
+    let found = events(&h, &id);
+    let probed = found.iter().position(|e| *e == Event::ProbeDone).expect("the probe ran");
+    let missing = found.iter().position(|e| *e == Event::ToolMissing { tool: Tool::Mkvmerge }).unwrap_or_else(|| panic!("no ToolMissing {{ Mkvmerge }}: {found:?}"));
+    assert!(probed < missing, "{found:?}");
+    assert!(spawns_with(&h, "-select_streams").is_empty());
+}
+
+/// Ruling T5-R56: a write error on the staging share during step 10 waits for the share, as RipTitle's does.
+#[test]
+fn a_staging_share_that_stops_answering_during_the_extraction_waits_as_awaiting_share() {
+    let h = harness(&[TWO_SUBS], json!({}));
+    h.insert("tok0", "movie-direct");
+    h.run_until("Inspecting");
+    let id = h.job_ids().pop().unwrap();
+    let folder = h.staging().join(&id).join("evidence");
+    fs::write(&folder, b"").unwrap(); // a file where the evidence folder goes, so creating it fails
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".into()));
+    h.restart();
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::AwaitingShare { return_to: Box::new(State::Inspecting) });
+    let share = Failure { class: FailureClass::Output, output: Some(OutputCause::ShareUnreachable) };
+    assert!(events(&h, &id).contains(&Event::DecisionFailed { failure: share }));
+    let message = record.message.unwrap();
+    assert!(message.starts_with(&format!("{}: ", folder.display())), "{message}");
+    assert!(spawns_with(&h, "-D").is_empty());
 }
 
 #[test]

@@ -13,6 +13,8 @@ mod relay;
 mod restart;
 mod selftest;
 mod space;
+mod staged;
+mod step10;
 mod steps;
 mod store;
 #[cfg(any(test, feature = "testkit"))]

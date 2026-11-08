@@ -65,6 +65,8 @@ use crate::space::{
     library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
     staged_remux_check, unreachable, Promises,
 };
+use crate::staged::{evidence_file, UnitError, WORK};
+use crate::step10;
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -223,6 +225,18 @@ pub(crate) fn mkv_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// so Output, which leads to AwaitingShare, or to AwaitingSpace when staging is out of space; never Unknown.
 fn staging_write_failure(health: StagingHealth) -> Failure {
     classify_title_failure(health.share_healthy, health.out_of_space, true, false)
+}
+
+/// A unit error as the step's result (T5-R56): `Failed` gives `DecisionFailed { Unknown }`, `Staging` gives
+/// `DecisionFailed` with `staging_write_failure(health())`; the message is the error's sentence. `health` is read only
+/// for `Staging`. Def: T5-14. Use: T5-14, T5-15, T5-17.
+fn unit_result(error: UnitError, health: impl FnOnce() -> StagingHealth) -> StepResult {
+    match error {
+        UnitError::Failed(message) => unknown(|failure| Event::DecisionFailed { failure }, message),
+        UnitError::Staging(message) => {
+            with(Event::DecisionFailed { failure: staging_write_failure(health()) }, message)
+        }
+    }
 }
 
 /// The class of a title folder VerifyFile cannot list after a rip (review round 1, V3 with V9, RR1-7): classed by the
@@ -503,6 +517,9 @@ pub(crate) struct RealSteps {
     makemkv: Arc<MakeMkv>,
     /// The probe of each (job, title key) Probe ran in this engine run, which Decide reads (design part 5.7 step 11.3).
     probes: Mutex<BTreeMap<(String, String), FfprobeStreams>>,
+    /// The data folder's work folder, `<data>\work` (B1 (the worker's folder)). Def: T5-14. Use: T5-15.
+    #[allow(dead_code)] // read from Task 15 on
+    work_root: PathBuf,
 }
 
 impl RealSteps {
@@ -537,6 +554,7 @@ impl RealSteps {
             java_in_use,
             makemkv,
             probes: Mutex::default(),
+            work_root: config.data.join(WORK),
         }
     }
 }
@@ -574,6 +592,29 @@ impl StepRunner for RealSteps {
         };
         outcome.unwrap_or_else(|early| early)
     }
+}
+
+/// `run <name>: <program> <args joined by " ">` (design part 7.1). Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn run_line(name: &str, program: &Path, args: &[String]) -> String {
+    format!("run {name}: {} {}", program.display(), args.join(" "))
+}
+
+/// `ended <name>: exit <code or none> after <elapsed_ms> ms` from `<out>.exit.json`, or `ended <name>: no exit file
+/// was written` (design part 7.2). Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn ended_line(name: &str, out: &Path) -> String {
+    match read_json(&with_suffix(out, ".exit.json")) {
+        Some(exit) => {
+            let code = exit["exit_code"].as_i64().filter(|code| *code != -1);
+            let code = code.map_or_else(|| "none".to_string(), |code| code.to_string());
+            format!("ended {name}: exit {code} after {} ms", exit["elapsed_ms"].as_u64().unwrap_or(0))
+        }
+        None => format!("ended {name}: no exit file was written"),
+    }
+}
+
+/// `ended <name>: <error>` for a run that could not be recorded. Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn not_run_line(name: &str, error: &io::Error) -> String {
+    format!("ended {name}: {error}")
 }
 
 /// One step of one job: the runner, the job, its cancel token, its limits and the progress callback.
@@ -634,7 +675,7 @@ impl Step<'_> {
 
     /// The job.log line before a run: `run <name>: <program> <args joined by " ">` (design part 7.1).
     fn started(&self, name: &str, program: &Path, args: &[String]) {
-        self.log(&format!("run {name}: {} {}", program.display(), args.join(" ")));
+        self.log(&run_line(name, program, args));
     }
 
     /// The job.log line after a run: `ended <name>: exit <code or none> after <elapsed_ms> ms`, from the run.
@@ -646,19 +687,12 @@ impl Step<'_> {
     /// `ended` for a driver that gives no RunResult, from the run's `<out>.exit.json` (removed before the run, so it
     /// is this run's); a missing file says so.
     fn ended_from_file(&self, name: &str, out: &Path) {
-        match read_json(&with_suffix(out, ".exit.json")) {
-            Some(exit) => {
-                let code = exit["exit_code"].as_i64().filter(|code| *code != -1);
-                let code = code.map_or_else(|| "none".to_string(), |code| code.to_string());
-                self.log(&format!("ended {name}: exit {code} after {} ms", exit["elapsed_ms"].as_u64().unwrap_or(0)));
-            }
-            None => self.log(&format!("ended {name}: no exit file was written")),
-        }
+        self.log(&ended_line(name, out));
     }
 
     /// The job.log line of a run that could not be recorded.
     fn not_run(&self, name: &str, error: &io::Error) {
-        self.log(&format!("ended {name}: {error}"));
+        self.log(&not_run_line(name, error));
     }
 
     /// With `keep_tuning_evidence` on, MakeMKV's debug log saved beside `out` (design part 7.2, S45, S61); a log not
@@ -1437,16 +1471,21 @@ impl Step<'_> {
         Ok((decision, path))
     }
 
+    /// The staged file's header, `<key>/mkvmerge.json` of the job folder as VerifyFile in Ripping recorded it (design
+    /// part 5.6 step 7), which `staged_report` and step 10 read. Err names the file and the read or parse error.
+    fn staged_ident(&self, key: &str) -> Result<MkvmergeIdent, String> {
+        let path = self.job.job_dir.join(key).join("mkvmerge.json");
+        let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
     /// The staged file's verification report, the call VerifyFile in Ripping made (design part 5.6 step 7):
     /// `verify_rip` of the scan title against `<key>/mkvmerge.json` with `Selection::All` and the rip log, read from
     /// the job folder so that it survives a restart. Its pairs map each scan stream to the staged file's track ID
     /// (S60).
     fn staged_report(&self, scan: &Scan, typed: &Disc, planned: &PlannedTitle) -> Result<VerifyReport, String> {
         let key_dir = self.job.job_dir.join(&planned.key);
-        let path = key_dir.join("mkvmerge.json");
-        let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let header: MkvmergeIdent =
-            serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+        let header = self.staged_ident(&planned.key)?;
         let title = typed.title(planned.title)?;
         let selection = selected_streams(scan, planned.title, Selection::All)?;
         let rip_log = read_lossy(&key_dir.join("rip.txt"));
@@ -1489,11 +1528,46 @@ impl Step<'_> {
         Ok(event(Event::ProbeDone))
     }
 
-    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): neither is built in this version, so it writes
-    /// the job.log line `step 10a did not run in this version` (S33) and returns no event; Decide fails a title that
-    /// needs step 10 (S32).
+    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a; T5-R56): for each planned title where `needs_step10`
+    /// holds, `step10::extract` over the staged file and `<key>/mkvmerge.json`; no mkvmerge, then no ffprobe, gives
+    /// ToolMissing for that tool before any file is touched, asked only when a title needs step 10; a unit error goes
+    /// through `unit_result`. Step 10a is not built yet, so it writes the job.log line `step 10a did not run in this
+    /// version` (S33) and, when every title is done, returns no event; Decide still fails a title that needs step 10
+    /// (S32).
     fn extract_subtitle_evidence(&self) -> Outcome {
         self.log(STEP10A_NOT_RUN);
+        let failed = |failure| Event::DecisionFailed { failure };
+        let plan = self.job_plan(failed)?;
+        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
+        let mut titles = Vec::new();
+        for planned in &plan.titles {
+            if self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))? {
+                titles.push(planned.key.as_str());
+            }
+        }
+        if titles.is_empty() {
+            return Ok(StepResult { event: None, message: None });
+        }
+        let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+        };
+        let Some(ffprobe) = self.tool(Tool::Ffprobe) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Ffprobe }));
+        };
+        let staging = self.job.settings.staging_root.as_deref().ok_or_else(|| unknown(failed, "staging_root is unset"))?;
+        for key in titles {
+            let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
+            let ident = self.staged_ident(key).map_err(|error| unknown(failed, error))?;
+            let evidence = evidence_file(staging, self.id, key);
+            let label_dir = self.job.job_dir.join(key);
+            let extracted = self.ctx(&no_progress, |ctx| {
+                step10::extract(ctx, &mkvmerge, &ffprobe, &raw, &ident, &evidence, &label_dir, &|line: &str| self.log(line))
+            });
+            self.check_cancel()?;
+            if let Err(error) = extracted {
+                return Ok(unit_result(error, || self.staging_health()));
+            }
+        }
         Ok(StepResult { event: None, message: None })
     }
 
@@ -2143,6 +2217,25 @@ mod tests {
         assert_eq!(classed(false, false), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
+    }
+
+    /// Ruling T5-R56 (design part 5.6 step 6, review round 1 of pull request 3, V5): a unit's write error on the staging
+    /// share waits for the share as a failed rip does, and any other unit failure is Unknown without asking the share.
+    #[test]
+    fn a_unit_staging_error_is_classed_by_the_share_check_and_a_failed_one_is_unknown() {
+        use lazymkv_core::job::OutputCause;
+        let output = |cause| Failure { class: FailureClass::Output, output: Some(cause) };
+        let down = || StagingHealth { share_healthy: false, out_of_space: false };
+        let staged = unit_result(UnitError::Staging("S/abc-1/evidence: denied".to_string()), down);
+        assert_eq!(staged.event, Some(Event::DecisionFailed { failure: output(OutputCause::ShareUnreachable) }));
+        assert_eq!(staged.message.as_deref(), Some("S/abc-1/evidence: denied"));
+        let full = || StagingHealth { share_healthy: true, out_of_space: true };
+        let staged = unit_result(UnitError::Staging("S/abc-1/evidence/t00.mks: no space".to_string()), full);
+        assert_eq!(staged.event, Some(Event::DecisionFailed { failure: output(OutputCause::OutOfSpace) }));
+        let unasked = || -> StagingHealth { panic!("a failed unit asks no share") };
+        let failed = unit_result(UnitError::Failed("mkvmerge exited with code 2".to_string()), unasked);
+        assert_eq!(failed.event, Some(Event::DecisionFailed { failure: UNKNOWN }));
+        assert_eq!(failed.message.as_deref(), Some("mkvmerge exited with code 2"));
     }
 
     /// Ruling W16: `started` is the record's start, not the clock at VerifyFile.

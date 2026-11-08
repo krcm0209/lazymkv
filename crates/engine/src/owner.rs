@@ -2222,9 +2222,10 @@ impl Owner {
         spawn_recording(id.to_string(), generation, arrival, job_dir, now, self.sender.clone());
     }
 
-    /// One worker runs `actions` one after another and returns the last result whose event is Some, else the last
-    /// result (design part 5.2). Each action's progress goes to the owner with its tag (S7). Handing Eject marks the
-    /// job's drive as ejecting.
+    /// One worker runs `actions` one after another and returns the first result whose event is Some, which ends the
+    /// list, else the last result (design part 5.2; PF-6: an ExtractSubtitleEvidence that feeds an event, step 10's
+    /// failure or ToolMissing, ends its unit before Decide runs, T5-14). Each action's progress goes to the owner with
+    /// its tag (S7). Handing Eject marks the job's drive as ejecting.
     fn hand(&mut self, id: &str, actions: Vec<Action>) {
         let Some(job) = self.jobs.get(id) else {
             return;
@@ -2266,8 +2267,10 @@ impl Owner {
                         let _ = progress_to.send(Msg::Progress { job, step, title, fraction });
                     };
                     let result = steps.run(&context, action, cancel.clone(), &progress);
-                    if result.event.is_some() || kept.as_ref().is_none_or(|kept| kept.event.is_none()) {
-                        kept = Some(result);
+                    let ended = result.event.is_some();
+                    kept = Some(result);
+                    if ended {
+                        break;
                     }
                 }
                 kept.unwrap_or(StepResult { event: None, message: None })
