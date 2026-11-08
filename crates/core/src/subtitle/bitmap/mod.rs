@@ -43,7 +43,9 @@ pub struct Object {
     /// The palette index of each pixel, row by row. Def: T5-4. Use: T5-5.
     pub indices: Vec<u8>,
     /// `palette[i]` is `[Y, alpha]` of index `i`, both 0 to 255: 256 entries for PGS (Presentation Graphic Stream),
-    /// an undefined entry `[0, 0]`; 4 entries for VobSub, one per pixel code. Def: T5-4. Use: T5-5.
+    /// an undefined entry `[0, 0]`; 4 entries for VobSub, one per pixel code. Y is the value for which `prepare`'s
+    /// `255 - round(Y * alpha / 255)` is phase 0's ffmpeg grey of the entry's colour at its alpha (see
+    /// `vobsub::palette_luma`). Def: T5-4. Use: T5-5.
     pub palette: Vec<[u8; 2]>,
 }
 

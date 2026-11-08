@@ -123,7 +123,12 @@ pub fn decode_vobsub(unit: &[u8], idx: &IdxHeader) -> Result<Bitmap, String> {
         let field = if y % 2 == 0 { &top_rows } else { &bottom_rows };
         indices.extend_from_slice(&field[y / 2 * row..(y / 2 + 1) * row]);
     }
-    let palette = (0..4).map(|c| [bt601_luma(idx.palette[usize::from(colours[c])]), vobsub_alpha(alphas[c])]).collect();
+    let palette = (0..4)
+        .map(|c| {
+            let alpha = vobsub_alpha(alphas[c]);
+            [palette_luma(idx.palette[usize::from(colours[c])], alpha), alpha]
+        })
+        .collect();
     let object = Object { x: x1, y: y1, width, height, indices, palette };
     Ok(Bitmap { video_width: idx.width, video_height: idx.height, objects: vec![object] })
 }
@@ -169,11 +174,56 @@ fn field_rows(unit: &[u8], offset: usize, width: u32, rows: u32) -> Result<Vec<u
     Ok(pixels)
 }
 
-/// BT.601's luma (ITU-R Recommendation BT.601) of an RGB colour, `round(0.299 R + 0.587 G + 0.114 B)`, full range
-/// (design part 10.4). Def: T5-4. Use: T5-4, T5-11.
+/// swscale's video range BT.601 luma (ITU-R Recommendation BT.601) of an RGB colour, as FFmpeg 9.0.2's libswscale
+/// converts RGB to the yuva444p that phase 0's chain gets before `mpdecimate`: `(8414 R + 16519 G + 3208 B +
+/// 0x80100) >> 9` (input.c, `rgb16_32ToY_c_template`, with utils.c's default coefficients `(int)(c * 219 / 255 *
+/// (1 << 15) + 0.5)` for c of 0.299, 0.587 and 0.114), doubled by the horizontal scaler (`hScale16To15_c`) and
+/// rounded to 8 bits by `(y + 64) >> 7` (`yuv2plane1_8_c`); 16 for black, 235 for white.
+fn video_luma(rgb: [u8; 3]) -> i32 {
+    let [r, g, b] = rgb.map(i32::from);
+    let y = (8414 * r + 16519 * g + 3208 * b + 0x80100) >> 9;
+    ((2 * y).min(32767) + 64) >> 7
+}
+
+/// swscale's widening of an 8-bit video range luma to the full range of GRAY8 (FFmpeg 9.0.2, yuva444p to gray):
+/// `y << 7` (`hScale8To15_c`), then `(y * 19078 - 39084288) >> 14` (`lumRangeToJpeg_c` with swscale.c's
+/// `solve_range_convert` constants for 16 to 235 onto 0 to 255) and `(y + 64) >> 7`, clipped to 0 to 255.
+fn full_range(luma: i32) -> u8 {
+    let full = (((luma << 7) * 19078 - 39084288) >> 14).min(32767);
+    ((full + 64) >> 7).clamp(0, 255) as u8
+}
+
+/// The grey phase 0's ffmpeg chain gives a pixel of an RGB colour at `alpha` (design part 10.4): the overlay over
+/// the black canvas per channel, `((c * alpha + 128) * 257) >> 16` (vf_overlay's `FAST_DIV255`; the colour itself at
+/// alpha 255, black at 0), its video range luma, `negate`'s `255 - Y` and the widening to full range. White text
+/// gives 5 and the canvas 255.
+fn phase0_grey(rgb: [u8; 3], alpha: u8) -> u8 {
+    let a = u32::from(alpha);
+    let blended = match alpha {
+        255 => rgb,
+        _ => rgb.map(|c| (((u32::from(c) * a + 128) * 257) >> 16) as u8),
+    };
+    full_range(255 - video_luma(blended))
+}
+
+/// The luma of an opaque RGB colour on `prepare`'s scale (design part 10.5): `255 - grey` of phase 0's ffmpeg grey of
+/// the colour at alpha 255, so that `255 - Y` is ffmpeg's frame exactly; white gives 250, black 0. Def: T5-4. Use:
+/// T5-4, T5-11.
 pub fn bt601_luma(rgb: [u8; 3]) -> u8 {
-    let [r, g, b] = rgb.map(f64::from);
-    (0.299 * r + 0.587 * g + 0.114 * b).round().clamp(0.0, 255.0) as u8
+    255 - phase0_grey(rgb, 255)
+}
+
+/// The Y a palette entry of an RGB colour and `alpha` holds (design part 10.4), the smallest for which `prepare`'s
+/// `255 - round(Y * alpha / 255)` (design part 10.5) equals phase 0's ffmpeg grey of the colour at that alpha, which
+/// one Y always reaches; ffmpeg's video range `negate` makes that grey no multiple of alpha, so Y depends on alpha.
+/// At alpha 0 every Y gives white and the entry holds `bt601_luma`. Def: T5-4. Use: T5-4.
+pub fn palette_luma(rgb: [u8; 3], alpha: u8) -> u8 {
+    if alpha == 0 {
+        return bt601_luma(rgb);
+    }
+    let (a, dark) = (i32::from(alpha), 255 - i32::from(phase0_grey(rgb, alpha)));
+    let least = 255 * dark - 127;
+    if least <= 0 { 0 } else { ((least + a - 1) / a).min(255) as u8 }
 }
 
 /// A VobSub contrast nibble on the 0 to 255 scale, `(alpha4 & 0x0F) * 17` (T5-R5; ffmpeg's dvdsubdec scales so).
@@ -263,10 +313,26 @@ mod tests {
 
     #[test]
     fn vobsub_colours_take_bt601_luma_from_the_idx_palette() {
-        assert_eq!([bt601_luma([255, 255, 255]), bt601_luma([16, 16, 16]), bt601_luma([0, 0, 0])], [255, 16, 0]);
-        assert_eq!([bt601_luma([255, 0, 0]), bt601_luma([0, 255, 0]), bt601_luma([0, 0, 255])], [76, 150, 29]);
+        // ffmpeg's chain: RGB to video range luma, negate, widen to full range; white is 5 there, so its Y is 250.
+        assert_eq!([bt601_luma([255, 255, 255]), bt601_luma([16, 16, 16]), bt601_luma([0, 0, 0])], [250, 12, 0]);
+        assert_eq!([bt601_luma([255, 0, 0]), bt601_luma([0, 255, 0]), bt601_luma([0, 0, 255])], [71, 146, 24]);
+        assert_eq!(bt601_luma([0, 90, 155]), 66);
+        // White at alpha 136 is ffmpeg's grey 123 (overlay FAST_DIV255, then the chain above), which Y 247 gives.
         let o = &decode_vobsub(&unit_with(&ALL), &idx(720, 480)).unwrap().objects[0];
-        assert_eq!(o.palette, [[0, 0], [255, 255], [16, 255], [255, 136]]);
+        assert_eq!(o.palette, [[0, 0], [250, 255], [12, 255], [247, 136]]);
+    }
+
+    #[test]
+    fn a_palette_entrys_y_draws_ffmpegs_grey_at_its_alpha() {
+        let drawn = |y: u8, alpha: u8| 255 - (u32::from(y) * u32::from(alpha) + 127) / 255;
+        // ffmpeg's grey of white over black at alpha 17, 51, 128 and 255, through its video range negate.
+        let greys = [17, 51, 128, 255].map(|alpha| phase0_grey([255, 255, 255], alpha));
+        assert_eq!(greys, [242, 208, 132, 5]);
+        for rgb in [[255, 255, 255], [16, 16, 16], [0, 90, 155], [200, 30, 70]] {
+            for alpha in 0..=255u8 {
+                assert_eq!(drawn(palette_luma(rgb, alpha), alpha), u32::from(phase0_grey(rgb, alpha)), "{rgb:?} at {alpha}");
+            }
+        }
     }
 
     #[test]
@@ -322,7 +388,8 @@ mod tests {
     #[test]
     fn the_test_builders_vobsub_unit_decodes_to_its_rectangle() {
         let b = decode_vobsub(&vobsub_unit((10, 20, 40, 30), 1, [0, 7, 9, 0], [0, 15, 15, 0]), &idx(720, 480)).unwrap();
-        let object = Object { x: 10, y: 20, width: 40, height: 30, indices: vec![1; 1200], palette: vec![[0, 0], [255, 255], [16, 255], [0, 0]] };
+        // ffmpeg's chain gives white a grey of 5 and RGB 16, 16, 16 one of 243, so their Y are 250 and 12.
+        let object = Object { x: 10, y: 20, width: 40, height: 30, indices: vec![1; 1200], palette: vec![[0, 0], [250, 255], [12, 255], [0, 0]] };
         assert_eq!(b, Bitmap { video_width: 720, video_height: 480, objects: vec![object] });
     }
 }

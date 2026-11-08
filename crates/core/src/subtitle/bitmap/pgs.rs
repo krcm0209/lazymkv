@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::subtitle::bitmap::vobsub::palette_luma;
 use crate::subtitle::bitmap::{Bitmap, Object};
 
 const COMPOSITION: u8 = 0x16;
@@ -19,7 +20,7 @@ const CROPPED: u8 = 0x80;
 const FIRST: u8 = 0x80;
 const LAST: u8 = 0x40;
 
-/// The 256 `[Y, alpha]` entries of one palette.
+/// The 256 `[Y, alpha]` entries of one palette, Y the luma `palette_luma` gives of the entry's RGB colour and alpha.
 type Palette = Vec<[u8; 2]>;
 
 /// One object of the epoch, decoded: width, height and its palette indices row by row.
@@ -67,6 +68,20 @@ pub struct PgsDecoder {
     palettes: BTreeMap<u8, Palette>,
     objects: BTreeMap<u16, Decoded>,
     joining: Option<Joining>,
+    /// The last composition's video height, 0 before the first, which chooses the palette's colour matrix.
+    video_height: u32,
+}
+
+/// The RGB colour of a PGS palette entry as ffmpeg's pgssubdec converts it (libavutil/colorspace.h, SCALEBITS 10):
+/// `YUV_TO_RGB1_CCIR_BT709` for a video height of 0 or above 576 lines, else `YUV_TO_RGB1_CCIR`, then
+/// `YUV_TO_RGB2_CCIR`, each channel `((Y - 16) * FIX(255 / 219) + c + ONE_HALF) >> 10` clipped to 0 to 255, where c
+/// is the channel's Cr and Cb term with `FIX(x) = (int)(x * 1024 + 0.5)` of the matrix's coefficients times 255 / 224.
+fn ccir_rgb(y: u8, cr: u8, cb: u8, video_height: u32) -> [u8; 3] {
+    let (cr, cb) = (i32::from(cr) - 128, i32::from(cb) - 128);
+    // FIX of 1.5747, 0.1873, 0.4682 and 1.8556 (BT.709), or of 1.402, 0.34414, 0.71414 and 1.772 (BT.601), by 255 / 224.
+    let [rv, gu, gv, bu] = if video_height == 0 || video_height > 576 { [1836, 218, 546, 2163] } else { [1634, 401, 832, 2066] };
+    let y = (i32::from(y) - 16) * 1192 + 512;
+    [y + rv * cr, y - gu * cb - gv * cr, y + bu * cb].map(|v| (v >> 10).clamp(0, 255) as u8)
 }
 
 /// A big-endian 16-bit number at `pos`; the caller has checked the bounds.
@@ -154,6 +169,7 @@ impl PgsDecoder {
                         return Err("PGS display set has two composition segments".to_string());
                     }
                     let (read, state) = self::composition(body)?;
+                    self.video_height = read.video_height;
                     if state & EPOCH_RESET != 0 {
                         self.palettes.clear();
                         self.objects.clear();
@@ -177,14 +193,16 @@ impl PgsDecoder {
     }
 
     /// A palette segment: palette id, version, then 5-byte entries of index, Y, Cr, Cb and alpha, each setting
-    /// `[Y, alpha]` of its index; a palette first seen starts as 256 entries of `[0, 0]`.
+    /// `[palette_luma(ccir_rgb(Y, Cr, Cb, video_height), alpha), alpha]` of its index, ffmpeg's colour of the entry
+    /// under the last composition's video height; a palette first seen starts as 256 entries of `[0, 0]`.
     fn palette(&mut self, body: &[u8]) -> Result<(), String> {
         if body.len() < 2 || (body.len() - 2) % 5 != 0 {
             return Err(too_short("palette"));
         }
         let palette = self.palettes.entry(body[0]).or_insert_with(|| vec![[0, 0]; 256]);
         for entry in body[2..].chunks_exact(5) {
-            palette[usize::from(entry[0])] = [entry[1], entry[4]];
+            let rgb = ccir_rgb(entry[1], entry[2], entry[3], self.video_height);
+            palette[usize::from(entry[0])] = [palette_luma(rgb, entry[4]), entry[4]];
         }
         Ok(())
     }
@@ -445,7 +463,8 @@ mod tests {
         assert_eq!(pcs(VIDEO, 0x80, 0, &[(0, 100, 1000, None)]), set[0..22]);
         assert_eq!(pds(0, &[(1, WHITE)]), set[35..45]);
         assert_eq!(ods(0, 2, 2, &set[59..67], 1), set[45..67]);
-        let object = Object { x: 100, y: 1000, width: 2, height: 2, indices: vec![1, 1, 0, 0], palette: palette_with(&[(1, [235, 255])]) };
+        // Y 235 widens to RGB white (YUV_TO_RGB2_CCIR), which phase 0's ffmpeg chain draws as grey 5: Y 250.
+        let object = Object { x: 100, y: 1000, width: 2, height: 2, indices: vec![1, 1, 0, 0], palette: palette_with(&[(1, [250, 255])]) };
         assert_eq!(PgsDecoder::new().decode(&set), Ok(Bitmap { video_width: 1920, video_height: 1080, objects: vec![object] }));
     }
 
@@ -460,7 +479,16 @@ mod tests {
     fn pgs_palette_entries_are_y_cr_cb_alpha() {
         let set = [pcs(VIDEO, 0x80, 0, &[(0, 0, 0, None)]), pds(0, &[(7, [200, 60, 90, 170])]), ods(0, 2, 1, &solid_rle(7, 2, 1), 1), END.to_vec()].concat();
         let palette = &PgsDecoder::new().decode(&set).unwrap().objects[0].palette;
-        assert_eq!((palette.len(), palette[7], palette[8]), (256, [200, 170], [0, 0]));
+        // ffmpeg's pgssubdec colour (BT.709 above 576 lines) RGB 92, 255, 134, then phase 0's grey of it at alpha 170.
+        assert_eq!((palette.len(), palette[7], palette[8]), (256, [184, 170], [0, 0]));
+    }
+
+    #[test]
+    fn a_palette_takes_ffmpegs_bt601_colours_at_576_lines_or_fewer() {
+        let set = |height| [pcs((720, height), 0x80, 0, &[(0, 0, 0, None)]), pds(0, &[(7, [200, 60, 90, 170])]), ods(0, 2, 1, &solid_rle(7, 2, 1), 1), END.to_vec()].concat();
+        // ffmpeg's YUV_TO_RGB1_CCIR gives RGB 106, 255, 138 at 576 lines; 577 lines take BT.709's 92, 255, 134.
+        assert_eq!(PgsDecoder::new().decode(&set(576)).unwrap().objects[0].palette[7], [190, 170]);
+        assert_eq!(PgsDecoder::new().decode(&set(577)).unwrap().objects[0].palette[7], [184, 170]);
     }
 
     #[test]
@@ -470,10 +498,12 @@ mod tests {
         let first = [pcs(VIDEO, 0x80, 1, &[(0, 0, 0, None)]), pds(0, &[(1, [100, 128, 128, 255])]),
             pds(1, &[(1, [50, 128, 128, 255]), (2, [60, 128, 128, 128])]), object, END.to_vec()].concat();
         let a = d.decode(&first).unwrap();
-        assert_eq!((a.objects[0].palette[1], a.objects[0].palette[2]), ([50, 255], [60, 128]));
+        // Y 50, 60 and 70 widen to RGB 40, 51 and 63 (YUV_TO_RGB2_CCIR); phase 0's ffmpeg chain draws them as 220,
+        // 234 at alpha 128 and 197.
+        assert_eq!((a.objects[0].palette[1], a.objects[0].palette[2]), ([35, 255], [41, 128]));
         let update = [pcs(VIDEO, 0x00, 1, &[(0, 0, 0, None)]), pds(1, &[(1, [70, 128, 128, 255])]), END.to_vec()].concat();
         let b = d.decode(&update).unwrap();
-        assert_eq!((b.objects[0].palette[1], b.objects[0].palette[2]), ([70, 255], [60, 128]));
+        assert_eq!((b.objects[0].palette[1], b.objects[0].palette[2]), ([58, 255], [41, 128]));
         let missing = [pcs(VIDEO, 0x00, 2, &[(0, 0, 0, None)]), END.to_vec()].concat();
         assert_eq!(d.decode(&missing), err("PGS palette 2 is not defined in its epoch"));
     }
@@ -486,7 +516,8 @@ mod tests {
         let second = [pcs(VIDEO, 0x00, 0, &[(0, 300, 950, None)]), END.to_vec()].concat();
         let b = d.decode(&second).unwrap();
         assert_eq!((b.objects[0].x, b.objects[0].y), (300, 950));
-        assert_eq!((&b.objects[0].indices, b.objects[0].palette[1]), (&a.objects[0].indices, [235, 255]));
+        // Y 235 is RGB white, which phase 0's ffmpeg chain draws as grey 5.
+        assert_eq!((&b.objects[0].indices, b.objects[0].palette[1]), (&a.objects[0].indices, [250, 255]));
     }
 
     #[test]
@@ -573,6 +604,7 @@ mod tests {
         let (first, second) = (&b.objects[0], &b.objects[1]);
         assert_eq!((first.x, first.y, first.width, first.height, first.indices.clone()), (100, 900, 40, 20, vec![1; 800]));
         assert_eq!((second.x, second.y, second.width, second.height, second.indices.clone()), (120, 950, 30, 10, vec![2; 300]));
-        assert_eq!((second.palette[1], second.palette[2]), ([235, 255], [16, 255]));
+        // Y 235 and 16 widen to RGB white and black, which phase 0's ffmpeg chain draws as 5 and 255.
+        assert_eq!((second.palette[1], second.palette[2]), ([250, 255], [0, 255]));
     }
 }
