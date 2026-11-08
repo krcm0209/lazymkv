@@ -451,3 +451,37 @@ fn the_writers_check_sees_an_entry_a_program_file_alone_carries() {
     assert!(!folder.trim().split(',').any(|sid| sid == authenticated), "the folder's writers hold {authenticated}");
     assert!(program.trim().split(',').any(|sid| sid == authenticated), "the program's writers lack {authenticated}");
 }
+
+/// Pull request 5's Task 11 (design part 10.4; notes calls 7 and 24; T5-R45): the desktop-session run of the decoder
+/// goldens sets the four variables crates/ocr/tests/goldens.rs reads and starts only the test program it is given,
+/// never cargo, since each scripts/box.sh call replaces C:\lazymkv\src under a running job. Read on every system and
+/// parsed on Windows; never run.
+#[test]
+fn the_ocr_goldens_script_parses_sets_its_four_variables_and_runs_no_cargo() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("scripts").join("phase0").join("ocr-goldens.ps1");
+    let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+    for line in [
+        "[Parameter(Mandatory)][string]$Exe",
+        r". C:\lazymkv\src\scripts\phase0\env.ps1",
+        r"$Tracks = 'C:\lazymkv\phase0\trial-tracks.txt'",
+        r"if ($Exe -notlike 'C:\lazymkv\target\release\deps\goldens-*.exe')",
+        "$env:LAZYMKV_EVIDENCE = $Recordings",
+        "$env:LAZYMKV_OCR_TEXT = $TuningData",
+        "$env:LAZYMKV_OCR_TRACKS = $Tracks",
+        "$env:LAZYMKV_OCR_STAGING = $Staging",
+        r#"cmd /c "$Exe --test-threads=1 --nocapture 2>&1""#,
+        "'RESULT ok'",
+    ] {
+        assert!(text.contains(line), "ocr-goldens.ps1 lacks: {line}");
+    }
+    for line in text.lines().filter(|line| !line.trim_start().starts_with('#')) {
+        assert!(!line.contains("cargo"), "ocr-goldens.ps1 runs cargo: {line}");
+    }
+    assert!(!text.contains("ScheduledTask"), "the script registers nothing; run-interactive.ps1 does");
+    #[cfg(windows)]
+    {
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{errors}");
+    }
+}
