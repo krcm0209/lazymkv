@@ -1,1 +1,3 @@
 crates/ocr-models/CC-BY-SA-4.0.txt -text
+# Scenario fixtures are bytes the stand-in replays; no line-ending conversion on any checkout (Task 14's fix).
+corpus/scenarios/** -text
