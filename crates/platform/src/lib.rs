@@ -117,6 +117,11 @@ pub struct Spawn {
     pub env: Vec<(String, String)>,
     /// Whether to start the child at below-normal priority. A no-op where the platform has no such class.
     pub below_normal: bool,
+    /// The folder the child starts in; None keeps the engine's own. Only step 10a sets it: its ffmpeg and ffprobe calls
+    /// run in the title's work folder `<data>\work\levels-<job id>-<title key>\`, as phase 0's `audio-levels.ps1` ran
+    /// them in its level folder, so every file name in the filter graph is relative (a drive colon cannot be written in
+    /// a filter argument; design part 5.7 step 10a; T5-R37, T5-R39). Def: T5-13. Use: T5-17.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Starts child programs so that closing the engine cannot leave them running (spec 4.3, design part 4.2).

@@ -12,18 +12,23 @@ use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 
 /// Starts children with `std::process::Command`: standard input null, standard output and error piped, `Spawn::env`
 /// added to the inherited environment (Ruling T9-e, design part 4.2, S13). `below_normal` does nothing here.
+/// `Spawn::cwd`, when set, is the child's working folder (T5-R37).
 /// Def: T9. Use: T11, T13, T23.
 pub struct StdProcessGuard;
 
 impl ProcessGuard for StdProcessGuard {
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
-        let mut child = Command::new(&spawn.program)
+        let mut command = Command::new(&spawn.program);
+        command
             .args(&spawn.args)
             .envs(spawn.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(dir) = &spawn.cwd {
+            command.current_dir(dir);
+        }
+        let mut child = command.spawn()?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Ok(Box::new(StdChild { child: Arc::new(Mutex::new(child)), stdout, stderr }))
@@ -101,6 +106,7 @@ pub(crate) mod tests {
             args: HELPER_ARGS.map(String::from).to_vec(),
             env: vec![("LAZYMKV_TEST_HELPER".to_string(), mode.to_string())],
             below_normal: false,
+            cwd: None,
         }
     }
 
@@ -120,8 +126,8 @@ pub(crate) mod tests {
     /// binary again as `print-pid-sleep`, with this child's standard output and error, then writes `child <pid>` and
     /// sleeps 60 s; `print-pid-sleep` writes `grandchild <pid>` and sleeps 60 s; `raise`, on Windows only, raises the
     /// exception `RAISED`, which nothing handles; `print-env` writes `env <NAME>` on a line of its own for each
-    /// variable of its environment, the names only, never the values, which hold the account name. Any other mode
-    /// returns at once.
+    /// variable of its environment, the names only, never the values, which hold the account name; `print-cwd` writes
+    /// `cwd <its working folder>` on a line of its own. Any other mode returns at once.
     #[test]
     #[ignore]
     fn helper_child() {
@@ -153,6 +159,7 @@ pub(crate) mod tests {
                     say(&format!("env {}", name.to_string_lossy()));
                 }
             }
+            Ok("print-cwd") => say(&format!("cwd {}", std::env::current_dir().unwrap().display())),
             #[cfg(windows)]
             Ok("raise") => {
                 use windows_sys::Win32::System::Diagnostics::Debug::RaiseException;
@@ -194,6 +201,31 @@ pub(crate) mod tests {
         assert_eq!(again, "");
     }
 
+    /// The working folder a `print-cwd` child of `spawn` reports, canonical, so a symbolic link (macOS's `/var`) or a
+    /// short name (a Windows runner's `RUNNER~1`) compares equal (T5-R37).
+    pub(crate) fn reported_cwd(guard: &dyn ProcessGuard, spawn: &Spawn) -> std::path::PathBuf {
+        let mut child = guard.spawn(spawn).unwrap();
+        let mut out = String::new();
+        child.take_stdout().read_to_string(&mut out).unwrap();
+        assert_eq!(child.wait().unwrap(), Some(0), "{out}");
+        let line = out.lines().find_map(|line| line.strip_prefix("cwd ")).unwrap_or_else(|| panic!("no cwd line in {out}"));
+        std::fs::canonicalize(line).unwrap()
+    }
+
+    /// A `Spawn` with `cwd` set starts its child in that folder, for any runner (T5-R37).
+    pub(crate) fn check_runs_in_its_cwd(guard: &dyn ProcessGuard) {
+        let scratch = lazymkv_core::testsupport::Scratch::new("spawn-cwd");
+        let spawn = Spawn { cwd: Some(scratch.0.clone()), ..helper("print-cwd") };
+        assert_eq!(reported_cwd(guard, &spawn), std::fs::canonicalize(&scratch.0).unwrap());
+    }
+
+    /// A `Spawn` without `cwd` starts its child where this process runs, as every spawn did before (T5-R37).
+    pub(crate) fn check_runs_where_it_did(guard: &dyn ProcessGuard) {
+        let spawn = helper("print-cwd");
+        assert_eq!(spawn.cwd, None);
+        assert_eq!(reported_cwd(guard, &spawn), std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap());
+    }
+
     #[test]
     fn the_runner_kills_its_child() {
         check_kills_its_child(&StdProcessGuard);
@@ -202,5 +234,15 @@ pub(crate) mod tests {
     #[test]
     fn the_runner_pipes_the_childs_output_and_passes_its_environment() {
         check_pipes_both_streams_and_adds_env(&StdProcessGuard);
+    }
+
+    #[test]
+    fn a_spawn_with_cwd_runs_in_that_folder() {
+        check_runs_in_its_cwd(&StdProcessGuard);
+    }
+
+    #[test]
+    fn a_spawn_without_cwd_runs_where_it_did() {
+        check_runs_where_it_did(&StdProcessGuard);
     }
 }
