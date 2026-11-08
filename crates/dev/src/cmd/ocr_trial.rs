@@ -897,10 +897,11 @@ fn separating(a: f64, b: f64, thresholds: &[(f64, Side)]) -> Option<f64> {
     thresholds.iter().find(|(t, side)| side.holds(a, *t) != side.holds(b, *t)).map(|(t, _)| *t)
 }
 
-/// The differences of one stream read in both arms, in design 10.9's order.
+/// The differences of one stream read in both arms, in design 10.9's order; a count differs when the arms are more than
+/// one event apart (the owner's amendment of 2026-11-08), the rest when unequal.
 fn stream_differences(n: i64, a: &Measures, b: &Measures, rule: &Rule, out: &mut Vec<String>) {
     for ((key, x), (_, y)) in counts(a).iter().zip(counts(b).iter()) {
-        if x != y {
+        if x.abs_diff(*y) > 1 {
             out.push(format!("s{n}: {key} F {x} R {y}"));
         }
     }
@@ -979,7 +980,8 @@ fn decision_text(d: Option<&Decision>) -> String {
     format!("{} {} {}", d.role.as_str(), or_dash(&d.review), or_dash(&d.note))
 }
 
-/// Design 10.9's parity of arm R against arm F over one title; Err when either run has no analysis. Def: T5-10.
+/// Design 10.9's parity of arm R against arm F over one title, with counts within one event; Err when either run has
+/// no analysis. Def: T5-10.
 /// Use: T5-10, T5-12.
 pub fn parity(f: &SubsRun, r: &SubsRun, rule: &Rule) -> Result<Parity, String> {
     let Some(fa) = &f.analysis else {
@@ -1181,12 +1183,17 @@ mod tests {
     /// `dir`/sub-<n>.ocr.jsonl for `recording`'s 30 events, event k read as `lines_of(k)` or as `edit`'s lines for
     /// its event, each record at its packet's pts.
     fn records(dir: &Path, n: i64, edit: Option<(usize, &[&str])>) {
+        records_edited(dir, n, edit.as_slice());
+    }
+
+    /// As `records`, with any number of events read as the given lines in place of `lines_of(k)`.
+    fn records_edited(dir: &Path, n: i64, edits: &[(usize, &[&str])]) {
         let mut text = String::new();
         for k in 0..30usize {
             let pts = 10.0 + 4.0 * k as f64;
-            let lines: Vec<String> = match edit {
-                Some((at, lines)) if at == k => strings(lines),
-                _ => lines_of(k),
+            let lines: Vec<String> = match edits.iter().find(|(at, _)| *at == k) {
+                Some((_, lines)) => strings(lines),
+                None => lines_of(k),
             };
             let file = format!("f-{:09}.png", (pts * 1000.0) as u64);
             text.push_str(&json!({"frame": k, "file": file, "t": pts, "pts": pts, "lines": lines}).to_string());
@@ -1499,23 +1506,41 @@ mod tests {
     }
 
     #[test]
-    fn parity_passes_on_equal_arms_and_fails_when_one_count_differs() {
+    fn parity_passes_within_one_event_per_count_and_fails_when_a_count_differs_by_two() {
         let s = Scratch::new("trial-parity-count");
         let rec = recording(&s, &[(0, "eng")]);
         let (f_dir, r_dir) = (s.0.join("f"), s.0.join("r"));
-        records(&f_dir, 0, None);
-        records(&r_dir, 0, None);
+        // Arm F reads eight sound cues (event 5 and seven more), an SDH track whose decision note holds no count, so
+        // a count that moves by one event leaves the decision alone.
+        let cue: &[&str] = &["(PHONE RINGS)"];
+        let dialogue: &[&str] = &["We babin the dagon."];
+        let mut f_edits: Vec<(usize, &[&str])> = [9, 11, 13, 17, 19, 23, 29].iter().map(|&k| (k, cue)).collect();
+        records_edited(&f_dir, 0, &f_edits);
+        records_edited(&r_dir, 0, &f_edits);
         let args = strings(&["parity", "--rec", &path(&rec), "--f", &path(&f_dir), "--r", &path(&r_dir)]);
         let (code, out, err) = trial(&s, &args);
         assert_eq!(code, 0, "{out}{err}");
         assert!(out.ends_with("PARITY PASS\n"), "{out}");
-        // Arm R reads event 5's sound cue as dialogue.
-        records(&r_dir, 0, Some((5, &["We babin the dagon."])));
         let ctx = Ctx::for_test(&s.0);
         let f = arm(&ctx, &path(&rec), &path(&f_dir));
+        // Arm R reads event 5's sound cue as dialogue: SO is one event apart, which passes.
+        f_edits.push((5, dialogue));
+        records_edited(&r_dir, 0, &f_edits);
         let r = arm(&ctx, &path(&rec), &path(&r_dir));
         let (fm, rm) = (measures(&f, 0), measures(&r, 0));
-        assert_ne!(fm.SO, rm.SO);
+        assert_eq!(fm.SO.abs_diff(rm.SO), 1);
+        let found = parity(&f, &r, &Rule::default()).unwrap();
+        assert!(found.differences.is_empty(), "{:?}", found.differences);
+        let (code, out, err) = trial(&s, &args);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.ends_with("PARITY PASS\n"), "{out}");
+        // Arm R reads a second sound cue as dialogue too: SO is two events apart, which fails.
+        f_edits.retain(|(k, _)| *k != 9);
+        f_edits.push((9, dialogue));
+        records_edited(&r_dir, 0, &f_edits);
+        let r = arm(&ctx, &path(&rec), &path(&r_dir));
+        let (fm, rm) = (measures(&f, 0), measures(&r, 0));
+        assert_eq!(fm.SO.abs_diff(rm.SO), 2);
         let found = parity(&f, &r, &Rule::default()).unwrap();
         assert!(found.differences.contains(&format!("s0: SO F {} R {}", fm.SO, rm.SO)), "{:?}", found.differences);
         let (code, out, _) = trial(&s, &args);
