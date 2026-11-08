@@ -8,9 +8,16 @@ use crate::subtitle::bitmap::prepare::{Crop, Grey, INK};
 /// row joins them. Def: T5-5. Use: T5-8.
 pub const GAP_ROWS: u32 = 2;
 
-/// The padding of design part 10.6 (P18; T5-R7) by which a line box grows on its left and right within the crop.
-/// Def: T5-5. Use: T5-8.
-pub const LINE_PAD: u32 = 16;
+/// The padding of design part 10.6 (P18; T5-R7) by which a line box grows on its left and right within the crop: 3
+/// pixels, ocrs 0.13.1's own expansion of a detected word rectangle (`expand_dist` in its detection.rs); 16 until the
+/// trial of 2026-11-07 showed the recognizer misreading line starts behind the longer white lead-in (the first glyph
+/// doubled, dropped or replaced by `[`, `|`, `?` or `*`). Def: T5-5. Use: T5-8.
+pub const LINE_PAD: u32 = 3;
+
+/// The margin of design part 10.6 (P18; T5-R7) by which a line box grows above and below its inked rows within the
+/// crop, at most half the empty rows to the neighbouring line (integer division) so that a neighbour's ink stays out:
+/// 3 pixels like `LINE_PAD`, for the same reason. Def: T5-5. Use: T5-8.
+pub const LINE_MARGIN: u32 = 3;
 
 /// The factor of design part 10.6's triggers 1 and 2 (P18; T5-R7): a run or a line taller than 1.6 times the
 /// stream's median line height is irregular. Def: T5-5. Use: T5-8.
@@ -26,10 +33,10 @@ pub const DECODER_VERSION: &str = "lazymkv-bitmap 1";
 
 /// The version of this line finder (design part 10.6, P18; T5-R7) that every OCR record names (design part 10.12).
 /// Def: T5-5. Use: T5-6.
-pub const LINE_FINDER_VERSION: &str = "lazymkv-rows 1";
+pub const LINE_FINDER_VERSION: &str = "lazymkv-rows 2";
 
-/// One line box of design part 10.6 (P18; T5-R7) within the crop: the line's rows and its inked columns padded by
-/// `LINE_PAD`. Def: T5-5. Use: T5-6, T5-8.
+/// One line box of design part 10.6 (P18; T5-R7) within the crop: the line's rows with `LINE_MARGIN` and its inked
+/// columns padded by `LINE_PAD`. Def: T5-5. Use: T5-6, T5-8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LineBox {
     /// The box's left column within the crop. Def: T5-5. Use: T5-6, T5-8.
@@ -84,13 +91,15 @@ pub fn rows(image: &Grey) -> Rows {
     Rows { runs, lines }
 }
 
-/// The line boxes of design part 10.6 (P18; T5-R7), one per line in `rows.lines` order: the line's rows, and the
-/// first to the last column holding a pixel at or below `INK` in them, padded by `LINE_PAD` and clamped to the crop.
-/// A line with no such pixel in the image has no box. Def: T5-5. Use: T5-8, T5-10.
+/// The line boxes of design part 10.6 (P18; T5-R7), one per line in `rows.lines` order: the line's rows grown by
+/// `LINE_MARGIN` above and below, each side at most half the empty rows to the neighbouring line (to the crop's edge
+/// where there is none), and the first to the last column holding a pixel at or below `INK` in the line's rows, padded
+/// by `LINE_PAD` and clamped to the crop. A line with no such pixel in the image has no box. Def: T5-5. Use: T5-8,
+/// T5-10.
 pub fn line_boxes(image: &Grey, rows: &Rows) -> Vec<LineBox> {
     let all: Vec<&[u8]> = image_rows(image).collect();
     let mut boxes = Vec::with_capacity(rows.lines.len());
-    for &(first, height) in &rows.lines {
+    for (index, &(first, height)) in rows.lines.iter().enumerate() {
         let start = (first as usize).min(all.len());
         let end = (first as usize).saturating_add(height as usize).min(all.len());
         let mut columns: Option<(usize, usize)> = None;
@@ -104,9 +113,20 @@ pub fn line_boxes(image: &Grey, rows: &Rows) -> Vec<LineBox> {
         let Some((left, right)) = columns else {
             continue;
         };
+        let gap_above = match index.checked_sub(1).map(|previous| rows.lines[previous]) {
+            Some((prev_first, prev_height)) => first.saturating_sub(prev_first.saturating_add(prev_height)),
+            None => first,
+        };
+        let bottom = first.saturating_add(height);
+        let gap_below = match rows.lines.get(index + 1) {
+            Some(&(next_first, _)) => next_first.saturating_sub(bottom),
+            None => image.height.saturating_sub(bottom),
+        };
+        let above = LINE_MARGIN.min(gap_above / 2);
+        let below = LINE_MARGIN.min(gap_below / 2);
         let x = (left as u32).saturating_sub(LINE_PAD);
         let last = (right as u32).saturating_add(LINE_PAD).min(image.width - 1);
-        boxes.push(LineBox { x, y: first, width: last - x + 1, height });
+        boxes.push(LineBox { x, y: first - above, width: last - x + 1, height: height + above + below });
     }
     boxes
 }
@@ -200,10 +220,32 @@ mod tests {
     }
 
     #[test]
-    fn line_boxes_span_inked_columns_padded_by_16_within_the_crop() {
+    fn line_boxes_span_inked_columns_padded_by_3_with_a_margin_of_at_most_3_rows() {
         let image = blocks(100, 40, &[(30, 5, 10, 5), (50, 11, 10, 4), (5, 17, 90, 4)]);
         let boxes = line_boxes(&image, &rows(&image));
-        assert_eq!(boxes, [LineBox { x: 14, y: 5, width: 62, height: 10 }, LineBox { x: 0, y: 17, width: 100, height: 4 }]);
+        assert_eq!(
+            boxes,
+            [LineBox { x: 27, y: 3, width: 36, height: 13 }, LineBox { x: 2, y: 16, width: 96, height: 8 }],
+            "line 1: above min(3, 5 / 2) = 2, below min(3, 2 / 2) = 1; line 2: above 1, below min(3, 19 / 2) = 3"
+        );
+    }
+
+    #[test]
+    fn a_margin_stops_at_the_crops_edges() {
+        let top = blocks(20, 20, &[(0, 0, 20, 10)]);
+        assert_eq!(line_boxes(&top, &rows(&top)), [LineBox { x: 0, y: 0, width: 20, height: 13 }]);
+        let bottom = blocks(20, 20, &[(0, 10, 20, 10)]);
+        assert_eq!(line_boxes(&bottom, &rows(&bottom)), [LineBox { x: 0, y: 7, width: 20, height: 13 }]);
+    }
+
+    #[test]
+    fn two_lines_two_rows_apart_never_share_a_row() {
+        let image = blocks(30, 40, &[(0, 10, 30, 8), (0, 20, 30, 8)]);
+        let boxes = line_boxes(&image, &rows(&image));
+        assert_eq!(boxes.len(), 2);
+        assert_eq!((boxes[0].y, boxes[0].height), (7, 12), "above 3, below 1");
+        assert_eq!((boxes[1].y, boxes[1].height), (19, 12), "above 1, below 3");
+        assert!(boxes[0].y + boxes[0].height <= boxes[1].y);
     }
 
     #[test]
@@ -266,7 +308,7 @@ mod tests {
 
     #[test]
     fn the_line_finders_constants_are_design_10_6s() {
-        assert_eq!((INK, GAP_ROWS, LINE_PAD, TALL_FACTOR, MAX_ROW_LINES), (127, 2, 16, 1.6, 3));
-        assert_eq!((DECODER_VERSION, LINE_FINDER_VERSION), ("lazymkv-bitmap 1", "lazymkv-rows 1"));
+        assert_eq!((INK, GAP_ROWS, LINE_PAD, LINE_MARGIN, TALL_FACTOR, MAX_ROW_LINES), (127, 2, 3, 3, 1.6, 3));
+        assert_eq!((DECODER_VERSION, LINE_FINDER_VERSION), ("lazymkv-bitmap 1", "lazymkv-rows 2"));
     }
 }

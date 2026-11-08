@@ -431,7 +431,7 @@ mod tests {
             r#"{"frame":2,"file":"f-000012500.png","t":12.5,"pts":12.5,"text":"text-sentinel-3e8f | text-sentinel-a1","#,
             r#""lines":["text-sentinel-3e8f","text-sentinel-a1"],"size":1400,"boxes":[{"x":16,"y":4,"width":200,"height":40}],"#,
             r#""method":"rows","trigger":null,"engine":{"ocrs":"0.13.1","detection_sha256":"DDD","recognition_sha256":"RRR"},"#,
-            r#""decoder":{"bitmap":"lazymkv-bitmap 1","rows":"lazymkv-rows 1"},"#,
+            r#""decoder":{"bitmap":"lazymkv-bitmap 1","rows":"lazymkv-rows 2"},"#,
             r#""ms":{"decode":1.5,"prepare":0.25,"lines":0.125,"detect":null,"recognize":80.0}}"#,
             "\n",
         ]
@@ -621,7 +621,7 @@ mod tests {
         let entry = &value["streams"][0];
         assert_eq!(keys(entry), ["n", "codec", "read", "exit", "wall_ms", "run", "decoder", "with_text", "lines", "markers"]);
         assert_eq!(entry["run"], serde_json::from_str::<Value>(&run_json(&totals())).unwrap());
-        assert_eq!(entry["decoder"], json!({"bitmap": "lazymkv-bitmap 1", "rows": "lazymkv-rows 1"}));
+        assert_eq!(entry["decoder"], json!({"bitmap": "lazymkv-bitmap 1", "rows": "lazymkv-rows 2"}));
         assert_eq!((&entry["n"], &entry["codec"], &entry["read"], &entry["exit"], &entry["wall_ms"]),
             (&json!(0), &json!("S_HDMV/PGS"), &json!(true), &json!(0), &json!(6012)));
         assert_eq!((&entry["with_text"], &entry["lines"]), (&json!(3), &json!(5)));
