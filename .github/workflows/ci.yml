@@ -7,8 +7,23 @@ name: CI
 # system (design part 12.6, item 2), and on Windows the platform's Windows implementations run too: the named pipe,
 # the mutex, the Job Object runner, Credential Manager under a test name, and a native whole job through the real
 # pipe (design parts 12.4 and 12.6, item 3). Tests that need the drive, the share or the owner's desktop session are
-# ignored here and run on the mini PC. ffmpeg is installed for the one test that builds its own proxy with lavfi;
-# without it that test skips too.
+# ignored here and run on the mini PC.
+#
+# Layer 2 (design part 12.1, G1): every runner installs MKVToolNix and an FFmpeg of 7.0 or later (K11), each pinned
+# (P33, call 20). Ubuntu takes MKVToolNix from apt at its pinned version and a static FFmpeg 7.x build whose SHA-256
+# (Secure Hash Algorithm 256) digest is checked before anything in it runs, since apt's FFmpeg is 6.1; macOS takes
+# both from Homebrew and checks mkvmerge's version against the pin; Windows takes FFmpeg from Chocolatey and
+# MKVToolNix by its installer, checked against its SHA-256. Each job hands the three programs to the tests as
+# LAZYMKV_TEST_MKVMERGE, LAZYMKV_TEST_FFPROBE and LAZYMKV_TEST_FFMPEG; the layer 2 tests
+# (crates/fake-tools/tests/layer2.rs) and the ffprobe size cross-check fail here, instead of skipping, when one is
+# missing or too old (T5-R49, call 24).
+#
+# The OCR (optical character recognition) models: the models job restores them from the cache keyed by their
+# SHA-256 pins, and on a miss downloads them once through lazymkv-ocr-models' build script; the three test jobs only
+# restore that cache (calls 2 and 3). lazymkv-ocr (rten and ocrs) builds, and its worker runs over a made-up
+# Matroska file, on ubuntu only, with the ocr-trial feature's build and test: the run's one rten build (F1, call 23;
+# T5-R27). macOS and Windows build and test the rest of the workspace. The notices job regenerates the crate
+# notices with cargo-about and fails when they differ from crates/ctl/crate-notices.txt (E1, call 26).
 
 on:
   push:
@@ -106,17 +121,87 @@ jobs:
           rustup show active-toolchain
           cargo --version
 
-      - name: Install ffmpeg (Linux)
+      # Layer 2 (design part 12.1, call 20): apt's FFmpeg is 6.1, below K11's 7.0, so ubuntu takes the pinned static
+      # 7.x build, checked before anything in it runs, and MKVToolNix from apt at the pinned version (T5-R28).
+      - name: Install FFmpeg 7.x and MKVToolNix (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        shell: bash
+        env:
+          FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz
+          FFMPEG_SHA256: c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79
+          MKVTOOLNIX_VERSION: 82.0-1build2
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/ffmpeg.tar.xz" "$FFMPEG_URL"
+          printf '%s  %s\n' "$FFMPEG_SHA256" "$RUNNER_TEMP/ffmpeg.tar.xz" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          test -x "$RUNNER_TEMP/ffmpeg/bin/ffmpeg"
+          test -x "$RUNNER_TEMP/ffmpeg/bin/ffprobe"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "mkvtoolnix=$MKVTOOLNIX_VERSION"
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+          {
+            echo "LAZYMKV_TEST_MKVMERGE=$(command -v mkvmerge)"
+            echo "LAZYMKV_TEST_FFPROBE=$RUNNER_TEMP/ffmpeg/bin/ffprobe"
+            echo "LAZYMKV_TEST_FFMPEG=$RUNNER_TEMP/ffmpeg/bin/ffmpeg"
+          } >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/ffmpeg/bin/ffmpeg" -version | sed -n 1p
+          "$RUNNER_TEMP/ffmpeg/bin/ffprobe" -version | sed -n 1p
+          mkvmerge --version
 
-      - name: Install ffmpeg (macOS)
+      # Homebrew's FFmpeg is above 7.0; its MKVToolNix must be the pinned version, so a formula that moved on fails
+      # here and goes to the owner for a new pin (P33, T5-R28).
+      - name: Install FFmpeg and MKVToolNix (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg
+        shell: bash
+        env:
+          MKVTOOLNIX_VERSION: "103.0"
+        run: |
+          set -euo pipefail
+          brew install ffmpeg mkvtoolnix
+          prefix="$(brew --prefix)"
+          first="$("$prefix/bin/mkvmerge" --version | sed -n 1p)"
+          echo "$first"
+          case "$first" in
+            "mkvmerge v$MKVTOOLNIX_VERSION "*) ;;
+            *) echo "Homebrew installed $first, not the pinned MKVToolNix $MKVTOOLNIX_VERSION (P33)" >&2; exit 1 ;;
+          esac
+          {
+            echo "LAZYMKV_TEST_MKVMERGE=$prefix/bin/mkvmerge"
+            echo "LAZYMKV_TEST_FFPROBE=$prefix/bin/ffprobe"
+            echo "LAZYMKV_TEST_FFMPEG=$prefix/bin/ffmpeg"
+          } >> "$GITHUB_ENV"
+          "$prefix/bin/ffmpeg" -version | sed -n 1p
 
-      - name: Install ffmpeg (Windows)
+      # Chocolatey's FFmpeg is above 7.0; MKVToolNix comes by its own installer, pinned by URL and SHA-256 and run
+      # silently (call 20 over design part 12.1's package managers, T5-R49).
+      - name: Install FFmpeg and MKVToolNix (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+        env:
+          MKVTOOLNIX_URL: https://mkvtoolnix.download/windows/releases/103.0/mkvtoolnix-64-bit-103.0-setup.exe
+          MKVTOOLNIX_SHA256: 3bb4b6efe464c8b852a9813f6be4093fa61bb79229ea755b3a70c5fa42489421
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install ffmpeg exited $LASTEXITCODE" }
+          $setup = Join-Path $env:RUNNER_TEMP 'mkvtoolnix-setup.exe'
+          Invoke-WebRequest -Uri $env:MKVTOOLNIX_URL -OutFile $setup
+          $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:MKVTOOLNIX_SHA256) { throw "the MKVToolNix installer has SHA-256 $hash, not $env:MKVTOOLNIX_SHA256" }
+          $install = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "the MKVToolNix installer exited $($install.ExitCode)" }
+          $mkvmerge = Join-Path $env:ProgramFiles 'MKVToolNix\mkvmerge.exe'
+          if (-not (Test-Path -LiteralPath $mkvmerge)) { throw "$mkvmerge is not there after the install" }
+          & $mkvmerge --version
+          $ffmpeg = (Get-Command ffmpeg.exe).Source
+          $ffprobe = (Get-Command ffprobe.exe).Source
+          & $ffmpeg -version | Select-Object -First 1
+          "LAZYMKV_TEST_MKVMERGE=$mkvmerge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LAZYMKV_TEST_FFPROBE=$ffprobe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LAZYMKV_TEST_FFMPEG=$ffmpeg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # lazymkv-ocr (rten and ocrs) builds and runs on ubuntu only; macOS and Windows build and test the rest of the
       # workspace, and the mini PC builds the Windows worker (notes call 23, F1).
