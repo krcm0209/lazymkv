@@ -1,4 +1,4 @@
-//! lazymkv-ctl: lazymkvctl's commands. plan, decide and retune run locally through lazymkv_dev::dispatch; the rest go to the engine over IPC (design parts 4.1, 9.5, 9.6).
+//! lazymkv-ctl: lazymkvctl's commands. plan, decide and retune run locally through lazymkv_dev::dispatch; licenses and export-models run here over the texts and model bytes this program carries; the rest go to the engine over IPC (design parts 4.1, 9.5, 9.6, 11.4).
 
 use lazymkv_dev::cmd::{decide, plan};
 use lazymkv_dev::evidence::{default_spec, Ctx};
@@ -9,6 +9,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 mod engine_cmds;
+pub mod licenses;
+pub mod models;
 
 /// What lazymkvctl reads and writes: the dev context, the engine connector (the named pipe's client on Windows, design
 /// part 3.3; None on Linux and macOS, S38), and the three streams (design parts 9.5, 9.6). Def: T27, T3-12.
@@ -28,6 +30,10 @@ pub struct Env<'a> {
 
 /// The commands lazymkvctl runs itself through lazymkv-dev's dispatcher (design part 9.5, P23). Def: T27. Use: T27, T28.
 pub const LOCAL_COMMANDS: [&str; 3] = ["plan", "decide", "retune"];
+
+/// The commands lazymkvctl runs itself with what it carries (design parts 9.6, 11.4; ARCH-17): no engine and no
+/// lazymkv-dev. Def: T5-23. Use: T5-23, T5-26.
+pub const OWN_COMMANDS: [&str; 2] = ["licenses", "export-models"];
 
 /// The message of exit 4 when this build has no engine transport (design part 4.2, S38). Def: T27. Use: T27, T28.
 pub const NO_TRANSPORT: &str = "lazymkvctl: no engine transport exists in this build";
@@ -60,10 +66,12 @@ pub(crate) const RETUNE_RELAY_FLAGS: [&str; 9] = [
 const USAGE: &str = "\
 usage: lazymkvctl <command> [arguments]
 
-commands run here (design part 9.5):
+commands run here (design parts 9.5, 9.6):
   plan <slug|recording dir|scan file> [lazymkv-dev plan's flags]   or   plan --job ID
   decide (<slug> <label> | --rec DIR) [lazymkv-dev decide's flags]   or   decide --job ID --title KEY
   retune [lazymkv-dev retune's flags]   or   retune --jobs [lazymkv-dev retune's flags]
+  licenses
+  export-models DIR
 ";
 
 /// Writes `lazymkvctl --help`'s words: USAGE, then one indented line per `ENGINE_COMMANDS` synopsis (PF-33).
@@ -85,6 +93,9 @@ pub fn run(argv: &[String], env: Env) -> i32 {
         write_usage(env.out);
         return 0;
     }
+    if OWN_COMMANDS.contains(&name.as_str()) {
+        return own(argv, env);
+    }
     if LOCAL_COMMANDS.contains(&name.as_str()) {
         return local(argv, env);
     }
@@ -105,6 +116,45 @@ pub fn run(argv: &[String], env: Env) -> i32 {
 pub(crate) fn argument_error(err: &mut dyn Write, name: &str, message: &str) -> i32 {
     let _ = writeln!(err, "lazymkvctl {name}: error: {message}");
     2
+}
+
+/// `licenses` or `export-models` (`argv[0]`); returns the exit code (design part 9.6; call 15, call 16).
+/// `licenses` takes no argument and prints `licenses_text` for this program's own path, exit 1 with the message when a
+/// bundled licence cannot be read; `export-models DIR` takes one folder, through `ctx.abs`, and writes the models
+/// there.
+fn own(argv: &[String], env: Env) -> i32 {
+    let name = argv[0].as_str();
+    let rest = &argv[1..];
+    if name == "licenses" {
+        if !rest.is_empty() {
+            return argument_error(env.err, name, &format!("unrecognized arguments: {}", rest.join(" ")));
+        }
+        return match licenses::licenses_text(std::env::current_exe().ok().as_deref()) {
+            Ok(text) => {
+                let _ = env.out.write_all(text.as_bytes());
+                0
+            }
+            Err(message) => {
+                let _ = writeln!(env.err, "lazymkvctl licenses: error: {message}");
+                1
+            }
+        };
+    }
+    let Some(dir) = rest.first() else {
+        return argument_error(env.err, name, "the following arguments are required: DIR");
+    };
+    if rest.len() > 1 {
+        return argument_error(env.err, name, &format!("unrecognized arguments: {}", rest[1..].join(" ")));
+    }
+    let dir = env.ctx.abs(dir);
+    match models::export_models(&dir) {
+        Ok(()) => {
+            let _ = writeln!(env.out, "wrote {}", dir.join(lazymkv_ocr_models::DETECTION_NAME).display());
+            let _ = writeln!(env.out, "wrote {}", dir.join(lazymkv_ocr_models::RECOGNITION_NAME).display());
+            0
+        }
+        Err(message) => argument_error(env.err, name, &message),
+    }
 }
 
 /// A command of `LOCAL_COMMANDS` (`argv[0]`): with no `--job` and no `--jobs` it runs through lazymkv-dev's
