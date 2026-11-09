@@ -19,7 +19,7 @@
 //! On Windows, `Harness::new_native` runs the same stand-ins under the binary's own start, `native::run_with`, behind
 //! a real mutex and pipe of the test's own names (Task T3-23).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -498,6 +498,10 @@ pub struct Harness {
     cleanup_done: Mutex<Option<Receiver<()>>>,
     /// The running engine's copy ends, one job id per attempt (`TestHooks::copy_done`).
     copy_done: Mutex<Option<Receiver<String>>>,
+    /// The running engine's refresh ends, one job id per refresh (`TestHooks::refresh_done`).
+    refresh_done: Mutex<Option<Receiver<String>>>,
+    /// The refresh ends received so far over every engine this harness started, counted per job (design part 7.5).
+    refreshed: Mutex<BTreeMap<String, usize>>,
     /// The copy step `copy_with` armed, shared with every engine the harness starts (Review Focus 1).
     copy_fault: Arc<Mutex<Option<CopyFn>>>,
     /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
@@ -706,6 +710,10 @@ impl Harness {
         *lock(&self.cleanup_done) = Some(cleanup_ends);
         let (copy_done, copy_ends) = channel::<String>();
         *lock(&self.copy_done) = Some(copy_ends);
+        // A restart loses no refresh end: the old engine's are counted before its receiver goes.
+        self.count_refreshes();
+        let (refresh_done, refresh_ends) = channel::<String>();
+        *lock(&self.refresh_done) = Some(refresh_ends);
         let armed_copy = Arc::clone(&self.copy_fault);
         let copy_with: CopyFn = Arc::new(move |from: &Path, to: &Path| match lock(&armed_copy).clone() {
             Some(copy) => copy(from, to),
@@ -718,6 +726,7 @@ impl Harness {
             cleanup_period: *lock(&self.cleanup_period),
             copy_done: Some(copy_done),
             copy_with: Some(copy_with),
+            refresh_done: Some(refresh_done),
         };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
         *lock(&self.engine) = Some(engine);
@@ -1170,6 +1179,24 @@ impl Harness {
         }
     }
 
+    /// How many refreshes of the job `id`'s tuning recordings have ended over every engine this harness started
+    /// (`TestHooks::refresh_done`; design part 7.5). Def: T5-20. Use: T5-20, T5-22.
+    pub fn refreshes(&self, id: &str) -> usize {
+        self.deliver();
+        self.count_refreshes();
+        lock(&self.refreshed).get(id).copied().unwrap_or(0)
+    }
+
+    /// Counts into `refreshed` every refresh end the running engine's receiver holds.
+    fn count_refreshes(&self) {
+        let ends = lock(&self.refresh_done);
+        let Some(ends) = ends.as_ref() else { return };
+        let mut refreshed = lock(&self.refreshed);
+        while let Ok(id) = ends.try_recv() {
+            *refreshed.entry(id).or_insert(0) += 1;
+        }
+    }
+
     /// Puts `copy` in place of `fs::copy` in every copy of this harness's engines, from the next copy on (Review Focus
     /// 1). Def: T5-19. Use: T5-19.
     pub fn copy_with(&self, copy: impl Fn(&Path, &Path) -> io::Result<u64> + Send + Sync + 'static) {
@@ -1600,6 +1627,8 @@ impl Folders {
             cleanup_period: Mutex::default(),
             cleanup_done: Mutex::default(),
             copy_done: Mutex::default(),
+            refresh_done: Mutex::default(),
+            refreshed: Mutex::default(),
             copy_fault: Arc::default(),
             #[cfg(windows)]
             native: Mutex::default(),

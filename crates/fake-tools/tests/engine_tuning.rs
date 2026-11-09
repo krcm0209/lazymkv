@@ -1,6 +1,8 @@
 //! The tuning dataset copy on stand-ins (design part 7.5, EVID-4; spec 7 "Tuning evidence"; call 10, C2; T5-R13,
 //! T5-R14, T5-R46, T5-R55; Review Focus 1).
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -57,10 +59,11 @@ fn root(h: &Harness) -> String {
     h.tuning().display().to_string()
 }
 
-/// job.log's lines about the dataset copy, in order.
+/// job.log's lines about the dataset copy, in order; the recordings refresh's lines (design part 7.5) are not its.
 fn tuning_lines(h: &Harness, id: &str) -> Vec<String> {
     let log = fs::read_to_string(h.job_dir(id).join("job.log")).unwrap_or_default();
-    log.lines().filter(|line| line.starts_with("tuning ")).map(str::to_string).collect()
+    let copy = |line: &&str| line.starts_with("tuning ") && !line.starts_with("tuning recordings ");
+    log.lines().filter(copy).map(str::to_string).collect()
 }
 
 fn staged(h: &Harness, id: &str) -> PathBuf {
@@ -339,4 +342,196 @@ fn a_pending_copy_is_retried_at_the_cleanup_pass_of_an_idle_engine() {
     assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Done));
     assert_eq!(tuning_lines(&h, &id).last().map(String::as_str), Some(COPIED));
     assert!(staged(&h, &id).join("audio-proxy.mka").is_file(), "the job's retention has not passed, so its staging data stays");
+}
+
+/// The recordings refresh and the cleanup's mirror (design part 7.5; call 11; T5-R15, T5-R16, T5-R57).
+mod refresh {
+    use super::common::Client;
+    use lazymkv_core::decision::Disposition;
+    use lazymkv_core::job::{Event, Failure, FailureClass};
+    use lazymkv_core::plan::Mode;
+    use lazymkv_core::record::JobRecord;
+    use lazymkv_core::review::ReviewReason;
+    use lazymkv_engine::testkit::{Harness, StepScript};
+    use lazymkv_engine::StepResult;
+    use lazymkv_platform::Reach;
+    use serde_json::{json, Value};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const DISC: &str = "disc-a";
+    /// The word Task 15's stand-in records and the panicking stand-in's standard error hold.
+    const SENTINEL: &str = "text-sentinel-3e8f";
+
+    fn keeping() -> Value {
+        json!({"keep_tuning_evidence": true, "drive_settle_s": 0, "drive_ready_timeout_s": 1})
+    }
+    fn step(event: Event) -> StepScript { StepScript::Result(StepResult { event: Some(event), message: None }) }
+    fn none() -> StepScript { StepScript::Result(StepResult { event: None, message: None }) }
+    fn held() -> StepScript {
+        step(Event::DecisionDone {
+            disposition: Disposition::NeedsReview, reasons: vec![ReviewReason::IdentityUnknown], has_path: true,
+        })
+    }
+
+    /// The scripted main line to Filed, as engine_ipc.rs's `main_line`.
+    fn main_line() -> Vec<(&'static str, StepScript)> {
+        vec![
+            ("RunScan", step(Event::ScanDone)), ("Plan", step(Event::PlanDone { mode: Mode::Direct })),
+            ("CheckSpace", step(Event::SpaceOk)), ("RipTitle", step(Event::TitleRipped)),
+            ("VerifyFile", step(Event::TitleVerified { last: true })), ("Eject", step(Event::Ejected)),
+            ("Probe", step(Event::ProbeDone)), ("ExtractSubtitleEvidence", none()),
+            ("Decide", step(Event::DecisionDone { disposition: Disposition::AutoFile, reasons: vec![], has_path: true })),
+            ("CheckSpace", step(Event::SpaceOk)), ("Remux", step(Event::RemuxDone)),
+            ("VerifyFile", step(Event::FileVerified)), ("File", step(Event::FileDone)),
+        ]
+    }
+
+    /// The main line up to its first `tag`, whose script is `last`; nothing after it.
+    fn line_to(tag: &str, last: StepScript) -> Vec<(&'static str, StepScript)> {
+        let mut out = Vec::new();
+        for (t, s) in main_line() {
+            if t == tag {
+                out.push((t, last));
+                return out;
+            }
+            out.push((t, s));
+        }
+        panic!("no {tag} in the main line")
+    }
+
+    /// The harness's one job, once `DISC` is in tok0 and the job is in `state`.
+    fn job_in(h: &Harness, state: &str) -> String {
+        h.insert("tok0", DISC);
+        h.wait(&format!("the job in {state}"), |h| h.job_ids().first().is_some_and(|id| h.state_of(id) == state));
+        h.job_ids().pop().unwrap()
+    }
+
+    fn mirror(h: &Harness, id: &str) -> PathBuf { h.tuning().join("recordings").join(id) }
+
+    fn refreshed(h: &Harness, id: &str, n: usize) {
+        h.wait(&format!("{n} refresh(es) of {id}"), |h| h.refreshes(id) >= n);
+    }
+
+    fn copy(date: &str) -> String { format!(r#"{{"id": 1, "fetched_at": "{date}"}}"#) }
+
+    /// Every file under `dir`; none when it does not exist.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut folders = vec![dir.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            let Ok(entries) = fs::read_dir(&folder) else { continue };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() { folders.push(path) } else { found.push(path) }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_refresh_runs_when_the_job_stops_in_filed_needs_review_or_failed() {
+        let failed = step(Event::TitleRipFailed { failure: Failure { class: FailureClass::Unknown, output: None } });
+        let cases = [(main_line(), "Filed"), (line_to("Decide", held()), "NeedsReview"), (line_to("RipTitle", failed), "Failed")];
+        for (script, state) in cases {
+            let h = Harness::new_scripted(script, keeping());
+            let id = job_in(&h, state);
+            refreshed(&h, &id, 1);
+            h.wait("state.json mirrored", |h| {
+                let job = fs::read(h.job_dir(&id).join("state.json")).ok();
+                job.is_some() && fs::read(mirror(h, &id).join("state.json")).ok() == job
+            });
+            let record: JobRecord = serde_json::from_slice(&fs::read(mirror(&h, &id).join("state.json")).unwrap()).unwrap();
+            assert_eq!(record.state.as_str(), state);
+            assert!(mirror(&h, &id).join(".lazymkv-refresh.json").is_file(), "{state}");
+        }
+    }
+
+    #[test]
+    fn the_cleanups_deletion_of_a_stale_copy_is_mirrored() {
+        let h = Harness::new_scripted(line_to("Decide", StepScript::Hang), keeping());
+        h.insert("tok0", DISC);
+        h.wait("Decide running", |h| h.steps().calls().iter().any(|call| call == "Decide"));
+        let id = h.job_ids().pop().unwrap();
+        fs::write(h.job_dir(&id).join("tmdb.json"), copy("2026-01-01")).unwrap();
+        fs::write(h.job_dir(&id).join("tmdb-record.json"), copy("2026-10-01")).unwrap();
+        let mut c = Client::open(&h);
+        c.snapshot();
+        c.ok("cancel", json!({"job": id}));
+        c.until_state(Some(&id), "Failed");
+        refreshed(&h, &id, 1);
+        assert!(mirror(&h, &id).join("tmdb.json").is_file(), "the Failed refresh copied the stale copy");
+        let before = h.refreshes(&id);
+        h.run_cleanup();
+        refreshed(&h, &id, before + 1);
+        assert!(!h.job_dir(&id).join("tmdb.json").exists(), "the cleanup deleted the job's stale copy");
+        assert!(!mirror(&h, &id).join("tmdb.json").exists(), "the refresh mirrored the deletion");
+        assert_eq!(fs::read(mirror(&h, &id).join("tmdb-record.json")).unwrap(), copy("2026-10-01").as_bytes());
+        let log = h.engine_log();
+        assert!(log.contains(&format!("cleanup: {id}: deleted tmdb.json (fetched_at 2026-01-01)")), "{log}");
+        assert!(log.contains(&format!("{id}: tuning recordings: deleted tmdb.json, which the job folder no longer holds")), "{log}");
+    }
+
+    #[test]
+    fn with_the_setting_off_no_recordings_folder_is_written() {
+        let off = json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1});
+        let h = Harness::new_scripted(main_line(), off);
+        let id = job_in(&h, "Filed");
+        h.settle();
+        assert_eq!(h.refreshes(&id), 0);
+        assert_eq!(fs::read_dir(h.tuning()).unwrap().count(), 0, "nothing goes to tuning_root");
+    }
+
+    #[test]
+    fn a_refresh_that_cannot_reach_tuning_root_writes_job_log_and_runs_at_the_next_trigger() {
+        let h = Harness::new_scripted(line_to("Decide", held()), keeping());
+        let root = h.tuning().display().to_string();
+        h.shares().set_reach(&root, Reach::Unreachable("the share did not answer".into()));
+        let id = job_in(&h, "NeedsReview");
+        refreshed(&h, &id, 1);
+        let line = "tuning recordings refresh failed: tuning_root was not reached: the share did not answer";
+        let job_log = |h: &Harness| fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap_or_default();
+        assert!(job_log(&h).contains(line), "{}", job_log(&h));
+        assert!(!mirror(&h, &id).exists());
+        assert_eq!(h.state_of(&id), "NeedsReview", "a failed refresh holds nothing");
+        h.shares().set_reach(&root, Reach::Reachable);
+        fs::write(h.job_dir(&id).join("tmdb.json"), copy("2026-01-01")).unwrap();
+        let before = h.refreshes(&id);
+        h.run_cleanup(); // the next trigger: the pass deleted a TMDb copy of the job
+        refreshed(&h, &id, before + 1);
+        assert!(mirror(&h, &id).join("state.json").is_file());
+        assert!(fs::read_to_string(mirror(&h, &id).join("job.log")).unwrap().contains(line));
+    }
+
+    #[test]
+    fn the_recordings_tree_holds_counts_and_no_subtitle_text() {
+        let runs: [&[&str]; 2] = [&["movie-direct-two-subs"], &["movie-direct-two-subs", "movie-direct-two-subs-panic"]];
+        for scenarios in runs {
+            // The variants go over movie-direct, the disc they change (the file's `harness`).
+            let h = super::harness(scenarios, keeping());
+            h.insert("tok0", "movie-direct");
+            h.wait("the job stops", |h| {
+                h.job_ids().first().is_some_and(|id| ["Filed", "NeedsReview", "Failed"].contains(&h.state_of(id).as_str()))
+            });
+            let id = h.job_ids().pop().unwrap();
+            refreshed(&h, &id, 1);
+            h.settle();
+            let files = walk(&h.tuning().join("recordings"));
+            assert!(files.iter().any(|path| path.ends_with("state.json")), "{scenarios:?}: {files:?}");
+            assert!(files.iter().any(|path| path.ends_with("subs-ocr/summary.json")), "{scenarios:?}: {files:?}");
+            for path in &files {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let text = String::from_utf8_lossy(&fs::read(path).unwrap()).into_owned();
+                assert!(!text.contains(SENTINEL), "{}", path.display());
+                for refused in [".ocr.jsonl", ".run.json", ".png", ".mks"] {
+                    assert!(!name.ends_with(refused), "{}", path.display());
+                }
+                assert!(!name.contains(".capture.txt"), "no worker capture: {}", path.display());
+                if path.parent().unwrap().file_name().unwrap() == "subs-ocr" {
+                    let count = name == "summary.json" || (name.starts_with("sub-") && name.ends_with(".frames.json"));
+                    assert!(count, "only the counts under subs-ocr: {}", path.display());
+                }
+            }
+        }
+    }
 }

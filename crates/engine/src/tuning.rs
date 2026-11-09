@@ -1,16 +1,19 @@
 //! The tuning dataset copy (design part 7.5, EVID-4; spec 7 "Tuning evidence"; call 10, C2; T5-R13, T5-R14, T5-R46,
 //! T5-R55): each title's staged tuning folder and evidence file to `<tuning_root>\dataset\<job id>\<title key>\`,
-//! outside the reducer.
+//! outside the reducer; and the recordings refresh (design part 7.5; call 11; T5-R15, T5-R16): the job folder's
+//! changed files to `<tuning_root>\recordings\<job id>\`, `state.json` first.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
-use lazymkv_platform::{Reach, ShareConnector};
+use lazymkv_core::lookup::stale::TMDB_COPIES;
+use lazymkv_platform::{write_atomic, Reach, ShareConnector, TEMP_SUFFIX};
 
-use crate::staged::{copy_checked, copy_checked_with, copy_into_job, evidence_file, tuning_dir};
+use crate::staged::{copy_checked, copy_checked_with, copy_into_job, evidence_file, tuning_dir, PARTIAL};
 
 /// The dataset tree's folder under `tuning_root` (design part 7.5). Def: T5-19. Use: T5-19, T5-22.
 pub(crate) const DATASET: &str = "dataset";
@@ -220,6 +223,176 @@ pub(crate) fn copy_dataset(
         }
     }
     CopyEnd::Landed
+}
+
+/// The recordings tree under `tuning_root`, `<tuning_root>\recordings` (design part 7.5). Def: T5-20. Use: T5-20, T5-22.
+pub(crate) const RECORDINGS: &str = "recordings";
+
+/// The refresh's manifest in `<tuning_root>\recordings\<job id>\`, naming each file it wrote with the source's size and
+/// modification time; those are its own earlier copies (T5-R16). Def: T5-20. Use: T5-20, T5-22.
+pub(crate) const REFRESH_MANIFEST: &str = ".lazymkv-refresh.json";
+
+/// The manifest's `format` (design part 7.4's versioned files). Def: T5-20. Use: T5-20.
+pub(crate) const REFRESH_FORMAT: &str = "lazymkv refresh v1";
+
+/// The owner's files, which the refresh never writes or deletes (design part 7.1; T5-R15). Def: T5-20. Use: T5-20.
+pub(crate) const OWNER_FILES: [&str; 3] = ["audio-labels.json", "subtitle-labels.json", "notes.md"];
+
+/// What one refresh did (design part 7.5): how many files it copied and the manifest paths it deleted. Def: T5-20.
+/// Use: T5-20.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RefreshEnd {
+    /// How many files the refresh copied.
+    pub(crate) copied: usize,
+    /// The manifest paths the refresh deleted, the job folder no longer holding them.
+    pub(crate) deleted: Vec<String>,
+}
+
+/// The refresh's manifest (T5-R16): its format and each file it wrote, sorted by path.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Manifest {
+    format: String,
+    files: Vec<ManifestEntry>,
+}
+
+/// One file the refresh wrote: its path relative to the job folder with `/` separators, and the source's size and
+/// modification time (nanoseconds since 1970, 0 for an earlier time) as read just before its copy.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ManifestEntry {
+    path: String,
+    bytes: u64,
+    modified_ns: u64,
+}
+
+/// `error` with `path` before it (as `located`), its kind kept.
+fn at(path: &Path, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), located(path, error))
+}
+
+/// Whether the refresh leaves a file of this name alone: the owner's files, its own manifest, and the temporary files
+/// of `write_atomic` and the checked copy.
+fn refresh_skips(name: &str) -> bool {
+    OWNER_FILES.contains(&name) || name == REFRESH_MANIFEST || name.ends_with(TEMP_SUFFIX) || name.ends_with(PARTIAL)
+}
+
+/// Every regular file under `dir` the refresh copies, relative to `root` with `/` separators; a link or a junction is
+/// neither followed nor listed.
+fn refresh_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> io::Result<()> {
+    for entry in fs::read_dir(dir).map_err(|error| at(dir, &error))? {
+        let path = entry.map_err(|error| at(dir, &error))?.path();
+        let kind = fs::symlink_metadata(&path).map_err(|error| at(&path, &error))?.file_type();
+        if kind.is_dir() {
+            refresh_sources(root, &path, found)?;
+        } else if kind.is_file() {
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            if refresh_skips(&name) {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else { continue };
+            let parts: Vec<String> =
+                relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
+            found.push(parts.join("/"));
+        }
+    }
+    Ok(())
+}
+
+/// The manifest in `target`; a missing file, a parse error or another format is an empty one.
+fn read_manifest(target: &Path) -> Vec<ManifestEntry> {
+    let Ok(bytes) = fs::read(target.join(REFRESH_MANIFEST)) else { return Vec::new() };
+    match serde_json::from_slice::<Manifest>(&bytes) {
+        Ok(manifest) if manifest.format == REFRESH_FORMAT => manifest.files,
+        _ => Vec::new(),
+    }
+}
+
+/// Writes `files`, sorted by path, as `target`'s manifest through `write_atomic`.
+fn write_manifest(target: &Path, mut files: Vec<ManifestEntry>) -> io::Result<()> {
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let manifest = Manifest { format: REFRESH_FORMAT.to_string(), files };
+    let mut bytes = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    write_atomic(&target.join(REFRESH_MANIFEST), &bytes)
+}
+
+/// `relative`, a manifest path with `/` separators, under `dir`.
+fn under(dir: &Path, relative: &str) -> PathBuf {
+    relative.split('/').fold(dir.to_path_buf(), |path, part| path.join(part))
+}
+
+/// Steps 3 to 5 of `refresh_recordings`: the target folder, the deletions and the copies, `files` and `end` holding
+/// what landed when an error ends them.
+fn refresh_into(
+    job_dir: &Path,
+    target: &Path,
+    sources: &[String],
+    files: &mut Vec<ManifestEntry>,
+    end: &mut RefreshEnd,
+) -> io::Result<()> {
+    fs::create_dir_all(target).map_err(|error| at(target, &error))?;
+    let mut index = 0;
+    while index < files.len() {
+        let path = files[index].path.clone();
+        let gone = TMDB_COPIES.contains(&path.as_str())
+            && matches!(fs::symlink_metadata(job_dir.join(&path)), Err(error) if error.kind() == io::ErrorKind::NotFound);
+        if !gone {
+            index += 1;
+            continue;
+        }
+        let copy = target.join(&path);
+        match fs::remove_file(&copy) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(at(&copy, &error)),
+            _ => {}
+        }
+        files.remove(index);
+        end.deleted.push(path);
+    }
+    for path in sources {
+        let (from, to) = (under(job_dir, path), under(target, path));
+        let metadata = fs::metadata(&from).map_err(|error| at(&from, &error))?;
+        let modified = metadata.modified().map_err(|error| at(&from, &error))?;
+        let modified_ns = modified
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| u64::try_from(since.as_nanos()).unwrap_or(u64::MAX));
+        let entry = ManifestEntry { path: path.clone(), bytes: metadata.len(), modified_ns };
+        let known = files.iter().position(|known| known.path == *path);
+        let unchanged = known.is_some_and(|index| {
+            files[index].bytes == entry.bytes && files[index].modified_ns == entry.modified_ns
+        });
+        if unchanged && to.exists() {
+            continue;
+        }
+        to.parent().map_or(Ok(()), fs::create_dir_all).map_err(|error| at(&to, &error))?;
+        copy_checked(&from, &to).map_err(|error| at(&to, &error))?;
+        match known {
+            Some(index) => files[index] = entry,
+            None => files.push(entry),
+        }
+        end.copied += 1;
+    }
+    Ok(())
+}
+
+/// Refreshes `target`, `<tuning_root>\recordings\<job id>\`, from `job_dir` (design part 7.5; call 11; T5-R15, T5-R16):
+/// copies each file whose size or modification time changed since its copy, `state.json` first, never writes or
+/// deletes `OWNER_FILES`, and deletes only a TMDb copy the manifest lists that `job_dir` no longer holds. Def: T5-20.
+/// Use: T5-20, T5-22.
+pub(crate) fn refresh_recordings(job_dir: &Path, target: &Path) -> io::Result<RefreshEnd> {
+    let mut sources = Vec::new();
+    refresh_sources(job_dir, job_dir, &mut sources)?;
+    sources.sort();
+    if let Some(index) = sources.iter().position(|path| path == "state.json") {
+        let state = sources.remove(index);
+        sources.insert(0, state);
+    }
+    let mut files = read_manifest(target);
+    let mut end = RefreshEnd { copied: 0, deleted: Vec::new() };
+    if let Err(error) = refresh_into(job_dir, target, &sources, &mut files, &mut end) {
+        let _ = write_manifest(target, files);
+        return Err(error);
+    }
+    write_manifest(target, files)?;
+    Ok(end)
 }
 
 #[cfg(test)]
@@ -515,5 +688,204 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(end, CopyEnd::Nothing);
         assert!(files(Path::new(&job.tuning_root)).is_empty());
+    }
+
+    /// The recordings refresh (design part 7.5; call 11; T5-R15, T5-R16).
+    mod refresh {
+        use super::super::*;
+        use lazymkv_core::testsupport::{Scratch, ScratchExt};
+        use lazymkv_dev::evidence::Ctx;
+        use lazymkv_dev::stale::{refresh_copies, JOB_STATE_FILE};
+        use serde_json::Value;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, UNIX_EPOCH};
+
+        const ID: &str = "0000000000000000000000000000000a-1";
+        /// The modification time every source file starts with, in seconds since 1970.
+        const T0: u64 = 1_792_800_000;
+
+        /// Sets `path`'s modification time to `secs` seconds after 1970.
+        fn touch(path: &Path, secs: u64) {
+            let file = fs::File::options().write(true).open(path).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+        }
+
+        /// A scratch holding the job folder `jobs/<ID>` with `files` (relative path, text), each modified at `T0`,
+        /// with the job folder and the target `tuning/recordings/<ID>`.
+        fn folders(name: &str, files: &[(&str, &str)]) -> (Scratch, PathBuf, PathBuf) {
+            let scratch = Scratch::new(name);
+            for (path, text) in files {
+                touch(&scratch.write_path(&format!("jobs/{ID}/{path}"), *text), T0);
+            }
+            let job = scratch.0.join("jobs").join(ID);
+            let target = scratch.0.join("tuning").join("recordings").join(ID);
+            (scratch, job, target)
+        }
+
+        /// Every file under `dir`, relative with '/' separators, sorted.
+        fn files(dir: &Path) -> Vec<String> {
+            fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
+                for entry in fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        walk(root, &path, found);
+                    } else {
+                        found.push(path.strip_prefix(root).unwrap().to_str().unwrap().replace('\\', "/"));
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            walk(dir, dir, &mut found);
+            found.sort();
+            found
+        }
+
+        /// The `path` of each entry of the target's manifest, in its order.
+        fn listed(target: &Path) -> Vec<String> {
+            let manifest: Value = serde_json::from_slice(&fs::read(target.join(REFRESH_MANIFEST)).unwrap()).unwrap();
+            manifest["files"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap().to_string()).collect()
+        }
+
+        fn copy(date: &str) -> String {
+            format!(r#"{{"id": 1, "fetched_at": "{date}"}}"#)
+        }
+
+        fn end(copied: usize, deleted: &[&str]) -> RefreshEnd {
+            RefreshEnd { copied, deleted: deleted.iter().map(|path| path.to_string()).collect() }
+        }
+
+        #[test]
+        fn the_refresh_copies_only_changed_files() {
+            let (_scratch, job, target) =
+                folders("refresh-changed", &[("state.json", "a"), ("job.log", "c"), ("t00-00800/decide.json", "b")]);
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(3, &[]));
+            assert_eq!(files(&target), [".lazymkv-refresh.json", "job.log", "state.json", "t00-00800/decide.json"]);
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(0, &[]));
+            // A copy whose source did not change is not written again.
+            fs::write(target.join("state.json"), "kept").unwrap();
+            fs::write(job.join("t00-00800/decide.json"), "B").unwrap(); // the same size, a later time
+            touch(&job.join("t00-00800/decide.json"), T0 + 60);
+            fs::write(job.join("job.log"), "cc").unwrap(); // another size, the same time
+            touch(&job.join("job.log"), T0);
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(2, &[]));
+            assert_eq!(fs::read(target.join("state.json")).unwrap(), b"kept");
+            assert_eq!(fs::read(target.join("t00-00800/decide.json")).unwrap(), b"B");
+            assert_eq!(fs::read(target.join("job.log")).unwrap(), b"cc");
+            // A copy gone from the target is written again.
+            fs::remove_file(target.join("state.json")).unwrap();
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(1, &[]));
+            assert_eq!(fs::read(target.join("state.json")).unwrap(), b"a");
+        }
+
+        #[test]
+        fn the_refresh_copies_state_json_so_dev_reads_the_folder_as_a_job_folder() {
+            let stale = copy("2026-01-01");
+            let (scratch, job, target) =
+                folders("refresh-job-shaped", &[("state.json", "{}"), ("tmdb.json", stale.as_str())]);
+            refresh_recordings(&job, &target).unwrap();
+            assert!(target.join(JOB_STATE_FILE).is_file());
+            let ctx = Ctx::for_test(&scratch.0);
+            let shown = format!("recordings/{ID}");
+            assert!(matches!(refresh_copies(&ctx, &target, &shown), Ok(names) if names.is_empty()));
+            assert_eq!(fs::read(target.join("tmdb.json")).unwrap(), stale.as_bytes());
+            // Without state.json the same folder is a recording whose stale copy dev's gate would fetch, and with no
+            // token it refuses (G3: the tuning tree stays a mirror only because state.json is there).
+            fs::remove_file(target.join(JOB_STATE_FILE)).unwrap();
+            assert!(refresh_copies(&ctx, &target, &shown).is_err());
+        }
+
+        #[test]
+        fn the_refresh_never_writes_the_owners_label_files_or_notes_md() {
+            let (scratch, job, target) = folders("refresh-owner", &[
+                ("state.json", "a"), ("audio-labels.json", "engine"), ("subtitle-labels.json", "engine"),
+                ("notes.md", "engine"), ("t00-00800/subtitle-labels.json", "engine"),
+            ]);
+            let audio = scratch.write_path(&format!("tuning/recordings/{ID}/audio-labels.json"), "owner");
+            let notes = scratch.write_path(&format!("tuning/recordings/{ID}/notes.md"), "owner notes");
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(1, &[]));
+            assert_eq!(fs::read(&audio).unwrap(), b"owner");
+            assert_eq!(fs::read(&notes).unwrap(), b"owner notes");
+            assert_eq!(files(&target), [".lazymkv-refresh.json", "audio-labels.json", "notes.md", "state.json"]);
+            assert_eq!(listed(&target), ["state.json"]);
+            assert_eq!(OWNER_FILES, ["audio-labels.json", "subtitle-labels.json", "notes.md"]);
+        }
+
+        #[test]
+        fn the_refresh_deletes_only_copies_it_wrote() {
+            let (old, fresh) = (copy("2026-04-01"), copy("2026-10-01"));
+            let (scratch, job, target) = folders("refresh-delete", &[
+                ("state.json", "a"), ("tmdb.json", old.as_str()), ("tmdb-record.json", fresh.as_str()),
+                ("t00-00800/decide.json", "b"),
+            ]);
+            refresh_recordings(&job, &target).unwrap();
+            // An orphan's copy that a relayed retune fetched into the recordings folder is never listed (T5-R60).
+            let orphan = scratch.write_path(&format!("tuning/recordings/{ID}/tmdb-search.json"), copy("2026-10-02"));
+            fs::remove_file(job.join("tmdb.json")).unwrap(); // the cleanup's deletion
+            fs::remove_file(job.join("t00-00800/decide.json")).unwrap(); // not a TMDb copy: its copy stays
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(0, &["tmdb.json"]));
+            assert!(!target.join("tmdb.json").exists());
+            assert_eq!(fs::read(&orphan).unwrap(), copy("2026-10-02").as_bytes());
+            assert_eq!(fs::read(target.join("tmdb-record.json")).unwrap(), fresh.as_bytes());
+            assert_eq!(fs::read(target.join("t00-00800/decide.json")).unwrap(), b"b");
+            assert_eq!(listed(&target), ["state.json", "t00-00800/decide.json", "tmdb-record.json"]);
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(0, &[]), "a deletion is mirrored once");
+        }
+
+        #[test]
+        fn the_manifest_names_each_copy_with_its_size_and_modified_time() {
+            let (_scratch, job, target) = folders("refresh-manifest", &[
+                ("state.json", "abc"), ("state.json.lazymkv-tmp", "torn"), ("t00-00800/rip.txt", "rip"),
+                ("t00-00800/rip.txt.partial", "torn"),
+            ]);
+            refresh_recordings(&job, &target).unwrap();
+            let expected = [
+                "{",
+                r#"  "format": "lazymkv refresh v1","#,
+                r#"  "files": ["#,
+                "    {",
+                r#"      "path": "state.json","#,
+                r#"      "bytes": 3,"#,
+                r#"      "modified_ns": 1792800000000000000"#,
+                "    },",
+                "    {",
+                r#"      "path": "t00-00800/rip.txt","#,
+                r#"      "bytes": 3,"#,
+                r#"      "modified_ns": 1792800000000000000"#,
+                "    }",
+                "  ]",
+                "}",
+                "",
+            ]
+            .join("\n");
+            assert_eq!(fs::read_to_string(target.join(REFRESH_MANIFEST)).unwrap(), expected);
+            assert_eq!(files(&target), [".lazymkv-refresh.json", "state.json", "t00-00800/rip.txt"]);
+            assert_eq!((REFRESH_MANIFEST, REFRESH_FORMAT, RECORDINGS), (".lazymkv-refresh.json", "lazymkv refresh v1", "recordings"));
+        }
+
+        #[test]
+        fn an_unreadable_manifest_is_read_as_empty_and_deletes_nothing() {
+            let (scratch, job, target) = folders("refresh-unreadable", &[("state.json", "a")]);
+            let kept = scratch.write_path(&format!("tuning/recordings/{ID}/tmdb.json"), "{}");
+            let other = r#"{"format": "lazymkv refresh v2", "files": [{"path": "tmdb.json", "bytes": 2, "modified_ns": 0}]}"#;
+            for text in ["not json", other] {
+                scratch.write(&format!("tuning/recordings/{ID}/{REFRESH_MANIFEST}"), text);
+                assert_eq!(refresh_recordings(&job, &target).unwrap(), end(1, &[]), "{text}");
+                assert_eq!(fs::read(&kept).unwrap(), b"{}");
+                assert_eq!(listed(&target), ["state.json"]);
+            }
+        }
+
+        #[test]
+        fn a_failed_refresh_keeps_what_landed_and_the_next_one_copies_the_rest() {
+            let (scratch, job, target) =
+                folders("refresh-torn", &[("state.json", "a"), ("job.log", "c"), ("t00-00800/decide.json", "b")]);
+            let blocker = scratch.write_path(&format!("tuning/recordings/{ID}/t00-00800"), "a file where a folder goes");
+            assert!(refresh_recordings(&job, &target).is_err());
+            assert_eq!(listed(&target), ["job.log", "state.json"]);
+            fs::remove_file(&blocker).unwrap();
+            assert_eq!(refresh_recordings(&job, &target).unwrap(), end(1, &[]));
+            assert_eq!(fs::read(target.join("t00-00800/decide.json")).unwrap(), b"b");
+        }
     }
 }

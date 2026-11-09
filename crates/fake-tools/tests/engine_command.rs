@@ -200,6 +200,28 @@ fn a_relayed_decide_with_a_stale_copy_it_cannot_fetch_exits_3_and_leaves_the_job
     assert_eq!(h.state_of(&id), "Filed");
 }
 
+/// Design part 7.5: a relayed command's refetch changes the job folder, so the recordings are refreshed after it. The
+/// job ran with the setting off and has it turned on in its own settings.json, so no copy or earlier refresh exists.
+#[test]
+fn a_relayed_decide_refetch_is_mirrored_into_the_recordings_tree() {
+    let (h, id) = filed();
+    let job = h.job_dir(&id);
+    let mut own = json_of(&job.join("settings.json"));
+    own["keep_tuning_evidence"] = json!(true);
+    fs::write(job.join("settings.json"), serde_json::to_vec_pretty(&own).unwrap()).unwrap();
+    h.restart(); // the owner reads the job's own settings when it loads the job
+    let mirror = h.tuning().join("recordings").join(&id);
+    assert!(!mirror.exists());
+    stale(&h, &id, "tmdb-record.json");
+    let mut c = client(&h);
+    let (_, reply) = c.command(&["decide", "--job", &id, "--title", KEY]);
+    assert_eq!(reply, exit(0, 1));
+    assert_ne!(json_of(&job.join("tmdb-record.json"))["fetched_at"], json!("2026-01-01"), "the refetch replaced it");
+    h.wait("the refresh after the refetch", |h| h.refreshes(&id) >= 1);
+    assert_eq!(fs::read(mirror.join("tmdb-record.json")).unwrap(), fs::read(job.join("tmdb-record.json")).unwrap());
+    assert!(mirror.join("state.json").is_file());
+}
+
 /// PR #15 review round 1, R2 follow-up (Ruling RR1-R2a): a relayed plan of a job whose fresh TV record owes a season
 /// the refetch cannot fetch exits 3 naming the season, and no child runs with the season missing.
 #[test]

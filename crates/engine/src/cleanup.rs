@@ -70,8 +70,9 @@ pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
 /// one is left to the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is
 /// deleted once its share answers, without following any link inside it. The share of each staging root is asked
 /// once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives `log` one engine.log
-/// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped.
-/// Def: T4-11. Use: T4-11.
+/// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped. It returns the
+/// ids of the jobs whose TMDb copies it deleted, in the pass's order, each once, for the refresh's mirror (design part
+/// 7.5). Def: T4-11; the ids: T5-20. Use: T4-11, T5-20.
 pub(crate) fn run_pass(
     jobs: Vec<CleanupJob>,
     data: &Path,
@@ -80,8 +81,9 @@ pub(crate) fn run_pass(
     now_unix: u64,
     stop: &AtomicBool,
     log: &dyn Fn(String),
-) {
+) -> Vec<String> {
     let mut roots = Vec::new();
+    let mut deleted = Vec::new();
     for job in jobs {
         if stop.load(Ordering::SeqCst) {
             break;
@@ -100,7 +102,9 @@ pub(crate) fn run_pass(
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => continue,
             };
-            delete_stale_copies(&data.join("jobs").join(id), id, today, log);
+            if delete_stale_copies(&data.join("jobs").join(id), id, today, log) {
+                deleted.push(id.to_string());
+            }
         }
         if !retention_due(&job, now_unix) {
             continue;
@@ -116,6 +120,7 @@ pub(crate) fn run_pass(
             log(format!("cleanup: the staging root {root} was not reached: {why}; {skipped} job(s) skipped"));
         }
     }
+    deleted
 }
 
 /// One staging root as a pass found it (Ruling FR-1): the failure text when its share did not answer, and how many
@@ -147,8 +152,10 @@ fn reached(roots: &mut Vec<RootReach>, root: &str, shares: &dyn ShareConnector) 
     known.failure.is_none()
 }
 
-/// Deletes each TMDb copy in `folder` whose `fetched_at` is a real date past the six-month limit on `today`.
-fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String)) {
+/// Deletes each TMDb copy in `folder` whose `fetched_at` is a real date past the six-month limit on `today`; true when
+/// it removed at least one.
+fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String)) -> bool {
+    let mut removed = false;
     for file in TMDB_COPIES {
         let path = folder.join(file);
         let bytes = match fs::read(&path) {
@@ -166,10 +173,14 @@ fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String
             continue;
         }
         match fs::remove_file(&path) {
-            Ok(()) => log(format!("cleanup: {id}: deleted {file} (fetched_at {date})")),
+            Ok(()) => {
+                removed = true;
+                log(format!("cleanup: {id}: deleted {file} (fetched_at {date})"));
+            }
             Err(error) => log(format!("cleanup: {id}: {file} could not be deleted: {error}")),
         }
     }
+    removed
 }
 
 /// Deletes `<root>/<id>`, the share holding `root` having answered this pass. `fs::remove_dir_all` removes a symbolic
@@ -599,5 +610,19 @@ mod tests {
         assert_eq!(fs::read(&tmdb).unwrap(), copy("2019-01-01").as_bytes());
         assert!(folders.0.join("staging").join(&id).join("rip/t00/b.mkv").is_file());
         assert_eq!(lines, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_pass_returns_the_ids_of_the_jobs_whose_tmdb_copies_it_deleted() {
+        let folders = Scratch::new("cleanup-deleted-ids");
+        let (first, second, third) = (id(1), id(2), id(3));
+        folders.write(&format!("data/jobs/{first}/tmdb.json"), copy("2026-04-22"));
+        folders.write(&format!("data/jobs/{first}/tmdb-search.json"), copy("2026-04-01"));
+        folders.write(&format!("data/jobs/{second}/tmdb.json"), copy("2026-10-01"));
+        folders.write(&format!("data/jobs/{third}/tmdb-record.json"), copy("2026-01-01"));
+        let jobs = vec![job(1, held(), None), job(2, held(), None), job(3, failed(), None)];
+        let stop = AtomicBool::new(false);
+        let deleted = run_pass(jobs, &folders.0.join("data"), &FakeShares::new(), TODAY, NOW, &stop, &|_| {});
+        assert_eq!(deleted, [first, third], "each job once, in the pass's order");
     }
 }
