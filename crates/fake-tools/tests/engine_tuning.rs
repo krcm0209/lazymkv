@@ -258,6 +258,7 @@ fn a_partial_left_by_a_lost_share_is_replaced_and_the_copy_lands_at_the_next_rea
     fs::create_dir_all(&dataset).unwrap();
     fs::write(dataset.join("audio-proxy.mka.partial"), b"torn").unwrap();
     assert_eq!(h.run_copies(), [id.clone()]);
+    h.settle();
     assert_eq!(fs::read(dataset.join("audio-proxy.mka")).unwrap(), fs::read(staged(&h, &id).join("audio-proxy.mka")).unwrap());
     assert!(files_under(h.tuning()).iter().all(|file| !file.ends_with(".partial")), "{:?}", files_under(h.tuning()));
     assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Done));

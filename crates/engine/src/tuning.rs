@@ -276,18 +276,24 @@ fn refresh_skips(name: &str) -> bool {
 }
 
 /// Every regular file under `dir` the refresh copies, relative to `root` with `/` separators; a link or a junction is
-/// neither followed nor listed.
+/// neither followed nor listed. A name the refresh skips is never read, and a file gone between the listing and its
+/// metadata read is left to the next refresh.
 fn refresh_sources(root: &Path, dir: &Path, found: &mut Vec<String>) -> io::Result<()> {
     for entry in fs::read_dir(dir).map_err(|error| at(dir, &error))? {
         let path = entry.map_err(|error| at(dir, &error))?.path();
-        let kind = fs::symlink_metadata(&path).map_err(|error| at(&path, &error))?.file_type();
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        if refresh_skips(&name) {
+            continue;
+        }
+        // A temp renamed away, or a TMDb copy the cleanup pass deleted meanwhile (its own Msg::Refresh mirrors it).
+        let kind = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(at(&path, &error)),
+        };
         if kind.is_dir() {
             refresh_sources(root, &path, found)?;
         } else if kind.is_file() {
-            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            if refresh_skips(&name) {
-                continue;
-            }
             let Ok(relative) = path.strip_prefix(root) else { continue };
             let parts: Vec<String> =
                 relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
