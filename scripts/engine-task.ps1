@@ -22,9 +22,8 @@ $release = 'C:\lazymkv\target\release'
 # The trees the programs are built from and copied out of (Owner decision 13), and the run folder's parent, which a
 # writer could rename away to put its own run folder in its place (Ruling T3-24-c).
 $trees = (Split-Path $run), 'C:\lazymkv\src', 'C:\lazymkv\target'
-# lazymkv-ocr.exe arrives with pull request 5 and is copied once it exists.
-$required = 'lazymkv-engine.exe', 'lazymkvctl.exe'
-$optional = 'lazymkv-ocr.exe'
+# lazymkv-ocr.exe, the OCR worker the engine starts (call 18; T5-R35).
+$required = 'lazymkv-engine.exe', 'lazymkvctl.exe', 'lazymkv-ocr.exe'
 # SYSTEM, Administrators, and CREATOR OWNER, which grants only to whoever creates an object below.
 $trusted = 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0'
 # Ruling W17's write rights (add a file or write data, add a folder or append, delete a child, delete, change the
@@ -144,7 +143,7 @@ try {
     }
     # Owner decision 13's check meets the trees, the release folder and each program copied from it, since an entry set
     # on the folder or on a program alone never shows in a tree's own list (review round 1 of pull request 3, G1).
-    $programs = @($required + $optional | ForEach-Object { Join-Path $release $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    $programs = @($required | ForEach-Object { Join-Path $release $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     foreach ($path in @($trees) + @($release) + $programs) {
         $writers = @(Get-Writers $path)
         if ($writers.Count -eq 0) { continue }
@@ -170,7 +169,7 @@ try {
     if (-not ($read.StartsWith('O:BA') -and ($read.EndsWith("D:PAI$aces") -or $read.EndsWith("D:P$aces")))) {
         throw "$run's access list did not read back as the protected list of design part 3.5"
     }
-    $known = $required + $optional
+    $known = $required
     $planted = @(Get-ChildItem -LiteralPath $run -Force | Where-Object { $known -notcontains $_.Name })
     if ($planted.Count -gt 0) {
         throw "$run holds $($planted.Name -join ', '), which this script did not put there; remove it by hand and run the script again (design part 3.5)"

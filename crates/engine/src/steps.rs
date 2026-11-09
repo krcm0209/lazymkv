@@ -14,7 +14,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::audio::rule::RULE_VERSION;
@@ -56,7 +56,7 @@ use serde_json::{json, Value};
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
     engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
-    OwedCheck, Refetched,
+    staged_text, OwedCheck, Refetched,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -65,8 +65,9 @@ use crate::space::{
     library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
     staged_remux_check, unreachable, Promises,
 };
-use crate::staged::{evidence_file, UnitError, WORK};
+use crate::staged::{evidence_file, tuning_dir, work_dir, UnitError, WORK};
 use crate::step10;
+use crate::step10::{read_streams, stream_cap, OCR_MISSING};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -78,9 +79,6 @@ const COPY_PLAN: &str = "the plan needs whole-disc copy mode, which arrives in p
 
 /// The class of every failure the engine finds itself (design part 5.2).
 const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
-
-/// The sentence of a Decide whose title needs step 10's subtitle evidence, which this version does not build (S32).
-const STEP10_NOT_BUILT: &str = "subtitle evidence (step 10) is not built in this version";
 
 /// ExtractSubtitleEvidence's job.log line (S33): step 10a's packet MD5 pass is not built either.
 const STEP10A_NOT_RUN: &str = "step 10a did not run in this version";
@@ -518,8 +516,11 @@ pub(crate) struct RealSteps {
     /// The probe of each (job, title key) Probe ran in this engine run, which Decide reads (design part 5.7 step 11.3).
     probes: Mutex<BTreeMap<(String, String), FfprobeStreams>>,
     /// The data folder's work folder, `<data>\work` (B1 (the worker's folder)). Def: T5-14. Use: T5-15.
-    #[allow(dead_code)] // read from Task 15 on
     work_root: PathBuf,
+    /// The OCR worker step 10 starts (design part 10.7).
+    ocr: Option<PathBuf>,
+    /// The harness's cap, for tests only (T5-R58).
+    ocr_cap_override: Option<Duration>,
 }
 
 impl RealSteps {
@@ -555,6 +556,8 @@ impl RealSteps {
             makemkv,
             probes: Mutex::default(),
             work_root: config.data.join(WORK),
+            ocr: config.ocr.clone(),
+            ocr_cap_override: config.ocr_cap_override,
         }
     }
 }
@@ -1528,12 +1531,12 @@ impl Step<'_> {
         Ok(event(Event::ProbeDone))
     }
 
-    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a; T5-R56): for each planned title where `needs_step10`
-    /// holds, `step10::extract` over the staged file and `<key>/mkvmerge.json`; no mkvmerge, then no ffprobe, gives
-    /// ToolMissing for that tool before any file is touched, asked only when a title needs step 10; a unit error goes
-    /// through `unit_result`. Step 10a is not built yet, so it writes the job.log line `step 10a did not run in this
-    /// version` (S33) and, when every title is done, returns no event; Decide still fails a title that needs step 10
-    /// (S32).
+    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): for each planned title where `needs_step10`
+    /// holds, the worker check (`OCR_MISSING`), the evidence extraction (`step10::extract` over the staged file and
+    /// `<key>/mkvmerge.json`; no mkvmerge, then no ffprobe, gives ToolMissing for that tool before any file is touched,
+    /// asked only when a title needs step 10) and `read_streams`; its errors feed DecisionFailed, a staging write
+    /// classed by the share check (`unit_result`, T5-R56); a cancelled step posts nothing. Step 10a is not built yet,
+    /// so it then writes the job.log line `step 10a did not run in this version` (S33) and returns no event.
     fn extract_subtitle_evidence(&self) -> Outcome {
         self.log(STEP10A_NOT_RUN);
         let failed = |failure| Event::DecisionFailed { failure };
@@ -1556,6 +1559,9 @@ impl Step<'_> {
         };
         let staging = self.job.settings.staging_root.as_deref().ok_or_else(|| unknown(failed, "staging_root is unset"))?;
         for key in titles {
+            let Some(worker) = self.steps.ocr.clone().filter(|path| path.is_file()) else {
+                return Ok(unknown(failed, OCR_MISSING));
+            };
             let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
             let ident = self.staged_ident(key).map_err(|error| unknown(failed, error))?;
             let evidence = evidence_file(staging, self.id, key);
@@ -1564,7 +1570,21 @@ impl Step<'_> {
                 step10::extract(ctx, &mkvmerge, &ffprobe, &raw, &ident, &evidence, &label_dir, &|line: &str| self.log(line))
             });
             self.check_cancel()?;
-            if let Err(error) = extracted {
+            let extracted = match extracted {
+                Ok(extracted) => extracted,
+                Err(error) => return Ok(unit_result(error, || self.staging_health())),
+            };
+            let tuning = tuning_dir(staging, self.id, key);
+            let title_work = work_dir(&self.steps.work_root, "ocr", self.id, key);
+            let over = self.steps.ocr_cap_override;
+            let cap = |events: usize| stream_cap(over, events);
+            let log = |line: &str| self.log(line);
+            let clear_max = self.job.settings.sub_clear_max_bytes;
+            let read = self.ctx(&no_progress, |ctx| {
+                read_streams(ctx, &worker, &extracted, &label_dir, &tuning, &title_work, clear_max, &cap, &log)
+            });
+            self.check_cancel()?;
+            if let Err(error) = read {
                 return Ok(unit_result(error, || self.staging_health()));
             }
         }
@@ -1593,7 +1613,9 @@ impl Step<'_> {
         let mut inputs = match &probes {
             Some(probes) => engine_decide_inputs(ctx, self.job, plan, key, probes, LibraryFacts::default())?,
             None => {
-                let inputs = read_back_inputs(ctx, &self.job.job_dir, plan, key)?;
+                let text = staged_text(self.job, key);
+                let clear_max = self.job.settings.sub_clear_max_bytes;
+                let inputs = read_back_inputs(ctx, &self.job.job_dir, plan, key, text.as_deref(), clear_max)?;
                 self.log(&format!("{key}: {READ_BACK_LINE}"));
                 inputs
             }
@@ -1629,12 +1651,11 @@ impl Step<'_> {
 
     /// Decide (design parts 5.7 step 11, 8.4): the job's stale TMDb copies fetched again first (Ruling T4-R9; one that
     /// cannot be fetched, or a season still owed (`for_decide`, Ruling RR1-R2a), gives LookupPending in Inspecting and
-    /// DecisionFailed { Unknown } otherwise, with
-    /// `refetch_stale`'s sentences); then the record's plan, refreshed from the saved answers while it is
-    /// lookup-pending and persisted so (R24.2); each planned title failing with S32's sentence when it needs step 10,
-    /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
-    /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
-    /// gives DecisionFailed { Unknown } with its sentence.
+    /// DecisionFailed { Unknown } otherwise, with `refetch_stale`'s sentences); then the record's plan, refreshed from
+    /// the saved answers while it is lookup-pending and persisted so (R24.2); each planned title's `title_doc`;
+    /// `same_path_reviews` over the titles' decisions, written back into their documents; each `<key>/decide.json`; the
+    /// decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure gives DecisionFailed {
+    /// Unknown } with its sentence.
     ///
     /// Before anything else it asks `reach` of the plan kind's library root, when that root is set, as File does
     /// (Ruling W22, review round 1's V7): a root that does not answer gives DecisionFailed { Unknown } with `the
@@ -1677,13 +1698,9 @@ impl Step<'_> {
                 return Err(cancelled());
             }
         }
-        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         let ctx = Ctx::from_process();
         let mut docs = Vec::new();
         for planned in &plan.titles {
-            if self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))? {
-                return Ok(unknown(failed, STEP10_NOT_BUILT));
-            }
             docs.push(self.title_doc(&ctx, &plan, &planned.key).map_err(|error| unknown(failed, error))?);
         }
         if let Some(root) = library {

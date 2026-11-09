@@ -168,6 +168,15 @@ fn the_run_folders_list_is_the_data_folders() {
     assert!(text.contains(&folder_sddl("$sid")), "the script's list is not folder_sddl's");
 }
 
+/// Call 18, T5-R35: the OCR worker is copied into the run folder with the other two programs, and a release tree
+/// without it refuses the deploy.
+#[test]
+fn the_task_script_requires_lazymkv_ocr() {
+    let (_, text) = script();
+    assert!(text.contains("$required = 'lazymkv-engine.exe', 'lazymkvctl.exe', 'lazymkv-ocr.exe'"));
+    assert!(!text.contains("$optional"), "the script still lists an optional program");
+}
+
 #[cfg(windows)]
 #[test]
 fn the_task_script_parses_without_errors() {

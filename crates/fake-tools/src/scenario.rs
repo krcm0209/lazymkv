@@ -9,10 +9,10 @@ pub struct Scenario {
     pub responses: Vec<Response>,
 }
 
-/// One reply of a stand-in executable (design part 12.2): which arguments it answers, what it prints to
-/// standard output and standard error and when, how it ends, and which files it creates. A scenario with
-/// several responses that match the same arguments hands them out one per run, in file order (see `select`).
-/// Def: T10. Use: T11, T13, T14, T23.
+/// One reply of a stand-in executable (design part 12.2): which arguments it answers, what it prints to standard output
+/// and standard error and when, how it ends, and which files it creates, before its output (`creates_first`) or after
+/// it (`creates`). A scenario with several responses that match the same arguments hands them out one per run, in file
+/// order (see `select`). Def: T10. Use: T11, T13, T14, T23.
 #[derive(Debug, Deserialize)]
 pub struct Response {
     /// Each string must be a substring of some argument.
@@ -27,6 +27,10 @@ pub struct Response {
     pub exit_code: i32,
     #[serde(default)]
     pub creates: Vec<Create>,
+    /// Files created before any line is printed, as `creates` creates them, so a stand-in can write its output and then
+    /// hang or stop (T5-R48). Def: T5-15. Use: T5-15.
+    #[serde(default)]
+    pub creates_first: Vec<Create>,
     /// File in the scenario folder replayed to standard error.
     #[serde(default)]
     pub stderr: Option<String>,
@@ -173,6 +177,23 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    /// T5-R48: a response may name files to create before its first line; without the key it creates none first.
+    #[test]
+    fn creates_first_parses_and_defaults_to_none() {
+        let scenario: Scenario = serde_json::from_str(
+            r#"{"responses":[
+                {"args_contain":["--stream"],"hang_after_line":0,
+                 "creates_first":[{"dir_arg_from_end":1,"name":"sub-0.ocr.jsonl","copy_from":"records.txt"}]},
+                {"args_contain":["-J"]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(scenario.responses[0].creates_first.len(), 1);
+        assert_eq!(scenario.responses[0].creates_first[0].name.as_deref(), Some("sub-0.ocr.jsonl"));
+        assert!(scenario.responses[0].creates.is_empty());
+        assert!(scenario.responses[1].creates_first.is_empty());
     }
 
     #[test]

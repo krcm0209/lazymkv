@@ -202,12 +202,12 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         host: Arc::new(WinHost::new()),
     };
     let services = Services { platform, http, notify, timers: Arc::new(StdTimers), steps: None };
-    let (resources, ctl) = match std::env::current_exe() {
+    let (resources, ctl, ocr) = match std::env::current_exe() {
         Ok(exe) => {
-            let (resources, ctl) = binary_paths(&exe);
-            (Some(resources), Some(ctl))
+            let (resources, ctl, ocr) = binary_paths(&exe);
+            (Some(resources), Some(ctl), Some(ocr))
         }
-        Err(_) => (None, None),
+        Err(_) => (None, None, None),
     };
     let console: Box<dyn Write + Send> = match console {
         Some(console) => console,
@@ -221,6 +221,8 @@ fn run(data: Option<String>, options: NativeOptions) -> Result<(), String> {
         ctl,
         console: Some(console),
         cleanup_minutes,
+        ocr,
+        ocr_cap_override: None,
     };
     let engine = start(config, services).map_err(|error| could_not_start(&error))?;
     *lock(&slot) = Some(engine.shutdown_handle());
@@ -298,13 +300,14 @@ pub(crate) fn mutex_refusal_text(mutex: &str, refusal: &MutexRefusal) -> String 
     }
 }
 
-/// The binary's `resources` folder and its sibling `lazymkvctl` from the path of the running executable (design parts
-/// 9.5, 11.5; Ruling W26): `(<exe folder>\..\resources, <exe folder>\lazymkvctl<EXE_SUFFIX>)`. Def: T3-23.
-/// Use: T3-23 (`run_with` step 7).
-pub(crate) fn binary_paths(exe: &Path) -> (PathBuf, PathBuf) {
+/// The binary's `resources` folder and its two siblings from the path of the running executable (design parts 9.5,
+/// 10.7, 11.5; Ruling W26): `(<exe folder>\..\resources, <exe folder>\lazymkvctl<EXE_SUFFIX>,
+/// <exe folder>\lazymkv-ocr<EXE_SUFFIX>)`. Def: T3-23, T5-15. Use: T3-23, T5-15.
+pub(crate) fn binary_paths(exe: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let folder = exe.parent().unwrap_or(Path::new(""));
     let ctl = folder.join(format!("lazymkvctl{}", std::env::consts::EXE_SUFFIX));
-    (folder.join("..").join("resources"), ctl)
+    let ocr = folder.join(format!("lazymkv-ocr{}", std::env::consts::EXE_SUFFIX));
+    (folder.join("..").join("resources"), ctl, ocr)
 }
 
 #[cfg(test)]
@@ -347,8 +350,14 @@ mod tests {
     }
 
     #[test]
-    fn the_run_folder_gives_resources_and_lazymkvctl() {
-        assert_eq!(binary_paths(Path::new(r"C:\lazymkv\run\lazymkv-engine.exe")),
-                   (PathBuf::from(r"C:\lazymkv\run\..\resources"), PathBuf::from(r"C:\lazymkv\run\lazymkvctl.exe")));
+    fn binary_paths_gives_the_sibling_worker() {
+        assert_eq!(
+            binary_paths(Path::new(r"C:\lazymkv\run\lazymkv-engine.exe")),
+            (
+                PathBuf::from(r"C:\lazymkv\run\..\resources"),
+                PathBuf::from(r"C:\lazymkv\run\lazymkvctl.exe"),
+                PathBuf::from(r"C:\lazymkv\run\lazymkv-ocr.exe"),
+            )
+        );
     }
 }

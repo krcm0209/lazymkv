@@ -12,6 +12,9 @@
 //! and the stand-in into `<root>/tools`, never running a stand-in inside `corpus/` (S12), builds the scenario's disc
 //! from its `disc.json`, and replays its `http.json`. When the scenarios hold `lazymkvctl.json`, it also copies the
 //! stand-in as `<root>/tools/lazymkvctl`, which the engine's `command` relay runs (design part 9.5, Task T3-22).
+//! When the merged scenarios hold `lazymkv-ocr.json`, it copies `fake_tool` as `lazymkv-ocr` into `<root>/tools`, which
+//! every engine gets as `EngineConfig.ocr` (design part 10.7); when they hold `ocr-cap-s.txt`, its whole seconds times
+//! `ci_factor()` become `EngineConfig.ocr_cap_override` (T5-R58).
 //!
 //! On Windows, `Harness::new_native` runs the same stand-ins under the binary's own start, `native::run_with`, behind
 //! a real mutex and pipe of the test's own names (Task T3-23).
@@ -446,6 +449,11 @@ pub struct Harness {
     /// The stand-in `lazymkvctl` every engine gets as `EngineConfig.ctl`; None when no scenario holds
     /// `lazymkvctl.json`, and for `new_scripted`.
     ctl: Option<PathBuf>,
+    /// The stand-in `lazymkv-ocr` every engine gets as `EngineConfig.ocr`; None when no scenario holds
+    /// `lazymkv-ocr.json`.
+    ocr: Option<PathBuf>,
+    /// The cap every engine gets as `EngineConfig.ocr_cap_override`, from `ocr-cap-s.txt` (T5-R58).
+    ocr_cap: Option<Duration>,
     /// True for `new_scripted`: the engine runs `steps`; false for `new`: the real runner.
     scripted: bool,
     script: DriveScript,
@@ -532,6 +540,9 @@ impl Harness {
     /// - When the merged scenarios hold `lazymkvctl.json`, it copies `fake_tool` as `lazymkvctl` (with the system's
     ///   executable suffix) into `<root>/tools`, and every engine gets that copy as `EngineConfig.ctl`, which the
     ///   `command` relay runs (design part 9.5, Task T3-22); otherwise `ctl` is None.
+    /// - When the merged scenarios hold `lazymkv-ocr.json`, it copies `fake_tool` as `lazymkv-ocr` into `<root>/tools`,
+    ///   which every engine gets as `EngineConfig.ocr` (design part 10.7); when they hold `ocr-cap-s.txt`, its whole
+    ///   seconds times `ci_factor()` become `EngineConfig.ocr_cap_override` (T5-R58).
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
@@ -554,6 +565,15 @@ impl Harness {
             let copy = tools.join(format!("lazymkvctl{}", std::env::consts::EXE_SUFFIX));
             fs::copy(fake_tool, &copy).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
             copy
+        });
+        let ocr = tools.join("lazymkv-ocr.json").is_file().then(|| {
+            let copy = tools.join(format!("lazymkv-ocr{}", std::env::consts::EXE_SUFFIX));
+            fs::copy(fake_tool, &copy).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+            copy
+        });
+        let ocr_cap = fs::read_to_string(tools.join("ocr-cap-s.txt")).ok().map(|text| {
+            let seconds: u64 = text.trim().parse().unwrap_or_else(|error| panic!("ocr-cap-s.txt: {error}"));
+            Duration::from_secs(seconds) * ci_factor()
         });
         let mut tool_paths = serde_json::Map::new();
         for tool in Tool::ALL {
@@ -599,6 +619,8 @@ impl Harness {
             spawn_hooks,
             spawns,
             ctl,
+            ocr,
+            ocr_cap,
         };
         folders.harness(defaults, settings, runner)
     }
@@ -650,6 +672,8 @@ impl Harness {
             ctl: self.ctl.clone(),
             console: Some(Box::new(self.console_buffer())),
             cleanup_minutes: *lock(&self.cleanup_minutes),
+            ocr: self.ocr.clone(),
+            ocr_cap_override: self.ocr_cap,
         };
         let hook = Arc::clone(&self.hook);
         let stop_after: StopAfter = Arc::new(move |transition: &Transition| {
@@ -1488,6 +1512,8 @@ impl Folders {
             spawn_hooks: runner.spawn_hooks,
             spawns: runner.spawns,
             ctl: runner.ctl,
+            ocr: runner.ocr,
+            ocr_cap: runner.ocr_cap,
             scripted: runner.scripted,
             ejector: Arc::new(RecordingEjector::new().with_removals(script_end.clone())),
             script: script_end,
@@ -1538,6 +1564,10 @@ struct Runner {
     spawns: Arc<Mutex<Vec<Spawn>>>,
     /// The stand-in `lazymkvctl`, when a scenario holds `lazymkvctl.json`.
     ctl: Option<PathBuf>,
+    /// The stand-in `lazymkv-ocr`, when a scenario holds `lazymkv-ocr.json`.
+    ocr: Option<PathBuf>,
+    /// The cap override of `ocr-cap-s.txt`, already times `ci_factor()`.
+    ocr_cap: Option<Duration>,
 }
 
 impl Runner {
@@ -1555,6 +1585,8 @@ impl Runner {
             spawn_hooks: SpawnHooks::default(),
             spawns: Arc::default(),
             ctl: None,
+            ocr: None,
+            ocr_cap: None,
         }
     }
 }

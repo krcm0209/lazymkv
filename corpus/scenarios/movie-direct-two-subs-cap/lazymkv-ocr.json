@@ -1,0 +1,1 @@
+{"responses":[{"args_contain":["--stream"],"hang_after_line":0,"creates_first":[{"dir_arg_from_end":1,"name":"sub-0.ocr.jsonl","copy_from":"records-cap-s0.txt"}]},{"args_contain":["--stream"],"hang_after_line":0,"creates_first":[{"dir_arg_from_end":1,"name":"sub-1.ocr.jsonl","copy_from":"records-cap-s1.txt"}]}]}

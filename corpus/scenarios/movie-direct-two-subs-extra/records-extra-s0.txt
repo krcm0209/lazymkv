@@ -1,0 +1,2 @@
+{"frame":0,"file":"s0/f-000001000.png","t":1.0,"pts":1.0,"lines":["text-sentinel-3e8f"],"text":"text-sentinel-3e8f","size":900}
+{"frame":1,"file":"s0/f-000005000.png","t":5.0,"pts":5.0,"lines":["text-sentinel-3e8f","text-sentinel-3e8f"],"text":"text-sentinel-3e8f | text-sentinel-3e8f","size":1300}

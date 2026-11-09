@@ -24,6 +24,7 @@ mod timers;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use lazymkv_dev::Args;
 use lazymkv_tools::Limits;
@@ -34,7 +35,8 @@ pub use timers::{StdTimers, Timers};
 
 /// The engine's start-up configuration (design parts 3.5, 3.6, 9.5; S44): the data folder, the resources folder the
 /// tool lookup reads second, limits that replace `Limits::from_settings` (tests only), the `PATH` the tool lookup reads
-/// last, the `lazymkvctl` the `command` relay runs, and the console writer. Def: T21. Use: T22 to T29.
+/// last, the `lazymkvctl` the `command` relay runs, the console writer, the OCR worker and, for tests only, its cap
+/// override. Def: T21, T5-15. Use: T22 to T29, T5-15.
 pub struct EngineConfig {
     /// The data folder (`--data DIR`, design part 3.5).
     pub data: PathBuf,
@@ -55,6 +57,14 @@ pub struct EngineConfig {
     /// The cleanup's period in minutes (design part 5.9; Ruling T4-R11): Some runs a pass at start and then each
     /// period on a thread of its own; None runs none (tests). Def: T4-11. Use: T4-11, T4-17.
     pub cleanup_minutes: Option<u32>,
+    /// The OCR worker step 10 starts (design parts 10.2, 10.7; K2): `native::binary_paths`' sibling `lazymkv-ocr` in a
+    /// native run, the stand-in copy in the testkit harness. None, or a path that is not a file, fails a title that
+    /// needs step 10 with `OCR_MISSING`. Def: T5-15. Use: T5-15.
+    pub ocr: Option<PathBuf>,
+    /// The time cap that replaces `time_cap_s(events)` for every worker run, for tests only, as `limits_override` is
+    /// (design part 10.8; T5-R10, T5-R58): no settings key reads it and the native main passes None. Def: T5-15. Use:
+    /// T5-15.
+    pub ocr_cap_override: Option<Duration>,
 }
 
 /// The binary's usage line; `--data` is the one optional argument (design part 3.1; Ruling W1). Def: T21, T3-23.

@@ -361,7 +361,7 @@ pub fn read_decide_inputs(
     let report = reconcile(&scan, title, &ident, selection, log).map_err(refused)?;
     let audio = audio_section(rec, label);
     let text = text.map(|dir| ctx.cwd.join(dir));
-    let subtitles = subtitle_section(rec, label, text.as_deref());
+    let subtitles = subtitle_section(rec, label, text.as_deref(), TextRule::default().CLEAR_MAX_BYTES);
     let plan = match plan_doc(ctx, &PlanSource::Recording(rec), options) {
         Ok(found) => PlanEntry::Results(found),
         Err(refused) => PlanEntry::Skipped { skipped: refused.line },
@@ -542,8 +542,10 @@ fn reading_folder(text: &Path, slug: &str, label: &str) -> Option<(PathBuf, Stri
 /// sub-<n>.ocr.jsonl for any stream, or an English or no-language bitmap stream without one). Skipped too without
 /// `text`, or when no folder holds the text. The streams `<label>/subs-ocr/summary.json` marks unread are passed to
 /// `subs_run`, which then refuses the title with one line per stream (design part 10.8, T5-R51); a summary.json that
-/// does not parse skips the section with its error.
-fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>) -> SubtitleEntry {
+/// does not parse skips the section with its error. `clear_max` is the event threshold (T5-R59): `lazymkv-dev decide`
+/// passes `TextRule::default().CLEAR_MAX_BYTES` (64), the engine the job's `sub_clear_max_bytes`, the value its worker
+/// and `check_events` took. (now pub, with clear_max) Def: T19, T5-15. Use: T19, T5-15.
+pub fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>, clear_max: i64) -> SubtitleEntry {
     let text = match text {
         Some(text) => text,
         None => return no_text_entry(),
@@ -563,8 +565,7 @@ fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>) -> Subtit
     };
     let rule = TextRule::default();
     let root = PathKey::root();
-    let outcome =
-        subs_run(&rec.tree, &rec.dir.join(label), &text_tree, &root, None, rule.CLEAR_MAX_BYTES, &rule, &unread);
+    let outcome = subs_run(&rec.tree, &rec.dir.join(label), &text_tree, &root, None, clear_max, &rule, &unread);
     if outcome.exit_code == 0 {
         SubtitleEntry::Results(subs_json(&outcome, &reading, &text_tree, &root))
     } else {
@@ -1043,8 +1044,9 @@ fn read_probes(tree: &dyn Tree, label_dir: &PathKey) -> Result<Option<FfprobeStr
 }
 
 /// <label>/subs-ocr/summary.json's unread streams (`OcrSummary::unread`, design part 10.8, T5-R51) as (`n`, `why`):
-/// Ok(empty) when the file is absent; Err "<path>: <serde's message>" when it does not parse.
-fn read_unread(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(i64, String)>, String> {
+/// Ok(empty) when the file is absent; Err "<path>: <serde's message>" when it does not parse. The engine fills
+/// `FileFacts` with it (K5). (now pub, T5-15) Def: T5-2. Use: T5-2, T5-15.
+pub fn read_unread(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(i64, String)>, String> {
     let path = label_dir.join(&format!("{READING}/summary.json"));
     if !tree.is_file(&path) {
         return Ok(Vec::new());
@@ -1071,8 +1073,9 @@ fn profiles_by_stream(probes: Option<&FfprobeStreams>, report: &VerifyReport) ->
 /// The label's subs/ folder, the reading half of the event start times (6.4 step 10, 8.7 "Events"): subs/index.json
 /// through `verify::subs_index` (Ok(None) when it is not a file: 6.4 step 10 skipped, or a title without subtitles),
 /// and on Ok `verify::read_packets_file` for every index entry, mapped or not, each error held in its entry
-/// (`verify::subtitle_events_of` reads the mapped ones only).
-fn read_subs(
+/// (`verify::subtitle_events_of` reads the mapped ones only). The engine fills `FileFacts` with it (K5). (now pub)
+/// Def: T19, T5-15. Use: T19, T5-15.
+pub fn read_subs(
     tree: &dyn Tree,
     label_dir: &PathKey,
 ) -> (Result<Option<Vec<SubsIndexEntry>>, String>, BTreeMap<i64, PacketsFile>) {

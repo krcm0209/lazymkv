@@ -1,5 +1,4 @@
 //! Staged, evidence and work paths, the one checked copy across volumes, and the unit's two-way error (design parts 7.1, 7.5; B1 (the worker's folder); T5-R4, T5-R39, T5-R55, T5-R56).
-#![cfg_attr(not(test), allow(dead_code))] // Task 15 calls the copies, tuning_dir and work_dir, and removes this line
 
 use std::fs;
 use std::io;
@@ -173,6 +172,19 @@ mod tests {
         assert_eq!(files(&b.0), ["subs-ocr/s0/f-000001000.png", "subs-ocr/sub-0.ocr.jsonl"]);
         assert_eq!(fs::read(b.0.join("subs-ocr").join("s0").join("f-000001000.png")).unwrap(), b"png");
         assert_eq!(files(&a.0), ["subs-ocr/s0/f-000001000.png", "subs-ocr/sub-0.ocr.jsonl"], "a copy keeps its source");
+    }
+
+    /// T5-R55: the data folder, staging and tuning_root are different volumes, so the unit moves a file between them
+    /// only through `copy_checked` and `move_checked`, which this file holds; no other source of the unit renames or
+    /// copies.
+    #[test]
+    fn the_unit_moves_files_across_volumes_only_through_the_checked_copy() {
+        let sources = [("step10.rs", include_str!("step10.rs"))];
+        for (name, text) in sources {
+            for needle in ["fs::rename", "fs::copy", "rename_no_replace"] {
+                assert!(!text.contains(needle), "{name} holds {needle}");
+            }
+        }
     }
 
     #[test]

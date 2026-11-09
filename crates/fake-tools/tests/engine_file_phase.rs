@@ -12,12 +12,14 @@ use common::Client;
 use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent, OutputCause, State, Tool, WaitReason};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::lookup::IdentityStep;
-use lazymkv_core::review::ReviewReason;
-use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder};
+use lazymkv_core::review::{Note, Noted, ReviewReason};
+use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder, DecideInputs, DecisionEntry};
 use lazymkv_dev::cmd::plan::PlanOptions;
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
+use lazymkv_engine::testkit::ci_factor;
 use lazymkv_engine::testkit::Harness;
+use lazymkv_platform::Spawn;
 use lazymkv_platform::{Host, Reach, SecretStore};
 use lazymkv_tools::exe_name;
 use lazymkv_tools::ffprobe::packets_args;
@@ -89,6 +91,95 @@ fn stale(h: &Harness, id: &str, file: &str) {
 /// Removes the harness's `tmdb_token`, so the engine has none.
 fn no_token(h: &Harness) {
     h.secrets().forget("tmdb_token");
+}
+
+/// The made-up word of every stand-in record and of the panicking stand-in's standard error (RP21: never subtitle text).
+const SENTINEL: &str = "text-sentinel-3e8f";
+/// The refused stand-in's first standard error line, the reason its exit 3 gives (T5-R8).
+const REFUSAL: &str = "content encoding 3 of track 3 is not zlib compression or header stripping";
+/// The cap scenarios with the harness's override of 2 s (T5-R58).
+const CAP: [&str; 2] = ["movie-direct-two-subs-cap", "movie-direct-two-subs-cap-2s"];
+
+/// movie-direct with `movie-direct-two-subs` and `overlays` copied over it.
+fn two_subs(overlays: &[&str], settings: Value) -> Harness {
+    let mut variants = vec!["movie-direct-two-subs"];
+    variants.extend_from_slice(overlays);
+    harness(&variants, settings)
+}
+
+fn job_id(h: &Harness) -> String {
+    format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase())
+}
+
+/// Inserts the disc and stops the engine once the job's DecisionDone is persisted, before its actions run.
+fn decided(h: &Harness) -> String {
+    h.insert("tok0", "movie-direct");
+    h.run_until_event("DecisionDone", |event| matches!(event, Event::DecisionDone { .. }));
+    job_id(h)
+}
+
+/// A file at the final path holds the job with path_collision, so it waits in NeedsReview with its engine running.
+fn held(h: &Harness) -> String {
+    let target = final_path(h);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"already here").unwrap();
+    run_to(h, "NeedsReview")
+}
+
+/// `<staging>/<job id>/tuning/<key>/subs-ocr`, where the text lives (design part 10.12 item 1).
+fn staged_ocr(h: &Harness, id: &str) -> PathBuf {
+    h.staging().join(id).join("tuning").join(KEY).join("subs-ocr")
+}
+
+/// `<data>/work/ocr-<job id>-<key>`, the title's work folder (B1 (the worker's folder), T5-R4).
+fn work_of(h: &Harness, id: &str) -> PathBuf {
+    h.data().join("work").join(format!("ocr-{id}-{KEY}"))
+}
+
+fn unread_notes(h: &Harness, id: &str) -> Vec<Noted> {
+    let decision = h.record(id).titles[0].decision.clone().expect("the title was decided");
+    decision.notes.into_iter().filter(|noted| noted.note == Note::SubtitleTextUnread).collect()
+}
+
+fn unread(stream: u32, reason: &str) -> Noted {
+    Noted { note: Note::SubtitleTextUnread, stream: Some(stream), detail: format!("stream {stream} was not read: {reason}") }
+}
+
+/// The reason of a run killed at the cap scenarios' override after `read` of its 10 events.
+fn cap_reason_of(read: usize) -> String {
+    let cap = 2.0 * f64::from(ci_factor());
+    format!("time cap of {cap:.1} s reached after {read} of 10 events")
+}
+
+/// Every file under `dir` whose bytes hold `needle`.
+fn holding(dir: &Path, needle: &str) -> Vec<String> {
+    let found = |name: &String| fs::read(dir.join(name)).unwrap().windows(needle.len()).any(|w| w == needle.as_bytes());
+    files_under(dir).into_iter().filter(found).collect()
+}
+
+fn ocr_spawns(h: &Harness) -> Vec<Spawn> {
+    h.spawns().into_iter().filter(|spawn| spawn.program.file_stem().is_some_and(|stem| stem == "lazymkv-ocr")).collect()
+}
+
+fn replay_files(dir: &Path) -> PlanOptions {
+    PlanOptions {
+        settings: Some(dir.join("settings.json")),
+        tmdb_search: Some(dir.join("tmdb-search.json")),
+        tmdb_record: Some(dir.join("tmdb-record.json")),
+        remembered: None,
+    }
+}
+
+/// `lazymkv-dev decide`'s inputs over the finished job folder, with `text` as its `--text`.
+fn read_back(h: &Harness, id: &str, text: Option<&Path>) -> DecideInputs {
+    let dir = h.job_dir(id);
+    let ctx = Ctx::for_test(h.data());
+    let (rec, label) = rec_folder(&ctx, &dir.join(KEY).display().to_string()).unwrap_or_else(|r| panic!("{}", r.line));
+    read_decide_inputs(&ctx, &rec, &label, text, None, &replay_files(&dir)).unwrap_or_else(|r| panic!("{}", r.line))
+}
+
+fn set(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 #[test]
@@ -353,14 +444,279 @@ fn a_first_pass_decide_applies_the_jobs_remembered_copy_not_the_data_folders_fil
     assert!(!log.contains("decide inputs read back"), "{log}");
 }
 
+/// Design part 10.2 steps 3 to 5 (S32 removed): both English PGS streams are read, their text and crops land in the
+/// staged folder, the counts in the job folder, and decide's subtitles section is the text rule's.
 #[test]
-fn two_english_subtitle_streams_fail_the_decision_until_step_10_exists() {
-    let h = harness(&["movie-direct-two-subs"], json!({}));
+fn two_english_subtitle_streams_are_read_by_the_worker_and_decided_with_their_text() {
+    let h = two_subs(&[], json!({}));
+    let id = held(&h);
+    let label = h.job_dir(&id).join(KEY);
+    let doc = json_of(&label.join("decide.json"));
+    assert_eq!(doc["subtitles"]["reading"], json!("subs-ocr"));
+    let streams: Vec<(i64, String, i64)> = doc["subtitles"]["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["n"].as_i64().unwrap(), s["status"].as_str().unwrap().to_string(), s["events"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(streams, [(0, "read".to_string(), 2), (1, "read".to_string(), 2)]);
+    assert!(unread_notes(&h, &id).is_empty());
+    assert_eq!(files_under(&label.join("subs-ocr")), set(&["sub-0.frames.json", "sub-1.frames.json", "summary.json"]));
+    let frames = json_of(&label.join("subs-ocr").join("sub-0.frames.json"));
+    let keys: Vec<&str> = frames[1].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!((frames.as_array().unwrap().len(), keys, &frames[1]["lines"]),
+               (2, vec!["frame", "file", "t", "pts", "chars", "lines", "markers"], &json!(2)));
+    let staged = staged_ocr(&h, &id);
+    assert_eq!(files_under(&staged), set(&[
+        "s0/f-000001000.png", "s0/f-000005000.png", "s1/f-000002000.png", "s1/f-000006000.png",
+        "sub-0.ocr.jsonl", "sub-0.run.json", "sub-1.ocr.jsonl", "sub-1.run.json", "summary.json",
+    ]));
+    assert_eq!(fs::read(staged.join("sub-0.ocr.jsonl")).unwrap(), fs::read(h.tools().join("records-s0.txt")).unwrap());
+    assert!(!work_of(&h, &id).exists());
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!log.contains("subtitle evidence (step 10) is not built in this version"), "{log}");
+}
+
+/// Design part 10.7, K2, R5-code-35: one run per stream, the next only after the last ended, below normal with
+/// RTEN_NUM_THREADS=3 alone, in the title's work folder with the job's sub_clear_max_bytes.
+#[test]
+fn the_worker_runs_once_per_english_or_no_language_stream_one_at_a_time_below_normal_with_rten_num_threads_3() {
+    let h = two_subs(&[], json!({}));
+    let id = decided(&h);
+    let work = work_of(&h, &id);
+    let spawns = ocr_spawns(&h);
+    assert_eq!(spawns.len(), 2);
+    for (n, spawn) in spawns.iter().enumerate() {
+        let want = [
+            work.join("evidence.mks").to_string_lossy().into_owned(),
+            "--stream".to_string(),
+            n.to_string(),
+            "--clear-max".to_string(),
+            "64".to_string(),
+            "--out".to_string(),
+            work.join(format!("s{n}")).to_string_lossy().into_owned(),
+        ];
+        assert_eq!(spawn.args, want);
+        assert_eq!(spawn.program, h.tools().join(format!("lazymkv-ocr{}", std::env::consts::EXE_SUFFIX)));
+        assert_eq!(spawn.env, [("RTEN_NUM_THREADS".to_string(), "3".to_string())]);
+        assert!(spawn.below_normal);
+    }
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("job.log lacks {needle}: {log}"));
+    assert!(at("run lazymkv-ocr s0: ") < at("ended lazymkv-ocr s0: exit 0 after "));
+    assert!(at("ended lazymkv-ocr s0: exit 0 after ") < at("run lazymkv-ocr s1: "));
+    assert!(at("run lazymkv-ocr s1: ") < at("ended lazymkv-ocr s1: exit 0 after "));
+}
+
+/// Design part 10.8, T5-R9, T5-R58: past its cap the worker is killed, its partial output deleted, and the note's
+/// detail counts its whole records; the note raises no review, so the decision's reviews are those of the same folders
+/// with the unread streams taken out.
+#[test]
+fn a_worker_past_its_cap_leaves_the_stream_unread_with_its_note_and_no_review() {
+    let h = two_subs(&CAP, json!({}));
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id)[0], unread(2, &cap_reason_of(3)));
+    assert_eq!(files_under(&staged_ocr(&h, &id)), set(&["summary.json"]));
+    assert!(!work_of(&h, &id).exists());
+    let mut inputs = read_back(&h, &id, None);
+    assert_eq!(inputs.file.unread, Ok(vec![(0, cap_reason_of(3)), (1, cap_reason_of(3))]));
+    inputs.file.unread = Ok(Vec::new());
+    let DecisionEntry::Results(without) = decide_doc(&inputs).decision else { panic!("the decision was skipped") };
+    let decision = h.record(&id).titles[0].decision.clone().unwrap();
+    assert_eq!(decision.reviews, without.decision.reviews);
+    assert!(without.decision.notes.iter().all(|noted| noted.note != Note::SubtitleTextUnread));
+}
+
+/// Review Focus 2, T5-R9: a kill in the middle of a record counts only the whole records before it.
+#[test]
+fn a_killed_worker_with_a_torn_last_record_counts_only_whole_records() {
+    let h = two_subs(&CAP, json!({}));
+    let records = fs::read_to_string(h.tools().join("records-cap-s1.txt")).unwrap();
+    assert_eq!((records.matches('\n').count(), records.ends_with('\n')), (3, false), "the fixture's fourth record is torn");
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id)[1], unread(3, &cap_reason_of(3)));
+}
+
+/// Review Focus 2, T5-R8, design part 10.12: a panic's standard error can hold text, so the reason is the exit code
+/// alone and the sentinel reaches no job file, engine.log or the snapshot; no capture file reaches the job folder.
+#[test]
+fn a_worker_that_panics_leaves_the_stream_unread_with_its_exit_code_and_no_stderr_text() {
+    let h = two_subs(&["movie-direct-two-subs-panic"], json!({}));
+    assert!(fs::read_to_string(h.tools().join("panic-s1.txt")).unwrap().contains(SENTINEL));
+    let id = held(&h);
+    assert_eq!(unread_notes(&h, &id), [unread(3, "lazymkv-ocr exited with code 101")]);
+    let jobs = h.data().join("jobs");
+    assert_eq!(holding(&jobs, SENTINEL), Vec::<String>::new());
+    assert!(!h.engine_log().contains(SENTINEL));
+    assert!(!Client::open(&h).snapshot().to_string().contains(SENTINEL));
+    assert!(files_under(&jobs).iter().all(|name| !name.contains("capture")), "{:?}", files_under(&jobs));
+}
+
+/// Review Focus 2, design part 10.3: records the listing does not have leave the stream unread with numbers only.
+#[test]
+fn a_worker_that_writes_more_records_than_events_is_unread_by_the_cross_check() {
+    let h = two_subs(&["movie-direct-two-subs-extra"], json!({}));
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id)[1], unread(3, "3 events recorded, 2 listed"));
+    assert!(!staged_ocr(&h, &id).join("sub-1.ocr.jsonl").exists());
+}
+
+/// Design part 10.3, call 24: the sizes are compared too, never count and order alone.
+#[test]
+fn a_size_disagreement_with_ffprobe_leaves_the_stream_unread() {
+    let h = two_subs(&["movie-direct-two-subs-extra"], json!({}));
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id)[0], unread(2, "event 1: size 1300 recorded, 1200 listed"));
+    assert!(!staged_ocr(&h, &id).join("sub-0.ocr.jsonl").exists());
+}
+
+/// T5-R8, call 5: exit 3's first standard error line is the note's reason.
+#[test]
+fn an_exit_3_refusal_is_the_notes_reason() {
+    let h = two_subs(&["movie-direct-two-subs-refused"], json!({}));
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id), [unread(3, REFUSAL)]);
+}
+
+/// T5-R8, Step 11 item e: a worker that exits 0 and writes no records leaves each stream unread with that sentence.
+#[test]
+fn a_worker_that_exits_0_without_records_leaves_each_stream_unread() {
+    let h = two_subs(&["movie-direct-two-subs-silent"], json!({}));
+    let id = decided(&h);
+    assert_eq!(
+        unread_notes(&h, &id),
+        [unread(2, "lazymkv-ocr wrote no sub-0.ocr.jsonl"), unread(3, "lazymkv-ocr wrote no sub-1.ocr.jsonl")]
+    );
+    assert_eq!(files_under(&staged_ocr(&h, &id)), set(&["summary.json"]));
+    assert!(!work_of(&h, &id).exists());
+}
+
+/// Design parts 10.8, 10.12, P19: an unread stream's partial records go; summary.json says why, with its exit code,
+/// in the job folder and, byte for byte, in the staged folder.
+#[test]
+fn an_unread_stream_keeps_no_records_and_summary_json_says_why() {
+    let h = two_subs(&["movie-direct-two-subs-panic"], json!({}));
+    let id = decided(&h);
+    let label = h.job_dir(&id).join(KEY);
+    let staged = staged_ocr(&h, &id);
+    assert_eq!(files_under(&staged), set(&[
+        "s0/f-000001000.png", "s0/f-000005000.png", "sub-0.ocr.jsonl", "sub-0.run.json", "summary.json",
+    ]));
+    assert!(!label.join("subs-ocr").join("sub-1.frames.json").exists());
+    let summary = json_of(&label.join("subs-ocr").join("summary.json"));
+    let index = json_of(&label.join("subs").join("index.json"));
+    let s1 = &summary["streams"][1];
+    assert_eq!((&s1["n"], &s1["codec"], &s1["read"], &s1["why"], &s1["exit"]),
+               (&json!(1), &index[1]["codec"], &json!(false), &json!("lazymkv-ocr exited with code 101"), &json!(101)));
+    assert_eq!((&summary["streams"][0]["read"], &summary["streams"][0]["exit"]), (&json!(true), &json!(0)));
+    assert_eq!(fs::read(staged.join("summary.json")).unwrap(), fs::read(label.join("subs-ocr").join("summary.json")).unwrap());
+}
+
+/// T5-R51: the title's subtitles section is the unread line, with no text, and the read stream's records are kept.
+#[test]
+fn a_title_with_an_unread_stream_has_the_unread_line_as_its_subtitles_section() {
+    let h = two_subs(&["movie-direct-two-subs-refused"], json!({}));
+    let id = decided(&h);
+    let decide = h.job_dir(&id).join(KEY).join("decide.json");
+    assert_eq!(json_of(&decide)["subtitles"], json!({"skipped": format!("stream s1 eng: not read by the engine: {REFUSAL}")}));
+    assert!(!fs::read_to_string(&decide).unwrap().contains(SENTINEL));
+    let staged = staged_ocr(&h, &id);
+    assert!(fs::read_to_string(staged.join("sub-0.ocr.jsonl")).unwrap().contains(SENTINEL));
+    assert!(!staged.join("sub-1.ocr.jsonl").exists());
+}
+
+/// T5-R59: the job's own sub_clear_max_bytes reaches the worker, the cross-check and the subtitles section, so a
+/// 50-byte packet is an event at 40 for all three. (The text's reviews stay out at any threshold but 64: dev's
+/// `text_decisions` uses no text when `settings.text_rule()` is not the default, RP15.)
+#[test]
+fn a_job_whose_clear_max_is_not_64_decides_with_the_workers_events() {
+    let h = two_subs(&["movie-direct-two-subs-clear-40"], json!({"sub_clear_max_bytes": 40}));
+    let id = decided(&h);
+    for spawn in ocr_spawns(&h) {
+        assert!(spawn.args.windows(2).any(|pair| pair == ["--clear-max", "40"]), "{:?}", spawn.args);
+    }
+    assert!(unread_notes(&h, &id).is_empty());
+    let staged = fs::read_to_string(staged_ocr(&h, &id).join("sub-1.ocr.jsonl")).unwrap();
+    assert_eq!(staged.lines().count(), 3);
+    let doc = json_of(&h.job_dir(&id).join(KEY).join("decide.json"));
+    assert_eq!((&doc["subtitles"]["streams"][0]["events"], &doc["subtitles"]["streams"][1]["events"]), (&json!(2), &json!(3)));
+}
+
+/// T5-R12: the staged summary.json, C3's marker, lands only after the job folder's: when the job folder's cannot be
+/// written the step fails and the staged folder holds the streams' files but no summary.json.
+#[test]
+fn the_staged_summary_json_is_written_after_the_job_folders() {
+    let h = two_subs(&[], json!({}));
+    let id = job_id(&h);
+    let blocker = h.job_dir(&id).join(KEY).join("subs-ocr").join("summary.json");
+    let s1 = work_of(&h, &id).join("s1").display().to_string();
+    let made = blocker.clone();
+    h.on_spawn(&[&s1], move || fs::create_dir_all(&made).unwrap());
     let id = run_to(&h, "Failed");
     let record = h.record(&id);
     assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
-    assert_eq!(record.message.as_deref(), Some("subtitle evidence (step 10) is not built in this version"));
-    assert!(!h.job_dir(&id).join(KEY).join("decide.json").exists());
+    let message = record.message.unwrap();
+    assert!(message.starts_with(&format!("{}: ", blocker.display())), "{message}");
+    let staged = staged_ocr(&h, &id);
+    assert!(staged.join("sub-0.ocr.jsonl").is_file() && staged.join("sub-1.ocr.jsonl").is_file());
+    assert!(!staged.join("summary.json").exists());
+    assert!(!work_of(&h, &id).exists());
+}
+
+/// Design part 10.12 item 3: the text is in the staged folder and in no file under jobs\, engine.log or the snapshot.
+#[test]
+fn no_ocr_text_reaches_the_job_folder_logs_state_or_snapshot() {
+    let h = two_subs(&[], json!({}));
+    let id = held(&h);
+    assert!(fs::read_to_string(staged_ocr(&h, &id).join("sub-0.ocr.jsonl")).unwrap().contains(SENTINEL));
+    assert_eq!(holding(&h.data().join("jobs"), SENTINEL), Vec::<String>::new());
+    assert!(!h.engine_log().contains(SENTINEL));
+    assert!(!Client::open(&h).snapshot().to_string().contains(SENTINEL));
+}
+
+/// T5-R57: the worker's capture is written to the work folder only and deleted with it.
+#[test]
+fn no_worker_capture_reaches_the_job_folder() {
+    let h = two_subs(&[], json!({}));
+    let id = decided(&h);
+    for root in [h.data().join("jobs"), h.staging().to_path_buf()] {
+        let files = files_under(&root);
+        assert!(files.iter().all(|name| !name.contains("capture")), "{files:?}");
+    }
+    assert!(!work_of(&h, &id).exists());
+}
+
+/// Design part 10.7, ENG-13: a cancel kills the running worker, deletes its partial files and ends the job as
+/// cancelled by the owner.
+#[test]
+fn a_cancel_kills_the_worker_and_deletes_its_work_folder() {
+    let h = two_subs(&["movie-direct-two-subs-cap"], json!({}));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", "movie-direct");
+    h.deliver();
+    let id = job_id(&h);
+    let first = work_of(&h, &id).join("s0").join("sub-0.ocr.jsonl");
+    h.wait("the worker's first records", |_| first.is_file());
+    c.ok("cancel", json!({"job": id}));
+    let record = h.record(&id);
+    assert!(matches!(record.state, State::Failed { class: FailureClass::Unknown, .. }), "{:?}", record.state);
+    assert_eq!(record.message.as_deref(), Some("cancelled by the owner"));
+    h.wait("the work folder removed", |h| !work_of(h, &id).exists());
+    assert_eq!(files_under(&staged_ocr(&h, &id)), BTreeSet::new());
+}
+
+/// T5-R8: a worker that is not beside the engine fails the decision before any extraction.
+#[test]
+fn a_missing_worker_fails_the_decision_with_ocr_missing() {
+    let h = two_subs(&[], json!({}));
+    fs::remove_file(h.tools().join(format!("lazymkv-ocr{}", std::env::consts::EXE_SUFFIX))).unwrap();
+    let id = run_to(&h, "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    assert_eq!(record.message.as_deref(), Some("lazymkv-ocr is not beside the engine, so step 10 cannot read subtitles"));
+    assert!(!h.staging().join(&id).join("evidence").exists());
+    assert!(ocr_spawns(&h).is_empty());
 }
 
 const TWO_SUBS: &str = "movie-direct-two-subs";

@@ -1,13 +1,22 @@
 //! Restarts over the stand-in tools (design part 5.10, L1, L1a; Ruling S12).
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use common::Client;
 
 use lazymkv_core::job::{
     job_lookup, Action, Event, Failure, FailureClass, Held, JobLookup, NotifyEvent, OutputCause, State, WaitReason,
 };
 use lazymkv_core::record::{JobRecord, Transition};
 use lazymkv_core::review::ReviewReason;
+use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder};
+use lazymkv_dev::cmd::plan::PlanOptions;
+use lazymkv_dev::evidence::Ctx;
+use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::Reach;
 use serde_json::json;
@@ -15,6 +24,7 @@ use serde_json::json;
 /// The disc of the base scenario, as Task 22's Harness::insert names it.
 const DISC: &str = "movie-direct";
 const FINAL: &str = "Synthetic Movie (2001) {tmdb-900001}/Synthetic Movie (2001) {tmdb-900001} - 1080p.mkv";
+const KEY: &str = "t00-00800";
 
 fn settings() -> serde_json::Value {
     json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1})
@@ -927,4 +937,77 @@ fn a_restart_reads_a_stale_copy_as_pending_and_asks_nothing() {
     let log = h.engine_log();
     assert!(log.contains(&format!("{id}: tmdb-record.json is more than six months old or was deleted, and is fetched again")), "{log}");
     assert!(!log.contains("test-token"));
+}
+
+/// Design part 5.10, T5-R51: a held two-stream job with one stream unread, approved after a restart, decides from the
+/// staged text and summary.json's unread stream with dev's readers, exactly as `lazymkvctl decide` does over the same
+/// folders.
+#[test]
+fn a_held_job_approved_after_a_restart_reads_the_staged_text_and_the_unread_streams() {
+    let h = harness(&["movie-direct", "movie-direct-two-subs", "movie-direct-two-subs-panic"], settings());
+    fs::create_dir_all(final_path(&h).parent().unwrap()).unwrap();
+    fs::write(final_path(&h), b"owner's").unwrap();
+    h.insert("tok0", DISC);
+    h.run_until("NeedsReview");
+    let id = only_job(&h);
+    let dir = h.job_dir(&id);
+    h.restart();
+    fs::remove_file(final_path(&h)).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    let decisions = |h: &Harness| {
+        transitions(&h.job_dir(&id)).iter().filter(|line| matches!(line.event, Some(Event::DecisionDone { .. }))).count()
+    };
+    h.wait("the decision made again", |h| decisions(h) == 2);
+    assert!(fs::read_to_string(dir.join("job.log")).unwrap().contains(
+        "decide inputs read back from the job folder with lazymkv-dev's readers (design part 5.10)"));
+    let staged = h.staging().join(&id).join("tuning").join(KEY).join("subs-ocr");
+    let ctx = Ctx::for_test(h.data());
+    let (rec, label) = rec_folder(&ctx, &dir.join(KEY).display().to_string()).unwrap_or_else(|r| panic!("{}", r.line));
+    let options = PlanOptions {
+        settings: Some(dir.join("settings.json")),
+        tmdb_search: Some(dir.join("tmdb-search.json")),
+        tmdb_record: Some(dir.join("tmdb-record.json")),
+        remembered: None,
+    };
+    let read = read_decide_inputs(&ctx, &rec, &label, Some(&staged), None, &options).unwrap_or_else(|r| panic!("{}", r.line));
+    assert_eq!(read.file.unread, Ok(vec![(1, "lazymkv-ocr exited with code 101".to_string())]));
+    let mut written: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(KEY).join("decide.json")).unwrap()).unwrap();
+    assert_eq!(written["subtitles"],
+               json!({"skipped": "stream s1 eng: not read by the engine: lazymkv-ocr exited with code 101"}));
+    let object = written.as_object_mut().unwrap();
+    object.remove("audio_rule_version");
+    object.remove("lazymkv_version");
+    assert_eq!(
+        dumps(&written, Style::INDENT1_ASCII),
+        dumps(&serde_json::to_value(decide_doc(&read)).unwrap(), Style::INDENT1_ASCII)
+    );
+}
+
+/// Review Focus 3, T5-R4: what a crashed run left in the work folder is deleted when the engine starts.
+#[test]
+fn engine_start_removes_a_leftover_work_folder() {
+    let h = harness(&["movie-direct"], settings());
+    let leftover = h.data().join("work").join(format!("ocr-x-{KEY}")).join("s0");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("sub-0.ocr.jsonl"), b"{\"pts\":1.0,\"size\":900}\n").unwrap();
+    h.restart();
+    assert!(!h.data().join("work").exists());
+    assert!(!h.engine_log().contains("could not be removed"), "{}", h.engine_log());
+}
+
+/// Review Focus 3, design part 10.7: a forced stop during a worker run kills the worker and leaves no work folder. The
+/// cap is 60 s here, so an engine that ends within 30 s killed it; the bound proves the kill and is not scaled.
+#[test]
+fn a_stop_during_a_worker_run_kills_it_and_leaves_no_work_folder() {
+    let h = harness(&["movie-direct", "movie-direct-two-subs", "movie-direct-two-subs-cap"], settings());
+    h.insert("tok0", DISC);
+    let id = format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase());
+    let work = h.data().join("work").join(format!("ocr-{id}-{KEY}"));
+    let first = work.join("s0").join("sub-0.ocr.jsonl");
+    h.wait("the worker's first records", |_| first.is_file());
+    h.shutdown_handle().shutdown(true);
+    assert!(h.wait_for_exit(Duration::from_secs(30)), "the engine did not stop within 30 s");
+    assert!(!work.exists());
 }

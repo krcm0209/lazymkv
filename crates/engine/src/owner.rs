@@ -42,6 +42,7 @@ use serde_json::{json, Map, Value};
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::cleanup::{run_pass, CleanupJob};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
+use crate::staged;
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
     no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
@@ -236,9 +237,10 @@ pub fn start(config: EngineConfig, services: Services) -> io::Result<EngineHandl
 }
 
 /// `start` with the testkit's hooks: the stop hook, and the persist faults the store meets. It writes the engine.log
-/// line `engine started (lazymkv <version>)`, runs the MakeMKV check to its end (design part 3.7, S79, PF-28) and then
-/// the restart sequence (design part 5.10, Ruling S70; `Owner::load`) before it returns, so a restart's EngineRestart
-/// lines are persisted by then (design part 3.5); the IPC server's serve thread starts last (Task 26). With
+/// line `engine started (lazymkv <version>)` and deletes `<data>\work\`, runs the MakeMKV check to its end (design
+/// part 3.7, S79, PF-28) and then the restart sequence (design part 5.10, Ruling S70; `Owner::load`) before it
+/// returns, so a restart's EngineRestart lines are persisted by then (design part 3.5); the IPC server's serve thread
+/// starts last (Task 26). With
 /// `services.steps` None it runs the real runner, `RealSteps` (Task 23), over the owner's Outbox, the space promises,
 /// the last scan's Java use and the MakeMKV state, which the owner keeps for the self-test. Def: T22. Use: T22.
 pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: TestHooks) -> io::Result<EngineHandle> {
@@ -263,6 +265,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     let stop_after = hooks.stop_after;
     let cleanup_done = hooks.cleanup_done;
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
+    remove_work_folder(&store, &config.data);
     let outbox = Outbox::default();
     let promises = Arc::new(Mutex::new(Promises::default()));
     let java_in_use = Arc::new(Mutex::new(None));
@@ -759,6 +762,19 @@ fn new_record(id: &str, meta: &DiscMeta, drive: &str, now: u64) -> JobRecord {
 /// The plan's identity title, the `title` of a job's notifications (S42).
 fn title_of(record: &JobRecord) -> Option<String> {
     record.plan.as_ref().and_then(|plan| plan.identity.title.clone())
+}
+
+/// B1 (the worker's folder), T5-R4: the work folder a stopped or crashed run left, deleted before any step runs;
+/// NotFound is no error, and any other error writes the engine.log line `the work folder <path> could not be removed:
+/// <error>` and the engine starts as usual (no step reads a work folder it did not make in this run).
+fn remove_work_folder(store: &Store, data: &Path) {
+    let work = data.join(staged::WORK);
+    match fs::remove_dir_all(&work) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            store.log(&format!("the work folder {} could not be removed: {error}", work.display()));
+        }
+        _ => {}
+    }
 }
 
 /// The settings a loaded job started with, from its own settings.json (ENG-19), else the engine's.

@@ -25,9 +25,10 @@ use lazymkv_core::recording::{read_text, text_mode, Encoding, Errors, Tree};
 use lazymkv_core::reconcile::{reconcile, RipLog, RIP_LOG_NAMES};
 use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{EditionStyle, Settings};
+use lazymkv_core::subtitle::text::READING;
 use lazymkv_dev::cmd::decide::{
-    no_text_entry, read_decide_inputs, rec_folder, replay_answers, replay_remembered, DecideInputs, FileFacts,
-    PlanEntry, RipLogText,
+    read_decide_inputs, read_subs, read_unread, rec_folder, replay_answers, replay_remembered, subtitle_section,
+    DecideInputs, FileFacts, PlanEntry, RipLogText,
 };
 use lazymkv_dev::cmd::plan::{plan_doc, PlanOptions, PlanSource};
 use lazymkv_dev::evidence::Ctx;
@@ -36,6 +37,7 @@ use serde_json::Value;
 
 use crate::arrival::chain_inputs;
 use crate::owner::JobContext;
+use crate::staged::tuning_dir;
 
 /// The folder under a library root that holds the partial files (design part 5.7 step 13), where the self-test probes
 /// a library root and a forced shutdown deletes a cancelled job's partial files (design part 3.8). Def: T24. Use: T24,
@@ -156,14 +158,16 @@ pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
 }
 
 /// The engine's DecideInputs for one title (K5, R-B1, design part 5.7 step 11.3), built from what it measured and read
-/// as `read_decide_inputs` reads the same files: the rip label `<job dir>/<key>` through `rec_folder`, the planned
-/// scan title with `Selection::All` (the one value both the inputs and `reconcile` take), scan.txt, the title's
-/// mkvmerge.json and rip log, `reconcile`, no audio section, the subtitles section of a run with no OCR text, the plan
-/// section of `plan_doc` over the job folder with its `.plan` replaced by `plan`, the plan the job decides with (RP-4),
-/// the answers of `replay_answers` with the same replay files, the remembered decision of `replay_remembered` over the
-/// job's own remembered.json (the copy the plan applied, never the data folder's file, which can change after Plan:
-/// R-B1, the PR #6 review's V14), the probe the engine ran and no other file fact, and `library`. Err is the sentence
-/// of a file that could not be read, or reconcile's. Def: T24. Use: T24, T25.
+/// as `read_decide_inputs` reads the same files: the rip label `<job dir>/<key>` through `rec_folder`, the planned scan
+/// title with `Selection::All` (the one value both the inputs and `reconcile` take), scan.txt, the title's
+/// mkvmerge.json and rip log, `reconcile`, no audio section, the subtitles section of the staged OCR text
+/// (`staged_text`, none when step 10 did not run) at the job's `sub_clear_max_bytes`, the subtitle index, packet lists
+/// and unread streams of the job folder, the plan section of `plan_doc` over the job folder with its `.plan` replaced
+/// by `plan`, the plan the job decides with (RP-4), the answers of `replay_answers` with the same replay files, the
+/// remembered decision of `replay_remembered` over the job's own remembered.json (the copy the plan applied, never the
+/// data folder's file, which can change after Plan: R-B1, the PR #6 review's V14), the probe the engine ran, no level
+/// MD5s, and `library`. Err is the sentence of a file that could not be read, or reconcile's. Def: T24,
+/// T5-15. Use: T24, T25, T5-15.
 pub(crate) fn engine_decide_inputs(
     ctx: &Ctx,
     job: &JobContext,
@@ -200,14 +204,15 @@ pub(crate) fn engine_decide_inputs(
     };
     let answers = replay_answers(ctx, &rec, &options);
     let remembered = replay_remembered(ctx, &options);
+    let (subs_index, packets) = read_subs(tree, &label_dir);
     let file = FileFacts {
         level_md5: Ok(Vec::new()),
         probes: Ok(Some(probes.clone())),
-        subs_index: Ok(None),
-        packets: BTreeMap::new(),
-        // Task 15 reads the job folder's subs-ocr\summary.json.
-        unread: Ok(Vec::new()),
+        subs_index,
+        packets,
+        unread: read_unread(tree, &label_dir),
     };
+    let subtitles = subtitle_section(&rec, &label, staged_text(job, key).as_deref(), job.settings.sub_clear_max_bytes);
     Ok(DecideInputs {
         slug: job.record.id.clone(),
         label: key.to_string(),
@@ -218,7 +223,7 @@ pub(crate) fn engine_decide_inputs(
         rip_log,
         reconcile: report,
         audio: Vec::new(),
-        subtitles: no_text_entry(),
+        subtitles,
         plan: plan_entry,
         answers,
         remembered,
@@ -231,9 +236,17 @@ pub(crate) fn engine_decide_inputs(
 /// The DecideInputs of a title whose probe the engine no longer holds, as after a restart (design part 5.10, PF-27):
 /// `read_decide_inputs` over the rip label `<job dir>/<key>` with no OCR text, `Selection::All` and the replay files of
 /// `engine_decide_inputs`, its plan section's `.plan` replaced by `plan` when the section has results (RP-4); the
-/// readers' `replay_remembered` reads the same remembered.json. Err is the readers' refusal line. Def: T24. Use: T24,
-/// T25.
-pub(crate) fn read_back_inputs(ctx: &Ctx, job_dir: &Path, plan: &Plan, key: &str) -> Result<DecideInputs, String> {
+/// readers' `replay_remembered` reads the same remembered.json. (changed) `text` is the staged OCR text and
+/// `clear_max` the job's `sub_clear_max_bytes`: the subtitles section is `subtitle_section(&rec, &label, text,
+/// clear_max)`. Err is the readers' refusal line. Def: T24, T5-15. Use: T24, T25, T5-15.
+pub(crate) fn read_back_inputs(
+    ctx: &Ctx,
+    job_dir: &Path,
+    plan: &Plan,
+    key: &str,
+    text: Option<&Path>,
+    clear_max: i64,
+) -> Result<DecideInputs, String> {
     let (rec, label) = rec_folder(ctx, &job_dir.join(key).display().to_string()).map_err(|refused| refused.line)?;
     let options = replay_options(job_dir);
     let mut inputs =
@@ -241,7 +254,15 @@ pub(crate) fn read_back_inputs(ctx: &Ctx, job_dir: &Path, plan: &Plan, key: &str
     if let PlanEntry::Results(found) = &mut inputs.plan {
         found.plan = plan.clone();
     }
+    inputs.subtitles = subtitle_section(&rec, &label, text, clear_max);
     Ok(inputs)
+}
+
+/// The staged OCR text of the title `key` (design parts 7.5, 10.12): `<staging_root>\<job id>\tuning\<key>\subs-ocr\`
+/// when it is a folder, else None (step 10 did not run, or `staging_root` is unset). Def: T5-15. Use: T5-15.
+pub(crate) fn staged_text(job: &JobContext, key: &str) -> Option<PathBuf> {
+    let root = job.settings.staging_root.as_deref()?;
+    Some(tuning_dir(root, &job.record.id, key).join(READING)).filter(|dir| dir.is_dir())
 }
 
 /// What one file name in the film's folder says (Ruling R24.5).

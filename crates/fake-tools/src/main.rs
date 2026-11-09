@@ -1,6 +1,6 @@
 mod scenario;
 
-use scenario::{parse_timing, schedule, select, Scenario, Stream};
+use scenario::{parse_timing, schedule, select, Create, Scenario, Stream};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,25 @@ fn read_timing(dir: &Path, file: &Option<String>) -> Result<Vec<u64>, String> {
     let Some(file) = file else { return Ok(Vec::new()) };
     let text = fs::read_to_string(dir.join(file)).map_err(|error| format!("{file}: {error}"))?;
     Ok(parse_timing(&text))
+}
+
+/// Creates each of `creates` for a run with `args`, copying its bytes from the scenario folder `dir`.
+fn create_files(dir: &Path, creates: &[Create], args: &[String]) -> Result<(), String> {
+    for create in creates {
+        let target = create.target(args)?;
+        let parent = target.parent().unwrap_or(Path::new(""));
+        if create.arg_after.is_some() {
+            // Like mkvmerge -o: the output's folder is the caller's to make.
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(format!("creates: {} does not exist", parent.display()));
+            }
+        } else {
+            fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        fs::copy(dir.join(&create.copy_from), &target)
+            .map_err(|error| format!("{}: {error}", create.copy_from))?;
+    }
+    Ok(())
 }
 
 fn run() -> Result<i32, String> {
@@ -68,6 +87,7 @@ fn run() -> Result<i32, String> {
     let err_lines = read_lines(&dir, &response.stderr)?;
     let out_ms = read_timing(&dir, &response.timing)?;
     let err_ms = read_timing(&dir, &response.stderr_timing)?;
+    create_files(&dir, &response.creates_first, &args)?;
 
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     let mut waited_ms = 0u64;
@@ -103,20 +123,7 @@ fn run() -> Result<i32, String> {
         }
     }
 
-    for create in &response.creates {
-        let target = create.target(&args)?;
-        let parent = target.parent().unwrap_or(Path::new(""));
-        if create.arg_after.is_some() {
-            // Like mkvmerge -o: the output's folder is the caller's to make.
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                return Err(format!("creates: {} does not exist", parent.display()));
-            }
-        } else {
-            fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-        }
-        fs::copy(dir.join(&create.copy_from), &target)
-            .map_err(|error| format!("{}: {error}", create.copy_from))?;
-    }
+    create_files(&dir, &response.creates, &args)?;
 
     Ok(response.exit_code)
 }
