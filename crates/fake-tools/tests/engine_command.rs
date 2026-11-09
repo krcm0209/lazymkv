@@ -7,6 +7,7 @@ mod common;
 use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{Client, WAIT};
@@ -26,7 +27,7 @@ const REPLAY: [&str; 4] = ["settings.json", "tmdb-search.json", "tmdb-record.jso
 // The relay's texts (Rulings W24, W25, T3-22-d), as the engine's crate-private constants hold them.
 const BUSY: &str = "a command is already running; one runs at a time (design part 9.5)";
 const NO_CTL: &str = "command needs lazymkvctl beside the engine, and this engine has none";
-const RETUNE: &str = "retune --jobs needs the evidence trees of pull request 5 (design part 9.5)";
+const NO_TUNING_ROOT: &str = "retune --jobs needs tuning_root in the engine's settings (design part 9.5)";
 const FORMS: &str = "command needs plan --job, decide --job --title or retune --jobs (design part 9.5)";
 const WRITABLE: &str =
     "lazymkvctl or its folder can be written by a non-elevated process, so the engine will not run it (design part 3.6)";
@@ -397,11 +398,191 @@ fn words_without_job_or_jobs_are_refused() {
     assert!(ctl_spawns(&h).is_empty());
 }
 
+/// `retune --jobs` through the relay (design part 9.5; G2, G3; calls 13, 25; T5-R32, T5-R53, T5-R60).
+mod retune_jobs {
+    use super::*;
+
+    /// The spec retune reads, an absolute path, so lazymkvctl sends it again unchanged.
+    const SPEC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/superpowers/specs/2026-10-04-lazymkv-design.md");
+    /// A refresh manifest of made-up bytes, which only the refresh of a held job writes (T5-R16).
+    const MANIFEST: &[u8] = b"made-up manifest bytes the relay never rewrites\n";
+
+    fn recordings(h: &Harness) -> PathBuf { h.tuning().join("recordings") }
+
+    /// The engine's `--evidence` value, `<tuning>/recordings=<tuning>/dataset`.
+    fn trees(h: &Harness) -> String {
+        format!("{}={}", text(recordings(h)), text(h.tuning().join("dataset")))
+    }
+
+    /// `<tuning>/recordings/<id>/` as the refresh leaves it: the job folder's `state.json` and each of `files`.
+    fn mirror(h: &Harness, id: &str, files: &[&str]) -> PathBuf {
+        let folder = recordings(h).join(id);
+        fs::create_dir_all(&folder).unwrap();
+        for file in ["state.json"].iter().chain(files) {
+            fs::copy(h.job_dir(id).join(file), folder.join(file)).unwrap();
+        }
+        folder
+    }
+
+    /// An orphan `<tuning>/recordings/gone-1/`, no job of the engine's: the filed job's `state.json`,
+    /// `lookup-status.txt` and three TMDb copies, its `tmdb.json` made stale, and `MANIFEST`.
+    fn orphan(h: &Harness, id: &str) -> PathBuf {
+        let folder = recordings(h).join("gone-1");
+        fs::create_dir_all(&folder).unwrap();
+        for file in ["state.json", "lookup-status.txt", "tmdb.json", "tmdb-record.json", "tmdb-search.json"] {
+            fs::copy(h.job_dir(id).join(file), folder.join(file)).unwrap();
+        }
+        let mut copy = json_of(&folder.join("tmdb.json"));
+        copy["fetched_at"] = json!("2026-01-01");
+        fs::write(folder.join("tmdb.json"), serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+        fs::write(folder.join(".lazymkv-refresh.json"), MANIFEST).unwrap();
+        folder
+    }
+
+    fn record_asks(h: &Harness) -> usize {
+        let url = lazymkv_clients::record_url(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 });
+        h.http().requests().iter().filter(|(u, _)| *u == url).count()
+    }
+
+    /// G2 end to end: lazymkvctl sends the clone made absolute, the engine puts its trees first, and one child
+    /// carries both folders, with and without `--subtitles` (retune ignores the TEXTDIR half without it, T5-R53).
+    #[test]
+    fn retune_jobs_reads_the_engines_recordings_and_a_client_evidence_folder_in_one_run() {
+        let (h, _) = filed();
+        let scratch = Scratch::new("relay-retune-clone");
+        let ctx = Ctx::for_test(&scratch.0);
+        for extra in [&[][..], &["--subtitles"][..]] {
+            let connector = h.client();
+            let mut argv: Vec<String> = ["retune", "--jobs", "--evidence", "clone"].map(str::to_string).into();
+            argv.extend(extra.iter().map(|word| word.to_string()));
+            argv.extend(["--spec".to_string(), SPEC.to_string()]);
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out,
+                                        err: &mut err });
+            let printed = (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap());
+            assert_eq!(printed, (0, "relay retune line 1\n".to_string(), String::new()), "{extra:?}");
+            let mut expected =
+                vec!["retune".to_string(), "--evidence".to_string(), trees(&h), "--evidence".to_string(),
+                     text(scratch.0.join("clone"))];
+            expected.extend(extra.iter().map(|word| word.to_string()));
+            expected.extend(["--spec", SPEC, "--spec", SPEC].map(str::to_string));
+            assert_eq!(ctl_spawns(&h).pop().unwrap().args, expected, "{extra:?}");
+        }
+    }
+
+    /// T5-R53: the engine's `--evidence DIR=TEXTDIR` names the text, so retune refuses a relayed `--text` with exit 2.
+    #[test]
+    fn retune_jobs_with_text_exits_2_naming_evidence_dir_equals_textdir() {
+        let (h, _) = filed();
+        let mut c = client(&h);
+        let (_, reply) = c.command(&["retune", "--jobs", "--subtitles", "--text", "ocr", "--spec", SPEC]);
+        assert_eq!(reply, exit(0, 1));
+        let args = ctl_spawns(&h).pop().unwrap().args;
+        let scratch = Scratch::new("relay-retune-text");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = lazymkv_dev::dispatch(&Ctx::for_test(&scratch.0), &args, &mut out, &mut err);
+        let err = String::from_utf8(err).unwrap();
+        assert_eq!((code, out.is_empty()), (2, true), "{err}");
+        assert!(err.ends_with("lazymkv-dev retune: error: argument --text: not with --evidence DIR=TEXTDIR, which \
+                               names the text already\n"), "{err}");
+    }
+
+    /// G3: a held job's stale copy is fetched into its job folder and refreshed into the recordings tree before the
+    /// child starts (the spawn's action reads the tree's copy at the spawn).
+    #[test]
+    fn a_stale_copy_of_an_engine_job_is_fetched_into_its_job_folder_and_copied_across_before_the_child() {
+        let (h, id) = filed();
+        stale(&h, &id, "tmdb-record.json");
+        let folder = mirror(&h, &id, &["tmdb-record.json"]);
+        let seen = Arc::new(Mutex::new(None));
+        {
+            let (seen, copy) = (Arc::clone(&seen), folder.join("tmdb-record.json"));
+            h.on_spawn(&["retune"], move || *seen.lock().unwrap() = Some(fs::read(&copy).unwrap()));
+        }
+        let mut c = client(&h);
+        let (outputs, reply) = c.command(&["retune", "--jobs", "--spec", SPEC]);
+        assert_eq!(reply, exit(0, 1));
+        assert_eq!(outputs, [pair("stdout", "relay retune line 1")]);
+        let job_copy = h.job_dir(&id).join("tmdb-record.json");
+        assert_eq!(json_of(&job_copy)["fetched_at"], json!("2026-10-23"));
+        assert_eq!(seen.lock().unwrap().take(), Some(fs::read(&job_copy).unwrap()),
+                   "the recordings copy was refreshed before the child started");
+        let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+        assert!(log.contains("the TMDb copy tmdb-record.json was fetched again"), "{log}");
+    }
+
+    /// G3 and R4-commands-44: without a token a held job's stale copy refuses the run with exit 3 naming the job and
+    /// the copy; no child runs and the job stays Filed.
+    #[test]
+    fn without_a_token_a_stale_engine_copy_exits_3_naming_it() {
+        let (h, id) = filed();
+        stale(&h, &id, "tmdb-record.json");
+        mirror(&h, &id, &["tmdb-record.json"]);
+        no_token(&h);
+        let mut c = client(&h);
+        let (outputs, reply) = c.command(&["retune", "--jobs", "--spec", SPEC]);
+        assert_eq!(reply, exit(3, 1));
+        let line = format!("lazymkvctl: job {id}: tmdb-record.json: the TMDb copy is more than six months old \
+                            (fetched_at 2026-01-01) and could not be fetched again: no tmdb_token is set");
+        assert_eq!(outputs, [pair("stderr", &line)]);
+        assert!(ctl_spawns(&h).is_empty());
+        assert_eq!(h.state_of(&id), "Filed");
+    }
+
+    /// Call 25 and T5-R60: an orphan's stale copy is fetched into the recordings folder itself as the answer's pretty
+    /// JSON and a final newline, through `<name>.partial`, and the refresh manifest is left as it was.
+    #[test]
+    fn an_orphans_stale_copy_is_fetched_into_its_recordings_folder() {
+        let (h, id) = filed();
+        let folder = orphan(&h, &id);
+        let before = record_asks(&h);
+        let mut c = client(&h);
+        let (outputs, reply) = c.command(&["retune", "--jobs", "--spec", SPEC]);
+        assert_eq!(reply, exit(0, 1));
+        let fetched = format!("lazymkvctl: {}: the TMDb copy tmdb.json was fetched again", folder.display());
+        assert_eq!(outputs, [pair("stderr", &fetched), pair("stdout", "relay retune line 1")]);
+        let bytes = fs::read(folder.join("tmdb.json")).unwrap();
+        let mut pretty = serde_json::to_vec_pretty(&json_of(&folder.join("tmdb.json"))).unwrap();
+        pretty.push(b'\n');
+        assert_eq!(bytes, pretty);
+        assert_eq!(json_of(&folder.join("tmdb.json"))["fetched_at"], json!("2026-10-23"));
+        assert_eq!(bytes, fs::read(h.job_dir(&id).join("tmdb.json")).unwrap(), "the answer the job folder holds");
+        assert_eq!(record_asks(&h), before + 1);
+        for entry in fs::read_dir(&folder).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(!name.to_string_lossy().ends_with(".partial"), "{name:?}");
+        }
+        assert_eq!(fs::read(folder.join(".lazymkv-refresh.json")).unwrap(), MANIFEST);
+        assert!(!h.job_dir("gone-1").exists());
+    }
+
+    /// Call 25: an orphan whose fetch fails is a standard-error line and the child still runs; the run is not exit 3.
+    #[test]
+    fn an_orphan_whose_fetch_fails_is_unmeasured_and_the_run_does_not_exit_3() {
+        let (h, id) = filed();
+        let folder = orphan(&h, &id);
+        let stale_bytes = fs::read(folder.join("tmdb.json")).unwrap();
+        no_token(&h);
+        let mut c = client(&h);
+        let (outputs, reply) = c.command(&["retune", "--jobs", "--spec", SPEC]);
+        assert_eq!(reply, exit(0, 1));
+        let line = format!("lazymkvctl: {}: tmdb.json: the TMDb copy is more than six months old (fetched_at \
+                            2026-01-01) and could not be fetched again: no tmdb_token is set; retune reports the \
+                            folder as unmeasured", folder.display());
+        assert_eq!(outputs, [pair("stderr", &line), pair("stdout", "relay retune line 1")]);
+        assert_eq!(ctl_spawns(&h).len(), 1);
+        assert_eq!(fs::read(folder.join("tmdb.json")).unwrap(), stale_bytes);
+    }
+}
+
+/// T5-R32 through the engine: the harness's settings with `tuning_root` null refuse `retune --jobs`.
 #[test]
-fn retune_jobs_is_refused_until_pull_request_5() {
-    let h = stand_in(RELAY);
+fn retune_jobs_without_tuning_root_is_refused_naming_it() {
+    let h = Harness::new(Path::new(env!("CARGO_BIN_EXE_fake-tool")), RELAY,
+                         json!({"keep_tuning_evidence": false, "tuning_root": null, "drive_settle_s": 0,
+                                "drive_ready_timeout_s": 1}));
     let mut c = client(&h);
-    assert_eq!(c.err("command", json!({"words": ["retune", "--jobs", "--spec", "spec.md"]})), RETUNE);
+    assert_eq!(c.err("command", json!({"words": ["retune", "--jobs", "--spec", "spec.md"]})), NO_TUNING_ROOT);
     assert!(ctl_spawns(&h).is_empty());
 }
 

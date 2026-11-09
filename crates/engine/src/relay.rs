@@ -1,31 +1,39 @@
-//! The `command` relay (S35; design parts 4.4, 9.1, 9.3, 9.5; Rulings W10, W24, W25, T4-R9): the child's words, the
-//! thread that fetches the job's stale TMDb copies again before the child, the thread that streams its lines to the
-//! client that asked, and the reply.
+//! The `command` relay (S35; design parts 4.4, 9.1, 9.3, 9.5; Rulings W10, W24, W25 as G2 and G3 end it, T4-R9): the
+//! child's words, the thread that fetches the job's, or the tuning recordings', stale TMDb copies again before the
+//! child, the thread that streams its lines to the client that asked, and the reply.
 
+use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use lazymkv_clients::{HttpTransport, LookupBook};
+use lazymkv_clients::{
+    reason_text, refetch_record, refetch_search, stale_copies, status_record, HttpTransport, LookupBook, PendingReason,
+    Seasons,
+};
 use lazymkv_core::ipc::{push_line, OutputStream, Push};
+use lazymkv_core::lookup::stale::TMDB_COPIES;
 use lazymkv_core::plan::Plan;
 use lazymkv_dev::forms::read_forms;
 use lazymkv_platform::{GuardedChild, KillHandle};
 use serde_json::{json, Value};
 
-use crate::file_phase::{refetch_stale, replay_options, OwedCheck};
+use crate::file_phase::{refetch_stale, replay_options, stale_sentence, OwedCheck, Refetched};
 use crate::ipc_server::{no_job, Clients};
 use crate::owner::Msg;
+use crate::staged::write_checked;
 use crate::store::Store;
+use crate::tuning::{refresh_recordings, DATASET, RECORDINGS};
 
 /// A second `command` while one runs (design part 9.5). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_BUSY: &str = "a command is already running; one runs at a time (design part 9.5)";
 /// An engine whose `EngineConfig.ctl` is None (design part 9.5). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_NO_CTL: &str = "command needs lazymkvctl beside the engine, and this engine has none";
-/// `retune --jobs` before pull request 5 (Ruling W25). Def: T3-22. Use: T3-22.
-pub(crate) const RETUNE_WAITS: &str = "retune --jobs needs the evidence trees of pull request 5 (design part 9.5)";
+/// `retune --jobs` with no `tuning_root` in the engine's settings (T5-R32). Def: T5-22. Use: T5-22.
+pub(crate) const RETUNE_NO_TUNING_ROOT: &str =
+    "retune --jobs needs tuning_root in the engine's settings (design part 9.5)";
 /// A child that ended without an exit code (design part 9.3). Def: T3-22. Use: T3-22.
 pub(crate) const NO_EXIT_CODE: &str = "lazymkvctl ended without an exit code";
 /// Words that are none of design part 9.5's three engine forms (Ruling W24). Def: T3-22. Use: T3-22.
@@ -56,14 +64,35 @@ fn word(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// A `tuning_root` with an empty or all-space value read as unset, as `Settings::validate` reads it (T5-R32).
+fn set_root(root: Option<&str>) -> Option<&str> {
+    root.filter(|root| !root.trim().is_empty())
+}
+
+/// A job the words may name: its folder, its title keys, whether its dataset copy landed (T5-R14), and its own
+/// settings' `tuning_root`, where that copy landed (ENG-19, call 14). Def: T5-22. Use: T5-22.
+pub(crate) struct CommandJob {
+    pub(crate) folder: PathBuf,
+    pub(crate) keys: Vec<String>,
+    pub(crate) dataset_done: bool,
+    pub(crate) tuning_root: Option<String>,
+}
+
 /// The child's words for a `command`'s `words` (design part 9.5's table; Rulings W24, W25), or the refusal's text.
-/// `job` gives a job's folder and its title keys, None for an unknown job. Built words come first and the client's
-/// remaining words after them, unchanged, so `Args`' last-wins rule lets a flag the client gave win. lazymkvctl sends a
-/// relative path flag's value again, made absolute (V10's ruling); the engine resolves nothing and passes the words
-/// unchanged. Def: T3-22. Use: T3-22.
+/// `job` gives a job the words may name (`CommandJob`), None for an unknown job; `tuning_root` is the engine's
+/// settings' own, which only `retune --jobs` reads. Built words come first and the client's remaining words after
+/// them, unchanged, so `Args`' last-wins rule lets a single-valued flag the client gave win, and a client's
+/// `--evidence` adds a folder after the engine's (G2 amends Ruling W24 for `--evidence`). `retune --jobs` is `retune
+/// --evidence <tuning_root>\recordings=<tuning_root>\dataset` and the client's words, refused with
+/// `RETUNE_NO_TUNING_ROOT` when the engine's settings hold no `tuning_root` (T5-R32); a `decide --job --title` of a
+/// job whose dataset copy landed (`tuning_copy` is `done`, T5-R14) gains `--text <tuning_root>\dataset` after the
+/// replay flags (call 14), over the job's own settings' `tuning_root` (ENG-19). lazymkvctl sends a relative path
+/// flag's value again, made absolute (V10's ruling); the engine resolves nothing and passes the words unchanged.
+/// Def: T3-22, T5-22. Use: T3-22, T5-22.
 pub(crate) fn child_words(
     words: &[String],
-    job: &dyn Fn(&str) -> Option<(PathBuf, Vec<String>)>,
+    job: &dyn Fn(&str) -> Option<CommandJob>,
+    tuning_root: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let Some((name, rest)) = words.split_first() else {
         return Err(COMMAND_FORMS.to_string());
@@ -73,16 +102,23 @@ pub(crate) fn child_words(
     }
     let forms = read_forms(name, rest)?;
     if forms.jobs {
-        return Err(RETUNE_WAITS.to_string());
+        let Some(root) = set_root(tuning_root).map(Path::new) else {
+            return Err(RETUNE_NO_TUNING_ROOT.to_string());
+        };
+        let trees = format!("{}={}", word(&root.join(RECORDINGS)), word(&root.join(DATASET)));
+        let mut child = vec!["retune".to_string(), "--evidence".to_string(), trees];
+        child.extend(forms.words);
+        return Ok(child);
     }
     let Some(id) = forms.job else {
         return Err(COMMAND_FORMS.to_string());
     };
-    let Some((folder, keys)) = job(&id) else {
+    let Some(CommandJob { folder, keys, dataset_done, tuning_root: job_root }) = job(&id) else {
         return Err(no_job(&id));
     };
     // `read_forms` lets `--title` through only with `decide --job` and requires it there, and refuses `--job` with
     // `retune`, so a title is decide's and no title is plan's.
+    let decide = forms.title.is_some();
     let mut child = match forms.title {
         Some(key) if !keys.contains(&key) => return Err(no_title(&id, &key)),
         Some(key) => vec!["decide".to_string(), "--rec".to_string(), word(&folder.join(key))],
@@ -99,6 +135,10 @@ pub(crate) fn child_words(
         if let Some(path) = path {
             child.extend([flag.to_string(), word(&path)]);
         }
+    }
+    // Call 14 and T5-R14: the dataset copy landed under the job's own tuning_root, not the engine's (ENG-19).
+    if let Some(root) = set_root(job_root.as_deref()).filter(|_| decide && dataset_done) {
+        child.extend(["--text".to_string(), word(&Path::new(root).join(DATASET))]);
     }
     child.extend(forms.words);
     Ok(child)
@@ -160,7 +200,210 @@ pub(crate) fn spawn_command_refetch(
         // A season still owed is the Err too, so no child runs with it missing (Ruling RR1-R2a).
         let refetched = fetched.for_decide();
         // An owner that is gone has stopped and answered the command already (Ruling T3-22-d).
-        let _ = owner.send(Msg::CommandRefetched { client, id, words, refetched });
+        let _ = owner.send(Msg::CommandRefetched { client, id, words, refetched, warnings: Vec::new() });
+    }));
+}
+
+/// What the relayed retune's refetch works with: the recordings folder, every job the owner holds with its refetch,
+/// and the transport, token and date for the orphans (G3, call 25). Def: T5-22. Use: T5-22.
+pub(crate) struct RetuneRefetch {
+    pub(crate) recordings: PathBuf,
+    pub(crate) jobs: Vec<(String, CommandRefetch)>,
+    pub(crate) http: Arc<dyn HttpTransport>,
+    pub(crate) token: Option<String>,
+    pub(crate) today: String,
+}
+
+/// `job <id>: <reason>`, an engine job's refusal of a relayed retune (G3; R4-commands-44). Def: T5-22. Use: T5-22.
+pub(crate) fn job_refusal(id: &str, reason: &str) -> String {
+    format!("job {id}: {reason}")
+}
+
+/// `<folder>: the TMDb copy <file> was fetched again`, an orphan's standard-error line (call 25). Def: T5-22.
+/// Use: T5-22.
+pub(crate) fn orphan_fetched(folder: &Path, file: &str) -> String {
+    format!("{}: the TMDb copy {file} was fetched again", folder.display())
+}
+
+/// `<folder>: <stale sentence>; retune reports the folder as unmeasured`, an orphan's copy not fetched again, which
+/// never refuses the run (call 25; T5-R40). Def: T5-22. Use: T5-22.
+pub(crate) fn orphan_unmeasured(folder: &Path, sentence: &str) -> String {
+    format!("{}: {sentence}; retune reports the folder as unmeasured", folder.display())
+}
+
+/// A JSON file's top-level `queries` strings, after one byte order mark; none when it cannot be read or holds none.
+fn saved_queries(path: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(path) else { return Vec::new() };
+    let Ok(saved) = serde_json::from_str::<Value>(text.strip_prefix('\u{feff}').unwrap_or(&text)) else {
+        return Vec::new();
+    };
+    let queries = saved["queries"].as_array().map(Vec::as_slice).unwrap_or_default();
+    queries.iter().filter_map(|query| query.as_str().map(str::to_string)).collect()
+}
+
+/// An orphan's stale TMDb copies fetched again into its recordings folder itself (call 25; T5-R60), the folder being
+/// no job the owner holds, so no job folder, book or status file is touched. The status is `<folder>\lookup-status.txt`
+/// with any byte order mark removed (empty when absent); the copies are `stale_copies` over it read as a job folder
+/// (an orphan holds `state.json`, so a missing copy whose status line says 200 is fetched too); none asks nothing. A
+/// listed `tmdb.json` or `tmdb-record.json` is fetched once for both with `refetch_record` by the status file's record
+/// (`status_record`; none fails each listed record copy with `no TMDb ID names the record`), every listed season with
+/// `tmdb-record.json` listed, none without; of the fetched files only the listed copies are written, a
+/// `tmdb-record.json` whose fetch left a season pending failing with that season's sentence instead. A listed
+/// `tmdb-search.json` is fetched with `refetch_search` over the copy's own `queries`. Each copy lands through
+/// `write_checked`. Only `fetched` (the copies written, in `TMDB_COPIES` order) and `failed` (a `stale_sentence` per
+/// copy not fetched again, or its write's error) are set. Def: T5-22. Use: T5-22.
+pub(crate) fn refetch_orphan(folder: &Path, http: &dyn HttpTransport, token: Option<&str>, today: &str) -> Refetched {
+    let status = fs::read_to_string(folder.join("lookup-status.txt")).unwrap_or_default();
+    let status = status.strip_prefix('\u{feff}').unwrap_or(&status);
+    let copies = stale_copies(status, &|file| fs::read(folder.join(file)).ok(), true, today);
+    let mut done = Refetched::default();
+    if copies.is_empty() {
+        return done;
+    }
+    let listed = |file: &str| copies.iter().any(|copy| copy.file == file);
+    let sentence = |file: &str, reason: &PendingReason| {
+        let copy = copies.iter().find(|copy| copy.file == file);
+        copy.map(|copy| stale_sentence(folder, copy, reason)).unwrap_or_default()
+    };
+    let write = |file: &str, bytes: &[u8]| {
+        let path = folder.join(file);
+        write_checked(&path, bytes).map_err(|error| {
+            let why = format!("{}: the TMDb copy could not be written: {error}", path.display());
+            sentence(file, &PendingReason::Unparsed(why))
+        })
+    };
+    // Each listed copy's end: Ok when written, else the sentence `failed` holds for it.
+    let mut ends: Vec<(String, Result<(), String>)> = Vec::new();
+    if listed("tmdb.json") || listed("tmdb-record.json") {
+        let seasons = if listed("tmdb-record.json") { Seasons::Listed } else { Seasons::None };
+        let fetched = match status_record(status) {
+            None => Err(PendingReason::Unparsed("no TMDb ID names the record".to_string())),
+            Some(id) => refetch_record(http, token, id, seasons, today),
+        };
+        match fetched {
+            Err(reason) => {
+                for file in ["tmdb.json", "tmdb-record.json"].into_iter().filter(|file| listed(file)) {
+                    ends.push((file.to_string(), Err(sentence(file, &reason))));
+                }
+            }
+            Ok(refetched) => {
+                for saved in refetched.files.iter().filter(|saved| listed(&saved.name)) {
+                    let end = match &refetched.seasons.pending {
+                        Some((n, reason)) if saved.name == "tmdb-record.json" => Err(format!(
+                            "tmdb-record.json: season {n} could not be fetched again: {}",
+                            reason_text(reason)
+                        )),
+                        _ => write(&saved.name, &saved.bytes),
+                    };
+                    ends.push((saved.name.clone(), end));
+                }
+            }
+        }
+    }
+    if listed("tmdb-search.json") {
+        let queries = saved_queries(&folder.join("tmdb-search.json"));
+        let end = match refetch_search(http, token, &queries, today) {
+            Ok((_, saved)) => write("tmdb-search.json", &saved.bytes),
+            Err(reason) => Err(sentence("tmdb-search.json", &reason)),
+        };
+        ends.push(("tmdb-search.json".to_string(), end));
+    }
+    for file in TMDB_COPIES {
+        for (_, end) in ends.iter().filter(|(name, _)| name == file) {
+            match end {
+                Ok(()) => done.fetched.push(file.to_string()),
+                Err(sentence) => done.failed.push(sentence.clone()),
+            }
+        }
+    }
+    done
+}
+
+/// The folders of `recordings` in name order; a recordings folder that does not exist lists none.
+fn recordings_folders(recordings: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(recordings) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut folders = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            folders.push((entry.file_name(), entry.path()));
+        }
+    }
+    folders.sort();
+    Ok(folders.into_iter().map(|(_, path)| path).collect())
+}
+
+/// The relayed retune's refetch (G3, call 25), on a thread of its own that it drops, as `spawn_command_refetch` does,
+/// so the owner thread never lists the share or waits on a request. It lists `work.recordings` (one that does not
+/// exist lists no folder; another error is the refusal `<recordings>: the tuning recordings could not be listed:
+/// <error>`) and takes its folders in name order. A folder named for a job the owner holds is that job's mirror: its
+/// stale copies are fetched again into the job folder with `refetch_stale` (`OwedCheck::Wait`), each `log_lines`
+/// line written to its job.log; `for_decide`'s Err is the refusal `job_refusal(id, reason)`; otherwise, when
+/// anything was fetched, `refresh_recordings` copies the job folder across, whose error is the refusal `job <id>: the
+/// recordings copy could not be refreshed: <error>`, since the child would read the stale mirror. Any other folder is
+/// an orphan, its copies fetched again into it with `refetch_orphan`: each copy fetched is an `orphan_fetched`
+/// warning and each not fetched an `orphan_unmeasured` one, which never refuse the run. Every folder is done before
+/// the one `Msg::CommandRefetched`, Ok with no refusal, else Err of the refusals joined with "; ", and the warnings.
+/// Def: T5-22. Use: T5-22.
+pub(crate) fn spawn_retune_refetch(
+    work: RetuneRefetch,
+    client: u64,
+    id: Option<u64>,
+    words: Vec<String>,
+    owner: Sender<Msg>,
+) {
+    drop(thread::spawn(move || {
+        let mut refusals = Vec::new();
+        let mut warnings = Vec::new();
+        match recordings_folders(&work.recordings) {
+            Err(error) => refusals.push(format!(
+                "{}: the tuning recordings could not be listed: {error}",
+                work.recordings.display()
+            )),
+            Ok(folders) => {
+                for folder in folders {
+                    let name = folder.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    match work.jobs.iter().find(|(job_id, _)| *job_id == name) {
+                        Some((job_id, job)) => {
+                            let fetched = refetch_stale(
+                                &job.job_dir,
+                                job.plan.as_ref(),
+                                &job.lookups,
+                                job.http.as_ref(),
+                                job.token.as_deref(),
+                                &job.today,
+                                OwedCheck::Wait,
+                            );
+                            let lines = fetched.log_lines();
+                            for line in &lines {
+                                job.store.job_log(job_id, line);
+                            }
+                            if let Err(reason) = fetched.for_decide() {
+                                refusals.push(job_refusal(job_id, &reason));
+                            } else if !lines.is_empty() {
+                                if let Err(error) = refresh_recordings(&job.job_dir, &folder) {
+                                    let reason = format!("the recordings copy could not be refreshed: {error}");
+                                    refusals.push(job_refusal(job_id, &reason));
+                                }
+                            }
+                        }
+                        None => {
+                            let fetched =
+                                refetch_orphan(&folder, work.http.as_ref(), work.token.as_deref(), &work.today);
+                            warnings.extend(fetched.fetched.iter().map(|file| orphan_fetched(&folder, file)));
+                            warnings.extend(fetched.failed.iter().map(|sentence| orphan_unmeasured(&folder, sentence)));
+                        }
+                    }
+                }
+            }
+        }
+        let refetched = if refusals.is_empty() { Ok(()) } else { Err(refusals.join("; ")) };
+        // An owner that is gone has stopped and answered the command already (Ruling T3-22-d).
+        let _ = owner.send(Msg::CommandRefetched { client, id, words, refetched, warnings });
     }));
 }
 
@@ -283,36 +526,137 @@ mod tests {
         s.write("a-1/settings.json", "{}");
         s.write("a-1/tmdb-search.json", "{}");
         let folder = s.0.join("a-1");
-        let job = |id: &str| (id == "a-1").then(|| (s.0.join(id), vec!["t00-00800".to_string()]));
+        let job = |id: &str| {
+            (id == "a-1").then(|| CommandJob {
+                folder: s.0.join(id),
+                keys: vec!["t00-00800".to_string()],
+                dataset_done: false,
+                tuning_root: None,
+            })
+        };
         let flags = vec!["--settings".to_string(), text(folder.join("settings.json")), "--tmdb-search".to_string(),
                          text(folder.join("tmdb-search.json"))];
         let mut plan = vec!["plan".to_string(), text(folder.clone())];
         plan.extend(flags.clone());
         plan.extend(words(&["--evidence", "e", "--settings", "mine.json"]));
-        assert_eq!(child_words(&words(&["plan", "--job", "a-1", "--evidence", "e", "--settings", "mine.json"]), &job),
-                   Ok(plan));
+        let given = words(&["plan", "--job", "a-1", "--evidence", "e", "--settings", "mine.json"]);
+        assert_eq!(child_words(&given, &job, None), Ok(plan));
         let mut decide = vec!["decide".to_string(), "--rec".to_string(), text(folder.join("t00-00800"))];
         decide.extend(flags);
-        assert_eq!(child_words(&words(&["decide", "--job", "a-1", "--t", "t00-00800"]), &job), Ok(decide));
+        assert_eq!(child_words(&words(&["decide", "--job", "a-1", "--t", "t00-00800"]), &job, None), Ok(decide));
     }
 
     #[test]
     fn every_other_form_is_refused_with_its_text() {
-        let job = |id: &str| (id == "a-1").then(|| (PathBuf::from("jobs").join(id), vec!["t00-00800".to_string()]));
+        let job = |id: &str| {
+            (id == "a-1").then(|| CommandJob {
+                folder: PathBuf::from("jobs").join(id),
+                keys: vec!["t00-00800".to_string()],
+                dataset_done: false,
+                tuning_root: None,
+            })
+        };
         let cases: Vec<(Vec<&str>, String)> = vec![
             (vec![], COMMAND_FORMS.to_string()),
             (vec!["status"], COMMAND_FORMS.to_string()),
             (vec!["plan", "some-slug"], COMMAND_FORMS.to_string()),
             (vec!["retune", "--set", "x=1"], COMMAND_FORMS.to_string()),
-            (vec!["retune", "--jobs", "--spec", "spec.md"], RETUNE_WAITS.to_string()),
             (vec!["plan", "--jobs"], "argument --jobs: only with retune".to_string()),
             (vec!["plan", "--job", "b-1"], "no job b-1".to_string()),
             (vec!["decide", "--job", "a-1", "--title", "t99-00000"], "job a-1 has no title t99-00000".to_string()),
             (vec!["decide", "--job", "a-1", "--title", ".."], "job a-1 has no title ..".to_string()),
         ];
         for (given, refusal) in cases {
-            assert_eq!(child_words(&words(&given), &job), Err(refusal), "{given:?}");
+            assert_eq!(child_words(&words(&given), &job, Some("tuning-root")), Err(refusal), "{given:?}");
         }
+    }
+
+    /// One job, `a-1` in `folder`, with the title t00-00800, its dataset copy `done` or not, and `tuning-root` as its
+    /// own settings' `tuning_root`.
+    fn one_job(folder: PathBuf, done: bool) -> impl Fn(&str) -> Option<CommandJob> {
+        rooted_job(folder, done, Some("tuning-root"))
+    }
+
+    /// `one_job` with its own settings' `tuning_root` given (ENG-19).
+    fn rooted_job(folder: PathBuf, done: bool, root: Option<&str>) -> impl Fn(&str) -> Option<CommandJob> {
+        let root = root.map(str::to_string);
+        move |id: &str| {
+            (id == "a-1").then(|| CommandJob {
+                folder: folder.clone(),
+                keys: vec!["t00-00800".to_string()],
+                dataset_done: done,
+                tuning_root: root.clone(),
+            })
+        }
+    }
+
+    /// `<root>\recordings=<root>\dataset`, the engine's `--evidence` value (design part 9.5; G2).
+    fn trees(root: &str) -> String {
+        format!("{}={}", text(Path::new(root).join("recordings")), text(Path::new(root).join("dataset")))
+    }
+
+    /// Design part 9.5's table: `retune --jobs` is `retune --evidence <tuning_root>\recordings=<tuning_root>\dataset`,
+    /// then the client's words without `--jobs`.
+    #[test]
+    fn retune_jobs_is_relayed_with_the_tuning_trees_first() {
+        let job = one_job(PathBuf::from("jobs").join("a-1"), false);
+        let given = words(&["retune", "--jobs", "--spec", "spec.md"]);
+        let expected = vec!["retune".to_string(), "--evidence".to_string(), trees("tuning-root"), "--spec".to_string(),
+                            "spec.md".to_string()];
+        assert_eq!(child_words(&given, &job, Some("tuning-root")), Ok(expected));
+    }
+
+    /// G2: the client's `--evidence` values follow the engine's, in the order given, so retune reads them all.
+    #[test]
+    fn the_clients_evidence_follows_the_engines_and_accumulates() {
+        let job = one_job(PathBuf::from("jobs").join("a-1"), false);
+        let given = words(&["retune", "--jobs", "--evidence", "clone", "--subtitles", "--evidence", "more=text",
+                            "--spec", "spec.md"]);
+        let mut expected = vec!["retune".to_string(), "--evidence".to_string(), trees("tuning-root")];
+        expected.extend(words(&["--evidence", "clone", "--subtitles", "--evidence", "more=text", "--spec", "spec.md"]));
+        assert_eq!(child_words(&given, &job, Some("tuning-root")), Ok(expected));
+    }
+
+    /// T5-R32: no tuning_root, an empty one or one of spaces refuses `retune --jobs` naming the setting.
+    #[test]
+    fn retune_jobs_without_tuning_root_is_refused_naming_it() {
+        assert_eq!(RETUNE_NO_TUNING_ROOT, "retune --jobs needs tuning_root in the engine's settings (design part 9.5)");
+        let job = one_job(PathBuf::from("jobs").join("a-1"), false);
+        for root in [None, Some(""), Some("   ")] {
+            assert_eq!(child_words(&words(&["retune", "--jobs", "--spec", "spec.md"]), &job, root),
+                       Err(RETUNE_NO_TUNING_ROOT.to_string()), "{root:?}");
+        }
+    }
+
+    /// Call 14 and T5-R14: `--text <tuning_root>\dataset` after the replay flags once the dataset copy is done, never
+    /// before, never without a tuning_root and never for plan; the root is the job's own settings' `tuning_root`, where
+    /// its copy landed (ENG-19), not the engine's; a client's own `--text` comes after it and wins.
+    #[test]
+    fn decide_job_gets_text_once_the_dataset_copy_is_done_and_not_before() {
+        let s = Scratch::new("relay-text");
+        s.write("a-1/settings.json", "{}");
+        let folder = s.0.join("a-1");
+        let replay = vec!["--settings".to_string(), text(folder.join("settings.json"))];
+        let mut head = vec!["decide".to_string(), "--rec".to_string(), text(folder.join("t00-00800"))];
+        head.extend(replay.clone());
+        let given = words(&["decide", "--job", "a-1", "--title", "t00-00800"]);
+        let mut with_text = head.clone();
+        with_text.extend(["--text".to_string(), text(Path::new("tuning-root").join("dataset"))]);
+        assert_eq!(child_words(&given, &one_job(folder.clone(), true), Some("tuning-root")), Ok(with_text.clone()));
+        assert_eq!(child_words(&given, &one_job(folder.clone(), false), Some("tuning-root")), Ok(head.clone()));
+        // The owner moved the engine's tuning_root after the copy landed: the job's own root still names its dataset.
+        assert_eq!(child_words(&given, &one_job(folder.clone(), true), Some("moved-root")), Ok(with_text.clone()));
+        assert_eq!(child_words(&given, &one_job(folder.clone(), true), None), Ok(with_text.clone()));
+        assert_eq!(child_words(&given, &rooted_job(folder.clone(), true, None), Some("tuning-root")), Ok(head.clone()));
+        assert_eq!(child_words(&given, &rooted_job(folder.clone(), true, Some("  ")), Some("tuning-root")), Ok(head));
+        let mut mine = given.clone();
+        mine.extend(words(&["--text", "mine"]));
+        with_text.extend(words(&["--text", "mine"]));
+        assert_eq!(child_words(&mine, &one_job(folder.clone(), true), Some("tuning-root")), Ok(with_text));
+        let mut plan = vec!["plan".to_string(), text(folder.clone())];
+        plan.extend(replay);
+        let given = words(&["plan", "--job", "a-1"]);
+        assert_eq!(child_words(&given, &one_job(folder, true), Some("tuning-root")), Ok(plan));
     }
 
     /// The burst's line count.

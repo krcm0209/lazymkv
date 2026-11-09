@@ -51,7 +51,9 @@ use crate::{usage_error, Args};
 
 /// The synopsis after "usage: lazymkv-dev ".
 const USAGE: &str = "retune [--evidence DIR[=TEXTDIR] ...] [--set NAME=VALUE] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]";
-const FLAGS: [&str; 8] =
+/// retune's flags, in its parser's order; lazymkvctl reads a relayed retune's words with them and its drift guard holds
+/// `RETUNE_RELAY_FLAGS` equal to them plus `--jobs` (V10, call 13). Def: T5-22. Use: T5-22.
+pub const FLAGS: [&str; 8] =
     ["--evidence", "--set", "--snapshot", "--compare", "--spec", "--allow-unmeasured", "--subtitles", "--text"];
 /// --subtitles runs the subtitle harness, which takes none of the audio harness's flags (RP15).
 const SUBTITLES_ALONE: &str =

@@ -41,8 +41,8 @@ pub const REFUSED: &str = "lazymkvctl: the engine refused the connection";
 /// The message of exit 4 when only an elevated client may reach the engine (design part 9.6). Def: T27. Use: T28.
 pub const NOT_ELEVATED: &str = "lazymkvctl: run lazymkvctl elevated to reach the engine";
 
-/// retune's eight flags (crates/dev/src/cmd/retune.rs:38) plus "--jobs", for reading a relayed retune's words.
-/// Design part 9.6. Def: T27. Use: T27, T28.
+/// retune's eight flags (`lazymkv_dev::cmd::retune::FLAGS`, held equal by `the_relay_reads_retunes_own_flag_list`)
+/// plus "--jobs", for reading a relayed retune's words. Design part 9.6; V10. Def: T27. Use: T27, T28, T5-22.
 pub(crate) const RETUNE_RELAY_FLAGS: [&str; 9] = [
     "--evidence",
     "--set",
@@ -63,7 +63,7 @@ usage: lazymkvctl <command> [arguments]
 commands run here (design part 9.5):
   plan <slug|recording dir|scan file> [lazymkv-dev plan's flags]   or   plan --job ID
   decide (<slug> <label> | --rec DIR) [lazymkv-dev decide's flags]   or   decide --job ID --title KEY
-  retune [lazymkv-dev retune's flags]   or   retune --jobs [--spec FILE]
+  retune [lazymkv-dev retune's flags]   or   retune --jobs [lazymkv-dev retune's flags]
 ";
 
 /// Writes `lazymkvctl --help`'s words: USAGE, then one indented line per `ENGINE_COMMANDS` synopsis (PF-33).
@@ -143,21 +143,99 @@ pub(crate) fn retune_spec(ctx: &Ctx, words: &[String]) -> Result<PathBuf, String
 pub(crate) const DECIDE_PATH_FLAGS: [&str; 7] =
     ["--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"];
 
-/// The words of a relayed plan or decide (`argv[0]`), with each path flag whose value is relative sent again, made
-/// absolute with `ctx.abs` against lazymkvctl's working folder (V10's ruling), since the child runs in the engine's.
-/// The words after the name are read with the child's own declared flags (`plan::FLAGS`, `decide::FLAGS`), so a
-/// prefix, the `=` form and a repeat resolve as they do in the child; the added words go at the first `--`, else at the
-/// end, in the path list's order (`plan::FLAGS`, `DECIDE_PATH_FLAGS`), after the values they override, which the
-/// child's last-wins reads. An absolute value, or a path flag not given, adds nothing. Any other name, or a path flag
-/// with no value, gives `argv` unchanged, and the child prints dev's own error and exits 2. `--job` and `--title`
-/// cannot confuse the reading: `read_forms` accepted them, their values never start with `-`, and `--t` is ambiguous
-/// in decide's list, so `Args::flag` skips it. A drive-relative value such as `D:alt.json` stays drive-relative.
-/// Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
+/// retune's path flags that take one path, sent again made absolute (V10). Def: T5-22. Use: T5-22.
+pub(crate) const RETUNE_PATH_FLAGS: [&str; 3] = ["--snapshot", "--compare", "--text"];
+
+/// Whether `word`, before the first `--`, names `--evidence` as `Args` reads it over `RETUNE_RELAY_FLAGS`: it starts
+/// with `--`, is not `--` alone, and its text before any `=` is `--evidence` or a prefix no other entry starts with.
+fn names_evidence(word: &str) -> bool {
+    if !word.starts_with("--") || word == "--" {
+        return false;
+    }
+    let option = word.split_once('=').map_or(word, |(option, _)| option);
+    option == "--evidence"
+        || ("--evidence".starts_with(option)
+            && !RETUNE_RELAY_FLAGS.iter().any(|flag| *flag != "--evidence" && flag.starts_with(option)))
+}
+
+/// An `--evidence` value with each half of `DIR=TEXTDIR`, split at the first `=`, made absolute with `ctx.abs` when it
+/// is not; an empty half stays empty, as it names no folder.
+fn evidence_value(ctx: &Ctx, value: &str) -> String {
+    let abs = |half: &str| {
+        if half.is_empty() || Path::new(half).is_absolute() {
+            half.to_string()
+        } else {
+            ctx.abs(half).to_string_lossy().into_owned()
+        }
+    };
+    match value.split_once('=') {
+        Some((dir, text)) => format!("{}={}", abs(dir), abs(text)),
+        None => abs(value),
+    }
+}
+
+/// The words of a relayed retune with each relative `--evidence` value made absolute where it stands (G2;
+/// R4-commands-47, 48): the value split at its first `=` into DIR and TEXTDIR, each half that is not absolute replaced
+/// by `ctx.abs` of it, written back as `DIR=TEXTDIR` or `DIR`; in the `=` form the word keeps its own flag text before
+/// the `=`. A word before the first `--` names `--evidence` when it starts with `--`, is not `--` alone, and its text
+/// before any `=` is `--evidence` or a prefix that no other entry of `RETUNE_RELAY_FLAGS` starts with, as `Args` reads
+/// it; without the `=` form its value is the next word. None when `Args::new(&argv[1..],
+/// &RETUNE_RELAY_FLAGS).flags("--evidence")` is an error (a value missing), and the caller then sends the words
+/// unchanged, so the child prints dev's own error. Def: T5-22. Use: T5-22.
+pub(crate) fn evidence_in_place(ctx: &Ctx, argv: &[String]) -> Option<Vec<String>> {
+    if argv.is_empty() || Args::new(&argv[1..], &RETUNE_RELAY_FLAGS).flags("--evidence").is_err() {
+        return None;
+    }
+    let mut words = argv.to_vec();
+    let mut at = 1;
+    while at < words.len() && words[at] != "--" {
+        if !names_evidence(&words[at]) {
+            at += 1;
+            continue;
+        }
+        match words[at].split_once('=') {
+            Some((flag, value)) => {
+                words[at] = format!("{flag}={}", evidence_value(ctx, value));
+                at += 1;
+            }
+            // `flags` read a value for every `--evidence`, so the next word is this one's.
+            None if at + 1 < words.len() => {
+                words[at + 1] = evidence_value(ctx, &words[at + 1]);
+                at += 2;
+            }
+            None => return None,
+        }
+    }
+    Some(words)
+}
+
+/// The words of a relayed plan, decide or retune (`argv[0]`), with each path flag whose value is relative sent again,
+/// made absolute with `ctx.abs` against lazymkvctl's working folder (V10's ruling), since the child runs in the
+/// engine's. The words after the name are read with the child's own declared flags (`plan::FLAGS`, `decide::FLAGS`,
+/// `RETUNE_RELAY_FLAGS`), so a prefix, the `=` form and a repeat resolve as they do in the child; the added words go
+/// at the first `--`, else at the end, in the path list's order (`plan::FLAGS`, `DECIDE_PATH_FLAGS`,
+/// `RETUNE_PATH_FLAGS`), after the values they override, which the child's last-wins reads. A retune's `--evidence`
+/// accumulates, so its values are replaced in place (`evidence_in_place`) instead of sent again, which would read a
+/// folder twice (G2). An absolute value, or a path flag not given, adds nothing. Any other name, or a path flag with
+/// no value, gives `argv` unchanged, and the child prints dev's own error and exits 2. `--job` and `--title` cannot
+/// confuse the reading: `read_forms` accepted them, their values never start with `-`, and `--t` is ambiguous in
+/// decide's list, so `Args::flag` skips it. A drive-relative value such as `D:alt.json` stays drive-relative.
+/// Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10), T5-22.
 pub(crate) fn relayed_paths(ctx: &Ctx, argv: &[String]) -> Vec<String> {
     let (declared, paths): (&[&str], &[&str]) = match argv.first().map(String::as_str) {
         Some("plan") => (&plan::FLAGS[..], &plan::FLAGS[..]),
         Some("decide") => (&decide::FLAGS[..], &DECIDE_PATH_FLAGS[..]),
+        Some("retune") => (&RETUNE_RELAY_FLAGS[..], &RETUNE_PATH_FLAGS[..]),
         _ => return argv.to_vec(),
+    };
+    let given = argv;
+    let argv = if given[0] == "retune" {
+        match evidence_in_place(ctx, given) {
+            Some(words) => words,
+            None => return given.to_vec(),
+        }
+    } else {
+        given.to_vec()
     };
     let mut args = Args::new(&argv[1..], declared);
     let mut added = Vec::new();
@@ -167,7 +245,7 @@ pub(crate) fn relayed_paths(ctx: &Ctx, argv: &[String]) -> Vec<String> {
                 added.extend([flag.to_string(), ctx.abs(&value).to_string_lossy().into_owned()]);
             }
             Ok(_) => {}
-            Err(_) => return argv.to_vec(),
+            Err(_) => return given.to_vec(),
         }
     }
     let at = argv.iter().position(|word| word == "--").unwrap_or(argv.len());

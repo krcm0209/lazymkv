@@ -54,13 +54,17 @@ pub(crate) fn run(argv: &[String], env: Env) -> i32 {
 /// Sends the engine form of `plan --job`, `decide --job --title` or `retune --jobs` as `command` (design part 9.5),
 /// prints the relayed lines and exits with the child's code; an `error` reply exits 2 (RP24). The child runs in the
 /// engine's working folder, so a relayed plan's or decide's path flag whose value is relative is sent again, made
-/// absolute against lazymkvctl's own (`relayed_paths`, V10's ruling), as retune's `--spec` is (K7). Def: T28.
-/// Use: T28.
+/// absolute against lazymkvctl's own (`relayed_paths`, V10's ruling), as retune's `--spec` is (K7), and retune's
+/// `--snapshot`, `--compare`, `--text` and each `--evidence` half too (call 13); the `--spec` pair goes at the first
+/// `--`, else at the end, as `relayed_paths` places its added words. Def: T28. Use: T28, T5-22.
 pub(crate) fn relay(argv: &[String], env: Env) -> i32 {
     let mut words = relayed_paths(env.ctx, argv);
     if argv[0] == "retune" {
         match retune_spec(env.ctx, &argv[1..]) {
-            Ok(spec) => words.extend(["--spec".to_string(), spec.to_string_lossy().into_owned()]),
+            Ok(spec) => {
+                let at = words.iter().position(|word| word == "--").unwrap_or(words.len());
+                words.splice(at..at, ["--spec".to_string(), spec.to_string_lossy().into_owned()]);
+            }
             Err(message) => return argument_error(env.err, "retune", &message),
         }
     }
@@ -795,6 +799,41 @@ mod tests {
         assert_eq!(relayed_words(&argv, &scratch), (json!(expected), 5));
     }
 
+    /// V10 for retune (call 13): `--snapshot`, `--compare` and `--text` go again made absolute, in that order, after
+    /// the words as typed; `--spec` follows, as `retune_spec` sends it (K7).
+    #[test]
+    fn a_relayed_retune_makes_snapshot_compare_and_text_absolute() {
+        let scratch = Scratch::new("ctl-relay-retune-paths");
+        let argv = ["retune", "--jobs", "--text", "ocr", "--snapshot", "snap.json", "--comp", "old.json", "--spec",
+                    "spec.md"];
+        let mut expected: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+        expected.extend([
+            "--snapshot".to_string(), under(&scratch, "snap.json"),
+            "--compare".to_string(), under(&scratch, "old.json"),
+            "--text".to_string(), under(&scratch, "ocr"),
+            "--spec".to_string(), under(&scratch, "spec.md"),
+        ]);
+        assert_eq!(relayed_words(&argv, &scratch), (json!(expected), 5));
+    }
+
+    /// V10 for `--evidence` (G2; R4-commands-47, 48): each relative value, and each relative half of `DIR=TEXTDIR`
+    /// split at the first `=`, is replaced where it stands, in every form retune reads (a prefix, the `=` form), so
+    /// no folder is read twice; an absolute half stays.
+    #[test]
+    fn a_relayed_retune_replaces_each_relative_evidence_half_in_place() {
+        let scratch = Scratch::new("ctl-relay-retune-evidence");
+        let absolute = under(&scratch, "abs");
+        let inline = format!("--evidence={absolute}=ocr2");
+        let argv = ["retune", "--jobs", "--evidence", "clone", "--ev", "rec=ocr", inline.as_str(), "--spec", "spec.md"];
+        let expected = json!([
+            "retune", "--jobs", "--evidence", under(&scratch, "clone"), "--ev",
+            format!("{}={}", under(&scratch, "rec"), under(&scratch, "ocr")),
+            format!("--evidence={absolute}={}", under(&scratch, "ocr2")), "--spec", "spec.md", "--spec",
+            under(&scratch, "spec.md"),
+        ]);
+        assert_eq!(relayed_words(&argv, &scratch), (expected, 5));
+    }
+
     /// V10's ruling: the added words go before a `--`, so the child never reads them as positionals.
     #[test]
     fn the_absolute_flags_go_before_a_double_dash() {
@@ -802,6 +841,10 @@ mod tests {
         let argv = ["plan", "--job", "a-1", "--settings", "alt.json", "--"];
         let absolute = under(&scratch, "alt.json");
         let expected = json!(["plan", "--job", "a-1", "--settings", "alt.json", "--settings", absolute, "--"]);
+        assert_eq!(relayed_words(&argv, &scratch), (expected, 5));
+        let argv = ["retune", "--jobs", "--compare", "old.json", "--spec", "spec.md", "--"];
+        let expected = json!(["retune", "--jobs", "--compare", "old.json", "--spec", "spec.md", "--compare",
+                              under(&scratch, "old.json"), "--spec", under(&scratch, "spec.md"), "--"]);
         assert_eq!(relayed_words(&argv, &scratch), (expected, 5));
     }
 
@@ -815,6 +858,27 @@ mod tests {
             [&["plan", "--job", "a-1", "--settings", absolute.as_str()], &["plan", "--job", "a-1", "--settings"]];
         for argv in given {
             assert_eq!(relayed_words(argv, &scratch), (json!(argv), 5), "{argv:?}");
+        }
+        let spec = under(&scratch, "spec.md");
+        let given: [&[&str]; 2] = [
+            &["retune", "--jobs", "--compare", absolute.as_str(), "--evidence", absolute.as_str(), "--spec",
+              spec.as_str()],
+            &["retune", "--jobs", "--spec", spec.as_str(), "--compare"],
+        ];
+        for argv in given {
+            let mut expected: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+            expected.extend(["--spec".to_string(), spec.clone()]);
+            assert_eq!(relayed_words(argv, &scratch), (json!(expected), 5), "{argv:?}");
+        }
+        // V10's residual: a drive-relative value stays drive-relative (Windows reads `D:alt.json` as relative to
+        // drive D's own folder, and `Ctx::abs` gives it back unchanged).
+        #[cfg(windows)]
+        {
+            let argv =
+                ["retune", "--jobs", "--evidence", "D:clone", "--compare", "D:alt.json", "--spec", spec.as_str()];
+            let expected = json!(["retune", "--jobs", "--evidence", "D:clone", "--compare", "D:alt.json", "--spec",
+                                  spec, "--compare", "D:alt.json", "--spec", spec]);
+            assert_eq!(relayed_words(&argv, &scratch), (expected, 5));
         }
     }
 

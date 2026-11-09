@@ -161,6 +161,20 @@ fn the_relay_reads_plans_and_decides_own_flag_lists() {
     );
 }
 
+/// V10's drift guard for retune (call 13; R5-code-72): `RETUNE_RELAY_FLAGS` is retune's own list plus `--jobs`, so a
+/// flag added to retune fails here until `relayed_paths` classes it as a path or not.
+#[test]
+fn the_relay_reads_retunes_own_flag_list() {
+    assert_eq!(
+        lazymkv_dev::cmd::retune::FLAGS,
+        ["--evidence", "--set", "--snapshot", "--compare", "--spec", "--allow-unmeasured", "--subtitles", "--text"]
+    );
+    let mut expected = lazymkv_dev::cmd::retune::FLAGS.to_vec();
+    expected.push("--jobs");
+    assert_eq!(RETUNE_RELAY_FLAGS.to_vec(), expected);
+    assert_eq!(RETUNE_PATH_FLAGS, ["--snapshot", "--compare", "--text"]);
+}
+
 #[test]
 fn ctl_plan_over_a_folder_with_a_stale_copy_and_no_token_exits_3() {
     let s = Scratch::new("ctl-stale");

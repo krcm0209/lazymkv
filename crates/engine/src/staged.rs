@@ -57,6 +57,21 @@ pub(crate) fn copy_checked(from: &Path, to: &Path) -> io::Result<()> {
     copy_checked_with(from, to, &|from, to| fs::copy(from, to))
 }
 
+/// `bytes` written to `<to>.partial`, its size checked against `bytes.len()`, then renamed to `to` (T5-R55, T5-R60:
+/// an orphan's TMDb copy fetched again). Def: T5-22. Use: T5-22.
+pub(crate) fn write_checked(to: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut partial = to.as_os_str().to_os_string();
+    partial.push(PARTIAL);
+    let partial = PathBuf::from(partial);
+    fs::write(&partial, bytes)?;
+    let written = fs::metadata(&partial)?.len();
+    if written != bytes.len() as u64 {
+        let _ = fs::remove_file(&partial);
+        return Err(io::Error::other(format!("{}: {written} bytes written of {}", partial.display(), bytes.len())));
+    }
+    fs::rename(&partial, to)
+}
+
 /// B1 (the worker's folder)'s move: `copy_checked`, then `from` deleted (T5-R55). Def: T5-14. Use: T5-15.
 pub(crate) fn move_checked(from: &Path, to: &Path) -> io::Result<()> {
     copy_checked(from, to)?;
@@ -427,6 +442,17 @@ mod tests {
         left.sort();
         assert_eq!(left, ["evidence-mkvmerge.txt", "mkvmerge.json", "probe-summary.json", "rip.txt", "subs"]);
         assert!(label_dir.join("subs").join("sub-0.packets.json").is_file());
+    }
+
+    /// T5-R60: an orphan's TMDb copy lands through `<to>.partial`, replacing a torn one of another size.
+    #[test]
+    fn write_checked_lands_the_bytes_through_partial_and_leaves_no_partial() {
+        let s = Scratch::new("staged-write-checked");
+        let to = s.0.join("tmdb.json");
+        fs::write(s.0.join("tmdb.json.partial"), "a torn write of another size").unwrap();
+        write_checked(&to, b"{\n  \"id\": 1\n}\n").unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"{\n  \"id\": 1\n}\n");
+        assert!(!s.0.join("tmdb.json.partial").exists());
     }
 
     #[test]
