@@ -146,7 +146,7 @@ fn after_error(job: &TuningJob, shares: &dyn ShareConnector, why: String) -> Cop
 /// The dataset copy of one job (design part 7.5, EVID-4; T5-R13, T5-R55): the share's reach and free space first,
 /// each file through `staged::copy_checked` (or `copy_checked_with(.., copy)` when a test gives `copy`), `stop` read
 /// before each file, and after the last file each title's level-folder `audio-proxy.json` copied into the job folder's
-/// level folder. Def: T5-19. Use: T5-19.
+/// level folder; a staged folder that cannot be read keeps the copy owed (C2). Def: T5-19. Use: T5-19.
 pub(crate) fn copy_dataset(
     job: &TuningJob,
     shares: &dyn ShareConnector,
@@ -159,8 +159,21 @@ pub(crate) fn copy_dataset(
     // C2: checked here, on the copy thread, so the owner thread asks no share; a staging share that does not answer
     // proves nothing, and the read error below keeps the copy owed.
     let staging_answers = !matches!(shares.reach(&job.staging_root), Reach::Unreachable(_));
-    if staging_answers && !job.keys.iter().any(|key| tuning_dir(&job.staging_root, &job.id, key).is_dir()) {
-        return CopyEnd::Nothing;
+    if staging_answers {
+        let mut staged = false;
+        for key in &job.keys {
+            let dir = tuning_dir(&job.staging_root, &job.id, key);
+            match fs::metadata(&dir) {
+                // A file in the folder's place is not a staged folder.
+                Ok(metadata) => staged |= metadata.is_dir(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                // Anything else proves nothing, so the copy stays owed and is retried (C2).
+                Err(error) => return CopyEnd::Failed(format!("{}: {error}", dir.display())),
+            }
+        }
+        if !staged {
+            return CopyEnd::Nothing;
+        }
     }
     let root = &job.tuning_root;
     if let Reach::Unreachable(why) = shares.reach(root) {
@@ -481,5 +494,26 @@ mod tests {
         shares.set_reach(&job.staging_root, Reach::Unreachable("cable out".into()));
         let end = copy_dataset(&job, &shares, &AtomicBool::new(false), None);
         assert!(matches!(end, CopyEnd::Failed(_)), "{end:?}");
+    }
+
+    /// C2: a staged folder whose metadata cannot be read is no proof that nothing is owed, so the copy stays owed.
+    #[test]
+    fn a_staged_folder_that_cannot_be_read_keeps_the_copy_owed() {
+        let folders = Scratch::new("tuning-unreadable");
+        let job = staged_job(&folders);
+        let tuning = Path::new(&job.staging_root).join(ID).join("tuning");
+        fs::remove_dir_all(&tuning).unwrap();
+        fs::write(&tuning, "not a folder").unwrap();
+        let end = copy_dataset(&job, &FakeShares::new(), &AtomicBool::new(false), None);
+        // Unix reports a file used as a folder as NotADirectory, an error that is not NotFound; Windows reports the
+        // path as not found (ERROR_PATH_NOT_FOUND, read as NotFound), so there the key is simply not staged.
+        #[cfg(unix)]
+        assert!(
+            matches!(&end, CopyEnd::Failed(why) if why.starts_with(&format!("{}: ", staged(&job).display()))),
+            "{end:?}"
+        );
+        #[cfg(windows)]
+        assert_eq!(end, CopyEnd::Nothing);
+        assert!(files(Path::new(&job.tuning_root)).is_empty());
     }
 }
