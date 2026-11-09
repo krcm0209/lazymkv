@@ -985,6 +985,37 @@ fn a_held_job_approved_after_a_restart_reads_the_staged_text_and_the_unread_stre
     );
 }
 
+/// Task 15's review round 1 (T5-R56): a held two-stream job approved while the staging share is unreachable waits for
+/// the share instead of deciding without its text; the staged folder is moved aside to stand for the share being gone,
+/// since the fake connector only answers `reach`.
+#[test]
+fn a_held_job_approved_while_the_staging_share_is_unreachable_waits_for_the_share() {
+    let h = harness(&["movie-direct", "movie-direct-two-subs"], settings());
+    fs::create_dir_all(final_path(&h).parent().unwrap()).unwrap();
+    fs::write(final_path(&h), b"owner's").unwrap();
+    h.insert("tok0", DISC);
+    h.run_until("NeedsReview");
+    let id = only_job(&h);
+    let dir = h.job_dir(&id);
+    assert!(dir.join(KEY).join("subs-ocr").join("summary.json").is_file(), "step 10 ran for the title");
+    h.restart();
+    fs::remove_file(final_path(&h)).unwrap();
+    let staged = h.staging().join(&id).join("tuning").join(KEY).join("subs-ocr");
+    fs::rename(&staged, staged.with_file_name("subs-ocr.away")).unwrap();
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".into()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    let record = h.record(&id);
+    assert!(matches!(record.state, State::AwaitingShare { .. }), "{:?}", record.state);
+    let message = record.message.unwrap();
+    assert!(message.starts_with(&format!("{}: ", staged.display())), "{message}");
+    let decisions = transitions(&dir).iter().filter(|line| matches!(line.event, Some(Event::DecisionDone { .. }))).count();
+    assert_eq!(decisions, 1, "the decision was not made again without the text");
+}
+
 /// Review Focus 3, T5-R4: what a crashed run left in the work folder is deleted when the engine starts.
 #[test]
 fn engine_start_removes_a_leftover_work_folder() {

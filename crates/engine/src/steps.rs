@@ -34,6 +34,7 @@ use lazymkv_core::review::{Note, ReviewReason};
 use lazymkv_core::robot::lines::RunSummary;
 use lazymkv_core::robot::{parse, Scan};
 use lazymkv_core::settings::version_triple;
+use lazymkv_core::subtitle::text::READING;
 use lazymkv_core::tracks::subtitle::step10_runs;
 use lazymkv_core::ustar::{ustar_entry, DEFAULT_PROFILE_NAME};
 use lazymkv_core::verify::{
@@ -1536,7 +1537,8 @@ impl Step<'_> {
     /// `<key>/mkvmerge.json`; no mkvmerge, then no ffprobe, gives ToolMissing for that tool before any file is touched,
     /// asked only when a title needs step 10) and `read_streams`; its errors feed DecisionFailed, a staging write
     /// classed by the share check (`unit_result`, T5-R56); a cancelled step posts nothing. Step 10a is not built yet,
-    /// so it then writes the job.log line `step 10a did not run in this version` (S33) and returns no event.
+    /// so it writes the job.log line `step 10a did not run in this version` (S33) first (Task 17 replaces it) and
+    /// returns no event.
     fn extract_subtitle_evidence(&self) -> Outcome {
         self.log(STEP10A_NOT_RUN);
         let failed = |failure| Event::DecisionFailed { failure };
@@ -1655,7 +1657,8 @@ impl Step<'_> {
     /// the saved answers while it is lookup-pending and persisted so (R24.2); each planned title's `title_doc`;
     /// `same_path_reviews` over the titles' decisions, written back into their documents; each `<key>/decide.json`; the
     /// decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure gives DecisionFailed {
-    /// Unknown } with its sentence.
+    /// Unknown } with its sentence. A title whose step 10 ran decides only when its staged text can be reached: an
+    /// unreachable staging share waits for the share, as a failed staged write does (T5-R56; Task 15's review round 1).
     ///
     /// Before anything else it asks `reach` of the plan kind's library root, when that root is set, as File does
     /// (Ruling W22, review round 1's V7): a root that does not answer gives DecisionFailed { Unknown } with `the
@@ -1701,6 +1704,15 @@ impl Step<'_> {
         let ctx = Ctx::from_process();
         let mut docs = Vec::new();
         for planned in &plan.titles {
+            let key = planned.key.as_str();
+            let ran = self.job.job_dir.join(key).join(READING).join("summary.json").is_file();
+            if let (true, Some(root)) = (ran, self.job.settings.staging_root.as_deref()) {
+                if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                    let text = tuning_dir(root, self.id, key).join(READING);
+                    let error = UnitError::Staging(format!("{}: {why}", text.display()));
+                    return Ok(unit_result(error, || self.staging_health()));
+                }
+            }
             docs.push(self.title_doc(&ctx, &plan, &planned.key).map_err(|error| unknown(failed, error))?);
         }
         if let Some(root) = library {
