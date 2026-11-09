@@ -4,6 +4,9 @@
 //! `fetched_at` is read as it is, and so is an engine job folder (one holding `state.json`): the engine fetches its
 //! own copies again. A copy is written through `lazymkv_platform::write_atomic` (a temporary file beside it, flushed,
 //! then renamed over it; PR #15 review round 1, R9). No text here holds the token.
+//!
+//! In every `retune`, a job folder whose TMDb copy is stale or missing is left out of the reading and named by
+//! `unmeasured_line` on stderr (Ruling T5-R40, call 25); lazymkvctl's relayed `retune --jobs` fetches it first.
 
 use std::fs;
 use std::io::Write;
@@ -99,11 +102,53 @@ pub fn refresh_copies(ctx: &Ctx, folder: &Path, shown: &str) -> Result<Vec<Strin
     Ok(replaced)
 }
 
+/// The job folders of `evidence` whose TMDb copies are stale or missing (design part 7.7; Ruling T5-R40, call 25):
+/// every child folder but `.git`, in name order, that holds `JOB_STATE_FILE`, with the first copy (`TMDB_COPIES`
+/// order) `stale_copies` names for it as a job folder; `today` is read once, and only when a job folder is found.
+/// Def: T5-21. Use: T5-21.
+pub(crate) fn stale_job_folders(ctx: &Ctx, evidence: &Path) -> Vec<(String, StaleCopy)> {
+    let Ok(entries) = fs::read_dir(evidence) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join(JOB_STATE_FILE).is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != ".git")
+        .collect();
+    names.sort();
+    let mut today = None;
+    let mut stale = Vec::new();
+    for name in names {
+        let folder = evidence.join(&name);
+        let status = fs::read_to_string(folder.join(STATUS_FILE)).unwrap_or_default();
+        let status = status.strip_prefix('\u{feff}').unwrap_or(&status);
+        let day: &str = today.get_or_insert_with(|| ctx.today());
+        let copies = stale_copies(status, &|file| fs::read(folder.join(file)).ok(), true, day);
+        if let Some(first) = copies.into_iter().next() {
+            stale.push((name, first));
+        }
+    }
+    stale
+}
+
 /// `<shown>/<file>: the TMDb copy is more than six months old (fetched_at <date>) and TMDB_TOKEN is not set to fetch
 /// it again`; `(no fetched_at)` replaces `(fetched_at <date>)` when the copy has none. Def: T4-10. Use: T4-10.
 pub fn no_token_line(shown: &str, copy: &StaleCopy) -> String {
     format!(
         "{}: the TMDb copy is more than six months old ({}) and {TMDB_TOKEN_VAR} is not set to fetch it again",
+        named(shown, copy),
+        dated(copy)
+    )
+}
+
+/// `lazymkv-dev retune: <shown>/<file>: unmeasured: the TMDb copy is missing or more than six months old (fetched_at
+/// <date>), and a job folder's copy is fetched again only by lazymkvctl retune --jobs`; `(no fetched_at)` replaces
+/// `(fetched_at <date>)` when the copy has none. Def: T5-21. Use: T5-21, T5-22.
+pub fn unmeasured_line(shown: &str, copy: &StaleCopy) -> String {
+    format!(
+        "lazymkv-dev retune: {}: unmeasured: the TMDb copy is missing or more than six months old ({}), and a job \
+         folder's copy is fetched again only by lazymkvctl retune --jobs",
         named(shown, copy),
         dated(copy)
     )

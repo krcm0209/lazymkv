@@ -156,7 +156,8 @@ fn civil_time(seconds: u64) -> String {
 
 /// The private evidence repository's URL. Py: audio_dataset.EVIDENCE.
 pub const EVIDENCE_URL: &str = "https://github.com/krcm0209/lazymkv-evidence";
-/// How every report prints the evidence root, whatever --evidence says (spec 3.4).
+/// How every report prints the evidence root, whatever --evidence says (spec 3.4); a several-folder `retune` names each
+/// folder as given in its section header and its refetch lines (design part 7.7, D1).
 pub const EVIDENCE_SHOWN: &str = "corpus/owner";
 
 /// Why a slug command cannot run: the line it prints (to stderr) and its exit code.
@@ -247,8 +248,15 @@ pub struct DiskTree {
 impl DiskTree {
     /// Opens `root`, printed under `display_root` (EVIDENCE_SHOWN, or the path as the user gave it).
     pub fn open(root: &Path, display_root: &str) -> std::io::Result<DiskTree> {
+        DiskTree::open_without(root, display_root, &[])
+    }
+
+    /// Like `open`, but the top-level child folders named in `left_out` are not walked, as `.git` is not: a job folder
+    /// whose TMDb copy is stale or missing is left out of `retune`'s reading (design part 7.7; Ruling T5-R40, call
+    /// 25). Def: T5-21. Use: T5-21.
+    pub(crate) fn open_without(root: &Path, display_root: &str, left_out: &[String]) -> std::io::Result<DiskTree> {
         let mut tree = MemTree::new(display_root, &resolved_name_of(root));
-        walk(root, "", &mut tree)?;
+        walk(root, "", left_out, &mut tree)?;
         Ok(DiskTree { root: root.to_path_buf(), tree })
     }
 
@@ -257,7 +265,7 @@ impl DiskTree {
     pub fn open_sub(root: &Path, display_root: &str, sub: &str) -> std::io::Result<DiskTree> {
         let mut tree = MemTree::new(display_root, &resolved_name_of(root));
         tree.insert_dir(sub);
-        walk(&root.join(sub), sub, &mut tree)?;
+        walk(&root.join(sub), sub, &[], &mut tree)?;
         Ok(DiskTree { root: root.to_path_buf(), tree })
     }
 
@@ -271,19 +279,23 @@ impl DiskTree {
     }
 }
 
-/// Adds every folder and file under `dir` to `tree`, below `prefix` ("" for the root), files as lazy loaders.
-fn walk(dir: &Path, prefix: &str, tree: &mut MemTree) -> std::io::Result<()> {
+/// Adds every folder and file under `dir` to `tree`, below `prefix` ("" for the root), files as lazy loaders; at the
+/// root (`prefix` ""), the folders named in `left_out` are not added.
+fn walk(dir: &Path, prefix: &str, left_out: &[String], tree: &mut MemTree) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == ".git" {
             continue;
         }
-        let key = if prefix.is_empty() { name } else { format!("{}/{}", prefix, name) };
         let path = entry.path();
+        if prefix.is_empty() && path.is_dir() && left_out.contains(&name) {
+            continue;
+        }
+        let key = if prefix.is_empty() { name } else { format!("{}/{}", prefix, name) };
         if path.is_dir() {
             tree.insert_dir(&key);
-            walk(&path, &key, tree)?;
+            walk(&path, &key, &[], tree)?;
         } else {
             insert_disk_file(tree, &PathKey::new(&key), &path);
         }
