@@ -67,8 +67,8 @@ use crate::space::{
     staged_remux_check, unreachable, Promises,
 };
 use crate::staged::{
-    clear_incomplete, evidence_file, staged_state, tuning_dir, work_dir, Staged, UnitError, CLEARED_INCOMPLETE,
-    SKIPPED_COMPLETE, WORK,
+    clear_incomplete, evidence_file, staged_state, tuning_dir, unit_outputs_left, work_dir, Staged, UnitError,
+    CLEARED_INCOMPLETE, SKIPPED_COMPLETE, WORK,
 };
 use crate::step10;
 use crate::step10::{read_streams, stream_cap, OCR_MISSING};
@@ -1540,11 +1540,12 @@ impl Step<'_> {
     /// staged file and `<key>/mkvmerge.json`) and `read_streams`. Step 10a is `run_pass` with the job's own
     /// `keep_tuning_evidence` (R5-code-33). On a re-run of the unit (a retry after a Decide whose refetch failed, a
     /// restart), a title whose staged tuning folder is complete (`staged_state`) skips both steps with the job.log line
-    /// `<key>: steps 10 and 10a skipped: the staged tuning folder is complete`, and Decide reads what the first run left
-    /// in the job folder and the staged folder (design part 5.10); an incomplete folder and the job folder's outputs of
-    /// the two steps are deleted first (`clear_incomplete`) and both steps run again (notes C3; T5-R12, T5-R13). Their
-    /// errors feed DecisionFailed, a staging write classed by the share check (`unit_result`, T5-R56); a cancelled step
-    /// posts nothing. It returns no event when every title is done.
+    /// `<key>: steps 10 and 10a skipped: the staged tuning folder is complete`, and Decide reads what the first run
+    /// left in the job folder and the staged folder (design part 5.10); an incomplete folder and the job folder's
+    /// outputs of the two steps are deleted first (`clear_incomplete`) and both steps run again (notes C3; T5-R12,
+    /// T5-R13), and when either is there (`unit_outputs_left`), a staging share that does not answer gives the staging
+    /// failure before anything is deleted. Their errors feed DecisionFailed, a staging write classed by the share check
+    /// (`unit_result`, T5-R56); a cancelled step posts nothing. It returns no event when every title is done.
     fn extract_subtitle_evidence(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1566,6 +1567,12 @@ impl Step<'_> {
             if state == Staged::Complete {
                 self.log(&format!("{key}: {SKIPPED_COMPLETE}"));
                 continue;
+            }
+            if state == Staged::Incomplete || unit_outputs_left(&label_dir) {
+                if let Reach::Unreachable(why) = self.steps.shares.reach(staging) {
+                    let error = UnitError::Staging(format!("{}: {why}", tuning.display()));
+                    return Ok(unit_result(error, || self.staging_health()));
+                }
             }
             if let Err(error) = clear_incomplete(&tuning, &label_dir) {
                 let message =

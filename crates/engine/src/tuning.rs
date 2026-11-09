@@ -326,8 +326,9 @@ fn under(dir: &Path, relative: &str) -> PathBuf {
     relative.split('/').fold(dir.to_path_buf(), |path, part| path.join(part))
 }
 
-/// Steps 3 to 5 of `refresh_recordings`: the target folder, the deletions and the copies, `files` and `end` holding
-/// what landed when an error ends them.
+/// The target folder, then the manifest's TMDb copies the job folder no longer holds deleted, then the changed files
+/// copied; a file that cannot be copied does not stop the others, the first error is returned, and `files` and `end`
+/// hold what landed.
 fn refresh_into(
     job_dir: &Path,
     target: &Path,
@@ -353,36 +354,52 @@ fn refresh_into(
         files.remove(index);
         end.deleted.push(path);
     }
+    let mut first: Option<io::Error> = None;
     for path in sources {
-        let (from, to) = (under(job_dir, path), under(target, path));
-        let metadata = fs::metadata(&from).map_err(|error| at(&from, &error))?;
-        let modified = metadata.modified().map_err(|error| at(&from, &error))?;
-        let modified_ns = modified
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| u64::try_from(since.as_nanos()).unwrap_or(u64::MAX));
-        let entry = ManifestEntry { path: path.clone(), bytes: metadata.len(), modified_ns };
-        let known = files.iter().position(|known| known.path == *path);
-        let unchanged = known.is_some_and(|index| {
-            files[index].bytes == entry.bytes && files[index].modified_ns == entry.modified_ns
-        });
-        if unchanged && to.exists() {
-            continue;
+        if let Err(error) = refresh_file(job_dir, target, path, files, end) {
+            if first.is_none() {
+                first = Some(error);
+            }
         }
-        to.parent().map_or(Ok(()), fs::create_dir_all).map_err(|error| at(&to, &error))?;
-        copy_checked(&from, &to).map_err(|error| at(&to, &error))?;
-        match known {
-            Some(index) => files[index] = entry,
-            None => files.push(entry),
-        }
-        end.copied += 1;
     }
+    first.map_or(Ok(()), Err)
+}
+
+/// One source of `refresh_into`: `path` copied into `target` when its size or modification time changed since its
+/// copy or the copy is missing, `files` and `end` updated when it lands.
+fn refresh_file(
+    job_dir: &Path,
+    target: &Path,
+    path: &str,
+    files: &mut Vec<ManifestEntry>,
+    end: &mut RefreshEnd,
+) -> io::Result<()> {
+    let (from, to) = (under(job_dir, path), under(target, path));
+    let metadata = fs::metadata(&from).map_err(|error| at(&from, &error))?;
+    let modified = metadata.modified().map_err(|error| at(&from, &error))?;
+    let modified_ns =
+        modified.duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_nanos()).unwrap_or(u64::MAX));
+    let entry = ManifestEntry { path: path.to_string(), bytes: metadata.len(), modified_ns };
+    let known = files.iter().position(|known| known.path == path);
+    let unchanged =
+        known.is_some_and(|index| files[index].bytes == entry.bytes && files[index].modified_ns == entry.modified_ns);
+    if unchanged && to.exists() {
+        return Ok(());
+    }
+    to.parent().map_or(Ok(()), fs::create_dir_all).map_err(|error| at(&to, &error))?;
+    copy_checked(&from, &to).map_err(|error| at(&to, &error))?;
+    match known {
+        Some(index) => files[index] = entry,
+        None => files.push(entry),
+    }
+    end.copied += 1;
     Ok(())
 }
 
 /// Refreshes `target`, `<tuning_root>\recordings\<job id>\`, from `job_dir` (design part 7.5; call 11; T5-R15, T5-R16):
 /// copies each file whose size or modification time changed since its copy, `state.json` first, never writes or
-/// deletes `OWNER_FILES`, and deletes only a TMDb copy the manifest lists that `job_dir` no longer holds. Def: T5-20.
-/// Use: T5-20, T5-22.
+/// deletes `OWNER_FILES`, and deletes only a TMDb copy the manifest lists that `job_dir` no longer holds; a file that
+/// cannot be copied does not stop the others, and the first error is returned. Def: T5-20. Use: T5-20, T5-22.
 pub(crate) fn refresh_recordings(job_dir: &Path, target: &Path) -> io::Result<RefreshEnd> {
     let mut sources = Vec::new();
     refresh_sources(job_dir, job_dir, &mut sources)?;
@@ -892,6 +909,21 @@ mod tests {
             fs::remove_file(&blocker).unwrap();
             assert_eq!(refresh_recordings(&job, &target).unwrap(), end(1, &[]));
             assert_eq!(fs::read(target.join("t00-00800/decide.json")).unwrap(), b"b");
+        }
+
+        /// Design part 7.5: `job.log` sorts before every title folder, so a copy of it that fails still lets the
+        /// title's files land, and the refresh returns the error naming `job.log`.
+        #[test]
+        fn a_file_that_cannot_be_copied_does_not_stop_the_files_after_it() {
+            let (_scratch, job, target) =
+                folders("refresh-skip", &[("state.json", "a"), ("job.log", "c"), ("t00-x/decide.json", "b")]);
+            fs::create_dir_all(target.join("job.log")).unwrap();
+            let error = refresh_recordings(&job, &target).unwrap_err();
+            let head = format!("{}: ", target.join("job.log").display());
+            assert!(error.to_string().starts_with(&head), "{error}");
+            assert_eq!(fs::read(target.join("t00-x").join("decide.json")).unwrap(), b"b");
+            assert_eq!(fs::read(target.join("state.json")).unwrap(), b"a");
+            assert_eq!(listed(&target), ["state.json", "t00-x/decide.json"]);
         }
     }
 }

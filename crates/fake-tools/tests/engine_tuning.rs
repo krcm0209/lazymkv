@@ -200,8 +200,8 @@ fn a_pending_copy_is_retried_when_tuning_root_answers_before_another_step() {
     let h = harness(&[], on());
     let id = pending_then_reachable(&h);
     h.insert("tok1", "second-disc");
-    assert_eq!(h.wait_copy(), id);
-    h.settle();
+    wait_copy_state(&h, &id, TuningCopy::Done);
+    h.wait("the copy ended", |h| !h.busy());
     assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Done));
     assert_eq!(tuning_lines(&h, &id).last().map(String::as_str), Some(COPIED));
 }
@@ -340,7 +340,8 @@ fn a_pending_copy_is_retried_at_the_cleanup_pass_of_an_idle_engine() {
     let h = harness(&[], on());
     let id = pending_then_reachable(&h);
     h.run_cleanup();
-    h.settle();
+    wait_copy_state(&h, &id, TuningCopy::Done);
+    h.wait("the copy ended", |h| !h.busy());
     assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Done));
     assert_eq!(tuning_lines(&h, &id).last().map(String::as_str), Some(COPIED));
     assert!(staged(&h, &id).join("audio-proxy.mka").is_file(), "the job's retention has not passed, so its staging data stays");
@@ -505,6 +506,25 @@ mod refresh {
         assert!(fs::read_to_string(mirror(&h, &id).join("job.log")).unwrap().contains(line));
     }
 
+    /// Design part 7.5: a job at rest whose refresh failed gets no other trigger, so the next cleanup pass retries it,
+    /// here with no TMDb copy for the pass to delete.
+    #[test]
+    fn a_failed_refresh_is_retried_at_the_next_cleanup_pass() {
+        let h = Harness::new_scripted(line_to("Decide", held()), keeping());
+        let root = h.tuning().display().to_string();
+        h.shares().set_reach(&root, Reach::Unreachable("the share did not answer".into()));
+        let id = job_in(&h, "NeedsReview");
+        refreshed(&h, &id, 1);
+        h.wait("the failed refreshes ended", |h| !h.busy());
+        assert!(!mirror(&h, &id).exists());
+        h.shares().set_reach(&root, Reach::Reachable);
+        let before = h.refreshes(&id);
+        h.run_cleanup();
+        h.wait("a refresh ended and none runs", |h| h.refreshes(&id) > before && !h.busy());
+        let job = fs::read(h.job_dir(&id).join("state.json")).unwrap();
+        assert_eq!(fs::read(mirror(&h, &id).join("state.json")).unwrap(), job);
+    }
+
     #[test]
     fn the_recordings_tree_holds_counts_and_no_subtitle_text() {
         let runs: [&[&str]; 2] = [&["movie-direct-two-subs"], &["movie-direct-two-subs", "movie-direct-two-subs-panic"]];
@@ -516,8 +536,9 @@ mod refresh {
                 h.job_ids().first().is_some_and(|id| ["Filed", "NeedsReview", "Failed"].contains(&h.state_of(id).as_str()))
             });
             let id = h.job_ids().pop().unwrap();
-            refreshed(&h, &id, 1);
-            h.settle();
+            h.wait("a refresh ended and none runs", |h| h.refreshes(&id) >= 1 && !h.busy());
+            let job = fs::read(h.job_dir(&id).join("state.json")).unwrap();
+            assert_eq!(fs::read(mirror(&h, &id).join("state.json")).unwrap(), job, "{scenarios:?}");
             let files = walk(&h.tuning().join("recordings"));
             assert!(files.iter().any(|path| path.ends_with("state.json")), "{scenarios:?}: {files:?}");
             assert!(files.iter().any(|path| path.ends_with("subs-ocr/summary.json")), "{scenarios:?}: {files:?}");

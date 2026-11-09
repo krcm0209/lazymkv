@@ -31,7 +31,7 @@ use crate::tuning::{refresh_recordings, DATASET, RECORDINGS};
 pub(crate) const COMMAND_BUSY: &str = "a command is already running; one runs at a time (design part 9.5)";
 /// An engine whose `EngineConfig.ctl` is None (design part 9.5). Def: T3-22. Use: T3-22.
 pub(crate) const COMMAND_NO_CTL: &str = "command needs lazymkvctl beside the engine, and this engine has none";
-/// `retune --jobs` with no `tuning_root` in the engine's settings (T5-R32). Def: T5-22. Use: T5-22.
+/// `retune --jobs` with no `tuning_root` in the engine's settings (design part 9.5; T5-R32). Def: T5-22. Use: T5-22.
 pub(crate) const RETUNE_NO_TUNING_ROOT: &str =
     "retune --jobs needs tuning_root in the engine's settings (design part 9.5)";
 /// A child that ended without an exit code (design part 9.3). Def: T3-22. Use: T3-22.
@@ -69,8 +69,8 @@ fn set_root(root: Option<&str>) -> Option<&str> {
     root.filter(|root| !root.trim().is_empty())
 }
 
-/// A job the words may name: its folder, its title keys, whether its dataset copy landed (T5-R14), and its own
-/// settings' `tuning_root`, where that copy landed (ENG-19, call 14). Def: T5-22. Use: T5-22.
+/// A job the words may name (design part 9.5): its folder, its title keys, whether its dataset copy landed (T5-R14),
+/// and its own settings' `tuning_root`, where that copy landed (ENG-19, call 14). Def: T5-22. Use: T5-22.
 pub(crate) struct CommandJob {
     pub(crate) folder: PathBuf,
     pub(crate) keys: Vec<String>,
@@ -204,8 +204,8 @@ pub(crate) fn spawn_command_refetch(
     }));
 }
 
-/// What the relayed retune's refetch works with: the recordings folder, every job the owner holds with its refetch,
-/// and the transport, token and date for the orphans (G3, call 25). Def: T5-22. Use: T5-22.
+/// What the relayed retune's refetch works with: the recordings folder, every job the owner holds with its refetch, and
+/// the transport, token and date for the orphans (design part 9.5; G3, call 25). Def: T5-22. Use: T5-22.
 pub(crate) struct RetuneRefetch {
     pub(crate) recordings: PathBuf,
     pub(crate) jobs: Vec<(String, CommandRefetch)>,
@@ -214,19 +214,20 @@ pub(crate) struct RetuneRefetch {
     pub(crate) today: String,
 }
 
-/// `job <id>: <reason>`, an engine job's refusal of a relayed retune (G3; R4-commands-44). Def: T5-22. Use: T5-22.
+/// `job <id>: <reason>`, an engine job's refusal of a relayed retune (design part 9.5; G3; R4-commands-44). Def: T5-22.
+/// Use: T5-22.
 pub(crate) fn job_refusal(id: &str, reason: &str) -> String {
     format!("job {id}: {reason}")
 }
 
-/// `<folder>: the TMDb copy <file> was fetched again`, an orphan's standard-error line (call 25). Def: T5-22.
-/// Use: T5-22.
+/// `<folder>: the TMDb copy <file> was fetched again`, an orphan's standard-error line (design parts 7.5 and 9.5;
+/// call 25). Def: T5-22. Use: T5-22.
 pub(crate) fn orphan_fetched(folder: &Path, file: &str) -> String {
     format!("{}: the TMDb copy {file} was fetched again", folder.display())
 }
 
 /// `<folder>: <stale sentence>; retune reports the folder as unmeasured`, an orphan's copy not fetched again, which
-/// never refuses the run (call 25; T5-R40). Def: T5-22. Use: T5-22.
+/// never refuses the run (design parts 7.5 and 9.5; call 25; T5-R40). Def: T5-22. Use: T5-22.
 pub(crate) fn orphan_unmeasured(folder: &Path, sentence: &str) -> String {
     format!("{}: {sentence}; retune reports the folder as unmeasured", folder.display())
 }
@@ -241,17 +242,17 @@ fn saved_queries(path: &Path) -> Vec<String> {
     queries.iter().filter_map(|query| query.as_str().map(str::to_string)).collect()
 }
 
-/// An orphan's stale TMDb copies fetched again into its recordings folder itself (call 25; T5-R60), the folder being
-/// no job the owner holds, so no job folder, book or status file is touched. The status is `<folder>\lookup-status.txt`
-/// with any byte order mark removed (empty when absent); the copies are `stale_copies` over it read as a job folder
-/// (an orphan holds `state.json`, so a missing copy whose status line says 200 is fetched too); none asks nothing. A
-/// listed `tmdb.json` or `tmdb-record.json` is fetched once for both with `refetch_record` by the status file's record
-/// (`status_record`; none fails each listed record copy with `no TMDb ID names the record`), every listed season with
-/// `tmdb-record.json` listed, none without; of the fetched files only the listed copies are written, a
-/// `tmdb-record.json` whose fetch left a season pending failing with that season's sentence instead. A listed
-/// `tmdb-search.json` is fetched with `refetch_search` over the copy's own `queries`. Each copy lands through
-/// `write_checked`. Only `fetched` (the copies written, in `TMDB_COPIES` order) and `failed` (a `stale_sentence` per
-/// copy not fetched again, or its write's error) are set. Def: T5-22. Use: T5-22.
+/// An orphan's stale TMDb copies fetched again into its recordings folder itself (design parts 7.5 and 9.5; call 25;
+/// T5-R60), the folder being no job the owner holds, so no job folder, book or status file is touched. The status is
+/// `<folder>\lookup-status.txt` with any byte order mark removed (empty when absent); the copies are `stale_copies`
+/// over it read as a job folder (an orphan holds `state.json`, so a missing copy whose status line says 200 is fetched
+/// too); none asks nothing. A listed `tmdb.json` or `tmdb-record.json` is fetched once for both with `refetch_record`
+/// by the status file's record (`status_record`; none fails each listed record copy with `no TMDb ID names the
+/// record`), every listed season with `tmdb-record.json` listed, none without; of the fetched files only the listed
+/// copies are written, a `tmdb-record.json` whose fetch left a season pending failing with that season's sentence
+/// instead. A listed `tmdb-search.json` is fetched with `refetch_search` over the copy's own `queries`. Each copy lands
+/// through `write_checked`. Only `fetched` (the copies written, in `TMDB_COPIES` order) and `failed` (a
+/// `stale_sentence` per copy not fetched again, or its write's error) are set. Def: T5-22. Use: T5-22.
 pub(crate) fn refetch_orphan(folder: &Path, http: &dyn HttpTransport, token: Option<&str>, today: &str) -> Refetched {
     let status = fs::read_to_string(folder.join("lookup-status.txt")).unwrap_or_default();
     let status = status.strip_prefix('\u{feff}').unwrap_or(&status);
@@ -329,7 +330,7 @@ fn recordings_folders(recordings: &Path) -> io::Result<Vec<PathBuf>> {
     let mut folders = Vec::new();
     for entry in entries {
         let entry = entry?;
-        if entry.path().is_dir() {
+        if entry.file_type()?.is_dir() {
             folders.push((entry.file_name(), entry.path()));
         }
     }
@@ -337,18 +338,18 @@ fn recordings_folders(recordings: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(folders.into_iter().map(|(_, path)| path).collect())
 }
 
-/// The relayed retune's refetch (G3, call 25), on a thread of its own that it drops, as `spawn_command_refetch` does,
-/// so the owner thread never lists the share or waits on a request. It lists `work.recordings` (one that does not
-/// exist lists no folder; another error is the refusal `<recordings>: the tuning recordings could not be listed:
-/// <error>`) and takes its folders in name order. A folder named for a job the owner holds is that job's mirror: its
-/// stale copies are fetched again into the job folder with `refetch_stale` (`OwedCheck::Wait`), each `log_lines`
-/// line written to its job.log; `for_decide`'s Err is the refusal `job_refusal(id, reason)`; otherwise, when
-/// anything was fetched, `refresh_recordings` copies the job folder across, whose error is the refusal `job <id>: the
-/// recordings copy could not be refreshed: <error>`, since the child would read the stale mirror. Any other folder is
-/// an orphan, its copies fetched again into it with `refetch_orphan`: each copy fetched is an `orphan_fetched`
-/// warning and each not fetched an `orphan_unmeasured` one, which never refuse the run. Every folder is done before
-/// the one `Msg::CommandRefetched`, Ok with no refusal, else Err of the refusals joined with "; ", and the warnings.
-/// Def: T5-22. Use: T5-22.
+/// The relayed retune's refetch (design part 9.5; G3, call 25), on a thread of its own that it drops, as
+/// `spawn_command_refetch` does, so the owner thread never lists the share or waits on a request. It lists
+/// `work.recordings` (one that does not exist lists no folder; another error is the refusal `<recordings>: the tuning
+/// recordings could not be listed: <error>`) and takes its folders in name order; a link or junction under
+/// `recordings\` is not listed. A folder named for a job the owner holds is that job's mirror: its stale copies are
+/// fetched again into the job folder with `refetch_stale` (`OwedCheck::Wait`), each `log_lines` line written to its
+/// job.log; `for_decide`'s Err is the refusal `job_refusal(id, reason)`; otherwise, when anything was fetched,
+/// `refresh_recordings` copies the job folder across, whose error is the refusal `job <id>: the recordings copy could
+/// not be refreshed: <error>`, since the child would read the stale mirror. Any other folder is an orphan, its copies
+/// fetched again into it with `refetch_orphan`: each copy fetched is an `orphan_fetched` warning and each not fetched
+/// an `orphan_unmeasured` one, which never refuse the run. Every folder is done before the one `Msg::CommandRefetched`,
+/// Ok with no refusal, else Err of the refusals joined with "; ", and the warnings. Def: T5-22. Use: T5-22.
 pub(crate) fn spawn_retune_refetch(
     work: RetuneRefetch,
     client: u64,
@@ -740,5 +741,27 @@ mod tests {
         assert_eq!(command_answer(Ok(None)), Err(NO_EXIT_CODE.to_string()));
         assert_eq!(command_answer(Err(io::Error::other("gone"))),
                    Err("lazymkvctl could not be waited for: gone".to_string()));
+    }
+
+    /// H2: a link or junction under `recordings\` is neither an orphan nor a job's mirror, so it is not listed.
+    #[test]
+    fn the_recordings_listing_skips_a_link_to_another_folder() {
+        let folders = Scratch::new("relay-recordings-link");
+        let recordings = folders.0.join("recordings");
+        let real = recordings.join("0000000000000000000000000000000a-1");
+        fs::create_dir_all(&real).unwrap();
+        let elsewhere = folders.0.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let link = recordings.join("0000000000000000000000000000000b-1");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(&link).arg(&elsewhere)
+                .output().unwrap();
+            assert!(made.status.success(), "mklink /J failed");
+        }
+        assert!(link.is_dir(), "the link reads as a folder when followed");
+        assert_eq!(recordings_folders(&recordings).unwrap(), [real]);
     }
 }

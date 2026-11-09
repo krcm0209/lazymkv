@@ -9,14 +9,15 @@ name: CI
 # pipe (design parts 12.4 and 12.6, item 3). Tests that need the drive, the share or the owner's desktop session are
 # ignored here and run on the mini PC.
 #
-# Layer 2 (design part 12.1, G1): every runner installs MKVToolNix and an FFmpeg of 7.0 or later (K11), each pinned
-# (P33, call 20). Ubuntu takes MKVToolNix from apt at its pinned version and a static FFmpeg 7.x build whose SHA-256
-# (Secure Hash Algorithm 256) digest is checked before anything in it runs, since apt's FFmpeg is 6.1; macOS takes
-# both from Homebrew and checks mkvmerge's version against the pin; Windows takes FFmpeg from Chocolatey and
-# MKVToolNix by its installer, checked against its SHA-256. Each job hands the three programs to the tests as
-# LAZYMKV_TEST_MKVMERGE, LAZYMKV_TEST_FFPROBE and LAZYMKV_TEST_FFMPEG; the layer 2 tests
-# (crates/fake-tools/tests/layer2.rs) and the ffprobe size cross-check fail here, instead of skipping, when one is
-# missing or too old (T5-R49, call 24).
+# Layer 2 (design part 12.1, G1): every runner installs MKVToolNix, pinned (P33, call 20), and an FFmpeg of 7.0 or
+# later (K11). Ubuntu takes MKVToolNix from apt at its pinned version and a static FFmpeg 7.x build pinned by its URL
+# and its SHA-256 (Secure Hash Algorithm 256) digest, which is checked before anything in it runs, since apt's FFmpeg
+# is 6.1; macOS takes both from Homebrew and checks mkvmerge's version against the pin; Windows takes FFmpeg from
+# Chocolatey and MKVToolNix by its installer, checked against its SHA-256. Homebrew's and Chocolatey's FFmpeg are the
+# package manager's current release, not pinned, and the layer 2 tests' version check holds K11's floor. Each job
+# hands the three programs to the tests as LAZYMKV_TEST_MKVMERGE, LAZYMKV_TEST_FFPROBE and LAZYMKV_TEST_FFMPEG; the
+# layer 2 tests (crates/fake-tools/tests/layer2.rs) fail here, instead of skipping, when a program is missing or
+# older than 7.0, and the ffprobe size cross-check fails when ffprobe is missing (T5-R49, call 24).
 #
 # The OCR (optical character recognition) models: the models job restores them from the cache keyed by their
 # SHA-256 pins, and on a miss downloads them once through lazymkv-ocr-models' build script; the three test jobs only
@@ -50,6 +51,7 @@ jobs:
     # most once and the three test jobs only restore.
     name: OCR models
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -97,6 +99,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     needs: models
     env:
       LAZYMKV_OCRS_MODELS: ${{ github.workspace }}/.ocrs-models
@@ -254,6 +257,7 @@ jobs:
   guard:
     name: repository guards
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -279,6 +283,7 @@ jobs:
     # until that file is refreshed, by one commit of this artifact.
     name: crate notices
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

@@ -57,12 +57,16 @@ pub(crate) fn copy_checked(from: &Path, to: &Path) -> io::Result<()> {
     copy_checked_with(from, to, &|from, to| fs::copy(from, to))
 }
 
-/// `bytes` written to `<to>.partial`, its size checked against `bytes.len()`, then renamed to `to` (T5-R55, T5-R60:
-/// an orphan's TMDb copy fetched again). Def: T5-22. Use: T5-22.
+/// `bytes` written to `<to>.partial`, a stale `<to>.partial` removed first, its size checked against `bytes.len()`,
+/// then renamed to `to` (T5-R55, T5-R60: an orphan's TMDb copy fetched again). Def: T5-22. Use: T5-22.
 pub(crate) fn write_checked(to: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut partial = to.as_os_str().to_os_string();
     partial.push(PARTIAL);
     let partial = PathBuf::from(partial);
+    match fs::remove_file(&partial) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     fs::write(&partial, bytes)?;
     let written = fs::metadata(&partial)?.len();
     if written != bytes.len() as u64 {
@@ -180,17 +184,33 @@ pub(crate) fn clear_incomplete(tuning: &Path, label_dir: &Path) -> io::Result<()
     for level in levels {
         removed(fs::remove_dir_all(level))?;
     }
-    for file in [
-        "streamhash.txt",
-        "streamhash-ffmpeg.txt",
-        "streamhash-ffmpeg.txt.stderr",
-        "streamhash-ffmpeg.txt.timing.jsonl",
-        "streamhash-ffmpeg.txt.exit.json",
-    ] {
+    for file in STREAMHASH_FILES {
         removed(fs::remove_file(label_dir.join(file)))?;
     }
     Ok(())
 }
+
+/// Whether the job folder's title folder `label_dir` holds any output of steps 10 and 10a that `clear_incomplete`
+/// deletes: `subs-ocr\`, a level folder, `streamhash.txt` or the streamhash pass's capture (design part 7.5; notes C3;
+/// T5-R57), so an unreachable staging share read as an absent staged folder deletes none of them. Def: T5-18. Use:
+/// T5-18.
+pub(crate) fn unit_outputs_left(label_dir: &Path) -> bool {
+    let levels = fs::read_dir(label_dir).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry.file_name().to_str().is_some_and(|name| name.starts_with(LEVEL_PREFIX)) && entry.path().is_dir()
+        })
+    });
+    levels || label_dir.join("subs-ocr").exists() || STREAMHASH_FILES.iter().any(|file| label_dir.join(file).exists())
+}
+
+/// The job folder's streamhash files that `clear_incomplete` deletes: `streamhash.txt` and the pass's capture.
+const STREAMHASH_FILES: [&str; 5] = [
+    "streamhash.txt",
+    "streamhash-ffmpeg.txt",
+    "streamhash-ffmpeg.txt.stderr",
+    "streamhash-ffmpeg.txt.timing.jsonl",
+    "streamhash-ffmpeg.txt.exit.json",
+];
 
 /// A copy into the job folder (R5-code-30, design part 7.4): `from`'s bytes, their count checked against `from`'s
 /// size, written through `lazymkv_platform::write_atomic`, so a job-folder file is flushed and whole or absent; it
@@ -453,6 +473,56 @@ mod tests {
         write_checked(&to, b"{\n  \"id\": 1\n}\n").unwrap();
         assert_eq!(fs::read(&to).unwrap(), b"{\n  \"id\": 1\n}\n");
         assert!(!s.0.join("tmdb.json.partial").exists());
+    }
+
+    /// H1: a link left at `<to>.partial` is removed, not written through, so its target keeps its bytes and `to` is a
+    /// regular file.
+    #[cfg(unix)]
+    #[test]
+    fn write_checked_removes_a_link_at_partial_and_never_writes_through_it() {
+        let s = Scratch::new("staged-write-checked-link");
+        let victim = s.write_path("victim.json", b"the victim's bytes");
+        let to = s.0.join("tmdb.json");
+        std::os::unix::fs::symlink(&victim, s.0.join("tmdb.json.partial")).unwrap();
+        write_checked(&to, b"{\n  \"id\": 1\n}\n").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"the victim's bytes");
+        assert!(fs::symlink_metadata(&to).unwrap().file_type().is_file(), "to is a regular file, not the link");
+        assert_eq!(fs::read(&to).unwrap(), b"{\n  \"id\": 1\n}\n");
+        assert!(fs::symlink_metadata(s.0.join("tmdb.json.partial")).is_err(), "no .partial is left");
+    }
+
+    /// Notes C3, Task 18's error path: a plain file at the staged tuning folder's path is not a folder already gone,
+    /// so `clear_incomplete` gives the error and deletes nothing of the job folder.
+    #[test]
+    fn clear_incomplete_gives_the_error_when_the_staged_tuning_path_is_a_file() {
+        let s = Scratch::new("staged-clear-file");
+        let tuning = s.write_path("tuning/t00-00800", "a file where the folder goes");
+        s.write("job/t00-00800/subs-ocr/summary.json", "x");
+        let label_dir = s.0.join("job").join("t00-00800");
+        let error = clear_incomplete(&tuning, &label_dir).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert!(tuning.is_file());
+        assert!(label_dir.join("subs-ocr").join("summary.json").is_file());
+    }
+
+    #[test]
+    fn unit_outputs_left_finds_only_what_clear_incomplete_deletes() {
+        let s = Scratch::new("staged-outputs-left");
+        let label_dir = s.0.join("job").join("t00-00800");
+        assert!(!unit_outputs_left(&label_dir), "no title folder");
+        s.write("job/t00-00800/mkvmerge.json", "x");
+        s.write("job/t00-00800/subs/index.json", "x");
+        assert!(!unit_outputs_left(&label_dir));
+        for (scratch, file) in [
+            ("staged-outputs-left-subs", "subs-ocr/summary.json"),
+            ("staged-outputs-left-levels", "audio-levels-20ms-1/main-mix.txt"),
+            ("staged-outputs-left-hash", "streamhash.txt"),
+            ("staged-outputs-left-capture", "streamhash-ffmpeg.txt.stderr"),
+        ] {
+            let s = Scratch::new(scratch);
+            s.write(&format!("job/t00-00800/{file}"), "x");
+            assert!(unit_outputs_left(&s.0.join("job").join("t00-00800")), "{file}");
+        }
     }
 
     #[test]

@@ -1950,6 +1950,69 @@ mod rerun {
         assert_eq!(got, expected);
     }
 
+    /// Task 18's deferred item 2: a staged tuning folder that reads as absent while the staging share does not answer
+    /// deletes none of the job folder's outputs of steps 10 and 10a; the job waits for the share, and once it answers
+    /// both steps run again.
+    #[test]
+    fn an_absent_staged_folder_on_an_unreachable_share_waits_and_deletes_nothing() {
+        let baseline = harness(&["movie-direct-two-subs"], on());
+        let base_id = run_to(&baseline, "Inspecting");
+        let expected = decided(&baseline, &base_id);
+
+        let h = harness(&["movie-direct-two-subs", "movie-direct-two-subs-lookup-late"], on());
+        let id = stale_before_the_probe(&h);
+        run_to(&h, "AwaitingLookup");
+        let first = unit_spawns(&h);
+        fs::remove_dir_all(tuning(&h, &id)).unwrap();
+        let label_dir = h.job_dir(&id).join(KEY);
+        let job_subs = label_dir.join("subs-ocr");
+        let job_levels = level_folder(&label_dir);
+        assert!(job_subs.is_dir());
+        fs::remove_file(h.tools().join("lazymkv-ocr.calls.json")).unwrap();
+        let staging = h.staging().to_str().unwrap().to_string();
+        h.shares().set_reach(&staging, Reach::Unreachable("cable out".into()));
+        h.fire_timers();
+        h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+        assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Inspecting) });
+        assert!(job_subs.is_dir() && job_levels.is_dir(), "the job folder's outputs are kept");
+        assert!(!job_log(&h, &id).contains(CLEARED));
+        assert_eq!(unit_spawns(&h), first, "steps 10 and 10a did not run");
+
+        h.shares().set_reach(&staging, Reach::Reachable);
+        let mut c = Client::open(&h);
+        c.snapshot();
+        c.ok("retry", json!({"job": id}));
+        let got = decided(&h, &id);
+        let second = unit_spawns(&h);
+        assert_eq!(second.len(), 2 * first.len(), "{second:?}");
+        assert!(level_folder(&tuning(&h, &id)).join("audio-proxy.json").is_file());
+        assert!(job_subs.join("summary.json").is_file());
+        assert_eq!(got, expected);
+    }
+
+    /// Task 18's deferred item 1: a staged tuning folder that cannot be deleted is a write error on staging (T5-R56),
+    /// classed by the share check, so on a share that answers it waits as AwaitingShare with `WriteError`.
+    #[test]
+    fn a_staged_folder_that_cannot_be_deleted_waits_with_a_write_error() {
+        // movie-direct's one English stream: no step 10 and no worker run, so the first unit is short under load.
+        let h = harness(&["movie-direct-two-subs-lookup-late"], on());
+        let id = stale_before_the_probe(&h);
+        run_to(&h, "AwaitingLookup");
+        let staged = tuning(&h, &id);
+        fs::remove_dir_all(&staged).unwrap();
+        fs::write(&staged, b"a file where the folder goes").unwrap();
+        h.fire_timers();
+        h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+        let record = h.record(&id);
+        assert_eq!(record.state, State::AwaitingShare { return_to: Box::new(State::Inspecting) });
+        let write = Failure { class: FailureClass::Output, output: Some(OutputCause::WriteError) };
+        assert!(events(&h, &id).contains(&Event::DecisionFailed { failure: write }));
+        let message = record.message.unwrap();
+        let head = format!("{}: the incomplete staged tuning folder could not be deleted: ", staged.display());
+        assert!(message.starts_with(&head), "{message}");
+        assert!(level_folder(&h.job_dir(&id).join(KEY)).is_dir(), "the job folder's level folder is kept");
+    }
+
     #[test]
     fn with_the_setting_off_streamhash_txt_marks_the_folder_complete() {
         let h = harness(&["movie-direct-two-subs", "movie-direct-two-subs-lookup-late"], json!({}));

@@ -199,12 +199,14 @@ synopsis.
 ### `lazymkv-dev retune --subtitles`
 
 ```
-lazymkv-dev retune [--evidence DIR] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]
+lazymkv-dev retune [--evidence DIR[=TEXTDIR] ...] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]
 ```
 
 `--subtitles` takes only `--evidence`, `--spec` and `--text`; with `--set`, `--snapshot`, `--compare` or
 `--allow-unmeasured` it is an argument error (exit 2). The subtitle thresholds are design spec 14's defaults
-(`Settings::default().text_rule()`).
+(`Settings::default().text_rule()`). `--evidence` may repeat, each as DIR or DIR=TEXTDIR split at the first `=`; two or
+more print one section per folder and exit with the worst code, and `--text`, `--snapshot` and `--compare` are then
+refused (design part 7.7; notes D1, D2).
 
 With `--subtitles`, the subtitle harness of design spec 15 (ruling RP15 below). For every labelled English or
 no-language subtitle track of every rip label in the evidence, it verifies the rip against the scan and judges the

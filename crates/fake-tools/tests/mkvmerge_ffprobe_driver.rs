@@ -232,7 +232,9 @@ fn text(value: &Option<serde_json::Value>) -> String {
 fn the_runners_ffprobe_lists_a_zlib_pgs_tracks_inflated_sizes_as_the_reader_does() {
     let Some(ffprobe) = installed_ffprobe() else {
         assert!(std::env::var_os("CI").is_none(), "CI has no ffprobe, so call 24's cross-check cannot run on this runner");
-        println!("skipped: no ffprobe (set LAZYMKV_TEST_FFPROBE or put ffprobe on PATH), so call 24's cross-check did not run");
+        lazymkv_dev::evidence::skip(
+            "no ffprobe (set LAZYMKV_TEST_FFPROBE or put ffprobe on PATH), so call 24's cross-check did not run",
+        );
         return;
     };
     let scratch = Scratch::new("cross-check");

@@ -144,7 +144,8 @@ pub fn no_token_line(shown: &str, copy: &StaleCopy) -> String {
 
 /// `lazymkv-dev retune: <shown>/<file>: unmeasured: the TMDb copy is missing or more than six months old (fetched_at
 /// <date>), and a job folder's copy is fetched again only by lazymkvctl retune --jobs`; `(no fetched_at)` replaces
-/// `(fetched_at <date>)` when the copy has none. Def: T5-21. Use: T5-21, T5-22.
+/// `(fetched_at <date>)` when the copy has none (design part 7.7; Ruling T5-R40, call 25). Def: T5-21. Use: T5-21,
+/// T5-22.
 pub fn unmeasured_line(shown: &str, copy: &StaleCopy) -> String {
     format!(
         "lazymkv-dev retune: {}: unmeasured: the TMDb copy is missing or more than six months old ({}), and a job \

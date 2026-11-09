@@ -1008,7 +1008,10 @@ impl Harness {
     /// Returns once the job files, notifications, engine.log, drives.json, ejects, step calls and keep-awake holders
     /// are unchanged for 300 ms, or for 2 s while the running engine has a step or lookup round outstanding (10 s
     /// cap). A step can pass 300 ms with no file changing, as a stand-in's first launch does, and a step that hangs on
-    /// purpose ends the wait after 2 s (Ruling R24.c1). Def: T22. Use: T22 to T29.
+    /// purpose ends the wait after 2 s (Ruling R24.c1). A running dataset copy or recordings refresh counts as busy,
+    /// but what it writes is not watched (design part 7.5), so a test that reads the tuning root or `tuning_copy`
+    /// waits with `refreshes(id)` and `!busy()`, on the record's `tuning_copy`, or with `run_copies`, never on `settle`
+    /// alone. Def: T22. Use: T22 to T29.
     pub fn settle(&self) {
         self.deliver();
         let cap = Instant::now() + SETTLE_CAP;
@@ -1167,7 +1170,8 @@ impl Harness {
             .collect()
     }
 
-    /// The id of the next copy attempt to end; panics after 10 s times `ci_factor()`. Def: T5-19. Use: T5-19, T5-20.
+    /// The id of the next copy attempt to end, which may be one that ended before the call (every attempt's end is
+    /// queued, a failed one's too); panics after 10 s times `ci_factor()`. Def: T5-19. Use: T5-19, T5-20.
     pub fn wait_copy(&self) -> String {
         self.deliver();
         let ends = lock(&self.copy_done);
@@ -1210,8 +1214,8 @@ impl Harness {
         *lock(&self.cleanup_period) = Some(period);
     }
 
-    /// The running engine's busy flag (Ruling R24.c1; a running pass counts); false when no engine runs.
-    /// Def: T4-11. Use: T4-11.
+    /// The running engine's busy flag (Ruling R24.c1; a running cleanup pass, dataset copy or recordings refresh
+    /// counts, design parts 5.9 and 7.5); false when no engine runs. Def: T4-11. Use: T4-11.
     pub fn busy(&self) -> bool {
         lock(&self.engine).as_ref().is_some_and(EngineHandle::busy)
     }

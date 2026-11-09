@@ -248,8 +248,9 @@ pub(crate) enum Msg {
     /// Refresh the job's tuning recordings (design part 7.5): the cleanup pass's message for a job whose TMDb copy it
     /// deleted. Def: T5-20. Use: T5-20.
     Refresh { job: String },
-    /// A refresh of the job's tuning recordings ended (design part 7.5). Def: T5-20. Use: T5-20.
-    Refreshed { job: String },
+    /// A refresh of the job's tuning recordings ended (design part 7.5): the job, and whether `tuning_root` was not
+    /// reached or `refresh_recordings` failed. Def: T5-20. Use: T5-20.
+    Refreshed { job: String, failed: bool },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -455,10 +456,11 @@ impl EngineHandle {
         lock(&self.jobs).values().map(job_summary).collect()
     }
 
-    /// Whether the owner, after the last message it handled, had a step, a lookup round or a cleanup pass (design part
-    /// 5.9) outstanding; false once it has shut down. While it is busy the testkit's `settle` asks for 2 s of quiet
-    /// instead of 300 ms, and waits no longer than that for it to clear (Ruling R24.c1). Def: T24, T4-11. Use: T24 to
-    /// T29, T4-11.
+    /// Whether the owner, after the last message it handled, had a step, a lookup round, a cleanup pass (design part
+    /// 5.9), a dataset copy or a recordings refresh (design part 7.5) outstanding; false once it has shut down. While
+    /// it is busy the testkit's `settle` asks for 2 s of quiet instead of 300 ms, and waits no longer than that for it
+    /// to clear (Ruling R24.c1); what a copy or a refresh writes, under the tuning root and the staging level markers,
+    /// is not among `settle`'s marks. Def: T24, T4-11. Use: T24 to T29, T4-11.
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
@@ -1089,6 +1091,9 @@ struct Owner {
     refreshing: BTreeSet<String>,
     /// The jobs asked for a refresh while theirs ran, refreshed once more at its end.
     refresh_again: BTreeSet<String>,
+    /// The jobs whose last refresh failed, refreshed again at the next cleanup pass (design part 7.5); kept in memory
+    /// only, so a restart forgets them.
+    refresh_failed: BTreeSet<String>,
     /// Sent the job's id at the end of each refresh, for the testkit (`TestHooks::refresh_done`).
     refresh_done: Option<Sender<String>>,
 }
@@ -1202,6 +1207,7 @@ impl Owner {
             copy_with,
             refreshing: BTreeSet::new(),
             refresh_again: BTreeSet::new(),
+            refresh_failed: BTreeSet::new(),
             refresh_done,
         };
         owner.restart(present);
@@ -1424,7 +1430,7 @@ impl Owner {
             Msg::TuningCopy => self.start_copies(),
             Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
             Msg::Refresh { job } => self.request_refresh(&job),
-            Msg::Refreshed { job } => self.refresh_ended(&job),
+            Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
         }
     }
 
@@ -1458,7 +1464,7 @@ impl Owner {
             Msg::CommandDone { .. } | Msg::CommandRefetched { .. } => {}
             Msg::CleanupDone => self.cleanup_ended(),
             Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
-            Msg::Refreshed { job } => self.refresh_ended(&job),
+            Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
             Msg::Drive(_)
             | Msg::Arrival(_)
             | Msg::Timer { .. }
@@ -1474,12 +1480,15 @@ impl Owner {
     /// and whatever its state, from its record, its own settings (ENG-19) and its lookup book, handed to a pass on a
     /// thread of its own, which `shut_down` joins. The pass writes engine.log through the store, reads the stop flag
     /// `shut_down` raises before each job (Ruling FR-1), and sends `Msg::Refresh` for each job whose TMDb copy it
-    /// deleted (design part 7.5), then `Msg::CleanupDone` at its end. First, whether a pass
-    /// runs or not, every pending dataset copy is retried (`start_copies`, call 10), so on an idle engine a copy waits
-    /// for `tuning_root` at most a cleanup period; the pass reads each record as it is when it starts, so a copy that
-    /// lands during it frees the staging data at the next pass (C2).
+    /// deleted (design part 7.5), then `Msg::CleanupDone` at its end. First, whether a pass runs or not, every pending
+    /// dataset copy is retried (`start_copies`, call 10), and every failed recordings refresh (design part 7.5), so on
+    /// an idle engine a copy waits for `tuning_root` at most a cleanup period; the pass reads each record as it is when
+    /// it starts, so a copy that lands during it frees the staging data at the next pass (C2).
     fn start_cleanup(&mut self) {
         self.start_copies();
+        for id in std::mem::take(&mut self.refresh_failed) {
+            self.request_refresh(&id);
+        }
         if self.cleanup_running {
             return;
         }
@@ -1524,7 +1533,8 @@ impl Owner {
     /// whose own settings do not keep tuning evidence or name no `tuning_root`. The thread, which `shut_down` joins,
     /// asks the share of `tuning_root` and runs `refresh_recordings` into `<tuning_root>\recordings\<id>\`: a root
     /// not reached or a failed refresh writes its job.log line, each deleted copy its engine.log line, and whatever
-    /// the end it sends `Msg::Refreshed`. Def: T5-20. Use: T5-20, T5-22.
+    /// the end it sends `Msg::Refreshed`, saying whether it failed; a failed refresh is retried at the next cleanup
+    /// pass (`refresh_failed`). Def: T5-20. Use: T5-20, T5-22.
     fn request_refresh(&mut self, id: &str) {
         if self.stopping || self.quiet.is_some() {
             return;
@@ -1550,9 +1560,11 @@ impl Owner {
         let target = Path::new(&root).join(RECORDINGS).join(id);
         let job = id.to_string();
         self.threads.push(thread::spawn(move || {
-            match shares.reach(&root) {
+            let failed = match shares.reach(&root) {
                 Reach::Unreachable(why) => {
-                    store.job_log(&job, &format!("tuning recordings refresh failed: tuning_root was not reached: {why}"))
+                    let line = format!("tuning recordings refresh failed: tuning_root was not reached: {why}");
+                    store.job_log(&job, &line);
+                    true
                 }
                 Reach::Reachable => match refresh_recordings(&job_dir, &target) {
                     Ok(end) => {
@@ -1561,18 +1573,27 @@ impl Owner {
                                 "{job}: tuning recordings: deleted {path}, which the job folder no longer holds"
                             ));
                         }
+                        false
                     }
-                    Err(error) => store.job_log(&job, &format!("tuning recordings refresh failed: {error}")),
+                    Err(error) => {
+                        store.job_log(&job, &format!("tuning recordings refresh failed: {error}"));
+                        true
+                    }
                 },
-            }
-            let _ = sender.send(Msg::Refreshed { job });
+            };
+            let _ = sender.send(Msg::Refreshed { job, failed });
         }));
     }
 
-    /// `Msg::Refreshed`: the job leaves `refreshing`, the testkit hears of it, and a marked job is refreshed again.
-    /// Def: T5-20. Use: T5-20.
-    fn refresh_ended(&mut self, id: &str) {
+    /// `Msg::Refreshed`: the job leaves `refreshing`, enters `refresh_failed` when its refresh failed and leaves it
+    /// otherwise, the testkit hears of it, and a marked job is refreshed again. Def: T5-20. Use: T5-20.
+    fn refresh_ended(&mut self, id: &str, failed: bool) {
         self.refreshing.remove(id);
+        if failed {
+            self.refresh_failed.insert(id.to_string());
+        } else {
+            self.refresh_failed.remove(id);
+        }
         if let Some(done) = &self.refresh_done {
             let _ = done.send(id.to_string());
         }

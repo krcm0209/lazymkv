@@ -311,12 +311,15 @@ fn licenses_and_export_models_take_exactly_their_arguments() {
         (&["licenses", "extra"][..], "lazymkvctl licenses: error: unrecognized arguments: extra"),
         (&["export-models"][..], "lazymkvctl export-models: error: the following arguments are required: DIR"),
         (&["export-models", "a", "b", "c"][..], "lazymkvctl export-models: error: unrecognized arguments: b c"),
+        (&["export-models", "--help"][..], "lazymkvctl export-models: error: unrecognized arguments: --help"),
+        (&["export-models", "-h"][..], "lazymkvctl export-models: error: unrecognized arguments: -h"),
     ] {
         let (code, out, err) = ctl(&ctx, argv);
         assert_eq!((code, out), (2, vec![]), "{argv:?}");
         assert_eq!(String::from_utf8(err).unwrap(), format!("{message}\n"), "{argv:?}");
     }
     assert!(!s.0.join("a").exists(), "an argument error writes nothing");
+    assert!(!s.0.join("--help").exists() && !s.0.join("-h").exists(), "a flag is not taken as DIR");
 }
 
 #[test]
