@@ -363,7 +363,11 @@ fn step_10a_writes_the_level_folder_and_the_proxy_into_the_staged_folder_and_the
     let h = harness(&[], evidence_on());
     let id = run_to(&h, "Filed");
     let (levels, tuning) = (h.job_dir(&id).join(KEY).join(LEVELS), staged(&h, &id));
-    assert_eq!(files_under(&levels), LEVEL_FILES.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>());
+    // Task 19 (T5-R13): the job folder's level folder gets its audio-proxy.json once the dataset copy has landed.
+    h.wait("the dataset copy", |h| h.record(&id).tuning_copy == Some(lazymkv_core::record::TuningCopy::Done));
+    let mut job_level: BTreeSet<String> = LEVEL_FILES.iter().map(|name| name.to_string()).collect();
+    job_level.insert("audio-proxy.json".to_string());
+    assert_eq!(files_under(&levels), job_level);
     let mut expected: BTreeSet<String> = LEVEL_FILES.iter().map(|name| format!("{LEVELS}/{name}")).collect();
     expected.extend([format!("{LEVELS}/audio-proxy.json"), "audio-proxy.mka".to_string(), "audio-proxy.json".to_string()]);
     assert_eq!(files_under(&tuning), expected);

@@ -347,7 +347,7 @@ mod tests {
             format: JOB_FORMAT.to_string(), id: id.to_string(), fingerprint: fingerprint.to_string(), disc_id: None,
             drive: "tok0".to_string(), created_unix: created, updated_unix: created, state, message: None,
             rip_again: false, profile: JOB_PROFILE_FILE.to_string(), plan: None, titles: vec![], filed_unix: None,
-            collisions: vec![], notes: vec![],
+            collisions: vec![], notes: vec![], tuning_copy: None,
         }
     }
 

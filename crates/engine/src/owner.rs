@@ -27,7 +27,7 @@ use lazymkv_core::job::{
     job_id, job_lookup, new_job, reduce, Action, Event, FailureClass, Held, JobLookup, NotifyEvent, State, Tool,
 };
 use lazymkv_core::profile::JOB_PROFILE_FILE;
-use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, DRIVES_FORMAT, JOB_FORMAT};
+use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, TuningCopy, DRIVES_FORMAT, JOB_FORMAT};
 use lazymkv_core::remembered::Overrides;
 use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::{Settings, SettingsProblem};
@@ -62,6 +62,7 @@ use crate::steps::{spawn_round, RealSteps};
 use crate::store::PersistFaults;
 use crate::store::{console_mirror, MirrorDrain, Persisted, Store, CONSOLE_DRAIN, CONSOLE_QUEUE};
 use crate::timers::Timers;
+use crate::tuning::{copy_dataset, pending_line, CopyEnd, CopyFn, TuningJob, COPIED};
 use crate::EngineConfig;
 
 /// How long the drive thread waits for each drive event before it looks at its stop flag again.
@@ -172,6 +173,12 @@ pub(crate) struct TestHooks {
     pub(crate) cleanup_done: Option<Sender<()>>,
     /// Replaces the period `EngineConfig.cleanup_minutes` gives, tests only (design part 5.9). Def: T4-11. Use: T4-11.
     pub(crate) cleanup_period: Option<Duration>,
+    /// Sent the job's id at the end of each copy attempt the owner handled (design part 7.5). Def: T5-19. Use: T5-19,
+    /// T5-20.
+    pub(crate) copy_done: Option<Sender<String>>,
+    /// The copy step every copy thread passes to `copy_dataset`; None copies with `staged::copy_checked`. Def: T5-19.
+    /// Use: T5-19.
+    pub(crate) copy_with: Option<CopyFn>,
 }
 
 /// Everything that reaches the owner thread, on its one channel (design part 4.4). Def: T22. Use: T22, T24, T26.
@@ -218,6 +225,13 @@ pub(crate) enum Msg {
     Cleanup,
     /// The running cleanup pass ended (design part 5.9). Def: T4-11. Use: T4-11.
     CleanupDone,
+    /// Starts a copy, as a retry, for every job whose copy is pending and not running (`EngineHandle::copy_now`).
+    /// Def: T5-19. Use: T5-19.
+    #[cfg_attr(not(any(test, feature = "testkit")), allow(dead_code))]
+    TuningCopy,
+    /// A copy thread ended (design part 7.5): the job, whether it was a retry, and how it ended. Def: T5-19.
+    /// Use: T5-19, T5-20.
+    TuningCopied { job: String, retry: bool, end: CopyEnd },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -264,6 +278,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     let store = Arc::new(store);
     let stop_after = hooks.stop_after;
     let cleanup_done = hooks.cleanup_done;
+    let (copy_done, copy_with) = (hooks.copy_done, hooks.copy_with);
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
     remove_work_folder(&store, &config.data);
     let outbox = Outbox::default();
@@ -329,6 +344,8 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
         present,
         selftest,
         cleanup_done,
+        copy_done,
+        copy_with,
     );
     // Review round 1 of pull request 3 (R35): the thread's end, a panic included, drops `owner_exit`.
     let (owner_exit, owner_done) = channel::<()>();
@@ -432,6 +449,12 @@ impl EngineHandle {
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn cleanup_now(&self) {
         let _ = self.sender.send(Msg::Cleanup);
+    }
+
+    /// Sends `Msg::TuningCopy` (design part 7.5). Def: T5-19. Use: T5-19.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) fn copy_now(&self) {
+        let _ = self.sender.send(Msg::TuningCopy);
     }
 
     /// Polls `jobs` every 20 ms until `done` holds, and gives true; false once `timeout` has passed. Def: T22. Use: T22
@@ -725,6 +748,10 @@ fn note_detail(note: Note) -> String {
         Note::DirectModeFallback => {
             "the whole-disc copy failed twice, so the job switched to direct mode (spec 6.3)".to_string()
         }
+        Note::TuningEvidencePending => {
+            "tuning_root was unreachable or short of space, so the tuning evidence is copied once it answers (spec 7)"
+                .to_string()
+        }
         other => other.as_str().to_string(),
     }
 }
@@ -756,6 +783,7 @@ fn new_record(id: &str, meta: &DiscMeta, drive: &str, now: u64) -> JobRecord {
         filed_unix: None,
         collisions: Vec::new(),
         notes: Vec::new(),
+        tuning_copy: None,
     }
 }
 
@@ -1031,6 +1059,12 @@ struct Owner {
     cleanup_running: bool,
     /// Sent once at the end of each cleanup pass, for the testkit (`TestHooks::cleanup_done`).
     cleanup_done: Option<Sender<()>>,
+    /// The jobs with a dataset copy thread running (design part 7.5).
+    copies: BTreeSet<String>,
+    /// Sent the job's id at the end of each copy attempt, for the testkit (`TestHooks::copy_done`).
+    copy_done: Option<Sender<String>>,
+    /// The copy step of every copy thread, for the testkit (`TestHooks::copy_with`).
+    copy_with: Option<CopyFn>,
 }
 
 impl Owner {
@@ -1038,7 +1072,8 @@ impl Owner {
     /// discs `present` in the drives (`Owner::restart`), showing `selftest` until the first `run_selftest`. Each loaded
     /// job but a Filed or Discarded one has its lookup book rebuilt from its folder (`rebuild_book`, S73). A refused
     /// job is logged and left alone; a refused drives.json is logged and the drives are kept in memory only. Each
-    /// cleanup pass's end is sent on `cleanup_done` when it is Some (design part 5.9).
+    /// cleanup pass's end is sent on `cleanup_done` when it is Some (design part 5.9), and each copy attempt's job on
+    /// `copy_done`, every copy thread copying with `copy_with` when it is Some (design part 7.5).
     #[allow(clippy::too_many_arguments)]
     fn load(
         store: Arc<Store>,
@@ -1051,6 +1086,8 @@ impl Owner {
         present: Vec<(String, PathBuf)>,
         selftest: SelfTest,
         cleanup_done: Option<Sender<()>>,
+        copy_done: Option<Sender<String>>,
+        copy_with: Option<CopyFn>,
     ) -> Owner {
         let mut jobs = BTreeMap::new();
         for loaded in store.load_jobs() {
@@ -1132,6 +1169,9 @@ impl Owner {
             command: None,
             cleanup_running: false,
             cleanup_done,
+            copies: BTreeSet::new(),
+            copy_done,
+            copy_with,
         };
         owner.restart(present);
         owner
@@ -1251,6 +1291,8 @@ impl Owner {
             self.perform(&id, &actions, None);
         }
         self.grant_next();
+        // Design part 7.5, call 10: a pending dataset copy is retried at engine start.
+        self.start_copies();
         let arrivals = walked.into_iter().filter(|walk| {
             let drive = match walk {
                 Ok(arrival) => &arrival.drive,
@@ -1348,6 +1390,8 @@ impl Owner {
             Msg::Gone { client } => self.kill_command_of(client),
             Msg::Cleanup => self.start_cleanup(),
             Msg::CleanupDone => self.cleanup_ended(),
+            Msg::TuningCopy => self.start_copies(),
+            Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
         }
     }
 
@@ -1356,7 +1400,8 @@ impl Owner {
     /// timers and lookup rounds are dropped, a new client is turned away and every request is refused. The shutdown
     /// stopped and answered a running command already (`stop_command`), so its end is dropped; a client that leaves
     /// still kills a command it runs (Ruling T3-22-c). A cleanup pass's end is handled as outside one, so `busy` never
-    /// stays set, and a new pass is not started (design part 5.9).
+    /// stays set, and a new pass is not started (design part 5.9); a copy's end likewise, and no copy starts (design
+    /// part 7.5).
     fn quiet_message(&mut self, message: Msg) {
         match message {
             Msg::StepDone { job, generation, result } => self.on_step_done(&job, generation, result),
@@ -1379,15 +1424,26 @@ impl Owner {
             Msg::Gone { client } => self.kill_command_of(client),
             Msg::CommandDone { .. } | Msg::CommandRefetched { .. } => {}
             Msg::CleanupDone => self.cleanup_ended(),
-            Msg::Drive(_) | Msg::Arrival(_) | Msg::Timer { .. } | Msg::Refeed { .. } | Msg::Cleanup | Msg::Stop => {}
+            Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
+            Msg::Drive(_)
+            | Msg::Arrival(_)
+            | Msg::Timer { .. }
+            | Msg::Refeed { .. }
+            | Msg::Cleanup
+            | Msg::TuningCopy
+            | Msg::Stop => {}
         }
     }
 
     /// `Msg::Cleanup` (design part 5.9, S40; Ruling T4-R11): unless a pass runs, one `CleanupJob` per job, in id order
     /// and whatever its state, from its record, its own settings (ENG-19) and its lookup book, handed to a pass on a
     /// thread of its own, which `shut_down` joins. The pass writes engine.log through the store, reads the stop flag
-    /// `shut_down` raises before each job (Ruling FR-1), and sends `Msg::CleanupDone` at its end.
+    /// `shut_down` raises before each job (Ruling FR-1), and sends `Msg::CleanupDone` at its end. First, whether a pass
+    /// runs or not, every pending dataset copy is retried (`start_copies`, call 10), so on an idle engine a copy waits
+    /// for `tuning_root` at most a cleanup period; the pass reads each record as it is when it starts, so a copy that
+    /// lands during it frees the staging data at the next pass (C2).
     fn start_cleanup(&mut self) {
+        self.start_copies();
         if self.cleanup_running {
             return;
         }
@@ -1398,7 +1454,6 @@ impl Owner {
                 id: job.record.id.clone(),
                 record: job.record.clone(),
                 staging_root: job.settings.staging_root.clone(),
-                keep_tuning_evidence: job.settings.keep_tuning_evidence,
                 retention_days: job.settings.retention_days,
                 lookups: Arc::clone(&job.lookups),
             })
@@ -1424,6 +1479,105 @@ impl Owner {
         }
     }
 
+    /// Starts the dataset copy of `id` on a thread of its own (design part 7.5, EVID-4; call 10), `retry` for every
+    /// attempt but the one after the unit's DecisionDone. Nothing starts while the engine stops or a forced shutdown
+    /// waits, for an unknown job, for a job whose `tuning_copy` is not pending, or for one whose copy runs. A job whose
+    /// own settings name no `staging_root` or no `tuning_root` gets the job.log line `pending_line(retry, "<name> is
+    /// unset")` and no thread. The thread, which `shut_down` joins, runs `copy_dataset` with the engine's stop flag
+    /// and the testkit's `copy_with`, and sends `Msg::TuningCopied`; it asks the shares, so the owner thread does not.
+    fn start_copy(&mut self, id: &str, retry: bool) {
+        if self.stopping || self.quiet.is_some() || self.copies.contains(id) {
+            return;
+        }
+        let Some(job) = self.jobs.get(id).filter(|job| job.record.tuning_copy == Some(TuningCopy::Pending)) else {
+            return;
+        };
+        let (staging_root, tuning_root) = match (&job.settings.staging_root, &job.settings.tuning_root) {
+            (Some(staging), Some(tuning)) => (staging.clone(), tuning.clone()),
+            (None, _) => return self.store.job_log(id, &pending_line(retry, "staging_root is unset")),
+            (_, None) => return self.store.job_log(id, &pending_line(retry, "tuning_root is unset")),
+        };
+        let keys = job.record.plan.iter().flat_map(|plan| plan.titles.iter().map(|title| title.key.clone())).collect();
+        let job_dir = self.store.job_dir(id);
+        let copy_job = TuningJob { id: id.to_string(), job_dir, staging_root, tuning_root, keys };
+        self.copies.insert(id.to_string());
+        let shares = Arc::clone(&self.parts.shares);
+        let stop = Arc::clone(&self.drive_stop);
+        let copy = self.copy_with.clone();
+        let sender = self.sender.clone();
+        self.threads.push(thread::spawn(move || {
+            let step = copy.as_ref().map(|copy| copy.as_ref() as &dyn Fn(&Path, &Path) -> io::Result<u64>);
+            let end = copy_dataset(&copy_job, shares.as_ref(), &stop, step);
+            let _ = sender.send(Msg::TuningCopied { job: copy_job.id, retry, end });
+        }));
+    }
+
+    /// Retries every pending dataset copy that does not run, in id order (design part 7.5; call 10): at engine start,
+    /// before another step is handed, at each cleanup pass and at `Msg::TuningCopy`. A retry only copies.
+    fn start_copies(&mut self) {
+        let ids: Vec<String> = self.jobs.keys().cloned().collect();
+        for id in ids {
+            self.start_copy(&id, true);
+        }
+    }
+
+    /// A copy thread ended (design part 7.5; call 10, T5-R14). `Landed` writes the job.log line `COPIED` and makes
+    /// `tuning_copy` done (Task 20's refresh starts in this arm); `Nothing` writes `tuning copy: no staged tuning
+    /// folder, so nothing is owed (C2)` and takes `tuning_copy` out, so the cleanup deletes the staging data once the
+    /// job's retention has passed; `Waiting` writes `pending_line` and adds the note `tuning_evidence_pending` unless
+    /// the job holds it; `Failed` writes `pending_line` and changes no record; `Stopped` writes nothing. A changed
+    /// record, with `updated_unix` now, is written with `Store::write_record` (no transition) and then becomes the
+    /// job's record and is published; one that cannot be written leaves the record in memory as it was, with the
+    /// engine.log line `<id>: state.json could not be written after the tuning copy: <error>`, so the copy stays
+    /// pending and runs again at the next trigger. Last, the testkit hears of the attempt.
+    fn copy_ended(&mut self, id: &str, retry: bool, end: CopyEnd) {
+        self.copies.remove(id);
+        if let Some(job) = self.jobs.get(id) {
+            let mut record = job.record.clone();
+            let changed = match end {
+                CopyEnd::Landed => {
+                    self.store.job_log(id, COPIED);
+                    record.tuning_copy = Some(TuningCopy::Done);
+                    true
+                }
+                CopyEnd::Nothing => {
+                    self.store.job_log(id, "tuning copy: no staged tuning folder, so nothing is owed (C2)");
+                    record.tuning_copy = None;
+                    true
+                }
+                CopyEnd::Waiting(why) => {
+                    self.store.job_log(id, &pending_line(retry, &why));
+                    let held = record.notes.iter().any(|noted| noted.note == Note::TuningEvidencePending);
+                    add_note(&mut record.notes, Note::TuningEvidencePending);
+                    !held
+                }
+                CopyEnd::Failed(why) => {
+                    self.store.job_log(id, &pending_line(retry, &why));
+                    false
+                }
+                CopyEnd::Stopped => false,
+            };
+            if changed {
+                record.updated_unix = self.parts.host.now_unix();
+                match self.store.write_record(&record) {
+                    Ok(()) => {
+                        lock(&self.shown).insert(id.to_string(), record.clone());
+                        if let Some(job) = self.jobs.get_mut(id) {
+                            job.record = record;
+                        }
+                        self.publish(id);
+                    }
+                    Err(error) => {
+                        self.store.log(&format!("{id}: state.json could not be written after the tuning copy: {error}"))
+                    }
+                }
+            }
+        }
+        if let Some(done) = &self.copy_done {
+            let _ = done.send(id.to_string());
+        }
+    }
+
     /// The eject of an already-ripped disc returned.
     fn on_ejected(&mut self, drive: &str) {
         self.ejects = self.ejects.saturating_sub(1);
@@ -1431,11 +1585,16 @@ impl Owner {
     }
 
     /// After the restart sequence and after each message: finished threads dropped, KeepAwake held or released, and
-    /// the busy flag set (Ruling R24.c1), a running cleanup pass counting (design part 5.9).
+    /// the busy flag set (Ruling R24.c1), a running cleanup pass (design part 5.9) and a running copy (design part 7.5)
+    /// counting.
     fn after_message(&mut self) {
         self.threads.retain(|thread| !thread.is_finished());
         self.keep_awake();
-        let busy = !self.workers.is_empty() || !self.rounds_running.is_empty() || self.checking || self.cleanup_running;
+        let busy = !self.workers.is_empty()
+            || !self.rounds_running.is_empty()
+            || self.checking
+            || self.cleanup_running
+            || !self.copies.is_empty();
         self.parts.busy.store(busy, Ordering::SeqCst);
     }
 
@@ -1733,6 +1892,10 @@ impl Owner {
             self.publish(id);
             return true;
         }
+        // Design part 7.5, call 10: the first copy attempt starts before any step the transition hands.
+        if matches!(transition.event, Some(Event::DecisionDone { .. })) {
+            self.start_copy(id, false);
+        }
         self.perform(id, &transition.actions, recording);
         self.publish(id);
         if self.stopping {
@@ -1771,6 +1934,7 @@ impl Owner {
         let job = self.jobs.get(id)?;
         let now = self.parts.host.now_unix();
         let mut record = job.record.clone();
+        let keeps_evidence = job.settings.keep_tuning_evidence;
         let old = event.as_ref().map(|_| record.state.clone());
         for edit in edits {
             edit(&mut record);
@@ -1782,6 +1946,13 @@ impl Owner {
                 Action::RefreshIdentity => self.refresh_identity(id, &mut record),
                 _ => {}
             }
+        }
+        // Call 10 (T5-R14): the unit's Decide owes a dataset copy when the job's own settings keep tuning evidence.
+        if matches!(event, Some(Event::DecisionDone { .. }))
+            && keeps_evidence
+            && record.tuning_copy.is_none()
+        {
+            record.tuning_copy = Some(TuningCopy::Pending);
         }
         if new == State::Filed && record.state != State::Filed {
             record.filed_unix = Some(now);
@@ -2241,8 +2412,11 @@ impl Owner {
     /// One worker runs `actions` one after another and returns the first result whose event is Some, which ends the
     /// list, else the last result (design part 5.2; PF-6: an ExtractSubtitleEvidence that feeds an event, step 10's
     /// failure or ToolMissing, ends its unit before Decide runs, T5-14). Each action's progress goes to the owner with
-    /// its tag (S7). Handing Eject marks the job's drive as ejecting.
+    /// its tag (S7). Handing Eject marks the job's drive as ejecting. First every pending dataset copy is retried
+    /// (`start_copies`, design part 7.5: "before another step").
     fn hand(&mut self, id: &str, actions: Vec<Action>) {
+        // Design part 7.5: a pending dataset copy is retried before another step, any job's step.
+        self.start_copies();
         let Some(job) = self.jobs.get(id) else {
             return;
         };

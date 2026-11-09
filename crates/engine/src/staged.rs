@@ -304,7 +304,11 @@ mod tests {
     /// copies.
     #[test]
     fn the_unit_moves_files_across_volumes_only_through_the_checked_copy() {
-        let sources = [("step10.rs", include_str!("step10.rs")), ("step10a.rs", include_str!("step10a.rs"))];
+        let sources = [
+            ("step10.rs", include_str!("step10.rs")),
+            ("step10a.rs", include_str!("step10a.rs")),
+            ("tuning.rs", include_str!("tuning.rs")),
+        ];
         for (name, text) in sources {
             for needle in ["fs::rename", "fs::copy", "rename_no_replace"] {
                 assert!(!text.contains(needle), "{name} holds {needle}");

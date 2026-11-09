@@ -21,6 +21,7 @@ mod store;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 mod timers;
+mod tuning;
 
 use std::ffi::OsString;
 use std::io::Write;

@@ -745,6 +745,7 @@ mod tests {
             state: State::AwaitingShare { return_to: Box::new(return_to) }, message: None, rip_again: false,
             profile: "job.mmcp.xml".to_string(), plan: None, titles: vec![], filed_unix: None, collisions: vec![],
             notes: vec![],
+            tuning_copy: None,
         }
     }
 

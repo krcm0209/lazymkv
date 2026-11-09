@@ -166,7 +166,7 @@ fn seed(h: &Harness, n: u64, state: State) -> String {
     let r = JobRecord {
         format: JOB_FORMAT.to_string(), id: id.clone(), fingerprint: fp, disc_id: None, drive: "tok9".to_string(),
         created_unix: n, updated_unix: n, state, message: None, rip_again: false, profile: "job.mmcp.xml".to_string(),
-        plan: None, titles: vec![], filed_unix: None, collisions: vec![], notes: vec![],
+        plan: None, titles: vec![], filed_unix: None, collisions: vec![], notes: vec![], tuning_copy: None,
     };
     let dir = h.data().join("jobs").join(&id);
     fs::create_dir_all(&dir).unwrap();

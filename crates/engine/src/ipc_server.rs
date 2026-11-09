@@ -837,7 +837,7 @@ mod tests {
             format: lazymkv_core::record::JOB_FORMAT.to_string(), id: format!("{}-1", fp.to_ascii_lowercase()),
             fingerprint: fp, disc_id: None, drive: "tok0".to_string(), created_unix: n, updated_unix: n, state,
             message: None, rip_again: false, profile: "job.mmcp.xml".to_string(), plan: None, titles: vec![],
-            filed_unix: None, collisions: vec![], notes: vec![],
+            filed_unix: None, collisions: vec![], notes: vec![], tuning_copy: None,
         }
     }
 

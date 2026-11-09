@@ -36,7 +36,7 @@ use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
 use lazymkv_core::job::{Action, Event, Tool};
 use lazymkv_core::lookup::name::disc_name;
-use lazymkv_core::record::{JobRecord, Transition};
+use lazymkv_core::record::{JobRecord, Transition, TuningCopy};
 use lazymkv_core::snapshot::{disc_meta, unit_key_file};
 use lazymkv_core::testsupport::{default_profile_xml, ustar_build};
 use lazymkv_platform::fakes::{
@@ -67,6 +67,7 @@ use crate::native::{run_with, NativeOptions};
 use crate::owner::panic_text;
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
+use crate::tuning::CopyFn;
 use crate::{
     EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers, WebhookSink,
 };
@@ -435,6 +436,8 @@ pub struct Harness {
     data: PathBuf,
     staging: PathBuf,
     library: PathBuf,
+    /// `<root>/tuning`, every engine's `tuning_root` (spec 7, design part 7.5).
+    tuning: PathBuf,
     volumes: PathBuf,
     /// `<root>/tools`: the merged scenario folder, holding the tool copies (`Harness::new`).
     tools: PathBuf,
@@ -493,6 +496,10 @@ pub struct Harness {
     cleanup_period: Mutex<Option<Duration>>,
     /// The running engine's cleanup ends, one `()` per pass (`TestHooks::cleanup_done`).
     cleanup_done: Mutex<Option<Receiver<()>>>,
+    /// The running engine's copy ends, one job id per attempt (`TestHooks::copy_done`).
+    copy_done: Mutex<Option<Receiver<String>>>,
+    /// The copy step `copy_with` armed, shared with every engine the harness starts (Review Focus 1).
+    copy_fault: Arc<Mutex<Option<CopyFn>>>,
     /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
     /// once `native_exit`, `stop` or the drop took it.
     #[cfg(windows)]
@@ -697,11 +704,20 @@ impl Harness {
         });
         let (cleanup_done, cleanup_ends) = channel::<()>();
         *lock(&self.cleanup_done) = Some(cleanup_ends);
+        let (copy_done, copy_ends) = channel::<String>();
+        *lock(&self.copy_done) = Some(copy_ends);
+        let armed_copy = Arc::clone(&self.copy_fault);
+        let copy_with: CopyFn = Arc::new(move |from: &Path, to: &Path| match lock(&armed_copy).clone() {
+            Some(copy) => copy(from, to),
+            None => fs::copy(from, to),
+        });
         let hooks = TestHooks {
             stop_after: Some(stop_after),
             persist_faults: Some(persist_faults),
             cleanup_done: Some(cleanup_done),
             cleanup_period: *lock(&self.cleanup_period),
+            copy_done: Some(copy_done),
+            copy_with: Some(copy_with),
         };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
         *lock(&self.engine) = Some(engine);
@@ -1116,6 +1132,50 @@ impl Harness {
         }
     }
 
+    /// The tuning root, `<root>/tuning` (spec 7, design part 7.5). Def: T5-19. Use: T5-19, T5-20, T5-22.
+    pub fn tuning(&self) -> &Path {
+        self.deliver();
+        &self.tuning
+    }
+
+    /// Starts a copy for every job whose state.json holds `tuning_copy: pending` (`Msg::TuningCopy`) and returns once
+    /// that many copy attempts have ended, the ids in the order they ended; panics after 10 s times `ci_factor()` per
+    /// attempt (design part 7.5). Def: T5-19. Use: T5-19, T5-20.
+    pub fn run_copies(&self) -> Vec<String> {
+        self.deliver();
+        let ids = self.job_ids();
+        let count = ids.iter().filter(|id| self.record(id).tuning_copy == Some(TuningCopy::Pending)).count();
+        let ends = lock(&self.copy_done);
+        let ends = ends.as_ref().expect("an engine has started");
+        while ends.try_recv().is_ok() {}
+        lock(&self.engine).as_ref().expect("an engine runs").copy_now();
+        let cap = WAIT_CAP * ci_factor();
+        (0..count)
+            .map(|_| match ends.recv_timeout(cap) {
+                Ok(id) => id,
+                Err(_) => panic!("run_copies: no copy ended within {} s", cap.as_secs()),
+            })
+            .collect()
+    }
+
+    /// The id of the next copy attempt to end; panics after 10 s times `ci_factor()`. Def: T5-19. Use: T5-19, T5-20.
+    pub fn wait_copy(&self) -> String {
+        self.deliver();
+        let ends = lock(&self.copy_done);
+        let ends = ends.as_ref().expect("an engine has started");
+        let cap = WAIT_CAP * ci_factor();
+        match ends.recv_timeout(cap) {
+            Ok(id) => id,
+            Err(_) => panic!("wait_copy: no copy ended within {} s", cap.as_secs()),
+        }
+    }
+
+    /// Puts `copy` in place of `fs::copy` in every copy of this harness's engines, from the next copy on (Review Focus
+    /// 1). Def: T5-19. Use: T5-19.
+    pub fn copy_with(&self, copy: impl Fn(&Path, &Path) -> io::Result<u64> + Send + Sync + 'static) {
+        *lock(&self.copy_fault) = Some(Arc::new(copy));
+    }
+
     /// From the next `start`, `cleanup_minutes: Some(1)` with its period replaced by `period` (design part 5.9).
     /// Def: T4-11. Use: T4-11.
     pub fn schedule_cleanup(&self, period: Duration) {
@@ -1505,6 +1565,7 @@ impl Folders {
             data: self.data,
             staging: self.staging,
             library: self.library,
+            tuning: self.tuning,
             volumes: self.volumes,
             tools: runner.tools,
             disc: runner.disc,
@@ -1538,6 +1599,8 @@ impl Folders {
             cleanup_minutes: Mutex::default(),
             cleanup_period: Mutex::default(),
             cleanup_done: Mutex::default(),
+            copy_done: Mutex::default(),
+            copy_fault: Arc::default(),
             #[cfg(windows)]
             native: Mutex::default(),
             #[cfg(windows)]

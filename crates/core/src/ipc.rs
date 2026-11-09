@@ -581,6 +581,7 @@ mod tests {
             filed_unix: None,
             collisions: vec![],
             notes: vec![],
+            tuning_copy: None,
         }
     }
 

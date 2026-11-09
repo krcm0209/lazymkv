@@ -212,6 +212,15 @@ impl Store {
         }
     }
 
+    /// state.json replaced with no transition line (design parts 7.3, 7.4; call 10): the same check, write and retry as
+    /// `persist`'s first half, for the copy's end, which changes `tuning_copy` or adds the note outside the reducer.
+    /// Def: T5-19. Use: T5-19.
+    pub(crate) fn write_record(&self, record: &JobRecord) -> io::Result<()> {
+        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self.job_dir(&record.id).join(STATE_FILE);
+        replace_state(&state, &pretty(record).map_err(|error| located(&state, error))?)
+    }
+
     /// `<data>/drives.json` through `check_format(DRIVES_FORMAT)` (design part 7.4). An Err is "<path>: <reason>". An
     /// absent file gives the empty record with DRIVES_FORMAT. Def: T21. Use: T22, T23, T25, T26.
     pub(crate) fn drives(&self) -> Result<DrivesFile, String> {
@@ -690,7 +699,7 @@ mod tests {
             format: JOB_FORMAT.to_string(), id: "abc-1".to_string(), fingerprint: "ABC".to_string(), disc_id: None,
             drive: "tok0".to_string(), created_unix: 7, updated_unix, state, message: None, rip_again: false,
             profile: "job.mmcp.xml".to_string(), plan: None, titles: Vec::new(), filed_unix: None,
-            collisions: Vec::new(), notes: Vec::new(),
+            collisions: Vec::new(), notes: Vec::new(), tuning_copy: None,
         }
     }
 
@@ -729,6 +738,26 @@ mod tests {
             fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert!(names.iter().all(|name| !name.ends_with(TEMP_SUFFIX)), "{names:?}");
         assert_eq!(store.load_jobs(), vec![Ok(record(State::Fingerprinted, 8))]);
+    }
+
+    /// Call 10: the copy's end rewrites state.json with no transitions line, under the same format check as `persist`.
+    #[test]
+    fn write_record_replaces_state_json_and_appends_no_transition() {
+        let tmp = Temp::new("write-record");
+        let store = store_in(&tmp.0);
+        store.persist(&record(State::Filed, 7), &first()).unwrap();
+        let dir = tmp.0.join("jobs/abc-1");
+        let lines = fs::read(dir.join("transitions.jsonl")).unwrap();
+        let mut done = record(State::Filed, 8);
+        done.tuning_copy = Some(lazymkv_core::record::TuningCopy::Done);
+        store.write_record(&done).unwrap();
+        let mut expected = serde_json::to_vec_pretty(&done).unwrap();
+        expected.push(b'\n');
+        assert_eq!(fs::read(dir.join("state.json")).unwrap(), expected);
+        assert_eq!(fs::read(dir.join("transitions.jsonl")).unwrap(), lines);
+        fs::write(dir.join("state.json"), br#"{"format": "lazymkv job v2"}"#).unwrap();
+        assert_eq!(store.write_record(&done).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(dir.join("state.json")).unwrap(), br#"{"format": "lazymkv job v2"}"#);
     }
 
     /// RP-8: a crash in the middle of an append leaves the last line without its newline; the next append ends it

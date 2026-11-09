@@ -1187,7 +1187,7 @@ The plans' "Not covered" lists, with the items the reviews of pull requests 2 an
 - `lazymkv-ocr.exe` and its below-normal run (`engine-task.ps1` copies it once it exists);
 - the release layout's `resources` folder in use;
 - layer 2 (real tools, MKVToolNix on CI). CI's commands stay unchanged in PR 2;
-- design part 7.5's mirror of the cleanup's deletion into `<tuning_root>\recordings\<job id>\`, and the tuning evidence copy, after which Owner decision 22's interim ends (until then pull request 4's cleanup keeps the staging data of a `Filed` job whose settings keep tuning evidence).
+- design part 7.5's mirror of the cleanup's deletion into `<tuning_root>\recordings\<job id>\` (Task 20), and the tuning evidence copy (Task 19), which ends Owner decision 22's interim: the cleanup holds a `Filed` job's staging data only while its dataset copy is pending (`tuning_copy` is `pending` in `state.json`), and a job with no staged tuning folder has nothing pending (C2).
 
 **Pull request 6:** `compare-job`.
 
