@@ -377,10 +377,11 @@ fn levels_pass(runner: &Runner, ffmpeg: &Path, ffprobe: &Path, inputs: &PassInpu
     let md5 = read_md5(key, work, &audio)?;
 
     // The level series and the manifest.
+    let raw_name = inputs.raw.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let mut frames: Vec<(i64, usize)> = Vec::new();
     for series in &first.series {
         let text = read_written(key, work, &series.raw)?;
-        let file = series_file(&text, &series.name, &series.raw)
+        let file = series_file(&text, &series.name, &raw_name)
             .map_err(|why| UnitError::Failed(format!("{key}: {why}")))?;
         write_work(&work.join(format!("{}.txt", series.name)), file.as_bytes())?;
         let raw_path = work.join(&series.raw);
@@ -392,7 +393,6 @@ fn levels_pass(runner: &Runner, ffmpeg: &Path, ffprobe: &Path, inputs: &PassInpu
             frames.push((n, count));
         }
     }
-    let raw_name = inputs.raw.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let raw_meta = fs::metadata(inputs.raw).map_err(|error| UnitError::Failed(shown(inputs.raw, error)))?;
     let seconds = (pass.elapsed_ms + 500) / 1000;
     let main_stream = audio.iter().find(|s| s.index == main).cloned().ok_or_else(|| {

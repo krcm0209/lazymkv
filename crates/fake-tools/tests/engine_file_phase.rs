@@ -380,6 +380,9 @@ fn step_10a_writes_the_level_folder_and_the_proxy_into_the_staged_folder_and_the
     assert_eq!(tracks, [(&json!(1), &json!("mix")), (&json!(1), &json!("fc"))]);
     assert_eq!(fs::read_to_string(levels.join("streamhash.txt")).unwrap(), format!("0,a,MD5={MD5}\n"));
     let mix = fs::read_to_string(levels.join("main-mix.txt")).unwrap();
+    assert!(mix.starts_with("# lazymkv audio levels v2: frame_ms=20 band_hz=300-3400 unit=dB floor=-100 series=main-mix file=title_t00.mkv\r\n"), "{mix}");
+    let fc = fs::read_to_string(levels.join("main-fc.txt")).unwrap();
+    assert!(fc.starts_with("# lazymkv audio levels v2: frame_ms=20 band_hz=300-3400 unit=dB floor=-100 series=main-fc file=title_t00.mkv\r\n"), "{fc}");
     assert_eq!(mix.split("\r\n").skip(1).collect::<Vec<_>>(), ["-20.1", "-21.4", "-100.0", "-35.6", "-19.9", ""]);
     assert!(!h.job_dir(&id).join(KEY).join("streamhash.txt").exists(), "the bare copy is the setting-off pass's");
     let pass = spawns_holding(&h, &["-/filter_complex"]);
