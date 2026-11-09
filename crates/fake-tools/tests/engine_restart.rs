@@ -939,6 +939,152 @@ fn a_restart_reads_a_stale_copy_as_pending_and_asks_nothing() {
     assert!(!log.contains("test-token"));
 }
 
+fn tuning_on() -> serde_json::Value {
+    json!({"keep_tuning_evidence": true, "drive_settle_s": 0, "drive_ready_timeout_s": 1})
+}
+
+/// The job's ID, with `tmdb-record.json` made stale just before the job's first Probe, so the unit's Decide asks TMDb
+/// for it again.
+fn stale_before_the_probe(h: &Harness) -> String {
+    let id = format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase());
+    let path = h.job_dir(&id).join("tmdb-record.json");
+    h.on_spawn(&["-show_streams"], move || {
+        let mut copy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        copy["fetched_at"] = json!("2026-01-01");
+        fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+    });
+    id
+}
+
+/// The spawns of steps 10 and 10a (the worker, ffmpeg but its `-version`, mkvmerge's extraction into an `.mks` file),
+/// over the harness's whole life: its spawn list spans a restart.
+fn unit_spawns(h: &Harness) -> Vec<String> {
+    h.spawns()
+        .into_iter()
+        .filter_map(|s| {
+            let stem = s.program.file_stem()?.to_str()?.to_string();
+            let unit = match stem.as_str() {
+                "lazymkv-ocr" => true,
+                "ffmpeg" => !s.args.iter().any(|a| a == "-version"),
+                "mkvmerge" => s.args.iter().any(|a| a.ends_with(".mks")),
+                _ => false,
+            };
+            unit.then(|| format!("{stem} {}", s.args.join(" ")))
+        })
+        .collect()
+}
+
+fn workers(spawns: &[String]) -> usize {
+    spawns.iter().filter(|s| s.starts_with("lazymkv-ocr ")).count()
+}
+
+/// The reason LookupAnswered's new identity adds to decide.json (design part 8.1, `movie-direct`'s TMDb answer): a
+/// re-run after the round has it, a run with no failed refetch does not, so `decided` leaves it out.
+const REFRESHED: &str = "the identity was made again with the answered lookups (8.1): step tmdb_one, confidence 0.90";
+
+/// `doc` without its `REFRESHED` line, the comma before it taken away when that line was an array's last.
+fn without_refreshed(doc: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in doc.lines() {
+        if !line.contains(REFRESHED) {
+            lines.push(line.to_string());
+        } else if !line.ends_with(',') {
+            if let Some(last) = lines.last_mut().filter(|last| last.ends_with(',')) {
+                last.pop();
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// decide.json, the title's decision and the `subtitle_text_unread` notes once the job's DecisionDone is persisted,
+/// with the harness's scratch root shown as `<root>` and decide.json without `REFRESHED`.
+fn decided(h: &Harness, id: &str) -> String {
+    h.wait("DecisionDone", |h| {
+        h.transitions(id).iter().any(|l| matches!(l.event, Some(Event::DecisionDone { .. })))
+    });
+    let record = h.record(id);
+    let unread: Vec<_> = record
+        .notes
+        .iter()
+        .filter(|n| serde_json::to_value(&n.note).unwrap() == json!("subtitle_text_unread"))
+        .collect();
+    let text = [
+        without_refreshed(&fs::read_to_string(h.job_dir(id).join(KEY).join("decide.json")).unwrap()),
+        serde_json::to_string(&record.titles[0].decision).unwrap(),
+        serde_json::to_string(&unread).unwrap(),
+    ]
+    .join("\n");
+    let root = h.tools().parent().unwrap().display().to_string();
+    text.replace(&root.replace('\\', "\\\\"), "<root>")
+        .replace(&root.replace('\\', "/"), "<root>")
+        .replace(&root, "<root>")
+}
+
+/// The decision of `scenarios` run straight through, with no failed refetch and no restart.
+fn straight(scenarios: &[&str]) -> String {
+    let h = harness(scenarios, tuning_on());
+    let id = format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase());
+    h.insert("tok0", DISC);
+    decided(&h, &id)
+}
+
+/// `scenarios` with the late lookup: the unit runs, Decide waits in AwaitingLookup, the engine restarts there.
+fn restarted_in_awaiting_lookup(scenarios: &[&str]) -> (Harness, String) {
+    let mut all = scenarios.to_vec();
+    all.push("movie-direct-two-subs-lookup-late");
+    let h = harness(&all, tuning_on());
+    let id = stale_before_the_probe(&h);
+    h.insert("tok0", DISC);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.restart();
+    (h, id)
+}
+
+#[test]
+fn a_restart_with_a_complete_staged_folder_skips_steps_10_and_10a() {
+    for scenarios in [&[DISC, "movie-direct-two-subs"][..], &[DISC, "movie-direct-two-subs", "movie-direct-two-subs-panic"][..]] {
+        let expected = straight(scenarios);
+        let (h, id) = restarted_in_awaiting_lookup(scenarios);
+        let first = unit_spawns(&h);
+        assert_eq!(workers(&first), 2, "{scenarios:?}: {first:?}");
+        h.fire_timers();
+        let got = decided(&h, &id);
+        assert_eq!(unit_spawns(&h), first, "{scenarios:?}: steps 10 and 10a ran again after the restart");
+        let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+        assert!(log.contains("t00-00800: steps 10 and 10a skipped: the staged tuning folder is complete"), "{log}");
+        assert_eq!(got, expected, "{scenarios:?}");
+    }
+}
+
+/// Review Focus 3: the engine stopped while it moved stream 1's output into the staged subs-ocr folder, after stream
+/// 0's had landed. The unit persists no transition between its moves, so the test leaves the folder as that stop does.
+#[test]
+fn a_restart_after_a_torn_move_deletes_the_staged_folder_and_reads_again() {
+    let expected = straight(&[DISC, "movie-direct-two-subs"]);
+    let (h, id) = restarted_in_awaiting_lookup(&[DISC, "movie-direct-two-subs"]);
+    let subs = h.staging().join(&id).join("tuning").join(KEY).join("subs-ocr");
+    for file in ["summary.json", "sub-1.ocr.jsonl", "sub-1.run.json"] {
+        fs::remove_file(subs.join(file)).unwrap();
+    }
+    fs::remove_dir_all(subs.join("s1")).unwrap();
+    assert!(subs.join("sub-0.ocr.jsonl").is_file());
+    let first = unit_spawns(&h);
+    // The stand-in worker answers its runs in turn (stream 0's files, then stream 1's for every later run), so its
+    // count starts again for the second unit's two streams.
+    fs::remove_file(h.tools().join("lazymkv-ocr.calls.json")).unwrap();
+    h.fire_timers();
+    let got = decided(&h, &id);
+    assert_eq!(workers(&unit_spawns(&h)), workers(&first) + 2, "both streams are read again");
+    for file in ["summary.json", "sub-0.ocr.jsonl", "sub-1.ocr.jsonl"] {
+        assert!(subs.join(file).is_file(), "{file}");
+    }
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(
+        "t00-00800: the staged tuning folder was incomplete, so it was deleted and steps 10 and 10a run again"), "{log}");
+    assert_eq!(got, expected);
+}
+
 /// Design part 5.10, T5-R51: a held two-stream job with one stream unread, approved after a restart, decides from the
 /// staged text and summary.json's unread stream with dev's readers, exactly as `lazymkvctl decide` does over the same
 /// folders.

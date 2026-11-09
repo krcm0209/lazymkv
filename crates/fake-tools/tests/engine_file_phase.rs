@@ -1787,3 +1787,195 @@ fn a_tv_disc_identified_through_its_seasons_is_held_with_no_path() {
     assert!(h.record(&id).titles.iter().all(|t| t.filed.is_none()));
     assert!(files_under(h.library()).is_empty(), "nothing is written under movies_root (A5, design part 6.6)");
 }
+
+/// C3 (notes lines 83 to 88): a re-run of steps 10, 10a and 11 after a Decide in Inspecting whose refetch failed.
+mod rerun {
+    use super::*;
+
+    /// keep_tuning_evidence on; the harness sets tuning_root to its scratch folder.
+    fn on() -> Value {
+        json!({"keep_tuning_evidence": true})
+    }
+
+    /// The job's ID, with `tmdb-record.json` made stale just before the job's first Probe, so the unit's Decide asks
+    /// TMDb for it again (`movie-direct-two-subs-lookup-late` answers that ask with a timeout).
+    pub(super) fn stale_before_the_probe(h: &Harness) -> String {
+        let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+        let path = h.job_dir(&id).join("tmdb-record.json");
+        h.on_spawn(&["-show_streams"], move || {
+            let mut copy: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            copy["fetched_at"] = json!("2026-01-01");
+            fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+        });
+        id
+    }
+
+    /// The spawns of steps 10 and 10a: the worker, ffmpeg (not its `-version`), and mkvmerge's extraction into an
+    /// `.mks` evidence file; each as its program's stem and its arguments.
+    pub(super) fn unit_spawns(h: &Harness) -> Vec<String> {
+        h.spawns()
+            .into_iter()
+            .filter_map(|s| {
+                let stem = s.program.file_stem()?.to_str()?.to_string();
+                let unit = match stem.as_str() {
+                    "lazymkv-ocr" => true,
+                    "ffmpeg" => !s.args.iter().any(|a| a == "-version"),
+                    "mkvmerge" => s.args.iter().any(|a| a.ends_with(".mks")),
+                    _ => false,
+                };
+                unit.then(|| format!("{stem} {}", s.args.join(" ")))
+            })
+            .collect()
+    }
+
+    fn workers(spawns: &[String]) -> usize {
+        spawns.iter().filter(|s| s.starts_with("lazymkv-ocr ")).count()
+    }
+
+    /// The reason LookupAnswered's new identity adds to decide.json (design part 8.1, `movie-direct`'s TMDb answer): a
+    /// re-run after the round has it, a run with no failed refetch does not, so `decided` leaves it out.
+    const REFRESHED: &str = "the identity was made again with the answered lookups (8.1): step tmdb_one, confidence 0.90";
+
+    /// `doc` without its `REFRESHED` line, the comma before it taken away when that line was an array's last.
+    fn without_refreshed(doc: &str) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for line in doc.lines() {
+            if !line.contains(REFRESHED) {
+                lines.push(line.to_string());
+            } else if !line.ends_with(',') {
+                if let Some(last) = lines.last_mut().filter(|last| last.ends_with(',')) {
+                    last.pop();
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// What the job's first DecisionDone leaves: decide.json, the title's decision and the job's
+    /// `subtitle_text_unread` notes, each with the harness's scratch root shown as `<root>` and decide.json without
+    /// `REFRESHED`, so two harnesses compare.
+    pub(super) fn decided(h: &Harness, id: &str) -> String {
+        h.wait("DecisionDone", |h| events(h, id).iter().any(|e| matches!(e, Event::DecisionDone { .. })));
+        let record = h.record(id);
+        let unread: Vec<_> = record
+            .notes
+            .iter()
+            .filter(|n| serde_json::to_value(&n.note).unwrap() == json!("subtitle_text_unread"))
+            .collect();
+        let text = [
+            without_refreshed(&fs::read_to_string(h.job_dir(id).join(KEY).join("decide.json")).unwrap()),
+            serde_json::to_string(&record.titles[0].decision).unwrap(),
+            serde_json::to_string(&unread).unwrap(),
+        ]
+        .join("\n");
+        let root = h.tools().parent().unwrap().display().to_string();
+        text.replace(&root.replace('\\', "\\\\"), "<root>")
+        .replace(&root.replace('\\', "/"), "<root>")
+        .replace(&root, "<root>")
+    }
+
+    pub(super) fn tuning(h: &Harness, id: &str) -> PathBuf {
+        h.staging().join(id).join("tuning").join(KEY)
+    }
+
+    /// The one `audio-levels-20ms-*` folder of `dir`.
+    pub(super) fn level_folder(dir: &Path) -> PathBuf {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.is_dir() && p.file_name().unwrap().to_str().unwrap().starts_with("audio-levels-20ms-"))
+            .unwrap_or_else(|| panic!("{}: no level folder", dir.display()))
+    }
+
+    fn job_log(h: &Harness, id: &str) -> String {
+        fs::read_to_string(h.job_dir(id).join("job.log")).unwrap()
+    }
+
+    const SKIPPED: &str = "t00-00800: steps 10 and 10a skipped: the staged tuning folder is complete";
+    const CLEARED: &str =
+        "t00-00800: the staged tuning folder was incomplete, so it was deleted and steps 10 and 10a run again";
+
+    #[test]
+    fn a_retry_after_a_lookup_pending_decide_does_not_decode_again() {
+        let baseline = harness(&["movie-direct-two-subs"], on());
+        let base_id = run_to(&baseline, "Inspecting");
+        let expected = decided(&baseline, &base_id);
+
+        let h = harness(&["movie-direct-two-subs", "movie-direct-two-subs-lookup-late"], on());
+        let id = stale_before_the_probe(&h);
+        run_to(&h, "AwaitingLookup");
+        let first = unit_spawns(&h);
+        assert_eq!(workers(&first), 2, "{first:?}");
+        assert!(events(&h, &id).contains(&Event::LookupPending));
+        h.fire_timers();
+        let got = decided(&h, &id);
+        assert!(events(&h, &id).contains(&Event::LookupAnswered));
+        assert_eq!(unit_spawns(&h), first, "steps 10 and 10a ran again");
+        assert_eq!(job_log(&h, &id).matches(SKIPPED).count(), 1);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn an_incomplete_staged_folder_is_deleted_and_both_steps_run_again() {
+        let baseline = harness(&["movie-direct-two-subs"], on());
+        let base_id = run_to(&baseline, "Inspecting");
+        let expected = decided(&baseline, &base_id);
+
+        let h = harness(&["movie-direct-two-subs", "movie-direct-two-subs-lookup-late"], on());
+        let id = stale_before_the_probe(&h);
+        run_to(&h, "AwaitingLookup");
+        let first = unit_spawns(&h);
+        let staged = tuning(&h, &id);
+        fs::remove_file(level_folder(&staged).join("audio-proxy.json")).unwrap();
+        fs::write(staged.join("leftover.txt"), b"x").unwrap();
+        let job_subs = h.job_dir(&id).join(KEY).join("subs-ocr");
+        fs::write(job_subs.join("leftover.txt"), b"x").unwrap();
+        // The stand-in worker answers its runs in turn (stream 0's files, then stream 1's for every later run), so its
+        // count starts again for the second unit's two streams.
+        fs::remove_file(h.tools().join("lazymkv-ocr.calls.json")).unwrap();
+        h.fire_timers();
+        let got = decided(&h, &id);
+        let second = unit_spawns(&h);
+        assert_eq!(second.len(), 2 * first.len(), "{second:?}");
+        assert_eq!(workers(&second), 4);
+        assert!(!staged.join("leftover.txt").exists() && !job_subs.join("leftover.txt").exists());
+        assert!(level_folder(&staged).join("audio-proxy.json").is_file());
+        assert!(staged.join("subs-ocr").join("summary.json").is_file());
+        assert_eq!(job_log(&h, &id).matches(CLEARED).count(), 1);
+        assert!(!job_log(&h, &id).contains(SKIPPED));
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn with_the_setting_off_streamhash_txt_marks_the_folder_complete() {
+        let h = harness(&["movie-direct-two-subs", "movie-direct-two-subs-lookup-late"], json!({}));
+        let id = stale_before_the_probe(&h);
+        run_to(&h, "AwaitingLookup");
+        let staged = tuning(&h, &id);
+        assert!(staged.join("streamhash.txt").is_file());
+        assert!(fs::read_dir(&staged).unwrap().all(|e| {
+            !e.unwrap().file_name().to_str().unwrap().starts_with("audio-levels-20ms-")
+        }));
+        let first = unit_spawns(&h);
+        h.fire_timers();
+        decided(&h, &id);
+        assert_eq!(unit_spawns(&h), first, "steps 10 and 10a ran again");
+        assert_eq!(job_log(&h, &id).matches(SKIPPED).count(), 1);
+    }
+
+    #[test]
+    fn a_title_without_step_10_is_complete_without_summary_json() {
+        let h = harness(&["movie-direct-two-subs-lookup-late"], on());
+        let id = stale_before_the_probe(&h);
+        run_to(&h, "AwaitingLookup");
+        let staged = tuning(&h, &id);
+        assert!(!staged.join("subs-ocr").exists(), "movie-direct has one English subtitle stream");
+        assert!(level_folder(&staged).join("audio-proxy.json").is_file());
+        let first = unit_spawns(&h);
+        assert_eq!(workers(&first), 0);
+        h.fire_timers();
+        decided(&h, &id);
+        assert_eq!(unit_spawns(&h), first, "step 10a ran again");
+        assert_eq!(job_log(&h, &id).matches(SKIPPED).count(), 1);
+    }
+}

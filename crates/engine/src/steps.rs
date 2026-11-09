@@ -66,7 +66,10 @@ use crate::space::{
     library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
     staged_remux_check, unreachable, Promises,
 };
-use crate::staged::{evidence_file, tuning_dir, work_dir, UnitError, WORK};
+use crate::staged::{
+    clear_incomplete, evidence_file, staged_state, tuning_dir, work_dir, Staged, UnitError, CLEARED_INCOMPLETE,
+    SKIPPED_COMPLETE, WORK,
+};
 use crate::step10;
 use crate::step10::{read_streams, stream_cap, OCR_MISSING};
 use crate::step10a::{run_pass, PassEnd, PassInputs, WORK_KIND};
@@ -1535,8 +1538,13 @@ impl Step<'_> {
     /// gives ToolMissing first (design part 5.7, R5-code-28). Step 10 runs where `needs_step10` holds: no mkvmerge
     /// gives ToolMissing, then the worker check (`OCR_MISSING`), the evidence extraction (`step10::extract` over the
     /// staged file and `<key>/mkvmerge.json`) and `read_streams`. Step 10a is `run_pass` with the job's own
-    /// `keep_tuning_evidence` (R5-code-33). Their errors feed DecisionFailed, a staging write classed by the share
-    /// check (`unit_result`, T5-R56); a cancelled step posts nothing. It returns no event when every title is done.
+    /// `keep_tuning_evidence` (R5-code-33). On a re-run of the unit (a retry after a Decide whose refetch failed, a
+    /// restart), a title whose staged tuning folder is complete (`staged_state`) skips both steps with the job.log line
+    /// `<key>: steps 10 and 10a skipped: the staged tuning folder is complete`, and Decide reads what the first run left
+    /// in the job folder and the staged folder (design part 5.10); an incomplete folder and the job folder's outputs of
+    /// the two steps are deleted first (`clear_incomplete`) and both steps run again (notes C3; T5-R12, T5-R13). Their
+    /// errors feed DecisionFailed, a staging write classed by the share check (`unit_result`, T5-R56); a cancelled step
+    /// posts nothing. It returns no event when every title is done.
     fn extract_subtitle_evidence(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1554,6 +1562,19 @@ impl Step<'_> {
             let label_dir = self.job.job_dir.join(key);
             let tuning = tuning_dir(staging, self.id, key);
             let step10 = self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
+            let state = staged_state(&tuning, self.job.settings.keep_tuning_evidence, step10);
+            if state == Staged::Complete {
+                self.log(&format!("{key}: {SKIPPED_COMPLETE}"));
+                continue;
+            }
+            if let Err(error) = clear_incomplete(&tuning, &label_dir) {
+                let message =
+                    format!("{}: the incomplete staged tuning folder could not be deleted: {error}", tuning.display());
+                return Ok(unit_result(UnitError::Staging(message), || self.staging_health()));
+            }
+            if state == Staged::Incomplete {
+                self.log(&format!("{key}: {CLEARED_INCOMPLETE}"));
+            }
             if step10 {
                 let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
                     return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));

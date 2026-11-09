@@ -83,6 +83,100 @@ pub(crate) fn copy_tree_checked(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The job.log sentence of a title whose staged tuning folder is complete on a re-run of the unit (notes C3), after
+/// `<key>: `. Def: T5-18. Use: T5-18.
+pub(crate) const SKIPPED_COMPLETE: &str = "steps 10 and 10a skipped: the staged tuning folder is complete";
+
+/// The job.log sentence of a title whose staged tuning folder was incomplete on a re-run of the unit and was deleted
+/// (notes C3), after `<key>: `. Def: T5-18. Use: T5-18.
+pub(crate) const CLEARED_INCOMPLETE: &str =
+    "the staged tuning folder was incomplete, so it was deleted and steps 10 and 10a run again";
+
+/// The name prefix of a level folder, `audio-levels-20ms-<main>[-<cand>...]` (design part 7.5).
+const LEVEL_PREFIX: &str = "audio-levels-20ms-";
+
+/// What a re-run of the unit finds in a title's staged tuning folder (notes C3): `Complete` skips steps 10 and 10a,
+/// `Incomplete` is deleted and both run again, `Absent` (no folder) runs both. Def: T5-18. Use: T5-18.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Staged {
+    /// Every marker is there: steps 10 and 10a are skipped.
+    Complete,
+    /// The folder is there without a marker: it is deleted and both steps run again.
+    Incomplete,
+    /// No folder: both steps run.
+    Absent,
+}
+
+/// Whether a title's staged tuning folder is complete (notes C3): the staged level folder's own `audio-proxy.json`,
+/// written last there (T5-R13), or with `keep_tuning_evidence` off `streamhash.txt`; and `subs-ocr\summary.json`,
+/// written last into the staged `subs-ocr\` (T5-R12), when step 10 runs for the title. Def: T5-18. Use: T5-18.
+pub(crate) fn staged_state(tuning: &Path, keep_tuning_evidence: bool, step10: bool) -> Staged {
+    if !tuning.is_dir() {
+        return Staged::Absent;
+    }
+    let audio = if keep_tuning_evidence {
+        match fs::read_dir(tuning) {
+            Ok(entries) => entries.filter_map(Result::ok).any(|entry| {
+                let path = entry.path();
+                entry.file_name().to_str().is_some_and(|name| name.starts_with(LEVEL_PREFIX))
+                    && path.is_dir()
+                    && path.join("audio-proxy.json").is_file()
+            }),
+            Err(_) => false,
+        }
+    } else {
+        tuning.join("streamhash.txt").is_file()
+    };
+    let subs = !step10 || tuning.join("subs-ocr").join("summary.json").is_file();
+    if audio && subs {
+        Staged::Complete
+    } else {
+        Staged::Incomplete
+    }
+}
+
+/// `remove` with a path already gone read as done.
+fn removed(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Deletes an incomplete staged tuning folder and the job folder's outputs of steps 10 and 10a, `subs-ocr\`, the
+/// level folders, `streamhash.txt` and the streamhash pass's capture (notes C3; T5-R57), so a re-run never mixes two
+/// runs' files; a path already gone is not an error. Def: T5-18. Use: T5-18.
+pub(crate) fn clear_incomplete(tuning: &Path, label_dir: &Path) -> io::Result<()> {
+    removed(fs::remove_dir_all(tuning))?;
+    removed(fs::remove_dir_all(label_dir.join("subs-ocr")))?;
+    let entries = match fs::read_dir(label_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut levels = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_str().is_some_and(|name| name.starts_with(LEVEL_PREFIX)) && entry.path().is_dir() {
+            levels.push(entry.path());
+        }
+    }
+    levels.sort();
+    for level in levels {
+        removed(fs::remove_dir_all(level))?;
+    }
+    for file in [
+        "streamhash.txt",
+        "streamhash-ffmpeg.txt",
+        "streamhash-ffmpeg.txt.stderr",
+        "streamhash-ffmpeg.txt.timing.jsonl",
+        "streamhash-ffmpeg.txt.exit.json",
+    ] {
+        removed(fs::remove_file(label_dir.join(file)))?;
+    }
+    Ok(())
+}
+
 /// A copy into the job folder (R5-code-30, design part 7.4): `from`'s bytes, their count checked against `from`'s
 /// size, written through `lazymkv_platform::write_atomic`, so a job-folder file is flushed and whole or absent; it
 /// creates no folder. Def: T5-17. Use: T5-17, T5-19.
@@ -230,5 +324,113 @@ mod tests {
         let job = Path::new("S").join("abc-1");
         assert_eq!(evidence_file("S", "abc-1", "t00-00800"), job.join("evidence").join("t00-00800.mks"));
         assert_eq!(tuning_dir("S", "abc-1", "t00-00800"), job.join("tuning").join("t00-00800"));
+    }
+
+    /// A staged title folder in `s`: each of `files` written as "x" under `tuning/`.
+    fn staged(s: &Scratch, files: &[&str]) -> std::path::PathBuf {
+        for file in files {
+            s.write(&format!("tuning/{file}"), "x");
+        }
+        s.0.join("tuning")
+    }
+
+    #[test]
+    fn a_missing_staged_folder_is_absent() {
+        let s = Scratch::new("staged-absent");
+        assert_eq!(staged_state(&s.0.join("tuning"), true, true), Staged::Absent);
+    }
+
+    #[test]
+    fn the_level_folders_audio_proxy_json_and_summary_json_make_the_folder_complete() {
+        let s = Scratch::new("staged-complete");
+        let tuning = staged(&s, &[
+            "audio-proxy.mka",
+            "audio-proxy.json",
+            "audio-levels-20ms-1-2/main-mix.txt",
+            "audio-levels-20ms-1-2/audio-proxy.json",
+            "subs-ocr/sub-0.ocr.jsonl",
+            "subs-ocr/summary.json",
+        ]);
+        assert_eq!(staged_state(&tuning, true, true), Staged::Complete);
+    }
+
+    #[test]
+    fn the_audio_proxy_json_beside_the_proxy_does_not_make_the_folder_complete() {
+        let s = Scratch::new("staged-no-level-marker");
+        let tuning = staged(&s, &[
+            "audio-proxy.mka",
+            "audio-proxy.json",
+            "audio-levels-20ms-1-2/main-mix.txt",
+            "subs-ocr/summary.json",
+        ]);
+        assert_eq!(staged_state(&tuning, true, true), Staged::Incomplete);
+    }
+
+    #[test]
+    fn a_staged_folder_without_summary_json_where_step_10_runs_is_incomplete() {
+        let s = Scratch::new("staged-no-summary");
+        let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json", "subs-ocr/sub-0.ocr.jsonl"]);
+        assert_eq!(staged_state(&tuning, true, true), Staged::Incomplete);
+    }
+
+    #[test]
+    fn without_step_10_summary_json_is_not_asked_for() {
+        let s = Scratch::new("staged-no-step-10");
+        let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json"]);
+        assert_eq!(staged_state(&tuning, true, false), Staged::Complete);
+    }
+
+    #[test]
+    fn with_the_setting_off_streamhash_txt_is_the_audio_marker() {
+        let s = Scratch::new("staged-off");
+        let tuning = staged(&s, &["streamhash.txt", "subs-ocr/summary.json"]);
+        assert_eq!(staged_state(&tuning, false, true), Staged::Complete);
+        let s = Scratch::new("staged-off-level-only");
+        let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json", "subs-ocr/summary.json"]);
+        assert_eq!(staged_state(&tuning, false, true), Staged::Incomplete);
+        let s = Scratch::new("staged-on-streamhash-only");
+        let tuning = staged(&s, &["streamhash.txt", "subs-ocr/summary.json"]);
+        assert_eq!(staged_state(&tuning, true, true), Staged::Incomplete);
+    }
+
+    #[test]
+    fn clear_incomplete_deletes_the_staged_folder_and_only_the_units_files_of_the_job_folder() {
+        let s = Scratch::new("staged-clear");
+        let tuning = staged(&s, &["audio-proxy.mka", "subs-ocr/sub-0.ocr.jsonl"]);
+        for file in [
+            "job/t00-00800/subs-ocr/summary.json",
+            "job/t00-00800/subs-ocr/sub-0.frames.json",
+            "job/t00-00800/audio-levels-20ms-1-2/main-mix.txt",
+            "job/t00-00800/streamhash.txt",
+            "job/t00-00800/streamhash-ffmpeg.txt",
+            "job/t00-00800/streamhash-ffmpeg.txt.stderr",
+            "job/t00-00800/streamhash-ffmpeg.txt.timing.jsonl",
+            "job/t00-00800/streamhash-ffmpeg.txt.exit.json",
+            "job/t00-00800/subs/index.json",
+            "job/t00-00800/subs/sub-0.packets.json",
+            "job/t00-00800/probe-summary.json",
+            "job/t00-00800/evidence-mkvmerge.txt",
+            "job/t00-00800/mkvmerge.json",
+            "job/t00-00800/rip.txt",
+        ] {
+            s.write(file, "x");
+        }
+        let label_dir = s.0.join("job").join("t00-00800");
+        clear_incomplete(&tuning, &label_dir).unwrap();
+        assert!(!tuning.exists());
+        let mut left: Vec<String> =
+            fs::read_dir(&label_dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["evidence-mkvmerge.txt", "mkvmerge.json", "probe-summary.json", "rip.txt", "subs"]);
+        assert!(label_dir.join("subs").join("sub-0.packets.json").is_file());
+    }
+
+    #[test]
+    fn clear_incomplete_of_a_title_with_nothing_to_delete_is_ok() {
+        let s = Scratch::new("staged-clear-nothing");
+        s.write("job/t00-00800/mkvmerge.json", "x");
+        let label_dir = s.0.join("job").join("t00-00800");
+        assert!(clear_incomplete(&s.0.join("tuning"), &label_dir).is_ok());
+        assert!(label_dir.join("mkvmerge.json").is_file());
     }
 }
