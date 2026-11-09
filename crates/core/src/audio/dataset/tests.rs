@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::json;
 
 use super::{
-    cache_key, cache_prefix, destination, find_folders, levels_args, parse_sets, read_snapshot, result_line,
-    snapshot_line, why_phrase, Destination, Measurer, Overrides, SNAPSHOT_FORMAT, SNAPSHOT_FORMAT_V2,
+    cache_key, cache_prefix, destination, find_folders, levels_args, parse_sets, proxy_titles, read_snapshot,
+    result_line, snapshot_line, why_phrase, Destination, Measurer, Overrides, SNAPSHOT_FORMAT, SNAPSHOT_FORMAT_V2,
 };
 use crate::audio::labels::{auto, load_fitted, open_for_change, FORMAT};
 use crate::audio::measures::{Constants, Measures, Num};
@@ -416,4 +416,24 @@ fn the_destination_and_the_last_lines() {
     assert_eq!(result_line(&[], &unread, true), (
         "RESULT ok (not checked, allowed by --allow-unmeasured: 1 folder(s) cannot be read, 2 labelled track(s) not measured)".to_string(), 0));
     assert_eq!(result_line(&[], &[], false), ("RESULT ok".to_string(), 0));
+}
+
+#[test]
+fn an_audio_proxy_json_that_kept_no_proxy_is_unmeasured() {
+    // call 22, T5-R17, R1-evidence-16: a title whose proxy clipped at -30 dB too is not in the tuning dataset; every
+    // other audio-proxy.json counts as before, retune's `{}` fixtures (crates/dev/src/cmd/retune/tests.rs) included.
+    let mut tree = MemTree::new(".", "tmp");
+    let kept = r#"{"format": "lazymkv audio proxy v1", "proxy": {"file": "audio-proxy.mka", "bytes": 5000, "tracks": 2}}"#;
+    tree.insert_file("disc-a/t00/audio-levels-20ms-1/audio-proxy.json", format!("\u{feff}{kept}"));
+    tree.insert_file("disc-a/t01/audio-levels-20ms-1-2/audio-proxy.json",
+                     r#"{"format": "lazymkv audio proxy v1", "proxy": null, "gains_tried": [-18, -30]}"#);
+    tree.insert_file("disc-b/t00/audio-levels-20ms-1/audio-proxy.json", "{}");
+    tree.insert_file("disc-b/t01/audio-levels-20ms-1/audio-proxy.json", "not json");
+    tree.insert_file("disc-b/t02/audio-levels-20ms-1/audio-proxy.json", r#"{"proxy": null}"#);
+    tree.insert_file("disc-b/t02/audio-levels-20ms-3/audio-proxy.json", kept);
+    let want: BTreeSet<(String, String)> = [("disc-a", "t00"), ("disc-b", "t00"), ("disc-b", "t01"), ("disc-b", "t02")]
+        .iter()
+        .map(|(s, l)| (s.to_string(), l.to_string()))
+        .collect();
+    assert_eq!(proxy_titles(&tree), want);
 }

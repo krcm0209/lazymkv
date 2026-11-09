@@ -18,6 +18,7 @@ use crate::audio::labels::{
     is_fitted, is_slug, kind_of, load, load_fitted, not_counted_because, Fitted, FittedKey, LabelEntry, Labels,
     Requirements, TitleFacts, COMMENTARY_KINDS, KINDS,
 };
+use crate::audio::levels::parse_proxy;
 use crate::audio::measures::{analyse, swapped, Constants, Measures, Num};
 use crate::audio::reference::{
     ffprobe_audio, first_of_language, original_language, placed_first, programme_reference, read_streams, wanted,
@@ -30,7 +31,8 @@ use crate::audio::rule::{
 use crate::lang::NO_LANGUAGE;
 use crate::recording::files::{FfprobeStream, FfprobeStreams, MkvmergeIdent};
 use crate::recording::{
-    py_float, py_int, py_int_value, py_repr, py_repr_str, py_str, py_truthy, read_json, Ordered, PathKey, Tree,
+    py_float, py_int, py_int_value, py_repr, py_repr_str, py_str, py_truthy, read_json, read_text, Encoding, Errors,
+    Ordered, PathKey, Tree,
 };
 
 /// The snapshot written from now on, and the one still read (for --compare and the "Changes since" block only,
@@ -657,11 +659,7 @@ pub fn harness(input: &HarnessInput) -> Result<Harness, HarnessError> {
             titles.insert((slug.clone(), label.to_string()), facts.clone());
         }
     }
-    let proxies: BTreeSet<(String, String)> = tree
-        .glob(&root, "*/*/audio-levels-20ms-*/audio-proxy.json")
-        .iter()
-        .map(|p| (p.components()[0].clone(), p.components()[1].clone()))
-        .collect();
+    let proxies = proxy_titles(tree);
     // A v2 baseline's measures are never a seed: read_snapshot leaves its cache empty (spec 3.3).
     let mut cache: BTreeMap<String, Measures> = input.previous.map(|p| p.measures_cache.clone()).unwrap_or_default();
     let found = find_folders(tree);
@@ -725,6 +723,23 @@ pub fn harness(input: &HarnessInput) -> Result<Harness, HarnessError> {
         computed: pass.computed,
         reused: pass.reused,
     })
+}
+
+/// The (slug, label) pairs whose audio is in the tuning dataset: a title with a `*/*/audio-levels-20ms-*/audio-proxy.json`
+/// that does not say it kept no proxy (call 22, T5-R17, R1-evidence-16). A file that cannot be read or parsed, or has
+/// no `proxy` key, counts as it did before this task. Def: T5-16. Use: T5-16, T5-21.
+pub(crate) fn proxy_titles(tree: &dyn Tree) -> BTreeSet<(String, String)> {
+    tree.glob(&PathKey::root(), "*/*/audio-levels-20ms-*/audio-proxy.json")
+        .iter()
+        .filter(|p| {
+            let no_proxy = read_text(tree, p, Encoding::Utf8Sig, Errors::Replace)
+                .ok()
+                .and_then(|text| parse_proxy(&text).ok())
+                .is_some_and(|proxy| proxy.kept_no_proxy());
+            !no_proxy
+        })
+        .map(|p| (p.components()[0].clone(), p.components()[1].clone()))
+        .collect()
 }
 
 /// Where the snapshot goes. Py: main's choice of `out`.
