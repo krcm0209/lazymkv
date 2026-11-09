@@ -285,3 +285,21 @@ fn the_ffmpeg_stem_selects_ffmpeg_json() {
     assert_eq!(hashed.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&hashed.stdout), "0,a,MD5=00\n");
 }
+
+#[test]
+fn a_create_in_cwd_writes_the_file_in_the_stand_ins_working_folder() {
+    let (dir, work) = (Scratch::new("fake-cwd"), Scratch::new("fake-cwd-work"));
+    let tool = stand_in(&dir.0, "ffmpeg");
+    dir.write(
+        "ffmpeg.json",
+        r#"{"responses":[{"args_contain":["-/filter_complex"],"creates":[{"in_cwd":"raw-main-mix.txt","copy_from":"raw.txt"}]}]}"#,
+    );
+    dir.write("raw.txt", "lavfi.astats.Overall.RMS_level=-20.100000\n");
+    let mut command = Command::new(&tool);
+    command.args(["-v", "warning", "-i", "raw.mkv", "-/filter_complex", "graph.txt"]).current_dir(&work.0);
+    command.env_remove("LAZYMKV_FAKE_DIR");
+    let ran = retry_busy(|| command.output()).unwrap();
+    assert_eq!(ran.status.code(), Some(0), "{}", String::from_utf8_lossy(&ran.stderr));
+    assert_eq!(fs::read_to_string(work.0.join("raw-main-mix.txt")).unwrap(), "lavfi.astats.Overall.RMS_level=-20.100000\n");
+    assert!(!dir.0.join("raw-main-mix.txt").exists(), "the file is in the working folder, not the scenario's");
+}

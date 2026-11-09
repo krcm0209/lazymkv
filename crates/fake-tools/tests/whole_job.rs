@@ -204,11 +204,13 @@ fn a_media_arrival_takes_a_synthetic_movie_disc_to_a_filed_placeholder() {
     ]);
     expected.insert(format!("{KEY}/rip-summary.json"));
     expected.insert(format!("{KEY}/decide.json"));
+    expected.insert(format!("{KEY}/streamhash.txt"));
     let mut runs: Vec<String> = vec!["drive-list.txt".into(), "scan.txt".into()];
     runs.extend(LATER_LISTINGS.iter().map(|name| name.to_string()));
     for name in ["rip.txt", "mkvmerge.json", "ffprobe-streams.json", "remux-mkvmerge.txt", "partial-mkvmerge.json"] {
         runs.push(format!("{KEY}/{name}"));
     }
+    runs.push(format!("{KEY}/streamhash-ffmpeg.txt"));
     for run in &runs {
         for suffix in ["", ".stderr", ".timing.jsonl", ".exit.json"] {
             expected.insert(format!("{run}{suffix}"));
@@ -243,7 +245,8 @@ fn a_media_arrival_takes_a_synthetic_movie_disc_to_a_filed_placeholder() {
     // 8. Nothing written outside the scratch roots and the data folder.
     assert_eq!(files_under(&scenario_dir()), scenario_before);
     assert!(files_under(&tuning).is_empty());
-    assert_eq!(names_in(harness.data().as_ref()), set(&["drives.json", "engine.log", "jobs", "selftest", "settings.json"]));
+    assert_eq!(names_in(harness.data().as_ref()), set(&["drives.json", "engine.log", "jobs", "selftest", "settings.json", "work"]));
+    assert!(names_in(&harness.data().join("work")).is_empty(), "the pass deletes its work folder");
     // The MakeMKV check at engine start (S79) and its recorded state (RP-9).
     assert_eq!(
         files_under(&harness.data().join("selftest")),

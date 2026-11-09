@@ -93,6 +93,65 @@ fn no_token(h: &Harness) {
     h.secrets().forget("tmdb_token");
 }
 
+/// The level folder step 10a writes for movie-direct: main stream 1, no candidate (levels-args' first line).
+const LEVELS: &str = "audio-levels-20ms-1";
+
+/// The files of movie-direct's level folder in the job folder, in name order: phase 0's names for a main stream with
+/// a centre channel and no candidate, without the audio-proxy.json that only the dataset copy adds (T5-R13).
+const LEVEL_FILES: [&str; 10] = [
+    "command.txt", "ffmpeg.txt", "ffprobe.txt", "graph.txt", "main-fc.txt", "main-mix.txt", "manifest.txt",
+    "proxy-check.json", "streamhash.txt", "streams.json",
+];
+
+/// movie-direct's one audio stream's packet MD5 (corpus/scenarios/movie-direct/streamhash-1.txt).
+const MD5: &str = "0f343b0931126a20f133d67c2b018a3b";
+
+/// The harness's tuning evidence on (its defaults keep it off, R5-code-79).
+fn evidence_on() -> Value {
+    json!({"keep_tuning_evidence": true})
+}
+
+/// `<staging>/<job id>/tuning/<KEY>`, the staged tuning folder (design part 7.5).
+fn staged(h: &Harness, id: &str) -> PathBuf {
+    h.staging().join(id).join("tuning").join(KEY)
+}
+
+/// `<data>/work/levels-<job id>-<KEY>`, step 10a's work folder (T5-R39).
+fn work(h: &Harness, id: &str) -> PathBuf {
+    h.data().join("work").join(format!("levels-{id}-{KEY}"))
+}
+
+fn job_log(h: &Harness, id: &str) -> String {
+    fs::read_to_string(h.job_dir(id).join("job.log")).unwrap()
+}
+
+/// The spawns whose arguments hold every needle, each as a substring of some argument (as the stand-ins match).
+fn spawns_holding(h: &Harness, needles: &[&str]) -> Vec<Spawn> {
+    h.spawns().into_iter().filter(|s| needles.iter().all(|n| s.args.iter().any(|a| a.contains(n)))).collect()
+}
+
+/// R-B1: decide.json without its two extra keys is what dev's readers render over the finished job folder.
+fn assert_dev_renders_decide_json(h: &Harness, id: &str) {
+    let dir = h.job_dir(id);
+    let ctx = Ctx::for_test(h.data());
+    let (rec, label) = rec_folder(&ctx, &dir.join(KEY).display().to_string()).unwrap_or_else(|r| panic!("{}", r.line));
+    let options = PlanOptions {
+        settings: Some(dir.join("settings.json")),
+        tmdb_search: Some(dir.join("tmdb-search.json")),
+        tmdb_record: Some(dir.join("tmdb-record.json")),
+        remembered: None,
+    };
+    let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
+    let mut written = json_of(&dir.join(KEY).join("decide.json"));
+    let object = written.as_object_mut().unwrap();
+    object.remove("audio_rule_version");
+    object.remove("lazymkv_version");
+    assert_eq!(
+        dumps(&written, Style::INDENT1_ASCII),
+        dumps(&serde_json::to_value(decide_doc(&read)).unwrap(), Style::INDENT1_ASCII)
+    );
+}
+
 /// The made-up word of every stand-in record and of the panicking stand-in's standard error (RP21: never subtitle text).
 const SENTINEL: &str = "text-sentinel-3e8f";
 /// The refused stand-in's first standard error line, the reason its exit 3 gives (T5-R8).
@@ -287,7 +346,7 @@ fn decide_json_is_the_renderers_document_with_two_extra_keys() {
     assert_eq!(doc["lazymkv_version"], json!(env!("CARGO_PKG_VERSION")));
     assert_eq!(doc["audio"], json!([]));
     assert!(doc["subtitles"]["skipped"].as_str().unwrap().starts_with("no OCR text"));
-    assert!(fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap().contains("step 10a did not run in this version"));
+    assert!(!job_log(&h, &id).contains("step 10a did not run in this version"));
 }
 
 #[test]
@@ -297,6 +356,259 @@ fn decide_json_uses_the_probe_the_engine_ran() {
     let doc = json_of(&h.job_dir(&id).join(KEY).join("decide.json"));
     assert_eq!(doc["decision"]["facts"]["profile_streams"], json!([1]));
     assert!(h.job_dir(&id).join(KEY).join("ffprobe-streams.json").is_file());
+}
+
+#[test]
+fn step_10a_writes_the_level_folder_and_the_proxy_into_the_staged_folder_and_the_level_folder_into_the_job_folder() {
+    let h = harness(&[], evidence_on());
+    let id = run_to(&h, "Filed");
+    let (levels, tuning) = (h.job_dir(&id).join(KEY).join(LEVELS), staged(&h, &id));
+    assert_eq!(files_under(&levels), LEVEL_FILES.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>());
+    let mut expected: BTreeSet<String> = LEVEL_FILES.iter().map(|name| format!("{LEVELS}/{name}")).collect();
+    expected.extend([format!("{LEVELS}/audio-proxy.json"), "audio-proxy.mka".to_string(), "audio-proxy.json".to_string()]);
+    assert_eq!(files_under(&tuning), expected);
+    for name in LEVEL_FILES {
+        assert_eq!(fs::read(levels.join(name)).unwrap(), fs::read(tuning.join(LEVELS).join(name)).unwrap(), "{name}");
+    }
+    assert_eq!(fs::read(tuning.join("audio-proxy.mka")).unwrap(), b"lazymkv-test-proxy");
+    assert_eq!(fs::read(tuning.join(LEVELS).join("audio-proxy.json")).unwrap(), fs::read(tuning.join("audio-proxy.json")).unwrap());
+    let proxy = json_of(&tuning.join("audio-proxy.json"));
+    assert_eq!((&proxy["format"], &proxy["slug"], &proxy["label"]), (&json!("lazymkv audio proxy v1"), &json!(id), &json!(KEY)));
+    assert_eq!((&proxy["encoding"]["gain_db"], &proxy["proxy"]["file"]), (&json!(-18), &json!("audio-proxy.mka")));
+    let tracks: Vec<(&Value, &Value)> =
+        proxy["tracks"].as_array().unwrap().iter().map(|t| (&t["source_stream"], &t["series"])).collect();
+    assert_eq!(tracks, [(&json!(1), &json!("mix")), (&json!(1), &json!("fc"))]);
+    assert_eq!(fs::read_to_string(levels.join("streamhash.txt")).unwrap(), format!("0,a,MD5={MD5}\n"));
+    let mix = fs::read_to_string(levels.join("main-mix.txt")).unwrap();
+    assert_eq!(mix.split("\r\n").skip(1).collect::<Vec<_>>(), ["-20.1", "-21.4", "-100.0", "-35.6", "-19.9", ""]);
+    assert!(!h.job_dir(&id).join(KEY).join("streamhash.txt").exists(), "the bare copy is the setting-off pass's");
+    let pass = spawns_holding(&h, &["-/filter_complex"]);
+    assert_eq!(pass.len(), 1);
+    assert!(pass[0].below_normal && pass[0].args.iter().any(|a| a == "graph.txt"));
+    assert_eq!(pass[0].cwd.as_deref(), Some(work(&h, &id).as_path()));
+    assert!(!work(&h, &id).exists());
+    assert_eq!(fs::read_dir(h.data().join("work")).unwrap().count(), 0);
+}
+
+#[test]
+fn the_staged_level_folders_audio_proxy_json_is_written_last() {
+    let h = harness(&[], evidence_on());
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    // A folder where the copy beside audio-proxy.mka lands: its rename fails, so the copies stop there.
+    let blocker = staged(&h, &id).join("audio-proxy.json");
+    h.on_spawn(&["-/filter_complex"], move || fs::create_dir_all(&blocker).unwrap());
+    h.insert("tok0", "movie-direct");
+    h.wait("DecisionFailed", |h| events(h, &id).iter().any(|e| matches!(e, Event::DecisionFailed { .. })));
+    let tuning = staged(&h, &id);
+    for name in LEVEL_FILES {
+        assert!(tuning.join(LEVELS).join(name).is_file(), "{name}");
+    }
+    assert!(tuning.join("audio-proxy.mka").is_file());
+    assert!(!tuning.join(LEVELS).join("audio-proxy.json").exists(), "C3's marker comes after every other file");
+    assert!(!h.job_dir(&id).join(KEY).join(LEVELS).join("audio-proxy.json").exists());
+}
+
+#[test]
+fn with_the_setting_off_step_10a_writes_only_streamhash_txt_in_both_places() {
+    let h = harness(&[], json!({}));
+    let id = run_to(&h, "Filed");
+    let key_dir = h.job_dir(&id).join(KEY);
+    assert_eq!(fs::read_to_string(key_dir.join("streamhash.txt")).unwrap(), format!("0,a,MD5={MD5}\n"));
+    assert_eq!(files_under(&staged(&h, &id)), BTreeSet::from(["streamhash.txt".to_string()]));
+    assert_eq!(fs::read(staged(&h, &id).join("streamhash.txt")).unwrap(), fs::read(key_dir.join("streamhash.txt")).unwrap());
+    assert!(fs::read_dir(&key_dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("audio-levels-")));
+    let raw = h.staging().join(&id).join("rip").join(KEY).join("title_t00.mkv");
+    let pass = spawns_holding(&h, &["0:a", "streamhash"]);
+    assert_eq!(pass.len(), 1);
+    assert_eq!(
+        pass[0].args,
+        ["-i", raw.to_str().unwrap(), "-map", "0:a", "-c", "copy", "-f", "streamhash", "-hash", "md5", "streamhash.txt"]
+    );
+    assert!(pass[0].below_normal);
+    assert_eq!(pass[0].cwd.as_deref(), Some(work(&h, &id).as_path()));
+    assert!(spawns_holding(&h, &["-/filter_complex"]).is_empty());
+}
+
+#[test]
+fn with_the_setting_off_the_streamhash_pass_is_recorded_beside_streamhash_txt() {
+    let h = harness(&[], json!({}));
+    let id = run_to(&h, "Filed");
+    let key_dir = h.job_dir(&id).join(KEY);
+    for suffix in ["", ".stderr", ".timing.jsonl", ".exit.json"] {
+        assert!(key_dir.join(format!("streamhash-ffmpeg.txt{suffix}")).is_file(), "{suffix}");
+    }
+    assert_eq!(json_of(&key_dir.join("streamhash-ffmpeg.txt.exit.json"))["exit_code"], json!(0));
+    let log = job_log(&h, &id);
+    assert!(log.contains(&format!("run {KEY}/streamhash-ffmpeg.txt: ")), "{log}");
+    assert!(log.contains(&format!("ended {KEY}/streamhash-ffmpeg.txt: exit 0 after ")), "{log}");
+    assert!(!staged(&h, &id).join("streamhash-ffmpeg.txt").exists(), "the capture is the job folder's only");
+}
+
+#[test]
+fn a_proxy_that_clips_at_minus_18_is_made_again_at_minus_30_and_nothing_else_changes() {
+    let plain = harness(&[], evidence_on());
+    let plain_id = run_to(&plain, "Filed");
+    let h = harness(&["movie-direct-clip"], evidence_on());
+    let id = run_to(&h, "Filed");
+    let tuning = staged(&h, &id);
+    assert_eq!(fs::read(tuning.join("audio-proxy.mka")).unwrap(), b"lazymkv-test-proxy-redo");
+    let proxy = json_of(&tuning.join("audio-proxy.json"));
+    assert_eq!((&proxy["encoding"]["gain_db"], &proxy["proxy"]["file"]), (&json!(-30), &json!("audio-proxy.mka")));
+    let passes = spawns_holding(&h, &["-/filter_complex"]);
+    assert_eq!(passes.len(), 2, "the first pass and the redo");
+    assert!(passes[0].args.iter().any(|a| a == "null") && !passes[1].args.iter().any(|a| a == "null"), "only the first measures");
+    assert_eq!(passes[1].cwd.as_deref(), Some(work(&h, &id).join("redo").as_path()));
+    let (levels, plain_levels) = (h.job_dir(&id).join(KEY).join(LEVELS), plain.job_dir(&plain_id).join(KEY).join(LEVELS));
+    for name in ["main-mix.txt", "main-fc.txt", "streamhash.txt", "graph.txt"] {
+        assert_eq!(fs::read(levels.join(name)).unwrap(), fs::read(plain_levels.join(name)).unwrap(), "{name}");
+    }
+    let audio = |h: &Harness, id: &str| json_of(&h.job_dir(id).join(KEY).join("decide.json"))["audio"].clone();
+    assert_eq!(audio(&h, &id), audio(&plain, &plain_id));
+    let line = format!("{KEY}: the audio proxy of stream 1 (mix) clips at -18 dB, so the title's proxy is made again at -30 dB");
+    assert!(job_log(&h, &id).contains(&line));
+}
+
+#[test]
+fn a_proxy_that_clips_at_minus_30_too_keeps_no_proxy_and_job_log_names_the_stream() {
+    let h = harness(&["movie-direct-clip", "movie-direct-clip-twice"], evidence_on());
+    let id = run_to(&h, "Filed");
+    let tuning = staged(&h, &id);
+    assert!(!tuning.join("audio-proxy.mka").exists());
+    let proxy = json_of(&tuning.join("audio-proxy.json"));
+    assert_eq!((&proxy["proxy"], &proxy["gains_tried"], &proxy["encoding"]["gain_db"]), (&Value::Null, &json!([-18, -30]), &json!(-30)));
+    assert_eq!(
+        fs::read(tuning.join(LEVELS).join("audio-proxy.json")).unwrap(),
+        fs::read(tuning.join("audio-proxy.json")).unwrap(),
+        "the staged folder reads complete (call 22)"
+    );
+    let line = format!("{KEY}: the audio proxy of stream 1 (mix) clips at -30 dB too, so the dataset gets no proxy for this title");
+    assert!(job_log(&h, &id).contains(&line));
+    assert_eq!(spawns_holding(&h, &["-/filter_complex"]).len(), 2, "no third pass");
+}
+
+#[test]
+fn step_10_reads_before_step_10a_decodes() {
+    let h = harness(&["movie-direct-two-subs"], json!({}));
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.insert("tok0", "movie-direct");
+    h.wait("DecisionDone", |h| events(h, &id).iter().any(|e| matches!(e, Event::DecisionDone { .. })));
+    let spawns = h.spawns();
+    let worker = |s: &Spawn| s.program.file_stem().is_some_and(|stem| stem == "lazymkv-ocr");
+    let last_read = spawns.iter().rposition(worker).expect("the worker ran");
+    let pass = spawns.iter().position(|s| s.args.iter().any(|a| a == "streamhash")).expect("step 10a ran");
+    assert!(last_read < pass, "worker {last_read}, pass {pass}");
+    assert!(h.job_dir(&id).join(KEY).join("streamhash.txt").is_file());
+}
+
+#[test]
+fn the_decision_carries_the_packet_md5s_and_the_measures_of_step_10a() {
+    let h = harness(&[], evidence_on());
+    let id = run_to(&h, "Filed");
+    let doc = json_of(&h.job_dir(&id).join(KEY).join("decide.json"));
+    assert_eq!(doc["decision"]["facts"]["md5_streams"], json!([1]));
+    assert_eq!(doc["audio"].as_array().unwrap().len(), 1);
+    assert_eq!((&doc["audio"][0]["folder"], &doc["audio"][0]["frames"]), (&json!(LEVELS), &json!(5)));
+    assert_dev_renders_decide_json(&h, &id);
+    let off = harness(&[], json!({}));
+    let off_id = run_to(&off, "Filed");
+    let off_doc = json_of(&off.job_dir(&off_id).join(KEY).join("decide.json"));
+    assert_eq!((&off_doc["decision"]["facts"]["md5_streams"], &off_doc["audio"]), (&json!([1]), &json!([])));
+    assert_dev_renders_decide_json(&off, &off_id);
+}
+
+#[test]
+fn after_a_restart_the_decision_reads_them_back_from_the_job_folder() {
+    let first = harness(&[], evidence_on());
+    let first_id = run_to(&first, "Filed");
+    let expected = json_of(&first.job_dir(&first_id).join(KEY).join("decide.json"));
+    let h = harness(&[], evidence_on());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Decided");
+    let id = h.job_ids().pop().unwrap();
+    h.restart(); // resume(Decided) runs Decide alone, over read_back_inputs (design part 5.10)
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    let doc = json_of(&h.job_dir(&id).join(KEY).join("decide.json"));
+    assert_eq!((&doc["audio"], &doc["decision"]["facts"]), (&expected["audio"], &expected["decision"]["facts"]));
+    assert!(job_log(&h, &id).contains(&format!("{KEY}: decide inputs read back from the job folder")));
+    assert_eq!(spawns_holding(&h, &["-/filter_complex"]).len(), 1, "the restart decodes nothing again");
+}
+
+#[test]
+fn a_failed_ffmpeg_pass_is_decision_failed_with_its_class() {
+    let h = harness(&["movie-direct-ffmpeg-error"], json!({}));
+    let id = run_to(&h, "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    assert_eq!(
+        record.message.as_deref(),
+        Some("t00-00800: step 10a's ffmpeg pass failed (exit 1): title_t00.mkv: Invalid data found when processing input")
+    );
+    assert!(!h.job_dir(&id).join(KEY).join("decide.json").exists());
+    assert!(!staged(&h, &id).join("streamhash.txt").exists());
+    assert!(!work(&h, &id).exists());
+}
+
+#[test]
+fn a_staging_share_that_stops_answering_during_step_10a_waits_as_awaiting_share() {
+    let h = harness(&[], json!({}));
+    h.insert("tok0", "movie-direct");
+    h.run_until("Ejected");
+    let id = h.job_ids().pop().unwrap();
+    let tuning = staged(&h, &id);
+    // The share goes away during the pass: the staged folder can take no file.
+    h.on_spawn(&["0:a", "streamhash"], move || {
+        let _ = fs::remove_dir_all(&tuning);
+        fs::write(&tuning, b"").unwrap();
+    });
+    h.shares().set_reach(&h.staging().display().to_string(), Reach::Unreachable("cable out".into()));
+    h.restart();
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    assert_eq!(h.record(&id).state, State::AwaitingShare { return_to: Box::new(State::Inspecting) });
+    assert!(events(&h, &id).iter().any(|e| matches!(e, Event::DecisionFailed { failure } if failure.class == FailureClass::Output)));
+    assert!(h.job_dir(&id).join(KEY).join("streamhash.txt").is_file(), "the job folder's copy lands first");
+}
+
+#[test]
+fn a_missing_ffmpeg_waits_as_tool_missing() {
+    let h = harness(&[], json!({"tool_paths": {"ffmpeg": null}}));
+    let id = run_to(&h, "AwaitingTool");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::AwaitingTool { return_to: Box::new(State::Inspecting) });
+    assert!(events(&h, &id).contains(&Event::ToolMissing { tool: Tool::Ffmpeg }));
+    assert!(!h.job_dir(&id).join(KEY).join("decide.json").exists());
+}
+
+/// R5-code-33 (ENG-19): step 10a reads the job's own `keep_tuning_evidence`, not the engine's. The engine's settings
+/// turn it off while the engine is stopped before Inspecting; the job keeps the settings it was made under.
+#[test]
+fn step_10a_follows_the_jobs_own_keep_tuning_evidence() {
+    let h = harness(&[], evidence_on());
+    h.insert("tok0", "movie-direct");
+    h.run_until("Ejected");
+    let id = h.job_ids().pop().unwrap();
+    let path = h.data().join("settings.json");
+    let mut settings = json_of(&path);
+    settings["keep_tuning_evidence"] = json!(false);
+    fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+    h.restart();
+    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    assert_eq!(json_of(&path)["keep_tuning_evidence"], json!(false), "the engine's own setting stayed off");
+    assert!(staged(&h, &id).join(LEVELS).join("audio-proxy.json").is_file());
+    assert!(staged(&h, &id).join("audio-proxy.json").is_file());
+    assert!(h.job_dir(&id).join(KEY).join(LEVELS).is_dir());
+    assert!(!h.job_dir(&id).join(KEY).join("streamhash.txt").exists(), "no setting-off pass ran");
+}
+
+/// A setting-off pass that exits 0 and writes no hash file fails the step with Step 13's sentence.
+#[test]
+fn a_pass_that_leaves_no_hash_file_is_decision_failed() {
+    let h = harness(&["movie-direct-ffmpeg-silent"], json!({}));
+    let id = run_to(&h, "Failed");
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Inspecting) });
+    assert_eq!(record.message.as_deref(), Some("t00-00800: ffmpeg wrote no streamhash.txt"));
+    assert!(!h.job_dir(&id).join(KEY).join("decide.json").exists());
+    assert!(!work(&h, &id).exists());
 }
 
 #[test]

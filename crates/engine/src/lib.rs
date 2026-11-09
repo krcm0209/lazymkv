@@ -15,6 +15,7 @@ mod selftest;
 mod space;
 mod staged;
 mod step10;
+mod step10a;
 mod steps;
 mod store;
 #[cfg(any(test, feature = "testkit"))]

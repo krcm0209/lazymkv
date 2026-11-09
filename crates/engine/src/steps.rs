@@ -69,6 +69,7 @@ use crate::space::{
 use crate::staged::{evidence_file, tuning_dir, work_dir, UnitError, WORK};
 use crate::step10;
 use crate::step10::{read_streams, stream_cap, OCR_MISSING};
+use crate::step10a::{run_pass, PassEnd, PassInputs, WORK_KIND};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -80,9 +81,6 @@ const COPY_PLAN: &str = "the plan needs whole-disc copy mode, which arrives in p
 
 /// The class of every failure the engine finds itself (design part 5.2).
 const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
-
-/// ExtractSubtitleEvidence's job.log line (S33): step 10a's packet MD5 pass is not built either.
-const STEP10A_NOT_RUN: &str = "step 10a did not run in this version";
 
 /// Locks `mutex`, ignoring a poison a panicked thread left.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1532,62 +1530,84 @@ impl Step<'_> {
         Ok(event(Event::ProbeDone))
     }
 
-    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): for each planned title where `needs_step10`
-    /// holds, the worker check (`OCR_MISSING`), the evidence extraction (`step10::extract` over the staged file and
-    /// `<key>/mkvmerge.json`; no mkvmerge, then no ffprobe, gives ToolMissing for that tool before any file is touched,
-    /// asked only when a title needs step 10) and `read_streams`; its errors feed DecisionFailed, a staging write
-    /// classed by the share check (`unit_result`, T5-R56); a cancelled step posts nothing. Step 10a is not built yet,
-    /// so it writes the job.log line `step 10a did not run in this version` (S33) first (Task 17 replaces it) and
-    /// returns no event.
+    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): steps 10 and 10a for each planned title, in
+    /// plan order, step 10's reading finished before step 10a's decode starts (design part 10.7); no ffmpeg or ffprobe
+    /// gives ToolMissing first (design part 5.7, R5-code-28). Step 10 runs where `needs_step10` holds: no mkvmerge
+    /// gives ToolMissing, then the worker check (`OCR_MISSING`), the evidence extraction (`step10::extract` over the
+    /// staged file and `<key>/mkvmerge.json`) and `read_streams`. Step 10a is `run_pass` with the job's own
+    /// `keep_tuning_evidence` (R5-code-33). Their errors feed DecisionFailed, a staging write classed by the share
+    /// check (`unit_result`, T5-R56); a cancelled step posts nothing. It returns no event when every title is done.
     fn extract_subtitle_evidence(&self) -> Outcome {
-        self.log(STEP10A_NOT_RUN);
         let failed = |failure| Event::DecisionFailed { failure };
         let plan = self.job_plan(failed)?;
         let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
-        let mut titles = Vec::new();
-        for planned in &plan.titles {
-            if self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))? {
-                titles.push(planned.key.as_str());
-            }
-        }
-        if titles.is_empty() {
-            return Ok(StepResult { event: None, message: None });
-        }
-        let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
-            return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+        let Some(ffmpeg) = self.tool(Tool::Ffmpeg) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Ffmpeg }));
         };
         let Some(ffprobe) = self.tool(Tool::Ffprobe) else {
             return Ok(event(Event::ToolMissing { tool: Tool::Ffprobe }));
         };
         let staging = self.job.settings.staging_root.as_deref().ok_or_else(|| unknown(failed, "staging_root is unset"))?;
-        for key in titles {
-            let Some(worker) = self.steps.ocr.clone().filter(|path| path.is_file()) else {
-                return Ok(unknown(failed, OCR_MISSING));
-            };
+        for planned in &plan.titles {
+            let key = planned.key.as_str();
             let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
-            let ident = self.staged_ident(key).map_err(|error| unknown(failed, error))?;
-            let evidence = evidence_file(staging, self.id, key);
             let label_dir = self.job.job_dir.join(key);
-            let extracted = self.ctx(&no_progress, |ctx| {
-                step10::extract(ctx, &mkvmerge, &ffprobe, &raw, &ident, &evidence, &label_dir, &|line: &str| self.log(line))
-            });
-            self.check_cancel()?;
-            let extracted = match extracted {
-                Ok(extracted) => extracted,
-                Err(error) => return Ok(unit_result(error, || self.staging_health())),
-            };
             let tuning = tuning_dir(staging, self.id, key);
-            let title_work = work_dir(&self.steps.work_root, "ocr", self.id, key);
-            let over = self.steps.ocr_cap_override;
-            let cap = |events: usize| stream_cap(over, events);
+            let step10 = self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
+            if step10 {
+                let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
+                    return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+                };
+                let Some(worker) = self.steps.ocr.clone().filter(|path| path.is_file()) else {
+                    return Ok(unknown(failed, OCR_MISSING));
+                };
+                let ident = self.staged_ident(key).map_err(|error| unknown(failed, error))?;
+                let evidence = evidence_file(staging, self.id, key);
+                let extracted = self.ctx(&no_progress, |ctx| {
+                    step10::extract(ctx, &mkvmerge, &ffprobe, &raw, &ident, &evidence, &label_dir, &|line: &str| {
+                        self.log(line)
+                    })
+                });
+                self.check_cancel()?;
+                let extracted = match extracted {
+                    Ok(extracted) => extracted,
+                    Err(error) => return Ok(unit_result(error, || self.staging_health())),
+                };
+                let title_work = work_dir(&self.steps.work_root, "ocr", self.id, key);
+                let over = self.steps.ocr_cap_override;
+                let cap = |events: usize| stream_cap(over, events);
+                let log = |line: &str| self.log(line);
+                let clear_max = self.job.settings.sub_clear_max_bytes;
+                let read = self.ctx(&no_progress, |ctx| {
+                    read_streams(ctx, &worker, &extracted, &label_dir, &tuning, &title_work, clear_max, &cap, &log)
+                });
+                self.check_cancel()?;
+                if let Err(error) = read {
+                    return Ok(unit_result(error, || self.staging_health()));
+                }
+            }
+            let title_work = work_dir(&self.steps.work_root, WORK_KIND, self.id, key);
+            let inputs = PassInputs {
+                raw: &raw,
+                job_id: self.id,
+                key,
+                label_dir: &label_dir,
+                tuning: &tuning,
+                title_work: &title_work,
+                keep: self.job.settings.keep_tuning_evidence, // the job's own settings (R5-code-33)
+            };
             let log = |line: &str| self.log(line);
-            let clear_max = self.job.settings.sub_clear_max_bytes;
-            let read = self.ctx(&no_progress, |ctx| {
-                read_streams(ctx, &worker, &extracted, &label_dir, &tuning, &title_work, clear_max, &cap, &log)
-            });
+            let ended = self.ctx(&no_progress, |ctx| run_pass(ctx, &ffmpeg, &ffprobe, &inputs, &log));
             self.check_cancel()?;
-            if let Err(error) = read {
-                return Ok(unit_result(error, || self.staging_health()));
+            match ended {
+                Ok(PassEnd::Levels { folder, proxy_kept: true }) => {
+                    self.log(&format!("{key}: step 10a wrote {folder}, proxy kept"))
+                }
+                Ok(PassEnd::Levels { folder, proxy_kept: false }) => {
+                    self.log(&format!("{key}: step 10a wrote {folder}, no proxy kept"))
+                }
+                Ok(PassEnd::Streamhash) => self.log(&format!("{key}: step 10a wrote streamhash.txt")),
+                Err(error) => return Ok(unit_result(error, || self.staging_health())),
             }
         }
         Ok(StepResult { event: None, message: None })

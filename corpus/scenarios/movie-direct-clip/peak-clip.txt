@@ -1,0 +1,4 @@
+frame:0    pts:0       pts_time:0
+lavfi.astats.Overall.Peak_level=-30.500000
+frame:1    pts:8000    pts_time:1
+lavfi.astats.Overall.Peak_level=-0.050000

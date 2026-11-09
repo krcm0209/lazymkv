@@ -32,9 +32,10 @@ fn create_files(dir: &Path, creates: &[Create], args: &[String]) -> Result<(), S
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 return Err(format!("creates: {} does not exist", parent.display()));
             }
-        } else {
+        } else if create.in_cwd.is_none() {
             fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
         }
+        // An in_cwd file's folder is the working folder, which the spawn named (Spawn.cwd) and the caller made.
         fs::copy(dir.join(&create.copy_from), &target)
             .map_err(|error| format!("{}: {error}", create.copy_from))?;
     }

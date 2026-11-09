@@ -1,0 +1,5 @@
+{"streams":[
+ {"index":0,"codec_type":"audio","codec_name":"flac","sample_rate":"8000","channels":1,"sample_fmt":"s32","bits_per_raw_sample":"24",
+  "tags":{"LAZYMKV_SOURCE_STREAM":"1","LAZYMKV_SERIES":"mix","language":"eng","DURATION":"00:00:00.100000000"}},
+ {"index":1,"codec_type":"audio","codec_name":"flac","sample_rate":"8000","channels":1,"sample_fmt":"s32","bits_per_raw_sample":"24",
+  "tags":{"LAZYMKV_SOURCE_STREAM":"1","LAZYMKV_SERIES":"fc","language":"eng","DURATION":"00:00:00.100000000"}}]}

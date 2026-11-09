@@ -83,6 +83,22 @@ pub(crate) fn copy_tree_checked(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A copy into the job folder (R5-code-30, design part 7.4): `from`'s bytes, their count checked against `from`'s
+/// size, written through `lazymkv_platform::write_atomic`, so a job-folder file is flushed and whole or absent; it
+/// creates no folder. Def: T5-17. Use: T5-17, T5-19.
+pub(crate) fn copy_into_job(from: &Path, to: &Path) -> io::Result<()> {
+    let want = fs::metadata(from)?.len();
+    let bytes = fs::read(from)?;
+    if bytes.len() as u64 != want {
+        return Err(io::Error::other(format!(
+            "{}: {} bytes read, not the {want} bytes of its size",
+            from.display(),
+            bytes.len()
+        )));
+    }
+    lazymkv_platform::write_atomic(to, &bytes)
+}
+
 /// How a step of the unit (steps 10, 10a and 11) failed (T5-R56): `Failed` is a tool, decode or argument failure, fed
 /// as `DecisionFailed { Unknown }` with its sentence; `Staging` is a write error on the staging share, classed by
 /// `staging_write_failure` over the share check. Def: T5-14. Use: T5-14, T5-15, T5-17, T5-18.
@@ -174,12 +190,27 @@ mod tests {
         assert_eq!(files(&a.0), ["subs-ocr/s0/f-000001000.png", "subs-ocr/sub-0.ocr.jsonl"], "a copy keeps its source");
     }
 
+    /// R5-code-30: a copy into the job folder is the job folder's own write, `write_atomic`, after a size check.
+    #[test]
+    fn copy_into_job_writes_the_bytes_through_write_atomic_and_leaves_no_temporary_file() {
+        let (a, b) = (Scratch::new("staged-from"), Scratch::new("staged-job"));
+        let from = a.write_path("streamhash.txt", b"0,a,MD5=0f343b0931126a20f133d67c2b018a3b\n");
+        let to = b.0.join("streamhash.txt");
+        fs::write(&to, b"old").unwrap();
+        copy_into_job(&from, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), fs::read(&from).unwrap());
+        assert_eq!(files(&b.0), ["streamhash.txt"], "no .partial and no .lazymkv-tmp is left");
+        let missing = b.0.join("no-folder").join("streamhash.txt");
+        assert_eq!(copy_into_job(&from, &missing).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(!b.0.join("no-folder").exists(), "copy_into_job creates no folder");
+    }
+
     /// T5-R55: the data folder, staging and tuning_root are different volumes, so the unit moves a file between them
     /// only through `copy_checked` and `move_checked`, which this file holds; no other source of the unit renames or
     /// copies.
     #[test]
     fn the_unit_moves_files_across_volumes_only_through_the_checked_copy() {
-        let sources = [("step10.rs", include_str!("step10.rs"))];
+        let sources = [("step10.rs", include_str!("step10.rs")), ("step10a.rs", include_str!("step10a.rs"))];
         for (name, text) in sources {
             for needle in ["fs::rename", "fs::copy", "rename_no_replace"] {
                 assert!(!text.contains(needle), "{name} holds {needle}");

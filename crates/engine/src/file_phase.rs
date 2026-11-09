@@ -27,8 +27,8 @@ use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{EditionStyle, Settings};
 use lazymkv_core::subtitle::text::READING;
 use lazymkv_dev::cmd::decide::{
-    read_decide_inputs, read_subs, read_unread, rec_folder, replay_answers, replay_remembered, subtitle_section,
-    DecideInputs, FileFacts, PlanEntry, RipLogText,
+    audio_section, read_decide_inputs, read_level_md5, read_subs, read_unread, rec_folder, replay_answers,
+    replay_remembered, subtitle_section, DecideInputs, FileFacts, PlanEntry, RipLogText,
 };
 use lazymkv_dev::cmd::plan::{plan_doc, PlanOptions, PlanSource};
 use lazymkv_dev::evidence::Ctx;
@@ -160,14 +160,15 @@ pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
 /// The engine's DecideInputs for one title (K5, R-B1, design part 5.7 step 11.3), built from what it measured and read
 /// as `read_decide_inputs` reads the same files: the rip label `<job dir>/<key>` through `rec_folder`, the planned scan
 /// title with `Selection::All` (the one value both the inputs and `reconcile` take), scan.txt, the title's
-/// mkvmerge.json and rip log, `reconcile`, no audio section, the subtitles section of the staged OCR text
+/// mkvmerge.json and rip log, `reconcile`, the audio section and packet MD5 values that `audio_section` and
+/// `read_level_md5` read from the label folder step 10a wrote (design part 5.7 step 11.3), the subtitles section of the staged OCR text
 /// (`staged_text`, none when step 10 did not run) at the job's `sub_clear_max_bytes`, the subtitle index, packet lists
 /// and unread streams of the job folder, the plan section of `plan_doc` over the job folder with its `.plan` replaced
 /// by `plan`, the plan the job decides with (RP-4), the answers of `replay_answers` with the same replay files, the
 /// remembered decision of `replay_remembered` over the job's own remembered.json (the copy the plan applied, never the
-/// data folder's file, which can change after Plan: R-B1, the PR #6 review's V14), the probe the engine ran, no level
-/// MD5s, and `library`. Err is the sentence of a file that could not be read, or reconcile's. Def: T24,
-/// T5-15. Use: T24, T25, T5-15.
+/// data folder's file, which can change after Plan: R-B1, the PR #6 review's V14), the probe the engine ran, and
+/// `library`. Err is the sentence of a file that could not be read, or reconcile's. Def: T24, T5-15, T5-17. Use: T24,
+/// T25, T5-15, T5-17.
 pub(crate) fn engine_decide_inputs(
     ctx: &Ctx,
     job: &JobContext,
@@ -206,7 +207,7 @@ pub(crate) fn engine_decide_inputs(
     let remembered = replay_remembered(ctx, &options);
     let (subs_index, packets) = read_subs(tree, &label_dir);
     let file = FileFacts {
-        level_md5: Ok(Vec::new()),
+        level_md5: read_level_md5(tree, &label_dir),
         probes: Ok(Some(probes.clone())),
         subs_index,
         packets,
@@ -222,7 +223,7 @@ pub(crate) fn engine_decide_inputs(
         ident,
         rip_log,
         reconcile: report,
-        audio: Vec::new(),
+        audio: audio_section(&rec, &label),
         subtitles,
         plan: plan_entry,
         answers,

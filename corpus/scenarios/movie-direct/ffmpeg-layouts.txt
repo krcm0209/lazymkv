@@ -1,0 +1,18 @@
+Individual channels:
+NAME           DESCRIPTION
+FL             front left
+FR             front right
+FC             front center
+LFE            low frequency
+BL             back left
+BR             back right
+Standard channel layouts:
+NAME           DECOMPOSITION
+mono           FC
+stereo         FL+FR
+2.1            FL+FR+LFE
+4.0            FL+FR+FC+BC
+5.0            FL+FR+FC+BL+BR
+5.1            FL+FR+FC+LFE+BL+BR
+6.1            FL+FR+FC+LFE+BC+SL+SR
+7.1            FL+FR+FC+LFE+BL+BR+SL+SR

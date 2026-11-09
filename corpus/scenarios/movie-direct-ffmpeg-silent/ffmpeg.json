@@ -1,0 +1,2 @@
+{"responses":[{"args_contain":["-version"],"stdout":"ffmpeg-version.txt"},
+ {"args_contain":["0:a","streamhash"]}]}

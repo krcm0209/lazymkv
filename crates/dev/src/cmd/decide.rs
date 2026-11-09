@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use lazymkv_core::audio::dataset::LEVELS_NOT_HERE;
 use lazymkv_core::audio::levels::{parse_proxy, read_manifest};
 use lazymkv_core::audio::measures::Constants;
+use lazymkv_core::audio::pass::{parse_streamhash, pass_streams};
 use lazymkv_core::audio::report::{folder_json, FolderJson};
 use lazymkv_core::audio::rule::{results, Plain, Rule as AudioRule, Verdict};
 use lazymkv_core::decision::{decide as file_decision, same_path_reviews, DecisionInputs, FileDecision};
@@ -265,8 +266,10 @@ pub struct RipLogText {
 pub struct FileFacts {
     /// (file track, trimmed digest) in `read_level_md5`'s order: per audio-levels-20ms-* folder in PathKey order,
     /// each manifest.txt `main=` then `cand=` line's (`main`/`cand` value parsed as i64, `md5`), then each
-    /// audio-proxy.json track's (`source_stream` as i64, `source.md5`). Err: the manifest read error, or
-    /// "<audio-proxy.json shown>: <parse error>".
+    /// audio-proxy.json track's (`source_stream` as i64, `source.md5`); a level folder without audio-proxy.json also
+    /// gives its own streamhash.txt's pairs after its manifest's, and, without any level folder pair, the bare
+    /// `<label>/streamhash.txt` gives them, each mapped through ffprobe-streams.json's audio streams (design parts 5.10,
+    /// 7.5). Err: the manifest read error, or "<audio-proxy.json shown>: <parse error>".
     pub level_md5: Result<Vec<(Option<i64>, Option<String>)>, String>,
     /// <label>/ffprobe-streams.json; None when absent; Err "<shown>: <serde error>".
     pub probes: Result<Option<FfprobeStreams>, String>,
@@ -498,8 +501,9 @@ fn read_ident(tree: &dyn Tree, path: &PathKey) -> Result<MkvmergeIdent, String> 
 /// Every audio-levels-20ms-* folder of the label in PathKey order, as audio_dataset.measure reads them: a folder
 /// without manifest.txt but with streams.json is skipped with the "level files are not here" line; any other goes
 /// through results with the default rule and constants and no cache (Plain: every measure is computed), and its
-/// refusal or read error is its skip reason.
-fn audio_section(rec: &Recording, label: &str) -> Vec<AudioEntry> {
+/// refusal or read error is its skip reason. Now pub for the engine's decision inputs (design part 5.7 step 11.3).
+/// Def: T19, T5-17. Use: T19, T5-17.
+pub fn audio_section(rec: &Recording, label: &str) -> Vec<AudioEntry> {
     let tree: &dyn Tree = &rec.tree;
     let rule = AudioRule::default();
     let consts = Constants::default();
@@ -983,8 +987,14 @@ fn track_stream(text: &str, report: &VerifyReport) -> Option<u32> {
 /// audio-proxy.json track (both ffprobe stream numbers of the file). The manifests are git-ignored side files, like the
 /// level series, but audio-proxy.json is tracked and holds the same MD5s for every audio stream of the file, so a clone
 /// without the level files keeps them. Err when a manifest cannot be read or an audio-proxy.json cannot be read or
-/// does not parse.
-fn read_level_md5(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(Option<i64>, Option<String>)>, String> {
+/// does not parse. A level folder without `audio-proxy.json` (a setting-on job's, before its dataset copy, design part
+/// 7.5) also gives its own `streamhash.txt`'s pairs after its manifest's, so every audio stream keeps its MD5. When no
+/// level folder gave a pair and `<label>/streamhash.txt` is a file, the bare file of a job run with
+/// `keep_tuning_evidence` off gives them (design part 5.10): in both, the k-th line is the k-th audio stream of
+/// `<label>/ffprobe-streams.json` in file order. Err as before, and also
+/// `<shown>: no ffprobe-streams.json beside it names its audio streams` or `<shown>: <parse_streamhash's sentence>`.
+/// Now pub for the engine. Def: T19, T5-17. Use: T19, T5-17.
+pub fn read_level_md5(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(Option<i64>, Option<String>)>, String> {
     let mut read = Vec::new();
     for folder in tree.glob(label_dir, LEVEL_FOLDERS) {
         if !tree.is_dir(&folder) {
@@ -1007,10 +1017,39 @@ fn read_level_md5(tree: &dyn Tree, label_dir: &PathKey) -> Result<Vec<(Option<i6
                 let digest = track.source.as_ref().and_then(|source| source.get("md5")).and_then(|value| value.as_str());
                 read.push((track.source_stream.as_i64(), digest.map(|text| text.trim().to_string())));
             }
+        } else {
+            // The job folder's level folder of a setting-on job before its dataset copy (T5-R13): its own
+            // streamhash.txt names every audio stream, main and candidates or not (spec 6.4 step 10a, D13). A label
+            // without ffprobe-streams.json, or a file that does not parse, adds nothing here.
+            let hashes = folder.join(STREAMHASH);
+            if tree.is_file(&hashes) {
+                if let Some(probes) = read_probes(tree, label_dir)? {
+                    let text = read_text(tree, &hashes, Encoding::Utf8Sig, Errors::Strict)?;
+                    let audio = pass_streams(&probes.streams);
+                    if let Ok(pairs) = parse_streamhash(&text, audio.len()) {
+                        read.extend(pairs.into_iter().map(|(k, md5)| (Some(audio[k as usize].index), Some(md5))));
+                    }
+                }
+            }
         }
+    }
+    let bare = label_dir.join(STREAMHASH);
+    if read.is_empty() && tree.is_file(&bare) {
+        // A job run with keep_tuning_evidence off: the bare streamhash.txt (design part 5.10).
+        let shown = tree.display(&bare);
+        let text = read_text(tree, &bare, Encoding::Utf8Sig, Errors::Strict)?;
+        let Some(probes) = read_probes(tree, label_dir)? else {
+            return Err(format!("{shown}: no ffprobe-streams.json beside it names its audio streams"));
+        };
+        let audio = pass_streams(&probes.streams);
+        let pairs = parse_streamhash(&text, audio.len()).map_err(|why| format!("{shown}: {why}"))?;
+        read.extend(pairs.into_iter().map(|(k, md5)| (Some(audio[k as usize].index), Some(md5))));
     }
     Ok(read)
 }
+
+/// The packet MD5 file's name, in a level folder and bare in a label folder (design part 7.1).
+const STREAMHASH: &str = "streamhash.txt";
 
 /// The packet MD5 of every audio stream the label's level folders hold (6.4 step 10a, D13), keyed by scan stream, the
 /// rendering half of `read_level_md5`: each pair's file track mapped through the verify pairs (`stream_of_track`), in

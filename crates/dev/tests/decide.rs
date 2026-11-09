@@ -25,6 +25,7 @@ use lazymkv_core::lookup::{IdentityStep, Kind};
 use lazymkv_core::plan::{title_key, Mode};
 use lazymkv_core::recording::files::rip_labels;
 use lazymkv_core::recording::{decode_text, Encoding, Errors};
+use lazymkv_core::recording::{MemTree, PathKey, Tree};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_core::robot::parse;
 use lazymkv_core::subtitle::labels::TEXT_HINT;
@@ -33,8 +34,8 @@ use lazymkv_core::tracks::audio::AudioDrop;
 use lazymkv_core::tracks::subtitle::SubtitleDrop;
 use lazymkv_core::tracks::SubtitleRole;
 use lazymkv_dev::cmd::decide::{
-    audio_reviews, decide_doc, read_decide_inputs, subtitle_reviews, AudioEntry, DecideDoc, DecideInputs, DecisionEntry,
-    PlanEntry, SubtitleEntry,
+    audio_reviews, decide_doc, read_decide_inputs, read_level_md5, subtitle_reviews, AudioEntry, DecideDoc, DecideInputs,
+    DecisionEntry, PlanEntry, SubtitleEntry,
 };
 use lazymkv_dev::cmd::plan::PlanOptions;
 use lazymkv_dev::evidence::{ocr_text_dir, resolve_evidence, resolve_recording, skip, Ctx, Recording};
@@ -869,4 +870,110 @@ fn only_the_level_files_not_here_line_excuses_a_skipped_level_folder() {
     assert!(levels_not_here(&absent));
     assert!(!levels_not_here("disc/label/audio-levels-20ms-1-2: manifest.txt does not begin with '# lazymkv audio-levels v2'"));
     assert!(!levels_not_here(""));
+}
+
+/// A rip label as a job run with keep_tuning_evidence off leaves it (design parts 5.10, 7.1): no level folder, a bare
+/// streamhash.txt, and the probe whose audio streams, in file order, its lines name (streams 1 and 3; 2 is a subtitle).
+fn bare_label(streamhash: &str, probe: bool) -> MemTree {
+    let mut tree = MemTree::new("rec", "rec");
+    if probe {
+        tree.insert_file(
+            "t00-00800/ffprobe-streams.json",
+            concat!(
+                r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},"#,
+                r#"{"index":1,"codec_type":"audio","codec_name":"dts","channels":6},"#,
+                r#"{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle"},"#,
+                r#"{"index":3,"codec_type":"audio","codec_name":"ac3","channels":2}]}"#
+            ),
+        );
+    }
+    tree.insert_file("t00-00800/streamhash.txt", streamhash);
+    tree
+}
+
+const HASHES: &str = "0,a,MD5=0f343b0931126a20f133d67c2b018a3b\n1,a,MD5=9e107d9d372bb6826bd81d3542a419d6\n";
+
+#[test]
+fn decide_reads_a_bare_streamhash_txt_when_no_level_folder_holds_md5s() {
+    let label = PathKey::new("t00-00800");
+    assert_eq!(
+        read_level_md5(&bare_label(HASHES, true), &label),
+        Ok(vec![
+            (Some(1), Some("0f343b0931126a20f133d67c2b018a3b".to_string())),
+            (Some(3), Some("9e107d9d372bb6826bd81d3542a419d6".to_string())),
+        ])
+    );
+    // A level folder that holds MD5 values wins, and the bare file is not read.
+    let mut tree = bare_label(HASHES, true);
+    tree.insert_file(
+        "t00-00800/audio-levels-20ms-1/manifest.txt",
+        concat!(
+            "# lazymkv audio-levels v2 (experiment 13)\n",
+            "file=title_t00.mkv bytes=16 seconds=0 frame_ms=20 band_hz=300-3400\n",
+            "main=1 codec=dts profile=- channels=6 layout=- layout_guessed=5.1 language=eng fc=yes frames=5 ",
+            "md5=d41d8cd98f00b204e9800998ecf8427e\n"
+        ),
+    );
+    assert_eq!(read_level_md5(&tree, &label), Ok(vec![(Some(1), Some("d41d8cd98f00b204e9800998ecf8427e".to_string()))]));
+}
+
+#[test]
+fn a_bare_streamhash_txt_that_cannot_name_its_streams_is_refused() {
+    let label = PathKey::new("t00-00800");
+    let tree = bare_label(HASHES, false);
+    let shown = tree.display(&label.join("streamhash.txt"));
+    assert_eq!(read_level_md5(&tree, &label), Err(format!("{shown}: no ffprobe-streams.json beside it names its audio streams")));
+    let tree = bare_label("0,a,MD5=0f343b0931126a20f133d67c2b018a3b\n", true);
+    assert_eq!(read_level_md5(&tree, &label), Err(format!("{shown}: streamhash.txt holds 1 of 2 stream hashes")));
+}
+
+/// A rip label as a job run with keep_tuning_evidence on leaves it before its dataset copy (design part 7.5, T5-R13):
+/// the level folder of main 1 and candidate 2 holds the manifest of those two and a streamhash.txt naming all three
+/// audio streams of the probe, and no audio-proxy.json yet. Without the probe the folder's streamhash.txt adds nothing.
+fn level_label(probe: bool) -> MemTree {
+    let mut tree = MemTree::new("rec", "rec");
+    if probe {
+        tree.insert_file(
+            "t00-00800/ffprobe-streams.json",
+            concat!(
+                r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},"#,
+                r#"{"index":1,"codec_type":"audio","codec_name":"dts","channels":6},"#,
+                r#"{"index":2,"codec_type":"audio","codec_name":"ac3","channels":2},"#,
+                r#"{"index":3,"codec_type":"audio","codec_name":"ac3","channels":2}]}"#
+            ),
+        );
+    }
+    tree.insert_file(
+        "t00-00800/audio-levels-20ms-1-2/manifest.txt",
+        concat!(
+            "# lazymkv audio-levels v2 (experiment 13)\n",
+            "file=title_t00.mkv bytes=16 seconds=0 frame_ms=20 band_hz=300-3400\n",
+            "main=1 codec=dts profile=- channels=6 layout=- layout_guessed=5.1 language=eng fc=yes frames=5 ",
+            "md5=0f343b0931126a20f133d67c2b018a3b\n",
+            "cand=2 codec=ac3 profile=- channels=2 layout=stereo language=eng frames=5 ",
+            "md5=9e107d9d372bb6826bd81d3542a419d6\n"
+        ),
+    );
+    tree.insert_file(
+        "t00-00800/audio-levels-20ms-1-2/streamhash.txt",
+        concat!(
+            "0,a,MD5=0f343b0931126a20f133d67c2b018a3b\n",
+            "1,a,MD5=9e107d9d372bb6826bd81d3542a419d6\n",
+            "2,a,MD5=e4d909c290d0fb1ca068ffaddf22cbd0\n"
+        ),
+    );
+    tree
+}
+
+#[test]
+fn a_level_folder_without_audio_proxy_json_gives_every_streams_md5_from_its_streamhash_txt() {
+    let label = PathKey::new("t00-00800");
+    let md5 = |text: &str| Some(text.to_string());
+    let (main, cand) = ((Some(1), md5("0f343b0931126a20f133d67c2b018a3b")), (Some(2), md5("9e107d9d372bb6826bd81d3542a419d6")));
+    // Stream 3 is neither main nor candidate: only the folder's streamhash.txt names its MD5 (spec 6.4 step 10a, D13).
+    assert_eq!(
+        read_level_md5(&level_label(true), &label),
+        Ok(vec![main.clone(), cand.clone(), main.clone(), cand.clone(), (Some(3), md5("e4d909c290d0fb1ca068ffaddf22cbd0"))])
+    );
+    assert_eq!(read_level_md5(&level_label(false), &label), Ok(vec![main, cand]));
 }
