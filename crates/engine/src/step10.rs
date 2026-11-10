@@ -19,7 +19,7 @@ use lazymkv_tools::{end_reason, ffprobe, mkvmerge, ocr_args, run_worker, with_su
 use serde_json::{json, Value};
 
 use crate::staged::{copy_checked, copy_tree_checked, move_checked, UnitError};
-use crate::steps::{ended_line, not_run_line, run_line};
+use crate::steps::{code_text, ended_line, exit_file, not_run_line, run_line, shown};
 
 /// A title that needs step 10 when the engine has no worker beside it (design part 10.7; T5-R8). Def: T5-15.
 /// Use: T5-15.
@@ -52,11 +52,6 @@ struct Summary {
     subtitle_tracks: Option<usize>,
     evidence_bytes: Option<u64>,
     evidence_ms: Option<u64>,
-}
-
-/// `<path>` and the error, the sentence of a file step 10 could not read or write.
-fn shown(path: &Path, error: impl std::fmt::Display) -> String {
-    format!("{}: {error}", path.display())
 }
 
 /// Step 10's extraction and packet lists for one title (design part 10.2 steps 1 and 2; T5-R56). Def: T5-14.
@@ -279,15 +274,6 @@ fn fresh(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-/// The exit code and wall time of a recorded run from its `.exit.json`: `exit_code` -1, or none, is None;
-/// `elapsed_ms` is 0 when missing.
-fn exit_of(path: &Path) -> (Option<i32>, u64) {
-    let doc: Value = fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
-    let exit = doc.get("exit_code").and_then(Value::as_i64).filter(|code| *code != -1);
-    let wall_ms = doc.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0);
-    (exit.and_then(|code| i32::try_from(code).ok()), wall_ms)
-}
-
 /// What an exit-0 run wrote into `out`, checked: the records' text, run.json's totals and frames.json's text, or the
 /// unread reason, which names files and numbers only.
 fn read_output(out: &Path, n: i64, packets: &[Packet], clear_max: i64) -> Result<(String, RunTotals, String), String> {
@@ -351,9 +337,8 @@ fn read_into(
         let limit = cap(events);
         let end = run_worker(ctx, worker, &args, &capture, limit)
             .map_err(|error| UnitError::Failed(format!("lazymkv-ocr could not run: {error}")))?;
-        let (exit, wall_ms) = exit_of(&with_suffix(&capture, ".exit.json"));
-        let code = exit.map_or_else(|| "none".to_string(), |code| code.to_string());
-        log(&format!("ended lazymkv-ocr s{n}: exit {code} after {wall_ms} ms"));
+        let (exit, wall_ms) = exit_file(&capture).unwrap_or((None, 0));
+        log(&format!("ended lazymkv-ocr s{n}: exit {} after {wall_ms} ms", code_text(exit)));
 
         let outcome = match &end {
             WorkerEnd::Cancelled => return Err(UnitError::Failed(CANCELLED.to_string())),

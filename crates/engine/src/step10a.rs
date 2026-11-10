@@ -8,9 +8,9 @@ use std::time::UNIX_EPOCH;
 use lazymkv_core::audio::dataset::levels_args;
 use lazymkv_core::audio::pass::{
     centre, check_main_and_candidates, ffmpeg_args, graph, last_peak, level_folder, main_and_candidates, manifest_text,
-    parse_layouts, parse_streamhash, pass_streams, peak_clipped, proxy_check, proxy_json, series_file, Graph, Layouts,
-    PassStream, ProxyFile, ProxyPass, ProxyRecord, ProxySource, ProxySourceStream, ProxyTrackFacts, GAIN_FIRST_DB,
-    GAIN_REDO_DB,
+    parse_layouts, parse_streamhash, pass_streams, peak_clipped, proxy_check, proxy_json, series_file, text_of, Graph,
+    Layouts, PassStream, ProxyFile, ProxyPass, ProxyRecord, ProxySource, ProxySourceStream, ProxyTrackFacts,
+    GAIN_FIRST_DB, GAIN_REDO_DB,
 };
 use lazymkv_core::ipc::CANCELLED;
 use lazymkv_core::recording::files::FfprobeStreams;
@@ -20,7 +20,7 @@ use lazymkv_tools::{layouts_args, proxy_check_args, run_ffmpeg, streamhash_args,
 use serde_json::Value;
 
 use crate::staged::{copy_checked, copy_into_job, UnitError};
-use crate::steps::{ended_line, not_run_line, run_line};
+use crate::steps::{code_text, ended_line, exit_file, not_run_line, run_line, shown};
 
 /// The kind of step 10a's work folder, `<data>\work\levels-<job id>-<title key>\` (T5-R39). Def: T5-17. Use: T5-17.
 pub(crate) const WORK_KIND: &str = "levels";
@@ -73,11 +73,6 @@ pub(crate) enum PassEnd {
     NoAudio,
 }
 
-/// `<path>: <error>`, the sentence of a file step 10a could not read or write.
-fn shown(path: &Path, error: impl std::fmt::Display) -> String {
-    format!("{}: {error}", path.display())
-}
-
 /// A file of the work folder, written as is (`Failed` on an error).
 fn write_work(path: &Path, bytes: impl AsRef<[u8]>) -> Result<(), UnitError> {
     fs::write(path, bytes).map_err(|error| UnitError::Failed(shown(path, error)))
@@ -115,14 +110,6 @@ enum Ran {
     Ffmpeg,
     /// ffprobe's proxy check.
     ProxyCheck,
-}
-
-/// `<out>.exit.json`'s exit code as text, `none` for a run without one.
-fn exit_code_text(out: &Path) -> String {
-    let exit = fs::read(with_suffix(out, ".exit.json")).ok();
-    let exit = exit.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    let code = exit.and_then(|exit| exit["exit_code"].as_i64()).filter(|code| *code != -1);
-    code.map_or_else(|| "none".to_string(), |code| code.to_string())
 }
 
 /// The last non-empty line of `<out>.stderr`, or "" when there is none.
@@ -163,7 +150,7 @@ impl Runner<'_, '_> {
             Ok(Ok(run)) => Ok(run),
             Ok(Err(why)) if why == CANCELLED => Err(UnitError::Failed(CANCELLED.to_string())),
             Ok(Err(_)) => {
-                let code = exit_code_text(out);
+                let code = code_text(exit_file(out).and_then(|(code, _)| code));
                 Err(UnitError::Failed(match ran {
                     Ran::ProxyCheck => format!("{key}: proxy check failed: ffprobe exited {code}"),
                     Ran::Ffmpeg => match last_stderr_line(out) {
@@ -287,15 +274,6 @@ fn quoted(arg: &str) -> String {
 /// A modification or start time as `yyyy-MM-dd HH:mm:ss`.
 fn seconds_text(ctx: &ToolCtx, unix_ms: u64) -> String {
     ctx.host.local_time(unix_ms).chars().take(19).collect()
-}
-
-/// A JSON value as text: a string as written, a number in its decimal form, absent or null as "".
-fn text_of(value: Option<&Value>) -> String {
-    match value {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => other.to_string(),
-    }
 }
 
 /// How one proxy pass ended: its working folder, each track's last peak and DURATION, and the first clipped track.

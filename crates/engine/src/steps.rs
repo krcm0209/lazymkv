@@ -208,10 +208,9 @@ fn empty_dir(dir: &Path) -> io::Result<()> {
 /// RR1-6(a)). The tools crate's copy, which reads a missing folder as empty for the rip's own count, stays separate.
 /// Def: T23, its Err PR #6 review (V3). Use: T23, T24, T25.
 pub(crate) fn mkv_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let shown = |error: io::Error| format!("{}: {error}", dir.display());
     let mut files = Vec::new();
-    for entry in fs::read_dir(dir).map_err(shown)? {
-        let path = entry.map_err(shown)?.path();
+    for entry in fs::read_dir(dir).map_err(|error| shown(dir, error))? {
+        let path = entry.map_err(|error| shown(dir, error))?.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")) {
             files.push(path);
         }
@@ -604,15 +603,33 @@ pub(crate) fn run_line(name: &str, program: &Path, args: &[String]) -> String {
     format!("run {name}: {} {}", program.display(), args.join(" "))
 }
 
+/// A run's `<out>.exit.json` for job.log's `ended` lines and the steps' sentences, their one reader of it (T5-R69): its
+/// `exit_code`, -1 or absent as None, and its `elapsed_ms`, 0 when absent; None when the file is absent or not JSON.
+/// The rip summary copies `rip.txt.exit.json`'s fields as written and does not use it. Def: T5-14. Use: T5-14, T5-15,
+/// T5-17.
+pub(crate) fn exit_file(out: &Path) -> Option<(Option<i32>, u64)> {
+    let exit = read_json(&with_suffix(out, ".exit.json"))?;
+    let code = exit["exit_code"].as_i64().filter(|code| *code != -1).and_then(|code| i32::try_from(code).ok());
+    Some((code, exit["elapsed_ms"].as_u64().unwrap_or(0)))
+}
+
+/// An exit code as the engine's job.log lines and step sentences show it: the number, or `none` (T5-R69); the tools
+/// crate's drivers keep their own for their errors. Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn code_text(code: Option<i32>) -> String {
+    code.map_or_else(|| "none".to_string(), |code| code.to_string())
+}
+
+/// `<path>: <error>`, the sentence of a file a step could not read or write (T5-R69). Def: T5-14. Use: T5-14, T5-15,
+/// T5-17.
+pub(crate) fn shown(path: &Path, error: impl std::fmt::Display) -> String {
+    format!("{}: {error}", path.display())
+}
+
 /// `ended <name>: exit <code or none> after <elapsed_ms> ms` from `<out>.exit.json`, or `ended <name>: no exit file
 /// was written` (design part 7.2). Def: T5-14. Use: T5-14, T5-15, T5-17.
 pub(crate) fn ended_line(name: &str, out: &Path) -> String {
-    match read_json(&with_suffix(out, ".exit.json")) {
-        Some(exit) => {
-            let code = exit["exit_code"].as_i64().filter(|code| *code != -1);
-            let code = code.map_or_else(|| "none".to_string(), |code| code.to_string());
-            format!("ended {name}: exit {code} after {} ms", exit["elapsed_ms"].as_u64().unwrap_or(0))
-        }
+    match exit_file(out) {
+        Some((code, elapsed_ms)) => format!("ended {name}: exit {} after {elapsed_ms} ms", code_text(code)),
         None => format!("ended {name}: no exit file was written"),
     }
 }
@@ -685,8 +702,7 @@ impl Step<'_> {
 
     /// The job.log line after a run: `ended <name>: exit <code or none> after <elapsed_ms> ms`, from the run.
     fn ended(&self, name: &str, run: &RunResult) {
-        let code = run.exit_code.map_or_else(|| "none".to_string(), |code| code.to_string());
-        self.log(&format!("ended {name}: exit {code} after {} ms", run.elapsed_ms));
+        self.log(&format!("ended {name}: exit {} after {} ms", code_text(run.exit_code), run.elapsed_ms));
     }
 
     /// `ended` for a driver that gives no RunResult, from the run's `<out>.exit.json` (removed before the run, so it
@@ -1243,7 +1259,6 @@ impl Step<'_> {
     /// attempt the job kept (design part 7.1).
     fn move_aside(&self, key_dir: &Path) -> Result<(), String> {
         let attempt = next_attempt_dir(key_dir);
-        let shown = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
         fs::create_dir_all(&attempt).map_err(|error| shown(&attempt, error))?;
         let entries = fs::read_dir(key_dir).map_err(|error| shown(key_dir, error))?;
         for entry in entries {
@@ -1699,12 +1714,11 @@ impl Step<'_> {
     /// keys, through `dumps` with `INDENT1_ASCII` and a newline, written with write_atomic.
     fn write_decide_json(&self, doc: DecideDoc) -> Result<(), String> {
         let path = self.job.job_dir.join(&doc.label).join("decide.json");
-        let shown = |error: &dyn std::fmt::Display| format!("{}: {error}", path.display());
         let version = env!("CARGO_PKG_VERSION").to_string();
         let engine = EngineDecideDoc { doc, audio_rule_version: RULE_VERSION, lazymkv_version: version };
-        let value = serde_json::to_value(&engine).map_err(|error| shown(&error))?;
+        let value = serde_json::to_value(&engine).map_err(|error| shown(&path, error))?;
         let text = format!("{}\n", dumps(&value, Style::INDENT1_ASCII));
-        write_atomic(&path, text.as_bytes()).map_err(|error| shown(&error))
+        write_atomic(&path, text.as_bytes()).map_err(|error| shown(&path, error))
     }
 
     /// Decide (design parts 5.7 step 11, 8.4): the job's stale TMDb copies fetched again first (Ruling T4-R9; one that

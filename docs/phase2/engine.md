@@ -176,6 +176,35 @@ job folder is outside the claim and can still meet an owner refresh reading the 
 `lazymkv-engine`'s `tuning.rs`: `a_refresh_waits_for_another_refresh_of_its_folder`,
 `a_refresh_of_another_folder_does_not_wait` and `refreshes_of_one_folder_at_once_all_land_with_every_entry`.
 
+The same review's five threads outside correctness were settled on 2026-11-10, each read against the code and the
+rulings first. The decoders' sizes (robustness): a PGS composition's video size and an object's size are 16-bit fields,
+so `prepare`'s canvas and `decode_rle`'s indices are each bounded at 65535 x 65535 bytes, about 4 GiB, and `event`
+clones an object's indices once more per placement; a VobSub object is bounded at 4096 x 4096 by its 12-bit
+coordinates, but the idx header's `size:` is read as two unbounded `u32`, and `mkv.rs` inflates zlib content without a
+limit (already among the frozen-path findings). Every decode runs inside the frozen paths (T5-R54): the worker's
+`stream.rs` reads the file and calls the decoders, so nothing outside them sees a size before it is allocated; the
+engine only spawns the worker and kills it at the time cap, after which the stream is unread with
+`subtitle_text_unread`, as it is when the worker aborts on an allocation that fails. The exposure is memory pressure
+on the mini PC for at most one stream's cap, not a failed job. A bound can be put only inside the frozen paths, or as
+a process memory limit on the worker through the Job Object, which design part 5.3 lists no limit for ("these limits
+and no others"); the choice is the owner's, under "Pull request 5: the owner's decisions". The copy retried before every
+step (efficiency): design part 7.5 and call 10 set the retry's triggers, engine start and "whenever `ShareConnector`
+finds `tuning_root` reachable before another step", `start_copy` asks the shares on the copy thread so the owner thread
+asks none, and its guards bound the cost to one attempt in flight per pending job, since a job whose copy runs is
+skipped, each attempt that waits writing design part 7.1's one job.log line; it stands as built, and narrowing the
+trigger is the owner's to rule on. The CI pins: T5-R28 and the owner's plan-time yes of 2026-11-07 pin MKVToolNix
+82.0-1build2 by apt on ubuntu (noble's package), 103.0 by brew on macos with the version check and 103.0 by the
+installer on windows, under P33 and design part 12.1, so a formula that moves on fails the job and goes to the owner
+for a new pin, as `ci.yml`'s comment on the macos step says, and an `ubuntu-latest` that moves to the next release
+fails the apt pin the same way, which no comment says; nothing changed. The marker names (reuse): the level folder's
+name prefix is core's `audio::pass::LEVEL_PREFIX`, which `level_folder` writes and `staged.rs` and `tuning.rs` read,
+and `PROXY_JSON` is step 10a's alone, which `staged_state` and `tuning.rs` read (T5-R68, below). The exit file's
+readers (simplification): `steps::exit_file` is the one reader of a run's `<out>.exit.json` for job.log's `ended` lines
+and the steps' sentences (`ended_line`, step 10 and step 10a; the rip summary copies `rip.txt.exit.json`'s fields as
+written), `code_text` the engine's one spelling of an exit code (those and `Step::ended`; the tools crate's drivers
+keep their own) and `shown` the one `<path>: <error>` sentence of steps 10 and 10a, and step 10a reads ffprobe's values
+with core's `text_of` (T5-R69, below). Both are refactors: no test changed and none was added.
+
 ## How to run it
 
 Every cargo command runs on the mini PC through `scripts/box.sh`, one at a time (design part 12.5).
@@ -1268,12 +1297,12 @@ answered R9 and R2 before they were built; each other ruling stands until the ow
 
 The owner may overturn any of them.
 
-### Pull request 5: the planner's rulings (T5-R1 to T5-R67)
+### Pull request 5: the planner's rulings (T5-R1 to T5-R69)
 
 The planner's rulings of 2026-11-06, each settling an item the notes leave open or where two sources disagree, and each
 naming the task that builds it. On 2026-11-07 the owner let every ruling stand. T5-R66 and T5-R67 were added, and
-T5-R59 amended, at the review of pull request 16 on 2026-11-09, not by the planner; they name no task, and the owner
-has not yet ruled on them.
+T5-R59 amended, at the review of pull request 16 on 2026-11-09, and T5-R68 and T5-R69 at its threads outside
+correctness on 2026-11-10, not by the planner; they name no task, and the owner has not yet ruled on them.
 
 - T5-R1 (R2-decoders-4, R3-worker-3, R4-commands-15, R4-commands-68). The `ocr` crate is call 23's two packages; the models' build script belongs to `lazymkv-ocr-models`; engine.md's crates table records the split, and T5-26 amends design 4.1, 4.7 and 10.11 for it (T5-R50).
 - T5-R2 (R3-worker-4, R4-commands-11). `lazymkvctl` links `lazymkv-ocr-models` only (E3 binds over spec 4.4's "compiled into `lazymkvctl.exe`" and design 11.1's ocrs row); T5-12 rewords spec 4.4's ocrs row and T5-26 design 11.1's.
@@ -1342,6 +1371,8 @@ has not yet ruled on them.
 - T5-R65 (engine.md's S80, design part 12.1, G1; T5-26). The self-test's judging of spec 13's minimum versions of MKVToolNix and FFmpeg moves to pull request 6, with the release's FFmpeg build; layer 2 checks FFmpeg 7.0 in its tests only (T5-24, K11, T5-R64), and the self-test keeps printing each tool's version and path as at `07ccc48`. T5-26 amends S80's sentence in engine.md, which put those minimums with layer 2 in pull request 5, and lists the check under pull request 6 in "Left for later pull requests".
 - T5-R66 (C3, design parts 5.7 and 7.1, spec 6.4 step 10a; the review of pull request 16). A planned title whose Probe `ffprobe-streams.json` lists no audio stream, which the owner's Assign titles, a remembered decision or J16's rule 1 can plan, gets no step 10a ffmpeg pass under either setting: step 10a writes an empty `streamhash.txt` into the job folder's `<title key>\` and then the staged tuning folder, and that staged `streamhash.txt` is C3's audio marker whatever `keep_tuning_evidence` is. Decide reads no level folder and no MD5 for it (spec 6.4's "every audio stream" with none). job.log gets `<key>: the file has no audio stream, so step 10a runs no ffmpeg pass and writes an empty streamhash.txt`. Before this ruling such a title failed the job as Unknown at ExtractSubtitleEvidence, with levels-args' refusal or ffmpeg's `-map 0:a` error.
 - T5-R67 (design part 7.5, G3, call 25, H3, L283; the review of pull request 16). `refresh_recordings` first claims its target folder for the whole process (`claim_target`) and waits while another refresh holds it, so the owner's refresh of a job (`request_refresh`) and a relayed `retune --jobs` refresh of the same `<tuning_root>\recordings\<job id>\` (`spawn_retune_refetch`) never run at once, and a relayed retune that copies a job folder across first waits for a running owner refresh of that folder to end. The claim is keyed on the target path as written and taken only on refresh threads, never on the owner thread. Before this ruling the two could share each file's `.partial` and the manifest's temporary file, so the retune could exit 3 and the manifest could lose an entry or be torn. The relay's refresh still asks no share and reads no `keep_tuning_evidence`. T5-20, T5-22.
+- T5-R68 (design part 7.5, T5-R13; the review of pull request 16). The level folder's name prefix is defined once, as core's `audio::pass::LEVEL_PREFIX`, which `level_folder` writes and the engine's `staged_state`, `clear_incomplete` and `is_level_marker` read; the level folder's marker name is defined once, as step 10a's `PROXY_JSON`, which `staged_state` and the dataset copy read. Before this ruling `tuning.rs` defined both names, `staged.rs` defined the prefix and `staged_state` spelled the marker as a literal, beside step 10a's `PROXY_JSON` and core's `level_folder`, so a change to one copy would have read a complete folder as incomplete or copied the marker before the files it vouches for. No behaviour changed; no test changed.
+- T5-R69 (design parts 7.1 and 7.2; the review of pull request 16). A run's `<out>.exit.json` has one reader for job.log's `ended` lines and the steps' sentences, `steps::exit_file`, which gives the exit code, -1 or absent as none, and `elapsed_ms`, 0 when absent, or nothing when the file is absent or not JSON; `ended_line` says `no exit file was written` in that case, step 10's summary records no code and 0 ms, and step 10a's sentences say `exit none`, as each did with its own reader (step 10a's read no `elapsed_ms`, and only step 10's narrowed the code to `i32`, which the recorder's `i32` makes moot). The rip summary still copies `rip.txt.exit.json`'s fields as written, -1 included, and is not a user. `steps::code_text` spells an exit code for the engine's job.log lines and step sentences (`ended_line`, `Step::ended`, step 10 and step 10a; the tools crate's drivers keep their own `code_text` for their errors), `steps::shown` is the one `<path>: <error>` sentence of steps 10 and 10a and of `steps.rs`'s own file errors, and step 10a reads ffprobe's strings and numbers with core's `audio::pass::text_of`, now public, in place of its copy. No behaviour changed; no test changed.
 
 ### Pull request 5: the owner's decisions
 
@@ -1418,7 +1449,16 @@ The review of pull request 16's items for the owner, each standing until the own
 C3's marker list with an empty `streamhash.txt` for a title whose probe lists no audio stream; the amendment of T5-R59,
 under which `lazymkv-dev decide` counts the subtitles section's events at its `--settings` file's
 `sub_clear_max_bytes`; and T5-R67, the claim that orders the owner's and a relayed retune's refresh of one job's
-recordings copy.
+recordings copy. Its five threads outside correctness, settled 2026-11-10, add T5-R68 and T5-R69 (two refactors), the
+copy retry's trigger left as design part 7.5 and call 10 set it, and the CI pins left as T5-R28 set them. One of them
+needs the owner's ruling, since every fix is inside the frozen paths or amends design part 5.3: the decoders'
+allocation sizes (the review's robustness thread; the sizes and the exposure are in "Pull request 5" above). The
+options: (a) record it here beside the zlib note and take it up with pull request 6 or the next reopened trial, no
+code now; (b) a process memory limit on the worker through the Job Object (`JOB_OBJECT_LIMIT_PROCESS_MEMORY`, a
+`Spawn` field that a guard wrapper of step 10 fills, since the frozen driver's `..Spawn::default()` leaves it unset),
+Windows only, which amends design part 5.3's "no others" and ends a worker over the limit with
+`lazymkv-ocr exited with code <c>` and the stream unread; (c) bounds inside the decoders now (a canvas and object cap
+such as 4096 x 2304 and an inflate limit), which reopens the trial under T5-R54. The controller recommends (a).
 
 ### Pull request 5: rulings made during execution
 
@@ -1930,6 +1970,7 @@ all 3437.
 - T5-26 Step 2, 2026-11-09, SSH, the junction run on 0369f02, second attempt: exit 101 again at fake-tools engine_file_phase (86 passed, 1 failed: rerun::a_retry_after_a_lookup_pending_decide_does_not_decode_again, waited 10s for AwaitingLookup); the binary alone with the junction and LAZYMKV_EVIDENCE set passed 87, 0 failed in 152 s; the task stopped for the controller
 - T5-26 Step 3, 2026-11-09, SSH, the junction run on 0369f02, third attempt (cargo test --workspace --locked --no-fail-fast, 988 s): every test result line ok; the test list and the junction run: N 3450 tests listed (capture 8, clients 103, core 1845, ctl 48, dev 467, engine 260, fake-tools 448, ocr 23, ocr-models 8, platform 192, tools 48), 15 more with ocr-trial; 3437 passed, 0 failed, 13 ignored, 46 skipped: lines (Task 0's 42, two layer 2 lines "no mkvmerge" and two decoder-goldens lines "no tuning dataset" without LAZYMKV_OCR_TEXT); Cargo.lock unchanged
 - The review of pull request 16, 2026-11-09, SSH, the junction run on the tree of f752d78, that review's fixes over 1cfff5b (cargo test --workspace --locked): every test result line ok; 3446 passed, 0 failed, 13 ignored, 3459 in all (capture 8, clients 103, core 1845, ctl 48, dev 468, engine 264, fake-tools 452, ocr 23, ocr-models 8, platform 192, tools 48), 46 skipped: lines; Cargo.lock unchanged
+- The five non-correctness threads of the review of pull request 16, 2026-11-10, SSH, the junction run twice on the tree of the threads' commit (T5-R68, T5-R69 over d40787e; cargo test --workspace --locked --no-fail-fast): every test result line ok both times; 3446 passed, 0 failed, 13 ignored, 3459 in all, 46 skipped: lines; Cargo.lock unchanged; the box window agreed with the disc-menu session. Before them, the targeted runs: core audio::pass 17 ok, engine 262 ok, engine_tuning 19 ok, and engine_file_phase 89 of 90 under load (the_decision_carries_the_packet_md5s_and_the_measures_of_step_10a at the 10 s harness wait, 1 of 1 alone in 5.7 s: the build-box load class of the owner's notes), no test changed
 
 ## Tests
 

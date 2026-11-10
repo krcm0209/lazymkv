@@ -11,21 +11,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
+use lazymkv_core::audio::pass::LEVEL_PREFIX;
 use lazymkv_core::lookup::stale::TMDB_COPIES;
 use lazymkv_platform::{write_atomic, Reach, ShareConnector, TEMP_SUFFIX};
 
 use crate::staged::{copy_checked, copy_checked_with, copy_into_job, evidence_file, tuning_dir, PARTIAL};
+use crate::step10a::PROXY_JSON;
 
 /// The dataset tree's folder under `tuning_root` (design part 7.5). Def: T5-19. Use: T5-19, T5-22.
 pub(crate) const DATASET: &str = "dataset";
 
 /// job.log's line when a copy landed (design part 7.1's "a copy to `tuning_root` retried"). Def: T5-19. Use: T5-19.
 pub(crate) const COPIED: &str = "tuning evidence copied to tuning_root";
-
-/// The prefix of a level folder's name (design part 7.5), whose `audio-proxy.json` is the folder's marker (T5-R13).
-const LEVEL_PREFIX: &str = "audio-levels-20ms-";
-/// A level folder's marker, and the title's proxy description (T5-R13).
-const PROXY_JSON: &str = "audio-proxy.json";
 
 /// job.log's line when a copy stays pending: `tuning copy pending: <why>` for the attempt after DecisionDone,
 /// `tuning copy retried: still pending: <why>` for a retry (design part 7.1). Def: T5-19. Use: T5-19.

@@ -181,9 +181,14 @@ pub fn centre(stream: &PassStream, layouts: &Layouts) -> Centre {
     Centre { has_fc, guessed }
 }
 
+/// The name prefix of a level folder, `audio-levels-20ms-<main>[-<cand>...]` (design part 7.5): the one definition,
+/// which `level_folder` writes and the engine's staged-folder reader and dataset copy read (T5-R68). Def: T5-16.
+/// Use: T5-17, T5-18, T5-19.
+pub const LEVEL_PREFIX: &str = "audio-levels-20ms-";
+
 /// "audio-levels-20ms-<main>[-<cand>...]", the candidates in the order given (R6-phase0-57). Def: T5-16. Use: T5-17.
 pub fn level_folder(main: i64, cands: &[i64]) -> String {
-    let mut name = format!("audio-levels-20ms-{main}");
+    let mut name = format!("{LEVEL_PREFIX}{main}");
     for c in cands {
         name.push_str(&format!("-{c}"));
     }
@@ -489,8 +494,8 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 /// A JSON value as PowerShell's `[string]` gives it here: a string as written, a number in its decimal form, absent
-/// or null as "".
-fn text_of(value: Option<&Value>) -> String {
+/// or null as "". Step 10a's proxy record reads ffprobe's answer with it too (T5-R69). Def: T5-16. Use: T5-16, T5-17.
+pub fn text_of(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => s.clone(),

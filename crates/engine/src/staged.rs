@@ -4,6 +4,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use lazymkv_core::audio::pass::LEVEL_PREFIX;
+
+use crate::step10a::PROXY_JSON;
+
 /// The data folder's work folder, `<data>\work` (B1 (the worker's folder), T5-R4, T5-R39). Def: T5-14. Use: T5-14, T5-15.
 pub(crate) const WORK: &str = "work";
 
@@ -111,9 +115,6 @@ pub(crate) const SKIPPED_COMPLETE: &str = "steps 10 and 10a skipped: the staged 
 pub(crate) const CLEARED_INCOMPLETE: &str =
     "the staged tuning folder was incomplete, so it was deleted and steps 10 and 10a run again";
 
-/// The name prefix of a level folder, `audio-levels-20ms-<main>[-<cand>...]` (design part 7.5).
-const LEVEL_PREFIX: &str = "audio-levels-20ms-";
-
 /// What a re-run of the unit finds in a title's staged tuning folder (notes C3): `Complete` skips steps 10 and 10a,
 /// `Incomplete` is deleted and both run again, `Absent` (no folder) runs both. Def: T5-18. Use: T5-18.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,7 +141,7 @@ pub(crate) fn staged_state(tuning: &Path, keep_tuning_evidence: bool, audio: boo
                 let path = entry.path();
                 entry.file_name().to_str().is_some_and(|name| name.starts_with(LEVEL_PREFIX))
                     && path.is_dir()
-                    && path.join("audio-proxy.json").is_file()
+                    && path.join(PROXY_JSON).is_file()
             }),
             Err(_) => false,
         }
