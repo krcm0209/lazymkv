@@ -1,11 +1,17 @@
-//! The mkvmerge and ffprobe drivers against the stand-in (design parts 5.3, 5.7, 5.11; Ruling S12).
+//! The mkvmerge and ffprobe drivers against the stand-in (design parts 5.3, 5.7, 5.11; Ruling S12), step 10's
+//! extraction and packet listing, and call 24's size cross-check against the runner's own ffprobe.
 
 use lazymkv_core::ipc::OutputStream;
+use lazymkv_core::job::Tool;
+use lazymkv_core::recording::files::PacketsFile;
+use lazymkv_core::subtitle::bitmap::mkv::read_stream;
+use lazymkv_core::subtitle::bitmap::CODEC_PGS;
+use lazymkv_core::testsupport::mks::{mks, pgs_display_set, MksBlock, MksEncoding, MksShape, MksTrack};
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use lazymkv_platform::fakes::FakeHost;
 use lazymkv_engine::testkit::BusyRetry;
 use lazymkv_platform::StdProcessGuard;
-use lazymkv_tools::{ident, probe, remux, CancelToken, Limits, ToolCtx};
+use lazymkv_tools::{exe_name, extract, extract_args, ident, packets, packets_args, probe, remux, CancelToken, Limits, ToolCtx};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -150,4 +156,116 @@ fn a_probe_parses_the_streams() {
     assert_eq!(read.streams[1].codec_name.as_deref(), Some("dts"));
     assert_eq!(read.streams[1].profile.as_deref(), Some("DTS-HD MA"));
     assert_eq!(fs::read(&out).unwrap(), streams);
+}
+
+const PACKETS: &str = r#"{"packets":[{"pts_time":"1.000000","duration_time":"2.000000","size":"2029"}]}
+"#;
+
+#[test]
+fn extraction_progress_lines_reach_the_progress_callback() {
+    let scratch = Scratch::new("extract");
+    let env = Env::new();
+    let program = stand_in(&scratch, "mkvmerge", r#"{"responses":[{"args_contain":["--gui-mode","-D","-A","-s"],
+        "stdout":"extract.txt","creates":[{"arg_after":"-o","copy_from":"evidence.mks"}]}]}"#,
+        &[("extract.txt", b"#GUI#progress 50%\n#GUI#progress 100%\n"), ("evidence.mks", b"made-up evidence bytes")]);
+    let evidence = scratch.0.join("staging/j/evidence/t00.mks");
+    fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+    let args = extract_args(&evidence, &[3, 4], &scratch.0.join("raw.mkv"));
+    let out = scratch.0.join("job/t00/evidence-mkvmerge.txt");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    assert_eq!(env.run(|ctx| extract(ctx, &program, &args, &out)).unwrap(), Ok(()));
+    assert_eq!(*env.progress.lock().unwrap(), vec![0.5, 1.0]);
+    assert_eq!(fs::read(&evidence).unwrap(), b"made-up evidence bytes");
+}
+
+#[test]
+fn an_extraction_accepts_exit_1_and_refuses_exit_2() {
+    let scratch = Scratch::new("extract-exit");
+    let env = Env::new();
+    let program = stand_in(&scratch, "mkvmerge", r#"{"responses":[
+        {"args_contain":["-s","one.mks"],"exit_code":1},
+        {"args_contain":["-s","two.mks"],"exit_code":2}]}"#, &[]);
+    let out = scratch.0.join("job/t00/evidence-mkvmerge.txt");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let args = |name: &str| extract_args(std::path::Path::new(name), &[3], std::path::Path::new("raw.mkv"));
+    assert_eq!(env.run(|ctx| extract(ctx, &program, &args("one.mks"), &out)).unwrap(), Ok(()));
+    assert_eq!(env.run(|ctx| extract(ctx, &program, &args("two.mks"), &out)).unwrap(),
+        Err("mkvmerge exited with code 2".to_string()));
+}
+
+#[test]
+fn a_packet_listing_keeps_ffprobes_json_and_refuses_another_exit_code() {
+    let scratch = Scratch::new("packets");
+    let env = Env::new();
+    let program = stand_in(&scratch, "ffprobe", r#"{"responses":[
+        {"args_contain":["s:0","packet=pts_time"],"stdout":"packets.json"},
+        {"args_contain":["s:1","packet=pts_time"],"exit_code":1}]}"#, &[("packets.json", PACKETS.as_bytes())]);
+    let evidence = scratch.0.join("t00.mks");
+    let out = |n: i64| scratch.0.join(format!("job/t00/subs/sub-{n}.packets.json"));
+    fs::create_dir_all(out(0).parent().unwrap()).unwrap();
+    assert_eq!(env.run(|ctx| packets(ctx, &program, &packets_args(0, &evidence), &out(0))).unwrap(), Ok(()));
+    assert_eq!(fs::read_to_string(out(0)).unwrap(), PACKETS);
+    assert_eq!(env.run(|ctx| packets(ctx, &program, &packets_args(1, &evidence), &out(1))).unwrap(),
+        Err("ffprobe exited with code 1".to_string()));
+}
+
+/// The ffprobe call 24's cross-check runs: `LAZYMKV_TEST_FFPROBE`, else the first `ffprobe` on `PATH` (K11's lookup
+/// for layer 2, with no version floor here).
+fn installed_ffprobe() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("LAZYMKV_TEST_FFPROBE") {
+        return Some(PathBuf::from(path));
+    }
+    let name = exe_name(Tool::Ffprobe);
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(&name)).find(|path| path.is_file())
+}
+
+/// A JSON value of ffprobe's listing as text: its string, else its JSON form.
+fn text(value: &Option<serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+#[test]
+fn the_runners_ffprobe_lists_a_zlib_pgs_tracks_inflated_sizes_as_the_reader_does() {
+    let Some(ffprobe) = installed_ffprobe() else {
+        assert!(std::env::var_os("CI").is_none(), "CI has no ffprobe, so call 24's cross-check cannot run on this runner");
+        lazymkv_dev::evidence::skip(
+            "no ffprobe (set LAZYMKV_TEST_FFPROBE or put ffprobe on PATH), so call 24's cross-check did not run",
+        );
+        return;
+    };
+    let scratch = Scratch::new("cross-check");
+    let env = Env::new();
+    let palette = [(1u8, [235u8, 128, 128, 255])];
+    let payloads: Vec<Vec<u8>> = (0..4u32)
+        .map(|k| pgs_display_set((1920, 1080), &[(0, 10, 10, 1900 - 100 * k, 200 + 20 * k, 1)], &palette))
+        .collect();
+    let sizes: Vec<u64> = payloads.iter().map(|p| p.len() as u64).collect();
+    assert!(sizes.windows(2).all(|w| w[0] != w[1]), "the four made-up events need four sizes: {sizes:?}");
+    let track = MksTrack { number: 1, kind: 17, codec_id: CODEC_PGS.to_string(), codec_private: Vec::new(),
+        language: "eng".to_string(), encoding: MksEncoding::Zlib };
+    let times = [1_000i64, 2_500, 4_000, 61_103];
+    let blocks: Vec<MksBlock> = times.iter().zip(&payloads).map(|(t, p)| MksBlock::new(1, *t, p.clone())).collect();
+    let bytes = mks(&[track], &blocks, &MksShape::default());
+    let inflated: u64 = sizes.iter().sum();
+    assert!((bytes.len() as u64) < inflated, "the file is {} bytes for {inflated} inflated, so zlib did not apply", bytes.len());
+    let evidence = scratch.write_path("staging/j/evidence/t00.mks", &bytes);
+    let out = scratch.0.join("job/t00/subs/sub-0.packets.json");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    assert_eq!(env.run(|ctx| packets(ctx, &ffprobe, &packets_args(0, &evidence), &out)).unwrap(), Ok(()));
+    let listed: PacketsFile = serde_json::from_slice(&fs::read(&out).unwrap()).unwrap();
+    let by_ffprobe: Vec<(i64, u64)> = listed
+        .packets()
+        .iter()
+        .map(|p| ((text(&p.pts_time).parse::<f64>().unwrap() * 1000.0).round() as i64, text(&p.size).parse().unwrap()))
+        .collect();
+    let stream = read_stream(&bytes, 0).unwrap();
+    let by_reader: Vec<(i64, u64)> = stream.blocks.iter().map(|b| ((b.pts * 1000.0).round() as i64, b.size)).collect();
+    assert_eq!(by_reader.iter().map(|r| r.1).collect::<Vec<_>>(), sizes);
+    assert_eq!(by_ffprobe, by_reader,
+        "call 24: this runner's ffprobe lists other (pts ms, size) pairs than the reader; stop and give the owner both lists");
+    println!("cross-check: {} packets, sizes {sizes:?}, equal in number, order and size", by_reader.len());
 }

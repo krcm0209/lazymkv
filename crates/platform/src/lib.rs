@@ -101,18 +101,27 @@ pub trait Ejector: Send + Sync {
     fn eject(&self, drive: &str) -> Result<(), String>;
 }
 
-/// What to start: one program with its arguments (spec 4.3, design part 4.2). Def: T8. Use: T11.
-#[derive(Clone, Debug)]
+/// What to start: one program with its arguments (spec 4.3, design part 4.2). `Default` is the empty spawn (no
+/// program, no argument, no variable, normal priority), so a literal can end with `..Spawn::default()` and a field
+/// added later leaves it unchanged (T5-R54). Def: T8, T5-9. Use: T11, T5-9, T5-13.
+#[derive(Clone, Debug, Default)]
 pub struct Spawn {
     /// The program to run, as a full path.
     pub program: PathBuf,
     /// The arguments, one string each.
     pub args: Vec<String>,
-    /// Extra environment variables for the child, added after what the runner keeps of the inherited environment. The
-    /// engine leaves this empty (S43).
+    /// Extra environment variables for the child, added after what the runner keeps of the inherited environment
+    /// (on Windows only the names of `security::CHILD_ENV_NAMES`, V1, so a variable reaches a guarded child only
+    /// through this list). The engine leaves this empty for every child but the OCR worker, whose one variable is
+    /// `RTEN_NUM_THREADS=3` (S43; design part 10.7, K2; T5-R37).
     pub env: Vec<(String, String)>,
     /// Whether to start the child at below-normal priority. A no-op where the platform has no such class.
     pub below_normal: bool,
+    /// The folder the child starts in; None keeps the engine's own. Only step 10a sets it: its ffmpeg and ffprobe calls
+    /// run in the title's work folder `<data>\work\levels-<job id>-<title key>\`, as phase 0's `audio-levels.ps1` ran
+    /// them in its level folder, so every file name in the filter graph is relative (a drive colon cannot be written in
+    /// a filter argument; design part 5.7 step 10a; T5-R37, T5-R39). Def: T5-13. Use: T5-17.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Starts child programs so that closing the engine cannot leave them running (spec 4.3, design part 4.2).
@@ -434,5 +443,15 @@ mod tests {
         rename_no_replace(&from, &to).unwrap();
         assert!(!from.exists());
         assert_eq!(fs::read_to_string(&to).unwrap(), "placeholder");
+    }
+
+    /// T5-R54: a literal that ends with `..Spawn::default()` adds nothing of its own.
+    #[test]
+    fn a_default_spawn_is_empty() {
+        let spawn = Spawn::default();
+        assert_eq!(spawn.program, PathBuf::new());
+        assert!(spawn.args.is_empty());
+        assert!(spawn.env.is_empty());
+        assert!(!spawn.below_normal);
     }
 }

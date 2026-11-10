@@ -1,0 +1,4 @@
+{"frame":0,"file":"s1/f-000011000.png","t":11.0,"pts":11.0,"lines":["text-sentinel-3e8f"],"text":"text-sentinel-3e8f","size":601}
+{"frame":1,"file":"s1/f-000012000.png","t":12.0,"pts":12.0,"lines":["text-sentinel-3e8f"],"text":"text-sentinel-3e8f","size":602}
+{"frame":2,"file":"s1/f-000013000.png","t":13.0,"pts":13.0,"lines":["text-sentinel-3e8f"],"text":"text-sentinel-3e8f","size":603}
+{"frame":3,"file":"s1/f-000014000.png","t":14.0,"pts":14.0,"lines":["text-sen

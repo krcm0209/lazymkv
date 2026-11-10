@@ -1,0 +1,2 @@
+content encoding 3 of track 3 is not zlib compression or header stripping
+second line

@@ -14,7 +14,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::audio::rule::RULE_VERSION;
@@ -34,6 +34,7 @@ use lazymkv_core::review::{Note, ReviewReason};
 use lazymkv_core::robot::lines::RunSummary;
 use lazymkv_core::robot::{parse, Scan};
 use lazymkv_core::settings::version_triple;
+use lazymkv_core::subtitle::text::READING;
 use lazymkv_core::tracks::subtitle::step10_runs;
 use lazymkv_core::ustar::{ustar_entry, DEFAULT_PROFILE_NAME};
 use lazymkv_core::verify::{
@@ -56,7 +57,7 @@ use serde_json::{json, Value};
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
     engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
-    OwedCheck, Refetched,
+    staged_text, OwedCheck, Refetched,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -65,6 +66,13 @@ use crate::space::{
     library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
     staged_remux_check, unreachable, Promises,
 };
+use crate::staged::{
+    clear_incomplete, evidence_file, staged_state, tuning_dir, unit_outputs_left, work_dir, Staged, UnitError,
+    CLEARED_INCOMPLETE, SKIPPED_COMPLETE, WORK,
+};
+use crate::step10;
+use crate::step10::{read_streams, stream_cap, OCR_MISSING};
+use crate::step10a::{has_audio, run_pass, PassEnd, PassInputs, NO_AUDIO, WORK_KIND};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -76,12 +84,6 @@ const COPY_PLAN: &str = "the plan needs whole-disc copy mode, which arrives in p
 
 /// The class of every failure the engine finds itself (design part 5.2).
 const UNKNOWN: Failure = Failure { class: FailureClass::Unknown, output: None };
-
-/// The sentence of a Decide whose title needs step 10's subtitle evidence, which this version does not build (S32).
-const STEP10_NOT_BUILT: &str = "subtitle evidence (step 10) is not built in this version";
-
-/// ExtractSubtitleEvidence's job.log line (S33): step 10a's packet MD5 pass is not built either.
-const STEP10A_NOT_RUN: &str = "step 10a did not run in this version";
 
 /// Locks `mutex`, ignoring a poison a panicked thread left.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -206,10 +208,9 @@ fn empty_dir(dir: &Path) -> io::Result<()> {
 /// RR1-6(a)). The tools crate's copy, which reads a missing folder as empty for the rip's own count, stays separate.
 /// Def: T23, its Err PR #6 review (V3). Use: T23, T24, T25.
 pub(crate) fn mkv_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let shown = |error: io::Error| format!("{}: {error}", dir.display());
     let mut files = Vec::new();
-    for entry in fs::read_dir(dir).map_err(shown)? {
-        let path = entry.map_err(shown)?.path();
+    for entry in fs::read_dir(dir).map_err(|error| shown(dir, error))? {
+        let path = entry.map_err(|error| shown(dir, error))?.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")) {
             files.push(path);
         }
@@ -223,6 +224,18 @@ pub(crate) fn mkv_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// so Output, which leads to AwaitingShare, or to AwaitingSpace when staging is out of space; never Unknown.
 fn staging_write_failure(health: StagingHealth) -> Failure {
     classify_title_failure(health.share_healthy, health.out_of_space, true, false)
+}
+
+/// A unit error as the step's result (T5-R56): `Failed` gives `DecisionFailed { Unknown }`, `Staging` gives
+/// `DecisionFailed` with `staging_write_failure(health())`; the message is the error's sentence. `health` is read only
+/// for `Staging`. Def: T5-14. Use: T5-14, T5-15, T5-17.
+fn unit_result(error: UnitError, health: impl FnOnce() -> StagingHealth) -> StepResult {
+    match error {
+        UnitError::Failed(message) => unknown(|failure| Event::DecisionFailed { failure }, message),
+        UnitError::Staging(message) => {
+            with(Event::DecisionFailed { failure: staging_write_failure(health()) }, message)
+        }
+    }
 }
 
 /// The class of a title folder VerifyFile cannot list after a rip (review round 1, V3 with V9, RR1-7): classed by the
@@ -503,6 +516,12 @@ pub(crate) struct RealSteps {
     makemkv: Arc<MakeMkv>,
     /// The probe of each (job, title key) Probe ran in this engine run, which Decide reads (design part 5.7 step 11.3).
     probes: Mutex<BTreeMap<(String, String), FfprobeStreams>>,
+    /// The data folder's work folder, `<data>\work` (B1 (the worker's folder)). Def: T5-14. Use: T5-15.
+    work_root: PathBuf,
+    /// The OCR worker step 10 starts (design part 10.7).
+    ocr: Option<PathBuf>,
+    /// The harness's cap, for tests only (T5-R58).
+    ocr_cap_override: Option<Duration>,
 }
 
 impl RealSteps {
@@ -537,6 +556,9 @@ impl RealSteps {
             java_in_use,
             makemkv,
             probes: Mutex::default(),
+            work_root: config.data.join(WORK),
+            ocr: config.ocr.clone(),
+            ocr_cap_override: config.ocr_cap_override,
         }
     }
 }
@@ -574,6 +596,47 @@ impl StepRunner for RealSteps {
         };
         outcome.unwrap_or_else(|early| early)
     }
+}
+
+/// `run <name>: <program> <args joined by " ">` (design part 7.1). Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn run_line(name: &str, program: &Path, args: &[String]) -> String {
+    format!("run {name}: {} {}", program.display(), args.join(" "))
+}
+
+/// A run's `<out>.exit.json` for job.log's `ended` lines and the steps' sentences, their one reader of it (T5-R69): its
+/// `exit_code`, -1 or absent as None, and its `elapsed_ms`, 0 when absent; None when the file is absent or not JSON.
+/// The rip summary copies `rip.txt.exit.json`'s fields as written and does not use it. Def: T5-14. Use: T5-14, T5-15,
+/// T5-17.
+pub(crate) fn exit_file(out: &Path) -> Option<(Option<i32>, u64)> {
+    let exit = read_json(&with_suffix(out, ".exit.json"))?;
+    let code = exit["exit_code"].as_i64().filter(|code| *code != -1).and_then(|code| i32::try_from(code).ok());
+    Some((code, exit["elapsed_ms"].as_u64().unwrap_or(0)))
+}
+
+/// An exit code as the engine's job.log lines and step sentences show it: the number, or `none` (T5-R69); the tools
+/// crate's drivers keep their own for their errors. Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn code_text(code: Option<i32>) -> String {
+    code.map_or_else(|| "none".to_string(), |code| code.to_string())
+}
+
+/// `<path>: <error>`, the sentence of a file a step could not read or write (T5-R69). Def: T5-14. Use: T5-14, T5-15,
+/// T5-17.
+pub(crate) fn shown(path: &Path, error: impl std::fmt::Display) -> String {
+    format!("{}: {error}", path.display())
+}
+
+/// `ended <name>: exit <code or none> after <elapsed_ms> ms` from `<out>.exit.json`, or `ended <name>: no exit file
+/// was written` (design part 7.2). Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn ended_line(name: &str, out: &Path) -> String {
+    match exit_file(out) {
+        Some((code, elapsed_ms)) => format!("ended {name}: exit {} after {elapsed_ms} ms", code_text(code)),
+        None => format!("ended {name}: no exit file was written"),
+    }
+}
+
+/// `ended <name>: <error>` for a run that could not be recorded. Def: T5-14. Use: T5-14, T5-15, T5-17.
+pub(crate) fn not_run_line(name: &str, error: &io::Error) -> String {
+    format!("ended {name}: {error}")
 }
 
 /// One step of one job: the runner, the job, its cancel token, its limits and the progress callback.
@@ -634,31 +697,23 @@ impl Step<'_> {
 
     /// The job.log line before a run: `run <name>: <program> <args joined by " ">` (design part 7.1).
     fn started(&self, name: &str, program: &Path, args: &[String]) {
-        self.log(&format!("run {name}: {} {}", program.display(), args.join(" ")));
+        self.log(&run_line(name, program, args));
     }
 
     /// The job.log line after a run: `ended <name>: exit <code or none> after <elapsed_ms> ms`, from the run.
     fn ended(&self, name: &str, run: &RunResult) {
-        let code = run.exit_code.map_or_else(|| "none".to_string(), |code| code.to_string());
-        self.log(&format!("ended {name}: exit {code} after {} ms", run.elapsed_ms));
+        self.log(&format!("ended {name}: exit {} after {} ms", code_text(run.exit_code), run.elapsed_ms));
     }
 
     /// `ended` for a driver that gives no RunResult, from the run's `<out>.exit.json` (removed before the run, so it
     /// is this run's); a missing file says so.
     fn ended_from_file(&self, name: &str, out: &Path) {
-        match read_json(&with_suffix(out, ".exit.json")) {
-            Some(exit) => {
-                let code = exit["exit_code"].as_i64().filter(|code| *code != -1);
-                let code = code.map_or_else(|| "none".to_string(), |code| code.to_string());
-                self.log(&format!("ended {name}: exit {code} after {} ms", exit["elapsed_ms"].as_u64().unwrap_or(0)));
-            }
-            None => self.log(&format!("ended {name}: no exit file was written")),
-        }
+        self.log(&ended_line(name, out));
     }
 
     /// The job.log line of a run that could not be recorded.
     fn not_run(&self, name: &str, error: &io::Error) {
-        self.log(&format!("ended {name}: {error}"));
+        self.log(&not_run_line(name, error));
     }
 
     /// With `keep_tuning_evidence` on, MakeMKV's debug log saved beside `out` (design part 7.2, S45, S61); a log not
@@ -1204,7 +1259,6 @@ impl Step<'_> {
     /// attempt the job kept (design part 7.1).
     fn move_aside(&self, key_dir: &Path) -> Result<(), String> {
         let attempt = next_attempt_dir(key_dir);
-        let shown = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
         fs::create_dir_all(&attempt).map_err(|error| shown(&attempt, error))?;
         let entries = fs::read_dir(key_dir).map_err(|error| shown(key_dir, error))?;
         for entry in entries {
@@ -1437,16 +1491,21 @@ impl Step<'_> {
         Ok((decision, path))
     }
 
+    /// The staged file's header, `<key>/mkvmerge.json` of the job folder as VerifyFile in Ripping recorded it (design
+    /// part 5.6 step 7), which `staged_report` and step 10 read. Err names the file and the read or parse error.
+    fn staged_ident(&self, key: &str) -> Result<MkvmergeIdent, String> {
+        let path = self.job.job_dir.join(key).join("mkvmerge.json");
+        let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
     /// The staged file's verification report, the call VerifyFile in Ripping made (design part 5.6 step 7):
     /// `verify_rip` of the scan title against `<key>/mkvmerge.json` with `Selection::All` and the rip log, read from
     /// the job folder so that it survives a restart. Its pairs map each scan stream to the staged file's track ID
     /// (S60).
     fn staged_report(&self, scan: &Scan, typed: &Disc, planned: &PlannedTitle) -> Result<VerifyReport, String> {
         let key_dir = self.job.job_dir.join(&planned.key);
-        let path = key_dir.join("mkvmerge.json");
-        let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let header: MkvmergeIdent =
-            serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+        let header = self.staged_ident(&planned.key)?;
         let title = typed.title(planned.title)?;
         let selection = selected_streams(scan, planned.title, Selection::All)?;
         let rip_log = read_lossy(&key_dir.join("rip.txt"));
@@ -1489,11 +1548,119 @@ impl Step<'_> {
         Ok(event(Event::ProbeDone))
     }
 
-    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): neither is built in this version, so it writes
-    /// the job.log line `step 10a did not run in this version` (S33) and returns no event; Decide fails a title that
-    /// needs step 10 (S32).
+    /// ExtractSubtitleEvidence (design part 5.7 steps 10 and 10a, PF-6): steps 10 and 10a for each planned title, in
+    /// plan order, step 10's reading finished before step 10a's decode starts (design part 10.7); no ffmpeg or ffprobe
+    /// gives ToolMissing first (design part 5.7, R5-code-28). Step 10 runs where `needs_step10` holds: no mkvmerge
+    /// gives ToolMissing, then the worker check (`OCR_MISSING`), the evidence extraction (`step10::extract` over the
+    /// staged file and `<key>/mkvmerge.json`) and `read_streams`. Step 10a is `run_pass` with the job's own
+    /// `keep_tuning_evidence` (R5-code-33), or, for a title whose probe lists no audio stream (`has_audio`), no pass
+    /// and an empty streamhash.txt, its marker under either setting (T5-R66). On a re-run of the unit (a retry after a
+    /// Decide whose refetch failed, a restart), a title whose staged tuning folder is complete (`staged_state`) skips
+    /// both steps with the job.log line `<key>: steps 10 and 10a skipped: the staged tuning folder is complete`, and
+    /// Decide reads what the first run left in the job folder and the staged folder (design part 5.10); an incomplete
+    /// folder and the job folder's outputs of the two steps are deleted first (`clear_incomplete`) and both steps run
+    /// again (notes C3; T5-R12, T5-R13), and when either is there (`unit_outputs_left`), a staging share that does not
+    /// answer gives the staging failure before anything is deleted. Their errors feed DecisionFailed, a staging write
+    /// classed by the share check (`unit_result`, T5-R56); a cancelled step posts nothing. It returns no event when
+    /// every title is done.
     fn extract_subtitle_evidence(&self) -> Outcome {
-        self.log(STEP10A_NOT_RUN);
+        let failed = |failure| Event::DecisionFailed { failure };
+        let plan = self.job_plan(failed)?;
+        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
+        let Some(ffmpeg) = self.tool(Tool::Ffmpeg) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Ffmpeg }));
+        };
+        let Some(ffprobe) = self.tool(Tool::Ffprobe) else {
+            return Ok(event(Event::ToolMissing { tool: Tool::Ffprobe }));
+        };
+        let staging = self.job.settings.staging_root.as_deref().ok_or_else(|| unknown(failed, "staging_root is unset"))?;
+        for planned in &plan.titles {
+            let key = planned.key.as_str();
+            let raw = self.staged_file(key).map_err(|error| unknown(failed, error))?;
+            let label_dir = self.job.job_dir.join(key);
+            let tuning = tuning_dir(staging, self.id, key);
+            let step10 = self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
+            let audio = match has_audio(&label_dir) {
+                Ok(audio) => audio,
+                Err(error) => return Ok(unit_result(error, || self.staging_health())),
+            };
+            let state = staged_state(&tuning, self.job.settings.keep_tuning_evidence, audio, step10);
+            if state == Staged::Complete {
+                self.log(&format!("{key}: {SKIPPED_COMPLETE}"));
+                continue;
+            }
+            if state == Staged::Incomplete || unit_outputs_left(&label_dir) {
+                if let Reach::Unreachable(why) = self.steps.shares.reach(staging) {
+                    let error = UnitError::Staging(format!("{}: {why}", tuning.display()));
+                    return Ok(unit_result(error, || self.staging_health()));
+                }
+            }
+            if let Err(error) = clear_incomplete(&tuning, &label_dir) {
+                let message =
+                    format!("{}: the incomplete staged tuning folder could not be deleted: {error}", tuning.display());
+                return Ok(unit_result(UnitError::Staging(message), || self.staging_health()));
+            }
+            if state == Staged::Incomplete {
+                self.log(&format!("{key}: {CLEARED_INCOMPLETE}"));
+            }
+            if step10 {
+                let Some(mkvmerge) = self.tool(Tool::Mkvmerge) else {
+                    return Ok(event(Event::ToolMissing { tool: Tool::Mkvmerge }));
+                };
+                let Some(worker) = self.steps.ocr.clone().filter(|path| path.is_file()) else {
+                    return Ok(unknown(failed, OCR_MISSING));
+                };
+                let ident = self.staged_ident(key).map_err(|error| unknown(failed, error))?;
+                let evidence = evidence_file(staging, self.id, key);
+                let extracted = self.ctx(&no_progress, |ctx| {
+                    step10::extract(ctx, &mkvmerge, &ffprobe, &raw, &ident, &evidence, &label_dir, &|line: &str| {
+                        self.log(line)
+                    })
+                });
+                self.check_cancel()?;
+                let extracted = match extracted {
+                    Ok(extracted) => extracted,
+                    Err(error) => return Ok(unit_result(error, || self.staging_health())),
+                };
+                let title_work = work_dir(&self.steps.work_root, "ocr", self.id, key);
+                let over = self.steps.ocr_cap_override;
+                let cap = |events: usize| stream_cap(over, events);
+                let log = |line: &str| self.log(line);
+                let clear_max = self.job.settings.sub_clear_max_bytes;
+                let read = self.ctx(&no_progress, |ctx| {
+                    read_streams(ctx, &worker, &extracted, &label_dir, &tuning, &title_work, clear_max, &cap, &log)
+                });
+                self.check_cancel()?;
+                if let Err(error) = read {
+                    return Ok(unit_result(error, || self.staging_health()));
+                }
+            }
+            let title_work = work_dir(&self.steps.work_root, WORK_KIND, self.id, key);
+            let inputs = PassInputs {
+                raw: &raw,
+                job_id: self.id,
+                key,
+                label_dir: &label_dir,
+                tuning: &tuning,
+                title_work: &title_work,
+                keep: self.job.settings.keep_tuning_evidence, // the job's own settings (R5-code-33)
+                audio,
+            };
+            let log = |line: &str| self.log(line);
+            let ended = self.ctx(&no_progress, |ctx| run_pass(ctx, &ffmpeg, &ffprobe, &inputs, &log));
+            self.check_cancel()?;
+            match ended {
+                Ok(PassEnd::Levels { folder, proxy_kept: true }) => {
+                    self.log(&format!("{key}: step 10a wrote {folder}, proxy kept"))
+                }
+                Ok(PassEnd::Levels { folder, proxy_kept: false }) => {
+                    self.log(&format!("{key}: step 10a wrote {folder}, no proxy kept"))
+                }
+                Ok(PassEnd::Streamhash) => self.log(&format!("{key}: step 10a wrote streamhash.txt")),
+                Ok(PassEnd::NoAudio) => self.log(&format!("{key}: {NO_AUDIO}")),
+                Err(error) => return Ok(unit_result(error, || self.staging_health())),
+            }
+        }
         Ok(StepResult { event: None, message: None })
     }
 
@@ -1519,7 +1686,9 @@ impl Step<'_> {
         let mut inputs = match &probes {
             Some(probes) => engine_decide_inputs(ctx, self.job, plan, key, probes, LibraryFacts::default())?,
             None => {
-                let inputs = read_back_inputs(ctx, &self.job.job_dir, plan, key)?;
+                let text = staged_text(self.job, key);
+                let clear_max = self.job.settings.sub_clear_max_bytes;
+                let inputs = read_back_inputs(ctx, &self.job.job_dir, plan, key, text.as_deref(), clear_max)?;
                 self.log(&format!("{key}: {READ_BACK_LINE}"));
                 inputs
             }
@@ -1545,22 +1714,21 @@ impl Step<'_> {
     /// keys, through `dumps` with `INDENT1_ASCII` and a newline, written with write_atomic.
     fn write_decide_json(&self, doc: DecideDoc) -> Result<(), String> {
         let path = self.job.job_dir.join(&doc.label).join("decide.json");
-        let shown = |error: &dyn std::fmt::Display| format!("{}: {error}", path.display());
         let version = env!("CARGO_PKG_VERSION").to_string();
         let engine = EngineDecideDoc { doc, audio_rule_version: RULE_VERSION, lazymkv_version: version };
-        let value = serde_json::to_value(&engine).map_err(|error| shown(&error))?;
+        let value = serde_json::to_value(&engine).map_err(|error| shown(&path, error))?;
         let text = format!("{}\n", dumps(&value, Style::INDENT1_ASCII));
-        write_atomic(&path, text.as_bytes()).map_err(|error| shown(&error))
+        write_atomic(&path, text.as_bytes()).map_err(|error| shown(&path, error))
     }
 
     /// Decide (design parts 5.7 step 11, 8.4): the job's stale TMDb copies fetched again first (Ruling T4-R9; one that
     /// cannot be fetched, or a season still owed (`for_decide`, Ruling RR1-R2a), gives LookupPending in Inspecting and
-    /// DecisionFailed { Unknown } otherwise, with
-    /// `refetch_stale`'s sentences); then the record's plan, refreshed from the saved answers while it is
-    /// lookup-pending and persisted so (R24.2); each planned title failing with S32's sentence when it needs step 10,
-    /// else its `title_doc`; `same_path_reviews` over the titles' decisions, written back into their documents; each
-    /// `<key>/decide.json`; the decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure
-    /// gives DecisionFailed { Unknown } with its sentence.
+    /// DecisionFailed { Unknown } otherwise, with `refetch_stale`'s sentences); then the record's plan, refreshed from
+    /// the saved answers while it is lookup-pending and persisted so (R24.2); each planned title's `title_doc`;
+    /// `same_path_reviews` over the titles' decisions, written back into their documents; each `<key>/decide.json`; the
+    /// decisions and the colliding paths [ENG-22] recorded; then `decision_done`. A failure gives DecisionFailed {
+    /// Unknown } with its sentence. A title whose step 10 ran decides only when its staged text can be reached: an
+    /// unreachable staging share waits for the share, as a failed staged write does (T5-R56; Task 15's review round 1).
     ///
     /// Before anything else it asks `reach` of the plan kind's library root, when that root is set, as File does
     /// (Ruling W22, review round 1's V7): a root that does not answer gives DecisionFailed { Unknown } with `the
@@ -1603,12 +1771,17 @@ impl Step<'_> {
                 return Err(cancelled());
             }
         }
-        let (scan, typed) = self.planned_scan().map_err(|error| unknown(failed, error))?;
         let ctx = Ctx::from_process();
         let mut docs = Vec::new();
         for planned in &plan.titles {
-            if self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))? {
-                return Ok(unknown(failed, STEP10_NOT_BUILT));
+            let key = planned.key.as_str();
+            let ran = self.job.job_dir.join(key).join(READING).join("summary.json").is_file();
+            if let (true, Some(root)) = (ran, self.job.settings.staging_root.as_deref()) {
+                if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                    let text = tuning_dir(root, self.id, key).join(READING);
+                    let error = UnitError::Staging(format!("{}: {why}", text.display()));
+                    return Ok(unit_result(error, || self.staging_health()));
+                }
             }
             docs.push(self.title_doc(&ctx, &plan, &planned.key).map_err(|error| unknown(failed, error))?);
         }
@@ -2143,6 +2316,25 @@ mod tests {
         assert_eq!(classed(false, false), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(false, true), output(OutputCause::ShareUnreachable));
         assert_eq!(classed(true, true), output(OutputCause::OutOfSpace));
+    }
+
+    /// Ruling T5-R56 (design part 5.6 step 6, review round 1 of pull request 3, V5): a unit's write error on the staging
+    /// share waits for the share as a failed rip does, and any other unit failure is Unknown without asking the share.
+    #[test]
+    fn a_unit_staging_error_is_classed_by_the_share_check_and_a_failed_one_is_unknown() {
+        use lazymkv_core::job::OutputCause;
+        let output = |cause| Failure { class: FailureClass::Output, output: Some(cause) };
+        let down = || StagingHealth { share_healthy: false, out_of_space: false };
+        let staged = unit_result(UnitError::Staging("S/abc-1/evidence: denied".to_string()), down);
+        assert_eq!(staged.event, Some(Event::DecisionFailed { failure: output(OutputCause::ShareUnreachable) }));
+        assert_eq!(staged.message.as_deref(), Some("S/abc-1/evidence: denied"));
+        let full = || StagingHealth { share_healthy: true, out_of_space: true };
+        let staged = unit_result(UnitError::Staging("S/abc-1/evidence/t00.mks: no space".to_string()), full);
+        assert_eq!(staged.event, Some(Event::DecisionFailed { failure: output(OutputCause::OutOfSpace) }));
+        let unasked = || -> StagingHealth { panic!("a failed unit asks no share") };
+        let failed = unit_result(UnitError::Failed("mkvmerge exited with code 2".to_string()), unasked);
+        assert_eq!(failed.event, Some(Event::DecisionFailed { failure: UNKNOWN }));
+        assert_eq!(failed.message.as_deref(), Some("mkvmerge exited with code 2"));
     }
 
     /// Ruling W16: `started` is the record's start, not the clock at VerifyFile.

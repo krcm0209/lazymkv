@@ -233,7 +233,8 @@ fn line_text(line: &[u8]) -> String {
 /// A program that cannot start gives `Err` before any run file is written. The exit file holds -1 when the tool had
 /// no exit code. The tool never outlives the call: a run file that cannot be written, or a pipe that cannot be read,
 /// kills it and gives `Err`, and a panic of `on_line` or `on_output` kills it and then goes on panicking. Design
-/// parts 5.3, 7.2. Def: T11. Use: T13, T14, T23.
+/// parts 5.3, 7.2. It is `run_recorded_in` with `Spawn { program, args, below_normal, ..Spawn::default() }`, so no
+/// tool it runs gets an extra environment variable (S43). Def: T11, T5-9. Use: T13, T14, T23.
 pub fn run_recorded(
     ctx: &ToolCtx,
     program: &Path,
@@ -243,6 +244,25 @@ pub fn run_recorded(
     below_normal: bool,
     on_line: &mut dyn FnMut(&str) -> LineAction,
 ) -> io::Result<RunResult> {
+    run_recorded_in(
+        ctx,
+        &Spawn { program: program.to_path_buf(), args: args.to_vec(), below_normal, ..Spawn::default() },
+        out,
+        limit,
+        on_line,
+    )
+}
+
+/// Runs `spawn` under `ctx.guard` exactly as `run_recorded` runs its program: the same four run files, the same
+/// limit, cancel and line actions, the same errors (design parts 5.3, 7.2), with the caller's whole `Spawn`, its
+/// `env` and `below_normal` included (T5-R37). Def: T5-9. Use: T5-9, T5-13.
+pub fn run_recorded_in(
+    ctx: &ToolCtx,
+    spawn: &Spawn,
+    out: &Path,
+    limit: Option<Duration>,
+    on_line: &mut dyn FnMut(&str) -> LineAction,
+) -> io::Result<RunResult> {
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -250,8 +270,7 @@ pub fn run_recorded(
     }
     let started_unix = ctx.host.now_unix();
     let clock = RealClock::start();
-    let spawn = Spawn { program: program.to_path_buf(), args: args.to_vec(), env: Vec::new(), below_normal };
-    let mut child = ctx.guard.spawn(&spawn)?;
+    let mut child = ctx.guard.spawn(spawn)?;
     let killer = child.killer();
 
     let files = (|| -> io::Result<(File, File, File)> {

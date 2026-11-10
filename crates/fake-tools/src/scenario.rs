@@ -9,10 +9,10 @@ pub struct Scenario {
     pub responses: Vec<Response>,
 }
 
-/// One reply of a stand-in executable (design part 12.2): which arguments it answers, what it prints to
-/// standard output and standard error and when, how it ends, and which files it creates. A scenario with
-/// several responses that match the same arguments hands them out one per run, in file order (see `select`).
-/// Def: T10. Use: T11, T13, T14, T23.
+/// One reply of a stand-in executable (design part 12.2): which arguments it answers, what it prints to standard output
+/// and standard error and when, how it ends, and which files it creates, before its output (`creates_first`) or after
+/// it (`creates`). A scenario with several responses that match the same arguments hands them out one per run, in file
+/// order (see `select`). Def: T10. Use: T11, T13, T14, T23.
 #[derive(Debug, Deserialize)]
 pub struct Response {
     /// Each string must be a substring of some argument.
@@ -27,6 +27,10 @@ pub struct Response {
     pub exit_code: i32,
     #[serde(default)]
     pub creates: Vec<Create>,
+    /// Files created before any line is printed, as `creates` creates them, so a stand-in can write its output and then
+    /// hang or stop (T5-R48). Def: T5-15. Use: T5-15.
+    #[serde(default)]
+    pub creates_first: Vec<Create>,
     /// File in the scenario folder replayed to standard error.
     #[serde(default)]
     pub stderr: Option<String>,
@@ -41,9 +45,9 @@ pub struct Response {
     pub hang_after_line: Option<usize>,
 }
 
-/// A file a response creates (design part 12.2). Exactly one of `dir_arg`, `dir_arg_from_end` and `arg_after`
-/// says where: the first two name the output folder (the file is `name` inside it) and `arg_after` names the
-/// file itself, as the argument after `mkvmerge`'s `-o`.
+/// A file a response creates (design part 12.2). Exactly one of `dir_arg`, `dir_arg_from_end`, `arg_after` and
+/// `in_cwd` says where: the first two name the output folder (the file is `name` inside it), `arg_after` names the
+/// file itself, as the argument after `mkvmerge`'s `-o`, and `in_cwd` names a file of the working folder.
 /// Def: T10. Use: T11, T13, T14, T23.
 #[derive(Debug, Deserialize)]
 pub struct Create {
@@ -56,7 +60,13 @@ pub struct Create {
     /// The argument after the first argument equal to this flag is the file to create.
     #[serde(default)]
     pub arg_after: Option<String>,
-    /// The file name inside the directory. Required with `dir_arg` and `dir_arg_from_end`, ignored with `arg_after`.
+    /// A file name in the stand-in's working folder, for a tool that writes relative names there, as step 10a's
+    /// `ffmpeg` and `ffprobe` do (T5-R48). Exclusive with every other locator; a name holding `/` or `\` is refused.
+    /// Def: T5-17. Use: T5-17.
+    #[serde(default)]
+    pub in_cwd: Option<String>,
+    /// The file name inside the directory. Required with `dir_arg` and `dir_arg_from_end`, ignored with `arg_after`
+    /// and `in_cwd`.
     #[serde(default)]
     pub name: Option<String>,
     /// File in the scenario folder whose bytes become the created file.
@@ -68,9 +78,16 @@ impl Create {
     /// not fit them.
     /// Def: T10. Use: T11, T13, T14, T23.
     pub fn target(&self, args: &[String]) -> Result<PathBuf, String> {
-        let locators = [self.dir_arg.is_some(), self.dir_arg_from_end.is_some(), self.arg_after.is_some()];
+        let locators =
+            [self.dir_arg.is_some(), self.dir_arg_from_end.is_some(), self.arg_after.is_some(), self.in_cwd.is_some()];
         if locators.iter().filter(|set| **set).count() != 1 {
-            return Err("creates: give exactly one of dir_arg, dir_arg_from_end and arg_after".to_string());
+            return Err("creates: give exactly one of dir_arg, dir_arg_from_end, arg_after and in_cwd".to_string());
+        }
+        if let Some(name) = &self.in_cwd {
+            if name.contains(['/', '\\']) {
+                return Err("creates: in_cwd names a file of the working folder, not a path".to_string());
+            }
+            return Ok(PathBuf::from(name));
         }
         if let Some(flag) = &self.arg_after {
             return args
@@ -175,6 +192,23 @@ mod tests {
         list.iter().map(|arg| arg.to_string()).collect()
     }
 
+    /// T5-R48: a response may name files to create before its first line; without the key it creates none first.
+    #[test]
+    fn creates_first_parses_and_defaults_to_none() {
+        let scenario: Scenario = serde_json::from_str(
+            r#"{"responses":[
+                {"args_contain":["--stream"],"hang_after_line":0,
+                 "creates_first":[{"dir_arg_from_end":1,"name":"sub-0.ocr.jsonl","copy_from":"records.txt"}]},
+                {"args_contain":["-J"]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(scenario.responses[0].creates_first.len(), 1);
+        assert_eq!(scenario.responses[0].creates_first[0].name.as_deref(), Some("sub-0.ocr.jsonl"));
+        assert!(scenario.responses[0].creates.is_empty());
+        assert!(scenario.responses[1].creates_first.is_empty());
+    }
+
     #[test]
     fn the_first_response_whose_needles_all_appear_is_selected() {
         let scenario: Scenario = serde_json::from_str(
@@ -245,10 +279,24 @@ mod tests {
     }
 
     #[test]
+    fn an_in_cwd_target_is_the_bare_name_and_a_path_is_refused() {
+        let create = |json: &str| serde_json::from_str::<Create>(json).unwrap();
+        let pass = args(&["-v", "warning", "-i", "raw.mkv", "-/filter_complex", "graph.txt"]);
+        assert_eq!(create(r#"{"in_cwd":"peak-0.txt","copy_from":"s"}"#).target(&pass), Ok(PathBuf::from("peak-0.txt")));
+        let path = "creates: in_cwd names a file of the working folder, not a path".to_string();
+        assert_eq!(create(r#"{"in_cwd":"redo/peak-0.txt","copy_from":"s"}"#).target(&pass), Err(path.clone()));
+        assert_eq!(create(r#"{"in_cwd":"..\\peak-0.txt","copy_from":"s"}"#).target(&pass), Err(path));
+        assert_eq!(
+            create(r#"{"in_cwd":"peak-0.txt","arg_after":"-i","copy_from":"s"}"#).target(&pass),
+            Err("creates: give exactly one of dir_arg, dir_arg_from_end, arg_after and in_cwd".to_string())
+        );
+    }
+
+    #[test]
     fn a_create_with_two_locators_or_none_or_no_name_is_refused() {
         let create = |json: &str| serde_json::from_str::<Create>(json).unwrap();
         let rip = args(&["-r", "mkv", "disc:0", "0", "out"]);
-        let both = "creates: give exactly one of dir_arg, dir_arg_from_end and arg_after";
+        let both = "creates: give exactly one of dir_arg, dir_arg_from_end, arg_after and in_cwd";
         assert_eq!(create(r#"{"dir_arg":4,"arg_after":"-o","name":"t","copy_from":"s"}"#).target(&rip), Err(both.to_string()));
         assert_eq!(create(r#"{"name":"t","copy_from":"s"}"#).target(&rip), Err(both.to_string()));
         assert_eq!(

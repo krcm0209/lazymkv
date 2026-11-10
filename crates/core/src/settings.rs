@@ -198,8 +198,8 @@ fn components(path: &str) -> Vec<&str> {
 
 /// A root setting as a path: None when it is absent or blank (no path component once surrounding whitespace is set
 /// aside, such as "", "  " or "/"), which is a missing setting (spec 14), so no final path is ever built under it. The
-/// one test of a blank root: `validate` and `decision::decide`'s naming both read it. Spec 7, 14. Def: PR #3 review
-/// (F14). Use: T13.
+/// one test of a blank root: `validate`, `decision::decide`'s naming and the engine's dataset copy read it. Spec 7, 14.
+/// Def: PR #3 review (F14). Use: T13, PR #16 review.
 pub fn configured_root(root: Option<&str>) -> Option<&str> {
     root.filter(|text| !components(text.trim()).is_empty())
 }

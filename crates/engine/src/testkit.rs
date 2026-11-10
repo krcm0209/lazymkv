@@ -12,11 +12,14 @@
 //! and the stand-in into `<root>/tools`, never running a stand-in inside `corpus/` (S12), builds the scenario's disc
 //! from its `disc.json`, and replays its `http.json`. When the scenarios hold `lazymkvctl.json`, it also copies the
 //! stand-in as `<root>/tools/lazymkvctl`, which the engine's `command` relay runs (design part 9.5, Task T3-22).
+//! When the merged scenarios hold `lazymkv-ocr.json`, it copies `fake_tool` as `lazymkv-ocr` into `<root>/tools`, which
+//! every engine gets as `EngineConfig.ocr` (design part 10.7); when they hold `ocr-cap-s.txt`, its whole seconds times
+//! `ci_factor()` become `EngineConfig.ocr_cap_override` (T5-R58).
 //!
 //! On Windows, `Harness::new_native` runs the same stand-ins under the binary's own start, `native::run_with`, behind
 //! a real mutex and pipe of the test's own names (Task T3-23).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -33,7 +36,7 @@ use lazymkv_core::fingerprint::content_hash;
 use lazymkv_core::ipc::Notification;
 use lazymkv_core::job::{Action, Event, Tool};
 use lazymkv_core::lookup::name::disc_name;
-use lazymkv_core::record::{JobRecord, Transition};
+use lazymkv_core::record::{JobRecord, Transition, TuningCopy};
 use lazymkv_core::snapshot::{disc_meta, unit_key_file};
 use lazymkv_core::testsupport::{default_profile_xml, ustar_build};
 use lazymkv_platform::fakes::{
@@ -64,6 +67,7 @@ use crate::native::{run_with, NativeOptions};
 use crate::owner::panic_text;
 use crate::owner::{action_tag, start_until, EngineHandle, StopAfter, TestHooks, NO_EVENT_ACTIONS};
 use crate::store::{PersistFault, PersistFaults};
+use crate::tuning::CopyFn;
 use crate::{
     EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers, WebhookSink,
 };
@@ -432,6 +436,8 @@ pub struct Harness {
     data: PathBuf,
     staging: PathBuf,
     library: PathBuf,
+    /// `<root>/tuning`, every engine's `tuning_root` (spec 7, design part 7.5).
+    tuning: PathBuf,
     volumes: PathBuf,
     /// `<root>/tools`: the merged scenario folder, holding the tool copies (`Harness::new`).
     tools: PathBuf,
@@ -446,6 +452,11 @@ pub struct Harness {
     /// The stand-in `lazymkvctl` every engine gets as `EngineConfig.ctl`; None when no scenario holds
     /// `lazymkvctl.json`, and for `new_scripted`.
     ctl: Option<PathBuf>,
+    /// The stand-in `lazymkv-ocr` every engine gets as `EngineConfig.ocr`; None when no scenario holds
+    /// `lazymkv-ocr.json`.
+    ocr: Option<PathBuf>,
+    /// The cap every engine gets as `EngineConfig.ocr_cap_override`, from `ocr-cap-s.txt` (T5-R58).
+    ocr_cap: Option<Duration>,
     /// True for `new_scripted`: the engine runs `steps`; false for `new`: the real runner.
     scripted: bool,
     script: DriveScript,
@@ -485,6 +496,14 @@ pub struct Harness {
     cleanup_period: Mutex<Option<Duration>>,
     /// The running engine's cleanup ends, one `()` per pass (`TestHooks::cleanup_done`).
     cleanup_done: Mutex<Option<Receiver<()>>>,
+    /// The running engine's copy ends, one job id per attempt (`TestHooks::copy_done`).
+    copy_done: Mutex<Option<Receiver<String>>>,
+    /// The running engine's refresh ends, one job id per refresh (`TestHooks::refresh_done`).
+    refresh_done: Mutex<Option<Receiver<String>>>,
+    /// The refresh ends received so far over every engine this harness started, counted per job (design part 7.5).
+    refreshed: Mutex<BTreeMap<String, usize>>,
+    /// The copy step `copy_with` armed, shared with every engine the harness starts (Review Focus 1).
+    copy_fault: Arc<Mutex<Option<CopyFn>>>,
     /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
     /// once `native_exit`, `stop` or the drop took it.
     #[cfg(windows)]
@@ -532,6 +551,9 @@ impl Harness {
     /// - When the merged scenarios hold `lazymkvctl.json`, it copies `fake_tool` as `lazymkvctl` (with the system's
     ///   executable suffix) into `<root>/tools`, and every engine gets that copy as `EngineConfig.ctl`, which the
     ///   `command` relay runs (design part 9.5, Task T3-22); otherwise `ctl` is None.
+    /// - When the merged scenarios hold `lazymkv-ocr.json`, it copies `fake_tool` as `lazymkv-ocr` into `<root>/tools`,
+    ///   which every engine gets as `EngineConfig.ocr` (design part 10.7); when they hold `ocr-cap-s.txt`, its whole
+    ///   seconds times `ci_factor()` become `EngineConfig.ocr_cap_override` (T5-R58).
     ///
     /// Everything else is as `new_scripted`. Def: T23. Use: T23 to T29.
     pub fn new(fake_tool: &Path, scenarios: &[&str], settings: Value) -> Harness {
@@ -554,6 +576,15 @@ impl Harness {
             let copy = tools.join(format!("lazymkvctl{}", std::env::consts::EXE_SUFFIX));
             fs::copy(fake_tool, &copy).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
             copy
+        });
+        let ocr = tools.join("lazymkv-ocr.json").is_file().then(|| {
+            let copy = tools.join(format!("lazymkv-ocr{}", std::env::consts::EXE_SUFFIX));
+            fs::copy(fake_tool, &copy).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+            copy
+        });
+        let ocr_cap = fs::read_to_string(tools.join("ocr-cap-s.txt")).ok().map(|text| {
+            let seconds: u64 = text.trim().parse().unwrap_or_else(|error| panic!("ocr-cap-s.txt: {error}"));
+            Duration::from_secs(seconds) * ci_factor()
         });
         let mut tool_paths = serde_json::Map::new();
         for tool in Tool::ALL {
@@ -599,6 +630,8 @@ impl Harness {
             spawn_hooks,
             spawns,
             ctl,
+            ocr,
+            ocr_cap,
         };
         folders.harness(defaults, settings, runner)
     }
@@ -650,6 +683,8 @@ impl Harness {
             ctl: self.ctl.clone(),
             console: Some(Box::new(self.console_buffer())),
             cleanup_minutes: *lock(&self.cleanup_minutes),
+            ocr: self.ocr.clone(),
+            ocr_cap_override: self.ocr_cap,
         };
         let hook = Arc::clone(&self.hook);
         let stop_after: StopAfter = Arc::new(move |transition: &Transition| {
@@ -673,11 +708,25 @@ impl Harness {
         });
         let (cleanup_done, cleanup_ends) = channel::<()>();
         *lock(&self.cleanup_done) = Some(cleanup_ends);
+        let (copy_done, copy_ends) = channel::<String>();
+        *lock(&self.copy_done) = Some(copy_ends);
+        // A restart loses no refresh end: the old engine's are counted before its receiver goes.
+        self.count_refreshes();
+        let (refresh_done, refresh_ends) = channel::<String>();
+        *lock(&self.refresh_done) = Some(refresh_ends);
+        let armed_copy = Arc::clone(&self.copy_fault);
+        let copy_with: CopyFn = Arc::new(move |from: &Path, to: &Path| match lock(&armed_copy).clone() {
+            Some(copy) => copy(from, to),
+            None => fs::copy(from, to),
+        });
         let hooks = TestHooks {
             stop_after: Some(stop_after),
             persist_faults: Some(persist_faults),
             cleanup_done: Some(cleanup_done),
             cleanup_period: *lock(&self.cleanup_period),
+            copy_done: Some(copy_done),
+            copy_with: Some(copy_with),
+            refresh_done: Some(refresh_done),
         };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
         *lock(&self.engine) = Some(engine);
@@ -959,7 +1008,10 @@ impl Harness {
     /// Returns once the job files, notifications, engine.log, drives.json, ejects, step calls and keep-awake holders
     /// are unchanged for 300 ms, or for 2 s while the running engine has a step or lookup round outstanding (10 s
     /// cap). A step can pass 300 ms with no file changing, as a stand-in's first launch does, and a step that hangs on
-    /// purpose ends the wait after 2 s (Ruling R24.c1). Def: T22. Use: T22 to T29.
+    /// purpose ends the wait after 2 s (Ruling R24.c1). A running dataset copy or recordings refresh counts as busy,
+    /// but what it writes is not watched (design part 7.5), so a test that reads the tuning root or `tuning_copy`
+    /// waits with `refreshes(id)` and `!busy()`, on the record's `tuning_copy`, or with `run_copies`, never on `settle`
+    /// alone. Def: T22. Use: T22 to T29.
     pub fn settle(&self) {
         self.deliver();
         let cap = Instant::now() + SETTLE_CAP;
@@ -1092,6 +1144,69 @@ impl Harness {
         }
     }
 
+    /// The tuning root, `<root>/tuning` (spec 7, design part 7.5). Def: T5-19. Use: T5-19, T5-20, T5-22.
+    pub fn tuning(&self) -> &Path {
+        self.deliver();
+        &self.tuning
+    }
+
+    /// Starts a copy for every job whose state.json holds `tuning_copy: pending` (`Msg::TuningCopy`) and returns once
+    /// that many copy attempts have ended, the ids in the order they ended; panics after 10 s times `ci_factor()` per
+    /// attempt (design part 7.5). Def: T5-19. Use: T5-19, T5-20.
+    pub fn run_copies(&self) -> Vec<String> {
+        self.deliver();
+        let ids = self.job_ids();
+        let count = ids.iter().filter(|id| self.record(id).tuning_copy == Some(TuningCopy::Pending)).count();
+        let ends = lock(&self.copy_done);
+        let ends = ends.as_ref().expect("an engine has started");
+        while ends.try_recv().is_ok() {}
+        lock(&self.engine).as_ref().expect("an engine runs").copy_now();
+        let cap = WAIT_CAP * ci_factor();
+        (0..count)
+            .map(|_| match ends.recv_timeout(cap) {
+                Ok(id) => id,
+                Err(_) => panic!("run_copies: no copy ended within {} s", cap.as_secs()),
+            })
+            .collect()
+    }
+
+    /// The id of the next copy attempt to end, which may be one that ended before the call (every attempt's end is
+    /// queued, a failed one's too); panics after 10 s times `ci_factor()`. Def: T5-19. Use: T5-19, T5-20.
+    pub fn wait_copy(&self) -> String {
+        self.deliver();
+        let ends = lock(&self.copy_done);
+        let ends = ends.as_ref().expect("an engine has started");
+        let cap = WAIT_CAP * ci_factor();
+        match ends.recv_timeout(cap) {
+            Ok(id) => id,
+            Err(_) => panic!("wait_copy: no copy ended within {} s", cap.as_secs()),
+        }
+    }
+
+    /// How many refreshes of the job `id`'s tuning recordings have ended over every engine this harness started
+    /// (`TestHooks::refresh_done`; design part 7.5). Def: T5-20. Use: T5-20, T5-22.
+    pub fn refreshes(&self, id: &str) -> usize {
+        self.deliver();
+        self.count_refreshes();
+        lock(&self.refreshed).get(id).copied().unwrap_or(0)
+    }
+
+    /// Counts into `refreshed` every refresh end the running engine's receiver holds.
+    fn count_refreshes(&self) {
+        let ends = lock(&self.refresh_done);
+        let Some(ends) = ends.as_ref() else { return };
+        let mut refreshed = lock(&self.refreshed);
+        while let Ok(id) = ends.try_recv() {
+            *refreshed.entry(id).or_insert(0) += 1;
+        }
+    }
+
+    /// Puts `copy` in place of `fs::copy` in every copy of this harness's engines, from the next copy on (Review Focus
+    /// 1). Def: T5-19. Use: T5-19.
+    pub fn copy_with(&self, copy: impl Fn(&Path, &Path) -> io::Result<u64> + Send + Sync + 'static) {
+        *lock(&self.copy_fault) = Some(Arc::new(copy));
+    }
+
     /// From the next `start`, `cleanup_minutes: Some(1)` with its period replaced by `period` (design part 5.9).
     /// Def: T4-11. Use: T4-11.
     pub fn schedule_cleanup(&self, period: Duration) {
@@ -1099,8 +1214,8 @@ impl Harness {
         *lock(&self.cleanup_period) = Some(period);
     }
 
-    /// The running engine's busy flag (Ruling R24.c1; a running pass counts); false when no engine runs.
-    /// Def: T4-11. Use: T4-11.
+    /// The running engine's busy flag (Ruling R24.c1; a running cleanup pass, dataset copy or recordings refresh
+    /// counts, design parts 5.9 and 7.5); false when no engine runs. Def: T4-11. Use: T4-11.
     pub fn busy(&self) -> bool {
         lock(&self.engine).as_ref().is_some_and(EngineHandle::busy)
     }
@@ -1481,6 +1596,7 @@ impl Folders {
             data: self.data,
             staging: self.staging,
             library: self.library,
+            tuning: self.tuning,
             volumes: self.volumes,
             tools: runner.tools,
             disc: runner.disc,
@@ -1488,6 +1604,8 @@ impl Folders {
             spawn_hooks: runner.spawn_hooks,
             spawns: runner.spawns,
             ctl: runner.ctl,
+            ocr: runner.ocr,
+            ocr_cap: runner.ocr_cap,
             scripted: runner.scripted,
             ejector: Arc::new(RecordingEjector::new().with_removals(script_end.clone())),
             script: script_end,
@@ -1512,6 +1630,10 @@ impl Folders {
             cleanup_minutes: Mutex::default(),
             cleanup_period: Mutex::default(),
             cleanup_done: Mutex::default(),
+            copy_done: Mutex::default(),
+            refresh_done: Mutex::default(),
+            refreshed: Mutex::default(),
+            copy_fault: Arc::default(),
             #[cfg(windows)]
             native: Mutex::default(),
             #[cfg(windows)]
@@ -1538,6 +1660,10 @@ struct Runner {
     spawns: Arc<Mutex<Vec<Spawn>>>,
     /// The stand-in `lazymkvctl`, when a scenario holds `lazymkvctl.json`.
     ctl: Option<PathBuf>,
+    /// The stand-in `lazymkv-ocr`, when a scenario holds `lazymkv-ocr.json`.
+    ocr: Option<PathBuf>,
+    /// The cap override of `ocr-cap-s.txt`, already times `ci_factor()`.
+    ocr_cap: Option<Duration>,
 }
 
 impl Runner {
@@ -1555,6 +1681,8 @@ impl Runner {
             spawn_hooks: SpawnHooks::default(),
             spawns: Arc::default(),
             ctl: None,
+            ocr: None,
+            ocr_cap: None,
         }
     }
 }

@@ -2,7 +2,8 @@
 //! on Windows its functions are called alone from its syntax tree; the script itself never runs, since running it
 //! registers a task, which needs the owner's yes (Owner decision 3). On Windows,
 //! `scripts/phase0/platform-ignored.ps1`, the desktop-session run of the platform's ignored tests (design part 12.4;
-//! Task T3-25), is read and parsed here too, never run.
+//! Task T3-25), and `scripts/phase0/engine-ocr-trial.ps1`, the OCR trial's desktop-session steps (design part 10.9;
+//! pull request 5's Task 10), are read and parsed here too, never run.
 
 use std::fs;
 #[cfg(windows)]
@@ -167,6 +168,15 @@ fn the_run_folders_list_is_the_data_folders() {
     assert!(text.contains(&folder_sddl("$sid")), "the script's list is not folder_sddl's");
 }
 
+/// Call 18, T5-R35: the OCR worker is copied into the run folder with the other two programs, and a release tree
+/// without it refuses the deploy.
+#[test]
+fn the_task_script_requires_lazymkv_ocr() {
+    let (_, text) = script();
+    assert!(text.contains("$required = 'lazymkv-engine.exe', 'lazymkvctl.exe', 'lazymkv-ocr.exe'"));
+    assert!(!text.contains("$optional"), "the script still lists an optional program");
+}
+
 #[cfg(windows)]
 #[test]
 fn the_task_script_parses_without_errors() {
@@ -202,6 +212,48 @@ fn the_platform_ignored_script_parses_and_runs_one_session_of_platform_tests() {
         assert!(text.contains(line), "platform-ignored.ps1 lacks: {line}");
     }
     assert!(!text.contains("ScheduledTask"), "the script registers nothing; run-interactive.ps1 does");
+}
+
+/// Design part 10.9 (Rulings T5-R45, T5-R62): the OCR trial's desktop-session script reads the rows from
+/// trial-tracks.txt, lets a slug or a label reach only a path or a check, sets RTEN_NUM_THREADS=3 for arm R' alone and
+/// runs no build. It is read here, and parsed on Windows; it never runs in a test.
+#[test]
+fn the_engine_ocr_trial_script_parses_sets_rten_num_threads_for_rows_and_prints_numbers_only() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("scripts").join("phase0").join("engine-ocr-trial.ps1");
+    let text = fs::read_to_string(&script).unwrap_or_else(|error| panic!("{}: {error}", script.display()));
+    for needle in [
+        "[Parameter(Mandatory)][ValidateSet('inventory', 'read', 'rows', 'compare', 'f3')][string]$Step",
+        r#"$Tracks = "$P0\trial-tracks.txt""#,
+        "$ClearMax = 64",
+        "$env:RTEN_NUM_THREADS = '3'",
+        "Remove-Item Env:RTEN_NUM_THREADS",
+        "'--clear-max', [string]$ClearMax",
+        "subs-ocr-engine",
+        "Assert-Quiet",
+        "'RESULT ok'",
+    ] {
+        assert!(text.contains(needle), "engine-ocr-trial.ps1 lacks: {needle}");
+    }
+    let code: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.starts_with('#')).collect();
+    for absent in ["cargo build", "cargo test", "cargo run", "write-host", "ocrs-trial.exe", "makemkvcon64.exe"] {
+        assert!(!code.iter().any(|line| line.to_ascii_lowercase().contains(absent)), "engine-ocr-trial.ps1 runs or prints {absent}");
+    }
+    let allowed = [
+        "[string]$Slug = ''", "[string]$Label = ''", "if ($Slug -and ", "if ($Label -and ", "$rows += [pscustomobject]@{",
+        "$rec = ", "$text = ", "$engineOut = ", "$title = @(", "$f3Dir = ",
+    ];
+    for line in code.iter().filter(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("slug") || lower.contains("label")
+    }) {
+        assert!(allowed.iter().any(|start| line.starts_with(start)), "a slug or a label reaches more than a path or a check: {line}");
+    }
+    #[cfg(windows)]
+    {
+        assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+        let errors = parse_errors(&script);
+        assert!(errors.is_empty(), "{errors}");
+    }
 }
 
 /// Review round 1 of pull request 3 (V13): the task's argument line is not quoted, Task Scheduler may expand a percent
@@ -407,4 +459,38 @@ fn the_writers_check_sees_an_entry_a_program_file_alone_carries() {
     let program = lines[1].strip_prefix("program:").expect("the program's line");
     assert!(!folder.trim().split(',').any(|sid| sid == authenticated), "the folder's writers hold {authenticated}");
     assert!(program.trim().split(',').any(|sid| sid == authenticated), "the program's writers lack {authenticated}");
+}
+
+/// Pull request 5's Task 11 (design part 10.4; notes calls 7 and 24; T5-R45): the desktop-session run of the decoder
+/// goldens sets the four variables crates/ocr/tests/goldens.rs reads and starts only the test program it is given,
+/// never cargo, since each scripts/box.sh call replaces C:\lazymkv\src under a running job. Read on every system and
+/// parsed on Windows; never run.
+#[test]
+fn the_ocr_goldens_script_parses_sets_its_four_variables_and_runs_no_cargo() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("scripts").join("phase0").join("ocr-goldens.ps1");
+    let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+    for line in [
+        "[Parameter(Mandatory)][string]$Exe",
+        r". C:\lazymkv\src\scripts\phase0\env.ps1",
+        r"$Tracks = 'C:\lazymkv\phase0\trial-tracks.txt'",
+        r"if ($Exe -notlike 'C:\lazymkv\target\release\deps\goldens-*.exe')",
+        "$env:LAZYMKV_EVIDENCE = $Recordings",
+        "$env:LAZYMKV_OCR_TEXT = $TuningData",
+        "$env:LAZYMKV_OCR_TRACKS = $Tracks",
+        "$env:LAZYMKV_OCR_STAGING = $Staging",
+        r#"cmd /c "$Exe --test-threads=1 --nocapture 2>&1""#,
+        "'RESULT ok'",
+    ] {
+        assert!(text.contains(line), "ocr-goldens.ps1 lacks: {line}");
+    }
+    for line in text.lines().filter(|line| !line.trim_start().starts_with('#')) {
+        assert!(!line.contains("cargo"), "ocr-goldens.ps1 runs cargo: {line}");
+    }
+    assert!(!text.contains("ScheduledTask"), "the script registers nothing; run-interactive.ps1 does");
+    #[cfg(windows)]
+    {
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{errors}");
+    }
 }

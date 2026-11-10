@@ -1,0 +1,7 @@
+{"responses":[
+ {"args_contain":["--stream"],"creates":[
+  {"dir_arg_from_end":1,"name":"sub-0.ocr.jsonl","copy_from":"records-extra-s0.txt"},
+  {"dir_arg_from_end":1,"name":"sub-0.run.json","copy_from":"run-s0.json"}]},
+ {"args_contain":["--stream"],"creates":[
+  {"dir_arg_from_end":1,"name":"sub-1.ocr.jsonl","copy_from":"records-extra-s1.txt"},
+  {"dir_arg_from_end":1,"name":"sub-1.run.json","copy_from":"run-s1.json"}]}]}

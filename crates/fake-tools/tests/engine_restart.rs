@@ -1,13 +1,22 @@
 //! Restarts over the stand-in tools (design part 5.10, L1, L1a; Ruling S12).
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use common::Client;
 
 use lazymkv_core::job::{
     job_lookup, Action, Event, Failure, FailureClass, Held, JobLookup, NotifyEvent, OutputCause, State, WaitReason,
 };
 use lazymkv_core::record::{JobRecord, Transition};
 use lazymkv_core::review::ReviewReason;
+use lazymkv_dev::cmd::decide::{decide_doc, read_decide_inputs, rec_folder};
+use lazymkv_dev::cmd::plan::PlanOptions;
+use lazymkv_dev::evidence::Ctx;
+use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::Reach;
 use serde_json::json;
@@ -15,6 +24,7 @@ use serde_json::json;
 /// The disc of the base scenario, as Task 22's Harness::insert names it.
 const DISC: &str = "movie-direct";
 const FINAL: &str = "Synthetic Movie (2001) {tmdb-900001}/Synthetic Movie (2001) {tmdb-900001} - 1080p.mkv";
+const KEY: &str = "t00-00800";
 
 fn settings() -> serde_json::Value {
     json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1})
@@ -927,4 +937,254 @@ fn a_restart_reads_a_stale_copy_as_pending_and_asks_nothing() {
     let log = h.engine_log();
     assert!(log.contains(&format!("{id}: tmdb-record.json is more than six months old or was deleted, and is fetched again")), "{log}");
     assert!(!log.contains("test-token"));
+}
+
+fn tuning_on() -> serde_json::Value {
+    json!({"keep_tuning_evidence": true, "drive_settle_s": 0, "drive_ready_timeout_s": 1})
+}
+
+/// The job's ID, with `tmdb-record.json` made stale just before the job's first Probe, so the unit's Decide asks TMDb
+/// for it again.
+fn stale_before_the_probe(h: &Harness) -> String {
+    let id = format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase());
+    let path = h.job_dir(&id).join("tmdb-record.json");
+    h.on_spawn(&["-show_streams"], move || {
+        let mut copy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        copy["fetched_at"] = json!("2026-01-01");
+        fs::write(&path, serde_json::to_vec_pretty(&copy).unwrap()).unwrap();
+    });
+    id
+}
+
+/// The spawns of steps 10 and 10a (the worker, ffmpeg but its `-version`, mkvmerge's extraction into an `.mks` file),
+/// over the harness's whole life: its spawn list spans a restart.
+fn unit_spawns(h: &Harness) -> Vec<String> {
+    h.spawns()
+        .into_iter()
+        .filter_map(|s| {
+            let stem = s.program.file_stem()?.to_str()?.to_string();
+            let unit = match stem.as_str() {
+                "lazymkv-ocr" => true,
+                "ffmpeg" => !s.args.iter().any(|a| a == "-version"),
+                "mkvmerge" => s.args.iter().any(|a| a.ends_with(".mks")),
+                _ => false,
+            };
+            unit.then(|| format!("{stem} {}", s.args.join(" ")))
+        })
+        .collect()
+}
+
+fn workers(spawns: &[String]) -> usize {
+    spawns.iter().filter(|s| s.starts_with("lazymkv-ocr ")).count()
+}
+
+/// The reason LookupAnswered's new identity adds to decide.json (design part 8.1, `movie-direct`'s TMDb answer): a
+/// re-run after the round has it, a run with no failed refetch does not, so `decided` leaves it out.
+const REFRESHED: &str = "the identity was made again with the answered lookups (8.1): step tmdb_one, confidence 0.90";
+
+/// `doc` without its `REFRESHED` line, the comma before it taken away when that line was an array's last.
+fn without_refreshed(doc: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in doc.lines() {
+        if !line.contains(REFRESHED) {
+            lines.push(line.to_string());
+        } else if !line.ends_with(',') {
+            if let Some(last) = lines.last_mut().filter(|last| last.ends_with(',')) {
+                last.pop();
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// decide.json, the title's decision and the `subtitle_text_unread` notes once the job's DecisionDone is persisted,
+/// with the harness's scratch root shown as `<root>` and decide.json without `REFRESHED`.
+fn decided(h: &Harness, id: &str) -> String {
+    h.wait("DecisionDone", |h| {
+        h.transitions(id).iter().any(|l| matches!(l.event, Some(Event::DecisionDone { .. })))
+    });
+    let record = h.record(id);
+    let unread: Vec<_> = record
+        .notes
+        .iter()
+        .filter(|n| serde_json::to_value(&n.note).unwrap() == json!("subtitle_text_unread"))
+        .collect();
+    let text = [
+        without_refreshed(&fs::read_to_string(h.job_dir(id).join(KEY).join("decide.json")).unwrap()),
+        serde_json::to_string(&record.titles[0].decision).unwrap(),
+        serde_json::to_string(&unread).unwrap(),
+    ]
+    .join("\n");
+    let root = h.tools().parent().unwrap().display().to_string();
+    text.replace(&root.replace('\\', "\\\\"), "<root>")
+        .replace(&root.replace('\\', "/"), "<root>")
+        .replace(&root, "<root>")
+}
+
+/// The decision of `scenarios` run straight through, with no failed refetch and no restart.
+fn straight(scenarios: &[&str]) -> String {
+    let h = harness(scenarios, tuning_on());
+    let id = format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase());
+    h.insert("tok0", DISC);
+    decided(&h, &id)
+}
+
+/// `scenarios` with the late lookup: the unit runs, Decide waits in AwaitingLookup, the engine restarts there.
+fn restarted_in_awaiting_lookup(scenarios: &[&str]) -> (Harness, String) {
+    let mut all = scenarios.to_vec();
+    all.push("movie-direct-two-subs-lookup-late");
+    let h = harness(&all, tuning_on());
+    let id = stale_before_the_probe(&h);
+    h.insert("tok0", DISC);
+    h.wait("AwaitingLookup", |h| h.state_of(&id) == "AwaitingLookup");
+    h.restart();
+    (h, id)
+}
+
+#[test]
+fn a_restart_with_a_complete_staged_folder_skips_steps_10_and_10a() {
+    for scenarios in [&[DISC, "movie-direct-two-subs"][..], &[DISC, "movie-direct-two-subs", "movie-direct-two-subs-panic"][..]] {
+        let expected = straight(scenarios);
+        let (h, id) = restarted_in_awaiting_lookup(scenarios);
+        let first = unit_spawns(&h);
+        assert_eq!(workers(&first), 2, "{scenarios:?}: {first:?}");
+        h.fire_timers();
+        let got = decided(&h, &id);
+        assert_eq!(unit_spawns(&h), first, "{scenarios:?}: steps 10 and 10a ran again after the restart");
+        let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+        assert!(log.contains("t00-00800: steps 10 and 10a skipped: the staged tuning folder is complete"), "{log}");
+        assert_eq!(got, expected, "{scenarios:?}");
+    }
+}
+
+/// Review Focus 3: the engine stopped while it moved stream 1's output into the staged subs-ocr folder, after stream
+/// 0's had landed. The unit persists no transition between its moves, so the test leaves the folder as that stop does.
+#[test]
+fn a_restart_after_a_torn_move_deletes_the_staged_folder_and_reads_again() {
+    let expected = straight(&[DISC, "movie-direct-two-subs"]);
+    let (h, id) = restarted_in_awaiting_lookup(&[DISC, "movie-direct-two-subs"]);
+    let subs = h.staging().join(&id).join("tuning").join(KEY).join("subs-ocr");
+    for file in ["summary.json", "sub-1.ocr.jsonl", "sub-1.run.json"] {
+        fs::remove_file(subs.join(file)).unwrap();
+    }
+    fs::remove_dir_all(subs.join("s1")).unwrap();
+    assert!(subs.join("sub-0.ocr.jsonl").is_file());
+    let first = unit_spawns(&h);
+    // The stand-in worker answers its runs in turn (stream 0's files, then stream 1's for every later run), so its
+    // count starts again for the second unit's two streams.
+    fs::remove_file(h.tools().join("lazymkv-ocr.calls.json")).unwrap();
+    h.fire_timers();
+    let got = decided(&h, &id);
+    assert_eq!(workers(&unit_spawns(&h)), workers(&first) + 2, "both streams are read again");
+    for file in ["summary.json", "sub-0.ocr.jsonl", "sub-1.ocr.jsonl"] {
+        assert!(subs.join(file).is_file(), "{file}");
+    }
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains(
+        "t00-00800: the staged tuning folder was incomplete, so it was deleted and steps 10 and 10a run again"), "{log}");
+    assert_eq!(got, expected);
+}
+
+/// Design part 5.10, T5-R51: a held two-stream job with one stream unread, approved after a restart, decides from the
+/// staged text and summary.json's unread stream with dev's readers, exactly as `lazymkvctl decide` does over the same
+/// folders.
+#[test]
+fn a_held_job_approved_after_a_restart_reads_the_staged_text_and_the_unread_streams() {
+    let h = harness(&["movie-direct", "movie-direct-two-subs", "movie-direct-two-subs-panic"], settings());
+    fs::create_dir_all(final_path(&h).parent().unwrap()).unwrap();
+    fs::write(final_path(&h), b"owner's").unwrap();
+    h.insert("tok0", DISC);
+    h.run_until("NeedsReview");
+    let id = only_job(&h);
+    let dir = h.job_dir(&id);
+    h.restart();
+    fs::remove_file(final_path(&h)).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    let decisions = |h: &Harness| {
+        transitions(&h.job_dir(&id)).iter().filter(|line| matches!(line.event, Some(Event::DecisionDone { .. }))).count()
+    };
+    h.wait("the decision made again", |h| decisions(h) == 2);
+    assert!(fs::read_to_string(dir.join("job.log")).unwrap().contains(
+        "decide inputs read back from the job folder with lazymkv-dev's readers (design part 5.10)"));
+    let staged = h.staging().join(&id).join("tuning").join(KEY).join("subs-ocr");
+    let ctx = Ctx::for_test(h.data());
+    let (rec, label) = rec_folder(&ctx, &dir.join(KEY).display().to_string()).unwrap_or_else(|r| panic!("{}", r.line));
+    let options = PlanOptions {
+        settings: Some(dir.join("settings.json")),
+        tmdb_search: Some(dir.join("tmdb-search.json")),
+        tmdb_record: Some(dir.join("tmdb-record.json")),
+        remembered: None,
+    };
+    let read = read_decide_inputs(&ctx, &rec, &label, Some(&staged), None, &options).unwrap_or_else(|r| panic!("{}", r.line));
+    assert_eq!(read.file.unread, Ok(vec![(1, "lazymkv-ocr exited with code 101".to_string())]));
+    let mut written: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(KEY).join("decide.json")).unwrap()).unwrap();
+    assert_eq!(written["subtitles"],
+               json!({"skipped": "stream s1 eng: not read by the engine: lazymkv-ocr exited with code 101"}));
+    let object = written.as_object_mut().unwrap();
+    object.remove("audio_rule_version");
+    object.remove("lazymkv_version");
+    assert_eq!(
+        dumps(&written, Style::INDENT1_ASCII),
+        dumps(&serde_json::to_value(decide_doc(&read)).unwrap(), Style::INDENT1_ASCII)
+    );
+}
+
+/// Task 15's review round 1 (T5-R56): a held two-stream job approved while the staging share is unreachable waits for
+/// the share instead of deciding without its text; the staged folder is moved aside to stand for the share being gone,
+/// since the fake connector only answers `reach`.
+#[test]
+fn a_held_job_approved_while_the_staging_share_is_unreachable_waits_for_the_share() {
+    let h = harness(&["movie-direct", "movie-direct-two-subs"], settings());
+    fs::create_dir_all(final_path(&h).parent().unwrap()).unwrap();
+    fs::write(final_path(&h), b"owner's").unwrap();
+    h.insert("tok0", DISC);
+    h.run_until("NeedsReview");
+    let id = only_job(&h);
+    let dir = h.job_dir(&id);
+    assert!(dir.join(KEY).join("subs-ocr").join("summary.json").is_file(), "step 10 ran for the title");
+    h.restart();
+    fs::remove_file(final_path(&h)).unwrap();
+    let staged = h.staging().join(&id).join("tuning").join(KEY).join("subs-ocr");
+    fs::rename(&staged, staged.with_file_name("subs-ocr.away")).unwrap();
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".into()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    h.wait("AwaitingShare", |h| h.state_of(&id) == "AwaitingShare");
+    let record = h.record(&id);
+    assert!(matches!(record.state, State::AwaitingShare { .. }), "{:?}", record.state);
+    let message = record.message.unwrap();
+    assert!(message.starts_with(&format!("{}: ", staged.display())), "{message}");
+    let decisions = transitions(&dir).iter().filter(|line| matches!(line.event, Some(Event::DecisionDone { .. }))).count();
+    assert_eq!(decisions, 1, "the decision was not made again without the text");
+}
+
+/// Review Focus 3, T5-R4: what a crashed run left in the work folder is deleted when the engine starts.
+#[test]
+fn engine_start_removes_a_leftover_work_folder() {
+    let h = harness(&["movie-direct"], settings());
+    let leftover = h.data().join("work").join(format!("ocr-x-{KEY}")).join("s0");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("sub-0.ocr.jsonl"), b"{\"pts\":1.0,\"size\":900}\n").unwrap();
+    h.restart();
+    assert!(!h.data().join("work").exists());
+    assert!(!h.engine_log().contains("could not be removed"), "{}", h.engine_log());
+}
+
+/// Review Focus 3, design part 10.7: a forced stop during a worker run kills the worker and leaves no work folder. The
+/// cap is 60 s here, so an engine that ends within 30 s killed it; the bound proves the kill and is not scaled.
+#[test]
+fn a_stop_during_a_worker_run_kills_it_and_leaves_no_work_folder() {
+    let h = harness(&["movie-direct", "movie-direct-two-subs", "movie-direct-two-subs-cap"], settings());
+    h.insert("tok0", DISC);
+    let id = format!("{}-1", h.fingerprint(DISC).to_ascii_lowercase());
+    let work = h.data().join("work").join(format!("ocr-{id}-{KEY}"));
+    let first = work.join("s0").join("sub-0.ocr.jsonl");
+    h.wait("the worker's first records", |_| first.is_file());
+    h.shutdown_handle().shutdown(true);
+    assert!(h.wait_for_exit(Duration::from_secs(30)), "the engine did not stop within 30 s");
+    assert!(!work.exists());
 }

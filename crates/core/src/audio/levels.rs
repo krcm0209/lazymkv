@@ -44,6 +44,7 @@ pub type Streams = FfprobeStreams;
 
 /// audio-proxy.json, the parts proxy_levels reads; the objects are kept as JSON because the Python tests their keys'
 /// presence. `encoding.read` may name proxy_levels.py or lazymkv-dev levels-from-proxy: it is never checked.
+/// `proxy` and `gains_tried` are read for call 22's proxy-less file (T5-R17).
 /// Py: load_proxy_json, build, proxy_streams.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct AudioProxy {
@@ -56,6 +57,22 @@ pub struct AudioProxy {
     pub encoding: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub tracks: Vec<ProxyTrack>,
+    /// `proxy` as written: None when the key is absent (a test's `{}`), Some(Value::Null) when no proxy was kept
+    /// (call 22, T5-R17), else phase 0's object {file, bytes, tracks}. Def: T5-16. Use: T5-16, T5-17, T5-21.
+    #[serde(default, deserialize_with = "present")]
+    pub proxy: Option<serde_json::Value>,
+    /// The gains tried in dB, in order: [-18], or [-18, -30] after C1's redo; None in phase 0's files (T5-R17).
+    /// Def: T5-16. Use: T5-17.
+    #[serde(default)]
+    pub gains_tried: Option<Vec<i64>>,
+}
+
+impl AudioProxy {
+    /// True when the file says no proxy was kept (`"proxy": null`, call 22, T5-R17); an absent key is not that.
+    /// Def: T5-16. Use: T5-16, T5-21.
+    pub fn kept_no_proxy(&self) -> bool {
+        matches!(self.proxy, Some(serde_json::Value::Null))
+    }
 }
 
 /// One entry of audio-proxy.json's "tracks".
@@ -229,9 +246,15 @@ pub fn parse_streams(text: &str) -> Result<Streams, String> {
     serde_json::from_str(text).map_err(|e| e.to_string())
 }
 
-/// audio-proxy.json's text (the caller reads it with read_text, utf-8-sig). Py: load_proxy_json's json.loads.
+/// audio-proxy.json's text (the caller reads it with read_text, utf-8-sig). A proxy-less file (call 22) parses with
+/// `proxy` Some(Null). Py: load_proxy_json's json.loads.
 pub fn parse_proxy(text: &str) -> Result<AudioProxy, String> {
     serde_json::from_str(text).map_err(|e| e.to_string())
+}
+
+/// A key that is present is Some, even when it holds null: serde's default for an Option would read null as None.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
+    <serde_json::Value as serde::Deserialize>::deserialize(d).map(Some)
 }
 
 #[cfg(test)]
@@ -423,5 +446,18 @@ mod tests {
         assert_eq!(p.tracks[1].source_stream, serde_json::Value::Null);
         assert_eq!(p.tracks[1].series.as_deref(), Some("fc"));
         assert!(p.tracks[1].source.is_none());
+    }
+
+    #[test]
+    fn a_null_proxy_is_kept_as_null_and_an_absent_one_as_none() {
+        let none = parse_proxy(r#"{"format": "lazymkv audio proxy v1", "proxy": null, "gains_tried": [-18, -30]}"#).unwrap();
+        assert_eq!(none.proxy, Some(serde_json::Value::Null));
+        assert!(none.kept_no_proxy());
+        assert_eq!(none.gains_tried, Some(vec![-18, -30]));
+        let absent = parse_proxy("{}").unwrap();
+        assert_eq!((absent.proxy.clone(), absent.gains_tried.clone()), (None, None));
+        assert!(!absent.kept_no_proxy());
+        let kept = parse_proxy(r#"{"proxy": {"file": "audio-proxy.mka", "bytes": 1, "tracks": 1}}"#).unwrap();
+        assert!(!kept.kept_no_proxy());
     }
 }

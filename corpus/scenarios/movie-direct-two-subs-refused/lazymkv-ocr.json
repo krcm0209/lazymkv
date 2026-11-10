@@ -1,0 +1,7 @@
+{"responses":[
+ {"args_contain":["--stream"],"creates":[
+  {"dir_arg_from_end":1,"name":"sub-0.ocr.jsonl","copy_from":"records-s0.txt"},
+  {"dir_arg_from_end":1,"name":"s0/f-000001000.png","copy_from":"crop-placeholder.png"},
+  {"dir_arg_from_end":1,"name":"s0/f-000005000.png","copy_from":"crop-placeholder.png"},
+  {"dir_arg_from_end":1,"name":"sub-0.run.json","copy_from":"run-s0.json"}]},
+ {"args_contain":["--stream"],"stderr":"refused-s1.txt","exit_code":3}]}

@@ -1,0 +1,31 @@
+[package]
+name = "lazymkv-ocr"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lazymkv_ocr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lazymkv-ocr"
+path = "src/main.rs"
+
+[dependencies]
+lazymkv-core = { path = "../core" }
+# The two embedded models (notes call 23).
+lazymkv-ocr-models = { path = "../ocr-models" }
+# The only package that links the OCR engine and its runtime (design part 10.7; notes A2, E3, call 23; K1).
+ocrs.workspace = true
+rten.workspace = true
+rten-imageproc.workspace = true
+png.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# The made-up Matroska and bitmap builders, the worker's driver, and a guard and a host for the real worker's cap
+# kill (Tasks 8, 9 and 11 of pull request 5).
+lazymkv-core = { path = "../core", features = ["testsupport"] }
+lazymkv-tools = { path = "../tools" }
+lazymkv-platform = { path = "../platform", features = ["fakes"] }

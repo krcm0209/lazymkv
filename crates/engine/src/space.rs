@@ -675,7 +675,7 @@ mod tests {
             format: JOB_FORMAT.to_string(), id: "a-1".to_string(), fingerprint: "AAA".to_string(), disc_id: None,
             drive: "tok0".to_string(), created_unix: 1, updated_unix: 1, state: State::Remuxing, message: None,
             rip_again: false, profile: "job.mmcp.xml".to_string(), plan: Some(plan.clone()),
-            titles: Vec::<TitleRecord>::new(), filed_unix: None, collisions: vec![], notes: vec![],
+            titles: Vec::<TitleRecord>::new(), filed_unix: None, collisions: vec![], notes: vec![], tuning_copy: None,
         };
         let shares = FakeShares::new();
         for staged in [false, true] {

@@ -1,0 +1,15 @@
+{"responses":[
+ {"args_contain":["-version"],"stdout":"ffmpeg-version.txt"},
+ {"args_contain":["-layouts"],"stdout":"ffmpeg-layouts.txt"},
+ {"args_contain":["-/filter_complex"],"creates":[
+  {"in_cwd":"streamhash.txt","copy_from":"streamhash-1.txt"},
+  {"in_cwd":"raw-main-mix.txt","copy_from":"raw-levels.txt"},
+  {"in_cwd":"raw-main-fc.txt","copy_from":"raw-levels.txt"},
+  {"in_cwd":"peak-0.txt","copy_from":"peak-clip.txt"},
+  {"in_cwd":"peak-1.txt","copy_from":"peak-quiet.txt"},
+  {"in_cwd":"audio-proxy.mka.partial","copy_from":"proxy-placeholder.mka"}]},
+ {"args_contain":["-/filter_complex"],"creates":[
+  {"in_cwd":"peak-0.txt","copy_from":"peak-quiet.txt"},
+  {"in_cwd":"peak-1.txt","copy_from":"peak-quiet.txt"},
+  {"in_cwd":"audio-proxy.mka.partial","copy_from":"proxy-redo.mka"}]},
+ {"args_contain":["0:a","streamhash"],"creates":[{"in_cwd":"streamhash.txt","copy_from":"streamhash-1.txt"}]}]}

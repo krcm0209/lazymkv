@@ -1,11 +1,12 @@
 //! The closed sets of review reasons and notes: design spec 8.8's table of review reasons with 8.6 "Content"'s
 //! `commentary_detected`, and the notes of 8.6 step 6,
-//! 8.7 "Text" and "Other tracks", 8.9, 7, 6.3 step 6a, 10.2 (ToolMissing), D9 and RP7. Every rule of phase 1 returns
-//! these enums, never strings: a result's `reviews` field holds `ReviewReason`s sorted by the table's order and
+//! 8.7 "Text" and "Other tracks", 8.9, 7, 6.3 step 6a, 10.2 (ToolMissing), D9, RP7 and design part 10.8. Every rule
+//! of phase 1 returns these enums, never strings: a result's `reviews` field holds `ReviewReason`s sorted by the table's order and
 //! unique (`sorted_unique`), its `notes` field holds `Noted` entries in the order the rule raised them. The serde and
 //! `as_str` spellings are the spec's snake_case strings; four notes the spec describes only in words take this plan's
 //! spelling (`possible_audio_description`, `lossy_before_lossless`, `direct_mode_fallback`, `label_rule_unavailable`),
-//! which the owner confirmed (ruling OR8, 2026-10-17); the rulings plan adds a thirteenth, `unlisted_label_cut` (OR16).
+//! which the owner confirmed (ruling OR8, 2026-10-17); the rulings plan adds a thirteenth, `unlisted_label_cut` (OR16),
+//! and phase 2 a fourteenth, `subtitle_text_unread` (design part 10.8, P19).
 //! Written from the spec (RP20); used by Tasks 4 to 18.
 
 /// A reason that holds a job for review: spec 8.8's table in its order, with 8.6 "Content"'s commentary_detected placed
@@ -126,6 +127,11 @@ pub enum Note {
     PartialSubtitleDropped,
     /// Spec 8.7 "Text": the text's verdict differs from the counts and timing; names the track.
     SubtitleTextDisagrees,
+    /// Design part 10.8 (P19) and spec 8.7 "Text": step 10 did not read a stream (its run passed the time cap; the
+    /// reader, the decoder or ocrs refused or failed on it; or its events disagreed with ffprobe's). Names the stream;
+    /// the detail is `tracks::subtitle::unread_detail`'s, with no subtitle text. It raises no review and never holds
+    /// the job. Not the text rule's `subtitle_text_unreadable` class. Def: T5-2. Use: T5-2, T5-6, T5-15.
+    SubtitleTextUnread,
     /// Spec 8.9: the Jellyfin 10 compatibility tag was left out (a year-like TMDb ID without an IMDb or TVDB ID).
     CompatTagOmitted,
     /// Spec 7 "Overwriting": a recorded file that no longer matches its record was left alone.
@@ -144,8 +150,8 @@ pub enum Note {
 }
 
 impl Note {
-    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7, 8.3 rule 1 (OR5, OR16).
-    pub const ALL: [Note; 13] = [
+    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7, 8.3 rule 1 (OR5, OR16), design part 10.8.
+    pub const ALL: [Note; 14] = [
         Note::PossibleCommentary,
         Note::PossibleAudioDescription,
         Note::LosslessOriginalAvailable,
@@ -153,6 +159,7 @@ impl Note {
         Note::LossyBeforeLossless,
         Note::PartialSubtitleDropped,
         Note::SubtitleTextDisagrees,
+        Note::SubtitleTextUnread,
         Note::CompatTagOmitted,
         Note::OldFileKept,
         Note::TuningEvidencePending,
@@ -171,6 +178,7 @@ impl Note {
             Note::LossyBeforeLossless => "lossy_before_lossless",
             Note::PartialSubtitleDropped => "partial_subtitle_dropped",
             Note::SubtitleTextDisagrees => "subtitle_text_disagrees",
+            Note::SubtitleTextUnread => "subtitle_text_unread",
             Note::CompatTagOmitted => "compat_tag_omitted",
             Note::OldFileKept => "old_file_kept",
             Note::TuningEvidencePending => "tuning_evidence_pending",
@@ -194,8 +202,8 @@ impl std::str::FromStr for Note {
 }
 
 /// A note as a rule raised it: which note, the scan stream it names (PossibleCommentary, PartialSubtitleDropped,
-/// LossyBeforeLossless, SubtitleTextDisagrees; None for a note on the title or the job) and one plain sentence of
-/// detail. Spec 8.6 step 6, 8.7, 8.9, 7.
+/// LossyBeforeLossless, SubtitleTextDisagrees, SubtitleTextUnread; None for a note on the title or the job) and one
+/// plain sentence of detail. Spec 8.6 step 6, 8.7, 8.9, 7, design part 10.8.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Noted {
     /// Which note.
@@ -276,6 +284,7 @@ mod tests {
         note_lossy_before_lossless_round_trips: Note::LossyBeforeLossless => "lossy_before_lossless",
         note_partial_subtitle_dropped_round_trips: Note::PartialSubtitleDropped => "partial_subtitle_dropped",
         note_subtitle_text_disagrees_round_trips: Note::SubtitleTextDisagrees => "subtitle_text_disagrees",
+        note_subtitle_text_unread_round_trips: Note::SubtitleTextUnread => "subtitle_text_unread",
         note_compat_tag_omitted_round_trips: Note::CompatTagOmitted => "compat_tag_omitted",
         note_old_file_kept_round_trips: Note::OldFileKept => "old_file_kept",
         note_tuning_evidence_pending_round_trips: Note::TuningEvidencePending => "tuning_evidence_pending",
@@ -322,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn all_notes_are_the_thirteen_in_spec_order() {
+    fn note_all_holds_fourteen_notes_with_subtitle_text_unread_after_subtitle_text_disagrees() {
         let spellings: Vec<&str> = Note::ALL.iter().map(|note| note.as_str()).collect();
         assert_eq!(
             spellings,
@@ -334,6 +343,7 @@ mod tests {
                 "lossy_before_lossless",
                 "partial_subtitle_dropped",
                 "subtitle_text_disagrees",
+                "subtitle_text_unread",
                 "compat_tag_omitted",
                 "old_file_kept",
                 "tuning_evidence_pending",
@@ -343,6 +353,8 @@ mod tests {
             ]
         );
         assert!(Note::ALL.windows(2).all(|pair| pair[0] < pair[1]), "ALL is in the enum's order");
+        // The text rule's class string is not a note (R3-worker-30): no existing spelling changes.
+        assert!("subtitle_text_unreadable".parse::<Note>().is_err());
     }
 
     #[test]

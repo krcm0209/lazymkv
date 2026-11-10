@@ -43,8 +43,21 @@ pub fn check_format(document: &serde_json::Value, expected: &str) -> Result<(), 
     }
 }
 
+/// The state of a job's copy to `<tuning_root>\dataset\<job id>\` (design parts 7.3, 7.5; call 10; T5-R14): pending
+/// from the unit's DecisionDone of a job whose own settings keep tuning evidence until every file has landed, then
+/// done. Def: T5-19. Use: T5-19, T5-22.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuningCopy {
+    /// Owed and not yet landed; holds the job's staging data from the cleanup (C2).
+    Pending,
+    /// Every file landed, the level folders' `audio-proxy.json` last.
+    Done,
+}
+
 /// state.json (design part 7.3; S1). No deny_unknown_fields, so a minor version's added key reads.
-/// `titles` serialise in key order and `notes` by note (RP23). Field order is the file's key order.
+/// `titles` serialise in key order and `notes` by note (RP23). Field order is the file's key order. `tuning_copy` is
+/// skipped when None (T5-R14).
 /// Def: T6. Use: T7, T21, T22, T25.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JobRecord {
@@ -82,6 +95,11 @@ pub struct JobRecord {
     /// The job's notes, serialised sorted by note.
     #[serde(serialize_with = "sorted_notes")]
     pub notes: Vec<Noted>,
+    /// The job's dataset copy (call 10, C2; T5-R14); absent when no copy is owed, so a record written before the key
+    /// existed reads and writes byte-identical (design part 7.4). The cleanup and the relay read it, never the note.
+    /// Def: T5-19. Use: T5-19, T5-22.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning_copy: Option<TuningCopy>,
 }
 
 /// `titles` sorted by key (RP23), so that every writer's output is in the sorted form.
@@ -234,6 +252,7 @@ mod tests {
             filed_unix: None,
             collisions: vec![],
             notes: vec![],
+            tuning_copy: None,
         }
     }
 
@@ -421,5 +440,27 @@ mod tests {
         record.titles = vec![title("t01-00055"), title("t00-00800")];
         let text = serde_json::to_string(&record).unwrap();
         assert!(text.find(r#""key":"t00-00800""#).unwrap() < text.find(r#""key":"t01-00055""#).unwrap(), "{text}");
+    }
+    /// Call 10, T5-R14 (design part 7.4): a record with no copy owed, every record written before this key existed
+    /// included, reads and writes byte-identical, so the format stays `lazymkv job v1`.
+    #[test]
+    fn state_json_without_tuning_copy_reads_and_writes_byte_identical() {
+        let text = serde_json::to_string_pretty(&job()).unwrap();
+        assert!(!text.contains("tuning_copy"), "{text}");
+        let read: JobRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.tuning_copy, None);
+        assert_eq!(serde_json::to_string_pretty(&read).unwrap(), text);
+    }
+
+    #[test]
+    fn tuning_copy_serialises_as_pending_and_done() {
+        let mut record = job();
+        for (copy, word) in [(TuningCopy::Pending, "pending"), (TuningCopy::Done, "done")] {
+            record.tuning_copy = Some(copy);
+            let text = serde_json::to_string(&record).unwrap();
+            assert!(text.ends_with(&format!(r#""notes":[],"tuning_copy":"{word}"}}"#)), "{text}");
+            assert_eq!(serde_json::from_str::<JobRecord>(&text).unwrap(), record);
+        }
+        assert!(serde_json::from_str::<TuningCopy>(r#""Pending""#).is_err());
     }
 }

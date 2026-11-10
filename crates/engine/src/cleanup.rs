@@ -1,8 +1,8 @@
 //! The cleanup task (design part 5.9, S40, P4, R-B4, L11; Rulings T4-R11, FR-1): one pass over every job the owner
 //! holds, run on a thread of its own. It deletes the TMDb copies past TMDb's six-month limit in every job's folder,
-//! whatever the job's state, and the staging folder of each filed job past its retention. It never touches
-//! `tuning_root`, never touches anything under `jobs/` but the three TMDb copies, and never follows a link out of a
-//! staging folder.
+//! whatever the job's state, and the staging folder of each filed job past its retention whose dataset copy is not
+//! pending (C2). It never touches `tuning_root`, never touches anything under `jobs/` but the three TMDb copies, and
+//! never follows a link out of a staging folder.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -13,16 +13,15 @@ use std::sync::{Arc, Mutex, TryLockError};
 use lazymkv_clients::LookupBook;
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::stale::{add_months, fetched_at, is_stale, TMDB_COPIES};
-use lazymkv_core::record::JobRecord;
-use lazymkv_core::review::Note;
+use lazymkv_core::record::{JobRecord, TuningCopy};
 use lazymkv_platform::{Reach, ShareConnector};
 
 /// The seconds of one day of `retention_days`.
 const DAY_SECONDS: u64 = 86_400;
 
 /// One job as the owner thread hands it to a pass (design part 5.9; Ruling T4-R11): its record, its own settings'
-/// staging root, keep_tuning_evidence and retention_days (ENG-19), and its lookup book, which a round holds for its
-/// whole length (R23.1). Def: T4-11. Use: T4-11.
+/// staging root and retention_days (ENG-19), and its lookup book, which a round holds for its whole length (R23.1).
+/// Def: T4-11. Use: T4-11.
 pub(crate) struct CleanupJob {
     /// The job's id, the name of its folder under `jobs/` and under the staging root.
     pub(crate) id: String,
@@ -30,8 +29,6 @@ pub(crate) struct CleanupJob {
     pub(crate) record: JobRecord,
     /// The staging root of the job's own settings.
     pub(crate) staging_root: Option<String>,
-    /// The keep_tuning_evidence of the job's own settings (Owner item 22).
-    pub(crate) keep_tuning_evidence: bool,
     /// The retention_days of the job's own settings.
     pub(crate) retention_days: u32,
     /// The job's lookup book; a pass skips the job while another holder has it locked.
@@ -51,9 +48,9 @@ pub(crate) fn job_id_shaped(id: &str) -> bool {
         && !number.starts_with('0')
 }
 
-/// Whether the staging folder of `job` is due for deletion at `now_unix` (design part 5.9, S40; Owner item 22): the job
-/// is Filed with a `filed_unix`, `now_unix` is later than that plus its `retention_days`, its own settings have
-/// keep_tuning_evidence off, and its record holds no TuningEvidencePending note. Def: T4-11. Use: T4-11.
+/// Whether the staging folder of `job` is due for deletion at `now_unix` (design part 5.9, S40; C2): the job is Filed
+/// with a `filed_unix`, `now_unix` is later than that plus its `retention_days`, and its dataset copy is not pending
+/// (C2; T5-R14: the note is not read). Def: T4-11, T5-19. Use: T4-11, T5-19.
 pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
     let record = &job.record;
     let Some(filed) = record.filed_unix else {
@@ -61,8 +58,7 @@ pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
     };
     record.state == State::Filed
         && now_unix > filed.saturating_add(u64::from(job.retention_days) * DAY_SECONDS)
-        && !job.keep_tuning_evidence
-        && !record.notes.iter().any(|noted| noted.note == Note::TuningEvidencePending)
+        && record.tuning_copy != Some(TuningCopy::Pending)
 }
 
 /// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each
@@ -74,8 +70,9 @@ pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
 /// one is left to the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is
 /// deleted once its share answers, without following any link inside it. The share of each staging root is asked
 /// once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives `log` one engine.log
-/// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped.
-/// Def: T4-11. Use: T4-11.
+/// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped. It returns the
+/// ids of the jobs whose TMDb copies it deleted, in the pass's order, each once, for the refresh's mirror (design part
+/// 7.5). Def: T4-11; the ids: T5-20. Use: T4-11, T5-20.
 pub(crate) fn run_pass(
     jobs: Vec<CleanupJob>,
     data: &Path,
@@ -84,8 +81,9 @@ pub(crate) fn run_pass(
     now_unix: u64,
     stop: &AtomicBool,
     log: &dyn Fn(String),
-) {
+) -> Vec<String> {
     let mut roots = Vec::new();
+    let mut deleted = Vec::new();
     for job in jobs {
         if stop.load(Ordering::SeqCst) {
             break;
@@ -104,7 +102,9 @@ pub(crate) fn run_pass(
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => continue,
             };
-            delete_stale_copies(&data.join("jobs").join(id), id, today, log);
+            if delete_stale_copies(&data.join("jobs").join(id), id, today, log) {
+                deleted.push(id.to_string());
+            }
         }
         if !retention_due(&job, now_unix) {
             continue;
@@ -120,6 +120,7 @@ pub(crate) fn run_pass(
             log(format!("cleanup: the staging root {root} was not reached: {why}; {skipped} job(s) skipped"));
         }
     }
+    deleted
 }
 
 /// One staging root as a pass found it (Ruling FR-1): the failure text when its share did not answer, and how many
@@ -151,8 +152,10 @@ fn reached(roots: &mut Vec<RootReach>, root: &str, shares: &dyn ShareConnector) 
     known.failure.is_none()
 }
 
-/// Deletes each TMDb copy in `folder` whose `fetched_at` is a real date past the six-month limit on `today`.
-fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String)) {
+/// Deletes each TMDb copy in `folder` whose `fetched_at` is a real date past the six-month limit on `today`; true when
+/// it removed at least one.
+fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String)) -> bool {
+    let mut removed = false;
     for file in TMDB_COPIES {
         let path = folder.join(file);
         let bytes = match fs::read(&path) {
@@ -170,10 +173,14 @@ fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String
             continue;
         }
         match fs::remove_file(&path) {
-            Ok(()) => log(format!("cleanup: {id}: deleted {file} (fetched_at {date})")),
+            Ok(()) => {
+                removed = true;
+                log(format!("cleanup: {id}: deleted {file} (fetched_at {date})"));
+            }
             Err(error) => log(format!("cleanup: {id}: {file} could not be deleted: {error}")),
         }
     }
+    removed
 }
 
 /// Deletes `<root>/<id>`, the share holding `root` having answered this pass. `fs::remove_dir_all` removes a symbolic
@@ -194,7 +201,9 @@ mod tests {
     use super::*;
     use lazymkv_core::job::{FailureClass, Held};
     use lazymkv_core::profile::JOB_PROFILE_FILE;
+    use lazymkv_core::record::TuningCopy;
     use lazymkv_core::record::JOB_FORMAT;
+    use lazymkv_core::review::Note;
     use lazymkv_core::review::Noted;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
     use lazymkv_platform::fakes::FakeShares;
@@ -220,9 +229,10 @@ mod tests {
             drive: "tok0".to_string(), created_unix: n, updated_unix: n, state, message: None, rip_again: false,
             profile: JOB_PROFILE_FILE.to_string(), plan: None, titles: vec![], filed_unix, collisions: vec![],
             notes: vec![],
+            tuning_copy: None,
         };
         CleanupJob {
-            id, record, staging_root: None, keep_tuning_evidence: false, retention_days: 7,
+            id, record, staging_root: None, retention_days: 7,
             lookups: Arc::new(Mutex::new(LookupBook::default())),
         }
     }
@@ -272,18 +282,20 @@ mod tests {
         State::NeedsReview { held: Held::DispositionGate }
     }
 
+    /// C2 (owner item 22's interim ended; R5-code-51, R5-code-52): only a pending dataset copy holds the staging data, and
+    /// the note, which stays after the copy lands, holds nothing (T5-R14).
     #[test]
-    fn retention_is_due_only_for_a_filed_job_older_than_its_days_without_pending_evidence() {
+    fn retention_is_due_only_for_a_filed_job_older_than_its_days_without_a_pending_copy() {
         let mut filed = job(1, State::Filed, Some(NOW - 7 * DAY - 1));
         assert!(retention_due(&filed, NOW));
         filed.record.filed_unix = Some(NOW - 7 * DAY);
         assert!(!retention_due(&filed, NOW), "exactly its retention is not older");
         filed.record.filed_unix = Some(NOW - 7 * DAY - 1);
-        filed.keep_tuning_evidence = true;
-        assert!(!retention_due(&filed, NOW), "Owner item 22");
-        filed.keep_tuning_evidence = false;
+        filed.record.tuning_copy = Some(TuningCopy::Pending);
+        assert!(!retention_due(&filed, NOW), "a pending copy holds the staging data");
+        filed.record.tuning_copy = Some(TuningCopy::Done);
         filed.record.notes.push(Noted { note: Note::TuningEvidencePending, stream: None, detail: String::new() });
-        assert!(!retention_due(&filed, NOW));
+        assert!(retention_due(&filed, NOW), "the note stays after the copy lands and holds nothing");
         for state in [held(), failed(), State::Ripping] {
             assert!(!retention_due(&job(2, state, Some(NOW - 30 * DAY)), NOW));
         }
@@ -328,6 +340,43 @@ mod tests {
         folders.write(&format!("staging/{id}/rip/t00/b.mkv"), "b");
         pass(&folders, vec![job(1, State::Filed, Some(NOW - 7 * DAY - 1))], &FakeShares::new(), TODAY, NOW);
         assert_eq!(fs::read(&kept).unwrap(), copy("2019-01-01").as_bytes());
+    }
+
+    /// C2, R1-evidence-35: pull request 4's real job (filed with the setting on, before step 10a existed) has no staged
+    /// tuning folder and nothing pending, so it goes once its 7 days have passed.
+    #[test]
+    fn a_filed_job_with_no_staged_tuning_folder_is_cleaned_once_its_days_pass() {
+        let folders = Scratch::new("cleanup-no-tuning");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/rip/t00-00800/title_t00.mkv"), "b");
+        let lines = pass(&folders, vec![job(1, State::Filed, Some(NOW - 7 * DAY - 1))], &FakeShares::new(), TODAY, NOW);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    #[test]
+    fn a_pending_copy_holds_the_staging_data() {
+        let folders = Scratch::new("cleanup-pending");
+        let id = id(1);
+        let proxy = folders.write_path(&format!("staging/{id}/tuning/t00-00800/audio-proxy.mka"), "mka");
+        folders.write(&format!("staging/{id}/rip/t00-00800/title_t00.mkv"), "b");
+        let mut pending = job(1, State::Filed, Some(NOW - 30 * DAY));
+        pending.record.tuning_copy = Some(TuningCopy::Pending);
+        let lines = pass(&folders, vec![pending], &FakeShares::new(), TODAY, NOW);
+        assert_eq!(fs::read(&proxy).unwrap(), b"mka");
+        assert_eq!(lines, Vec::<String>::new());
+    }
+
+    /// R1-evidence-37: a job run with the setting off has a staged folder but no copy to make.
+    #[test]
+    fn a_setting_off_job_has_nothing_pending() {
+        let folders = Scratch::new("cleanup-setting-off");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/tuning/t00-00800/streamhash.txt"), "md5");
+        folders.write(&format!("staging/{id}/tuning/t00-00800/subs-ocr/summary.json"), "{}");
+        let lines = pass(&folders, vec![job(1, State::Filed, Some(NOW - 7 * DAY - 1))], &FakeShares::new(), TODAY, NOW);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
     }
 
     #[test]
@@ -376,7 +425,7 @@ mod tests {
     fn a_clock_years_ahead_deletes_only_tmdb_copies() {
         let folders = Scratch::new("cleanup-years");
         let mut kept = job(1, State::Filed, Some(NOW));
-        kept.keep_tuning_evidence = true;
+        kept.record.tuning_copy = Some(TuningCopy::Pending);
         let jobs = vec![kept, job(2, held(), None), job(3, failed(), None), job(4, State::Ripping, None)];
         for job in &jobs {
             let id = &job.id;
@@ -561,5 +610,19 @@ mod tests {
         assert_eq!(fs::read(&tmdb).unwrap(), copy("2019-01-01").as_bytes());
         assert!(folders.0.join("staging").join(&id).join("rip/t00/b.mkv").is_file());
         assert_eq!(lines, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_pass_returns_the_ids_of_the_jobs_whose_tmdb_copies_it_deleted() {
+        let folders = Scratch::new("cleanup-deleted-ids");
+        let (first, second, third) = (id(1), id(2), id(3));
+        folders.write(&format!("data/jobs/{first}/tmdb.json"), copy("2026-04-22"));
+        folders.write(&format!("data/jobs/{first}/tmdb-search.json"), copy("2026-04-01"));
+        folders.write(&format!("data/jobs/{second}/tmdb.json"), copy("2026-10-01"));
+        folders.write(&format!("data/jobs/{third}/tmdb-record.json"), copy("2026-01-01"));
+        let jobs = vec![job(1, held(), None), job(2, held(), None), job(3, failed(), None)];
+        let stop = AtomicBool::new(false);
+        let deleted = run_pass(jobs, &folders.0.join("data"), &FakeShares::new(), TODAY, NOW, &stop, &|_| {});
+        assert_eq!(deleted, [first, third], "each job once, in the pass's order");
     }
 }

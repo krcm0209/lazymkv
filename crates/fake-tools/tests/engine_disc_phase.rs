@@ -572,6 +572,9 @@ fn the_eject_fake_failure_sends_eject_failed_and_ends_the_disc_phase() {
     let h = harness(&[], json!({}));
     h.ejector().fail_next("stuck");
     let id = run_to(&h, "Ejected");
+    // KeepAwake is released only once the file phase has filed the job, and step 10a's pass writes nothing `settle`
+    // watches, so the wait is on the persisted stop.
+    h.wait("the job is filed", |h| h.transitions(&id).iter().any(|line| line.new.as_str() == "Filed"));
     h.settle();
     assert!(events(&h, &id).contains(&Event::EjectFailed));
     let sent: Vec<NotifyEvent> = h.notifications().into_iter().map(|n| n.event).collect();

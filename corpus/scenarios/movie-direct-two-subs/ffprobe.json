@@ -1,0 +1,5 @@
+{"responses":[{"args_contain":["-show_streams"],"stdout":"ffprobe-streams.json"},
+ {"args_contain":["proxy-check.json"],"creates":[{"in_cwd":"proxy-check.json","copy_from":"proxy-check-1.json"}]},
+ {"args_contain":["-select_streams","s:0"],"stdout":"packets-s0.json"},
+ {"args_contain":["-select_streams","s:1"],"stdout":"packets-s1.json"},
+ {"args_contain":["-version"],"stdout":"ffprobe-version.txt"}]}

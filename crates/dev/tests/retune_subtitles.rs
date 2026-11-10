@@ -26,7 +26,7 @@ use lazymkv_dev::evidence::{skip, Ctx, DiskTree, EVIDENCE_SHOWN};
 const DESIGN_SPEC: &str = "../../docs/superpowers/specs/2026-10-04-lazymkv-design.md";
 
 /// retune's usage line, as every argument error prints it.
-const USAGE_LINE: &str = "usage: lazymkv-dev retune [--evidence DIR] [--set NAME=VALUE] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]";
+const USAGE_LINE: &str = "usage: lazymkv-dev retune [--evidence DIR[=TEXTDIR] ...] [--set NAME=VALUE] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]";
 
 /// Made-up English lines for the OCR text (no line of any real subtitle), as in core's harness tests: alone in its
 /// title, this dialogue is placed as regular by the text rule without a review.
@@ -135,14 +135,15 @@ fn spec_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(DESIGN_SPEC)
 }
 
-/// Writes `<root>/corpus/disc-a`, a film with one English PGS stream (scan stream 1, file track 1) of 40 events labelled
-/// sdh from its read text before the verdict, with no style (RP25), and its OCR text under `<root>/text/disc-a/eng-only/subs-ocr/`.
-fn write_disc_a(root: &Path) {
-    let rec = root.join("corpus/disc-a");
+/// Writes `<root>/<corpus>/<slug>`, a film with one English PGS stream (scan stream 1, file track 1) of 40 events
+/// labelled `kind` from its read text before the verdict, with no style (RP25), and its OCR text under
+/// `<root>/<text>/<slug>/eng-only/subs-ocr/`. Every value is the one `write_disc_a` wrote before this task.
+fn write_disc(root: &Path, corpus: &str, text: &str, slug: &str, kind: &str) {
+    let rec = root.join(corpus).join(slug);
     write(&rec.join("scan.txt"), scan_text(&[(1, "Blu-ray disc")], &[(0, BD_TITLE, &[(0, AVC), (1, ENG_PGS)])]));
     write(&rec.join("tmdb.json"), json!({"title": "Made Up Film", "original_language": "en"}).to_string());
-    let labels = json!({"format": FORMAT, "slug": "disc-a", "tracks": [
-        {"label": "eng-only", "stream": 1, "kind": "sdh", "how": "read", "sure": true, "date": "2026-10-16",
+    let labels = json!({"format": FORMAT, "slug": slug, "tracks": [
+        {"label": "eng-only", "stream": 1, "kind": kind, "how": "read", "sure": true, "date": "2026-10-16",
          "saw_verdict": false, "note": null, "style": null}
     ]});
     write(&rec.join("subtitle-labels.json"), labels.to_string());
@@ -171,7 +172,12 @@ fn write_disc_a(root: &Path) {
         ocr.push('\n');
     }
     write(&label.join("subs/sub-0.packets.json"), json!({"packets": packets}).to_string());
-    write(&root.join("text/disc-a/eng-only/subs-ocr/sub-0.ocr.jsonl"), ocr);
+    write(&root.join(text).join(slug).join("eng-only/subs-ocr/sub-0.ocr.jsonl"), ocr);
+}
+
+/// `<root>/corpus/disc-a`, labelled sdh, and its text under `<root>/text`.
+fn write_disc_a(root: &Path) {
+    write_disc(root, "corpus", "text", "disc-a", "sdh");
 }
 
 /// `retune` with cwd `root` and the environment `env`: (exit code, stdout, stderr).
@@ -529,7 +535,7 @@ fn the_retune_row_of_the_command_table_names_subtitles_and_text() {
     let row = lazymkv_dev::COMMANDS.iter().find(|(name, _, _)| *name == "retune").map(|(_, _, synopsis)| *synopsis);
     assert_eq!(
         row,
-        Some("[--evidence DIR] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]")
+        Some("[--evidence DIR[=TEXTDIR] ...] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]")
     );
 }
 
@@ -604,4 +610,107 @@ fn with_the_goldens_ocr_text_the_clones_labelled_tracks_get_no_costly_verdict() 
     assert_eq!(section(&h, "Costly verdicts ("), ["  none"]);
     assert_eq!(h.lines.last().map(String::as_str), Some("RESULT ok"));
     assert_eq!((h.labelled, h.placed_without_review, h.costly.len(), h.exit_code), (6, 6, 0, 0));
+}
+
+// Several evidence folders and DIR=TEXTDIR (design part 7.7; notes D1, call 12; Rulings T5-R29, T5-R51, T5-R53).
+mod folders {
+    use super::*;
+
+    #[test]
+    fn text_with_two_evidence_folders_is_an_argument_error() {
+        let (tmp, corpus, text, spec) = scratch("retune-folders-text");
+        let args = ["--subtitles", "--evidence", corpus.as_str(), "--evidence", corpus.as_str(), "--spec", spec.as_str(), "--text", text.as_str()];
+        assert_eq!(
+            call(&tmp.0, &args, &[]),
+            (2, String::new(), format!("{USAGE_LINE}\nlazymkv-dev retune: error: argument --text: only with a single --evidence; give DIR=TEXTDIR\n"))
+        );
+    }
+
+    #[test]
+    fn evidence_dir_equals_textdir_with_text_is_an_argument_error() {
+        let (tmp, corpus, text, spec) = scratch("retune-folders-text-twice");
+        let refused = format!(
+            "{USAGE_LINE}\nlazymkv-dev retune: error: argument --text: not with --evidence DIR=TEXTDIR, which names the text already\n"
+        );
+        let joined = format!("{corpus}={text}");
+        let one = ["--subtitles", "--evidence", joined.as_str(), "--spec", spec.as_str(), "--text", text.as_str()];
+        assert_eq!(call(&tmp.0, &one, &[]), (2, String::new(), refused.clone()));
+        // Checked before the single-folder rule, so a relayed retune --jobs --text names DIR=TEXTDIR (T5-R53).
+        let two = ["--subtitles", "--evidence", joined.as_str(), "--evidence", corpus.as_str(), "--spec", spec.as_str(), "--text", text.as_str()];
+        assert_eq!(call(&tmp.0, &two, &[]), (2, String::new(), refused));
+    }
+
+    #[test]
+    fn a_single_evidence_with_text_keeps_todays_meaning() {
+        let (tmp, corpus, text, spec) = scratch("retune-folders-single");
+        let today = call(&tmp.0, &["--subtitles", "--evidence", corpus.as_str(), "--spec", spec.as_str(), "--text", text.as_str()], &[]);
+        assert_eq!(today, (1, printed_report(), String::new()));
+        let joined = format!("{corpus}={text}");
+        assert_eq!(call(&tmp.0, &["--subtitles", "--evidence", joined.as_str(), "--spec", spec.as_str()], &[]), today);
+        let inline = format!("--evidence={corpus}={text}");
+        assert_eq!(call(&tmp.0, &["--subtitles", inline.as_str(), "--spec", spec.as_str()], &[]), today);
+        // A TEXTDIR half wins over LAZYMKV_OCR_TEXT, as --text does.
+        let nope = tmp.0.join("nope").display().to_string();
+        assert_eq!(
+            call(&tmp.0, &["--subtitles", "--evidence", joined.as_str(), "--spec", spec.as_str()], &[("LAZYMKV_OCR_TEXT", nope)]),
+            today
+        );
+    }
+
+    #[test]
+    fn a_several_folder_run_over_an_engine_folder_with_an_unread_stream_exits_3() {
+        let tmp = Scratch::new("retune-folders-unread");
+        write_disc(&tmp.0, "clone", "clone-text", "disc-a", "regular");
+        write_disc(&tmp.0, "recordings", "dataset", "job-e-1", "regular");
+        let job = tmp.0.join("recordings/job-e-1");
+        write(&job.join("state.json"), "{}");
+        write(&job.join("tmdb.json"), json!({"title": "Made Up Film", "original_language": "en", "fetched_at": "2026-10-05"}).to_string());
+        write(
+            &job.join("eng-only/subs-ocr/summary.json"),
+            json!({"streams": [{"n": 0, "codec": "S_HDMV/PGS", "read": false, "why": "time cap of 60.0 s reached after 12 of 40 events"}]}).to_string(),
+        );
+        fs::remove_dir_all(tmp.0.join("dataset/job-e-1")).unwrap(); // the dataset holds no text of an unread stream
+        let at = |name: &str| tmp.0.join(name).display().to_string();
+        let clone = format!("{}={}", at("clone"), at("clone-text"));
+        let recordings = format!("{}={}", at("recordings"), at("dataset"));
+        let spec = spec_path().display().to_string();
+        let single = |evidence: &str| call(&tmp.0, &["--subtitles", "--evidence", evidence, "--spec", spec.as_str()], &[]);
+        let (clean_code, clean_out, _) = single(&clone);
+        assert_eq!(clean_code, 0, "{clean_out}");
+        let (engine_code, engine_out, _) = single(&recordings);
+        assert_eq!(engine_code, 3, "{engine_out}");
+        assert!(engine_out.contains("Labels that cannot be judged:\n  job-e-1/eng-only stream 1: "), "{engine_out}");
+        let args = ["--subtitles", "--evidence", clone.as_str(), "--evidence", recordings.as_str(), "--spec", spec.as_str()];
+        let (code, out, err) = call(&tmp.0, &args, &[]);
+        assert_eq!((code, err.as_str()), (3, ""), "{out}");
+        assert_eq!(
+            out,
+            format!("evidence folder 1 of 2: {}\n{clean_out}\nevidence folder 2 of 2: {}\n{engine_out}", at("clone"), at("recordings"))
+        );
+    }
+
+    /// D2 for the subtitle harness: a folder without `*/subtitle-labels.json` (the engine's recordings until the owner
+    /// writes one) reads "no labelled track" and leaves the exit code to the folders with labels; none with labels
+    /// exits 3.
+    #[test]
+    fn a_subtitles_folder_without_subtitle_labels_reads_no_labelled_track_and_keeps_the_exit_code() {
+        let tmp = Scratch::new("retune-folders-unlabelled");
+        write_disc(&tmp.0, "labelled", "labelled-text", "disc-a", "sdh");
+        write_disc(&tmp.0, "unlabelled", "unlabelled-text", "disc-a", "sdh");
+        fs::remove_file(tmp.0.join("unlabelled/disc-a/subtitle-labels.json")).unwrap();
+        let at = |name: &str| tmp.0.join(name).display().to_string();
+        let labelled = format!("{}={}", at("labelled"), at("labelled-text"));
+        let unlabelled = format!("{}={}", at("unlabelled"), at("unlabelled-text"));
+        let spec = spec_path().display().to_string();
+        let (alone_code, alone, _) = call(&tmp.0, &["--subtitles", "--evidence", labelled.as_str(), "--spec", spec.as_str()], &[]);
+        let both = ["--subtitles", "--evidence", labelled.as_str(), "--evidence", unlabelled.as_str(), "--spec", spec.as_str()];
+        let (code, out, _) = call(&tmp.0, &both, &[]);
+        assert_eq!(code, alone_code, "{out}");
+        assert_eq!(
+            out,
+            format!("evidence folder 1 of 2: {}\n{alone}\nevidence folder 2 of 2: {}\nno labelled track\n", at("labelled"), at("unlabelled"))
+        );
+        let neither = ["--subtitles", "--evidence", unlabelled.as_str(), "--evidence", unlabelled.as_str(), "--spec", spec.as_str()];
+        assert_eq!(call(&tmp.0, &neither, &[]).0, 3, "a run in which no folder has labels exits 3 (D2)");
+    }
 }

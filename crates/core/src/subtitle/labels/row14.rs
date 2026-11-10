@@ -550,6 +550,7 @@ fn read_rip(
             text: text.as_ref().ok(),
             remembered: None,
             reviewed: None,
+            unread: BTreeMap::new(),
         };
         decide_subtitles(&rip_title(&title, &selection), &facts, settings)
     };
@@ -574,7 +575,7 @@ fn text_decisions(
     if !text_tree.is_dir(&reading) {
         return Err(format!("no OCR text: {} {TEXT_HINT}", text_tree.display(&reading)));
     }
-    let run = subs_run(evidence, &folder, text_tree, &reading, None, settings.sub_clear_max_bytes, &settings.text_rule());
+    let run = subs_run(evidence, &folder, text_tree, &reading, None, settings.sub_clear_max_bytes, &settings.text_rule(), &[]);
     if run.exit_code != 0 {
         return Err(run.stderr.join("; "));
     }

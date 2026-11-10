@@ -1632,3 +1632,280 @@ fn counts_the_answer_follows_the_rules_of_row_13() {
         assert!(out.contains(answer), "{spec}: {out}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Several evidence folders (design part 7.7; notes D1, D2, calls 12 and 25; Rulings T5-R29 to T5-R31, T5-R40,
+// T5-R53). Every folder is made up here, from the fixtures above (RP21).
+
+mod several {
+    use super::super::{single_only, split_evidence, worst, EvidenceArg, NO_LABELLED_TRACK, TEXT_WITH_TEXTDIR, USAGE};
+    use super::*;
+
+    /// Ctx::for_test's day is 2026-10-13: a copy fetched 2026-01-01 is more than six months old.
+    const STALE: &str = "2026-01-01";
+
+    /// The main corpus in `<tmp>/<name>`, exit 0 alone; its path as an argument.
+    fn ok_folder(tmp: &TempDir, name: &str) -> String {
+        build_main_corpus(&tmp.0.join(name));
+        tmp.path(name)
+    }
+
+    /// The main corpus with disc-b's all-tracks stream 3 labelled alternate-mix (programme audio), which gets the
+    /// commentary verdict: exit 1 alone.
+    fn failing_folder(tmp: &TempDir, name: &str) -> String {
+        build_main_corpus(&tmp.0.join(name));
+        write_labels(&tmp.0.join(name).join("disc-b"), vec![entry("all-tracks", 3, "alternate-mix")], json!({}));
+        tmp.path(name)
+    }
+
+    /// The main corpus with a label of disc-b's all-tracks stream 7, which no level folder measures: exit 3 alone.
+    fn unmeasured_folder(tmp: &TempDir, name: &str) -> String {
+        build_main_corpus(&tmp.0.join(name));
+        let slug = tmp.0.join(name).join("disc-b");
+        let data = read_json_file(&slug.join("audio-labels.json"));
+        let mut tracks = data["tracks"].as_array().unwrap().clone();
+        tracks.push(entry("all-tracks", 7, "foreign-dub"));
+        write_labels(&slug, tracks, data["titles"].clone());
+        tmp.path(name)
+    }
+
+    /// One level folder and no audio-labels.json anywhere.
+    fn unlabelled_folder(tmp: &TempDir, name: &str) -> String {
+        let s = signals();
+        Folder::new("mu", &[(2, &s.comment[..], "cu")]).write(&tmp.0.join(name).join("disc-u/t0"));
+        tmp.path(name)
+    }
+
+    /// The main corpus with fit-disc's label in no vocabulary: exit 2 alone.
+    fn bad_labels_folder(tmp: &TempDir, name: &str) -> String {
+        build_main_corpus(&tmp.0.join(name));
+        write_labels(&tmp.0.join(name).join("fit-disc"), vec![entry("t0", 3, "comentary")], json!({}));
+        tmp.path(name)
+    }
+
+    /// `retune --evidence <folder> ... --spec <tmp>/spec.md <extra>`: (exit code, stdout, stderr).
+    fn over(tmp: &TempDir, folders: &[&str], extra: &[&str]) -> (i32, String, String) {
+        let spec = tmp.path("spec.md");
+        let mut args: Vec<&str> = Vec::new();
+        for folder in folders {
+            args.extend(["--evidence", *folder]);
+        }
+        args.push("--spec");
+        args.push(spec.as_str());
+        args.extend_from_slice(extra);
+        call(tmp, &args)
+    }
+
+    /// The single-folder run over `folder` once it has settled: run twice, so the second reads the baseline the first
+    /// wrote, as a several-folder run then reads it.
+    fn settled(tmp: &TempDir, folder: &str) -> (i32, String, String) {
+        over(tmp, &[folder], &[]);
+        over(tmp, &[folder], &[])
+    }
+
+    /// A folder's section in a run of `m` folders, from its settled single-folder stdout: the header, then that stdout
+    /// without its "snapshot:" line.
+    fn section_from(k: usize, m: usize, folder: &str, single_out: &str) -> String {
+        let body: String =
+            single_out.lines().filter(|line| !line.starts_with("snapshot: ")).map(|line| format!("{line}\n")).collect();
+        format!("evidence folder {k} of {m}: {folder}\n{body}")
+    }
+
+    #[test]
+    fn evidence_dir_equals_textdir_splits_at_the_first_equals_sign() {
+        let arg = |dir: &str, text: Option<&str>| EvidenceArg { dir: dir.to_string(), text: text.map(str::to_string) };
+        assert_eq!(split_evidence("corpus/owner"), arg("corpus/owner", None));
+        assert_eq!(
+            split_evidence(r"T:\tuning\recordings=T:\tuning\dataset"),
+            arg(r"T:\tuning\recordings", Some(r"T:\tuning\dataset"))
+        );
+        assert_eq!(split_evidence("a=b=c"), arg("a", Some("b=c")));
+    }
+
+    #[test]
+    fn the_exit_code_is_the_worst_over_the_folders() {
+        assert_eq!(worst(&[0, 1, 0]), 1);
+        assert_eq!(worst(&[1, 3, 0]), 3);
+        assert_eq!(worst(&[3, 1]), 3);
+        assert_eq!(worst(&[0, 0]), 0);
+        assert_eq!(worst(&[]), 3, "no folder with labels (D2)");
+        let tmp = new_tmp("several-worst");
+        let (ok, fail, unmeasured) =
+            (ok_folder(&tmp, "ok"), failing_folder(&tmp, "fail"), unmeasured_folder(&tmp, "unmeasured"));
+        assert_eq!(over(&tmp, &[ok.as_str()], &[]).0, 0);
+        assert_eq!(over(&tmp, &[fail.as_str()], &[]).0, 1);
+        assert_eq!(over(&tmp, &[unmeasured.as_str()], &[]).0, 3);
+        let runs: [(&[&str], i32); 5] = [
+            (&[ok.as_str(), fail.as_str()], 1),
+            (&[fail.as_str(), ok.as_str()], 1),
+            (&[ok.as_str(), unmeasured.as_str()], 3),
+            (&[unmeasured.as_str(), fail.as_str()], 3),
+            (&[ok.as_str(), ok.as_str()], 0),
+        ];
+        for (folders, code) in runs {
+            let (got, out, err) = over(&tmp, folders, &[]);
+            assert_eq!(got, code, "{folders:?}\n{out}{err}");
+        }
+        assert_eq!(over(&tmp, &[ok.as_str(), unmeasured.as_str()], &["--allow-unmeasured"]).0, 0);
+    }
+
+    #[test]
+    fn two_evidence_folders_give_two_sections_in_flag_order() {
+        let tmp = new_tmp("several-sections");
+        let (a, b) = (ok_folder(&tmp, "a"), failing_folder(&tmp, "b"));
+        let (code_a, out_a, err_a) = settled(&tmp, &a);
+        let (code_b, out_b, err_b) = settled(&tmp, &b);
+        assert_eq!((code_a, code_b, err_a.as_str(), err_b.as_str()), (0, 1, "", ""));
+        let baselines = |tmp: &TempDir| ["a", "b"].map(|name| fs::read(tmp.0.join(name).join(BASELINE_FILE)).unwrap());
+        let before = baselines(&tmp);
+        let expected = format!("{}\n{}", section_from(1, 2, &a, &out_a), section_from(2, 2, &b, &out_b));
+        assert_eq!(over(&tmp, &[a.as_str(), b.as_str()], &[]), (1, expected, String::new()));
+        let reversed = format!("{}\n{}", section_from(1, 2, &b, &out_b), section_from(2, 2, &a, &out_a));
+        assert_eq!(over(&tmp, &[b.as_str(), a.as_str()], &[]), (1, reversed, String::new()));
+        assert_eq!(baselines(&tmp), before, "a several-folder run writes no baseline (T5-R31)");
+        assert_eq!(fs::read_dir(tmp.0.join("tmp")).unwrap().count(), 0, "and no trial or unchecked snapshot");
+    }
+
+    #[test]
+    fn snapshot_or_compare_with_two_evidence_folders_is_an_argument_error() {
+        let tmp = new_tmp("several-snapshot");
+        let (a, b) = (tmp.path("a"), tmp.path("b")); // never read: the arguments are refused first
+        let file = tmp.path("s.json");
+        for flag in ["--snapshot", "--compare"] {
+            let refused = format!("usage: lazymkv-dev {USAGE}\nlazymkv-dev retune: error: {}\n", single_only(flag));
+            assert_eq!(over(&tmp, &[a.as_str(), b.as_str()], &[flag, file.as_str()]), (2, String::new(), refused), "{flag}");
+        }
+        assert!(!tmp.0.join("s.json").exists());
+        assert_eq!(single_only("--snapshot"), "argument --snapshot: only with a single --evidence");
+        assert_eq!(single_only("--compare"), "argument --compare: only with a single --evidence");
+        assert_eq!(single_only("--text"), "argument --text: only with a single --evidence; give DIR=TEXTDIR");
+        assert_eq!(TEXT_WITH_TEXTDIR, "argument --text: not with --evidence DIR=TEXTDIR, which names the text already");
+    }
+
+    #[test]
+    fn an_evidence_textdir_half_is_ignored_without_subtitles() {
+        let tmp = new_tmp("several-textdir");
+        let (a, b) = (ok_folder(&tmp, "a"), failing_folder(&tmp, "b"));
+        let nowhere = tmp.path("no-text"); // never made: the audio harness reads no OCR text
+        let single = settled(&tmp, &a);
+        assert_eq!(over(&tmp, &[format!("{a}={nowhere}").as_str()], &[]), single);
+        let both = over(&tmp, &[a.as_str(), b.as_str()], &[]);
+        assert_eq!(both.0, 1);
+        let (a_text, b_text) = (format!("{a}={nowhere}"), format!("{b}={nowhere}"));
+        assert_eq!(over(&tmp, &[a_text.as_str(), b_text.as_str()], &[]), both);
+    }
+
+    #[test]
+    fn a_folder_without_labels_reads_no_labelled_track_and_keeps_the_exit_code() {
+        assert_eq!(NO_LABELLED_TRACK, "no labelled track");
+        let tmp = new_tmp("several-unlabelled");
+        let (ok, fail, none) = (ok_folder(&tmp, "ok"), failing_folder(&tmp, "fail"), unlabelled_folder(&tmp, "none"));
+        let (_, out_ok, _) = settled(&tmp, &ok);
+        let (code, out, err) = over(&tmp, &[ok.as_str(), none.as_str()], &[]);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        assert_eq!(out, format!("{}\nevidence folder 2 of 2: {none}\nno labelled track\n", section_from(1, 2, &ok, &out_ok)));
+        assert_eq!(over(&tmp, &[none.as_str(), fail.as_str()], &[]).0, 1);
+        assert!(!tmp.0.join("none").join(BASELINE_FILE).exists());
+    }
+
+    #[test]
+    fn a_run_with_no_labels_in_any_folder_exits_3() {
+        let tmp = new_tmp("several-no-labels");
+        let (x, y) = (unlabelled_folder(&tmp, "x"), unlabelled_folder(&tmp, "y"));
+        let expected = format!("evidence folder 1 of 2: {x}\nno labelled track\n\nevidence folder 2 of 2: {y}\nno labelled track\n");
+        assert_eq!(over(&tmp, &[x.as_str(), y.as_str()], &[]), (3, expected, String::new()));
+        assert_eq!(over(&tmp, &[x.as_str(), y.as_str()], &["--allow-unmeasured"]).0, 3, "--allow-unmeasured makes no label");
+    }
+
+    #[test]
+    fn a_folder_whose_labels_do_not_validate_exits_2_at_once() {
+        let tmp = new_tmp("several-bad-labels");
+        let (ok, bad) = (ok_folder(&tmp, "ok"), bad_labels_folder(&tmp, "bad"));
+        let (code, out_bad, _) = over(&tmp, &[bad.as_str()], &[]);
+        assert_eq!(code, 2, "{out_bad}");
+        let (_, out_ok, _) = settled(&tmp, &ok);
+        assert_eq!(
+            over(&tmp, &[bad.as_str(), ok.as_str()], &[]),
+            (2, format!("evidence folder 1 of 2: {bad}\n{out_bad}"), String::new())
+        );
+        assert_eq!(
+            over(&tmp, &[ok.as_str(), bad.as_str()], &[]),
+            (2, format!("{}\nevidence folder 2 of 2: {bad}\n{out_bad}", section_from(1, 2, &ok, &out_ok)), String::new())
+        );
+    }
+
+    #[test]
+    fn a_missing_evidence_folder_stops_the_run_before_any_section() {
+        let tmp = new_tmp("several-missing");
+        let ok = ok_folder(&tmp, "ok");
+        let absent = tmp.path("absent");
+        let line = format!(
+            "{absent}: no such folder; the evidence repository lazymkv-evidence is not cloned there (git clone https://github.com/krcm0209/lazymkv-evidence {absent})\n"
+        );
+        assert_eq!(over(&tmp, &[ok.as_str(), absent.as_str()], &[]), (3, String::new(), line));
+    }
+
+    #[test]
+    fn the_baseline_check_runs_only_for_a_folder_holding_audio_dataset_json() {
+        let tmp = new_tmp("several-baseline");
+        let (a, b) = (ok_folder(&tmp, "a"), ok_folder(&tmp, "b"));
+        settled(&tmp, &a);
+        let baseline = fs::read(tmp.0.join("a").join(BASELINE_FILE)).unwrap();
+        let (code, out, err) = over(&tmp, &[a.as_str(), b.as_str()], &[]);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        let (first, second) = out.split_once(&format!("\nevidence folder 2 of 2: {b}\n")).expect("two sections");
+        assert!(first.contains("Changes since the previous snapshot ("), "{first}");
+        assert!(!second.contains("Changes since the previous snapshot"), "{second}");
+        assert_eq!(fs::read(tmp.0.join("a").join(BASELINE_FILE)).unwrap(), baseline);
+        assert!(!tmp.0.join("b").join(BASELINE_FILE).exists(), "a several-folder run writes no baseline (T5-R31)");
+    }
+
+    #[test]
+    fn each_folders_refetch_lines_name_that_folder() {
+        let tmp = new_tmp("several-refetch");
+        let (a, b) = (ok_folder(&tmp, "a"), ok_folder(&tmp, "b"));
+        write(&tmp.0.join("b/disc-s/lookup-status.txt"), "tmdb movie/6537 200\r\n");
+        write(
+            &tmp.0.join("b/disc-s/tmdb.json"),
+            format!(r#"{{"id": 6537, "title": "Made Up Film", "original_language": "es", "fetched_at": "{STALE}"}}"#),
+        );
+        let line = |shown: &str| {
+            format!("{shown}/disc-s/tmdb.json: the TMDb copy is more than six months old (fetched_at 2026-01-01) and TMDB_TOKEN is not set to fetch it again\n")
+        };
+        assert_eq!(over(&tmp, &[a.as_str(), b.as_str()], &[]), (3, String::new(), line(b.as_str())));
+        assert_eq!(over(&tmp, &[b.as_str()], &[]), (3, String::new(), line("corpus/owner")), "one folder is shown as today");
+    }
+
+    #[test]
+    fn a_job_shaped_folder_with_a_stale_copy_is_unmeasured_and_never_exits_3() {
+        let tmp = new_tmp("several-job-stale");
+        let corpus = ok_folder(&tmp, "corpus");
+        let (code, out, err) = settled(&tmp, &corpus);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        let s = signals();
+        for (slug, main, cand) in [("job-j", "mj", "cj"), ("job-k", "mk", "ck")] {
+            let dir = tmp.0.join("corpus").join(slug);
+            Folder::new(main, &[(3, &s.comment[..], cand)]).write(&dir.join("t0"));
+            // Read, this label would fail the run (exit 1): a programme track with the commentary verdict.
+            write_labels(&dir, vec![entry("t0", 3, "alternate-mix")], json!({}));
+            write(&dir.join("state.json"), "{}");
+        }
+        write(
+            &tmp.0.join("corpus/job-j/tmdb.json"),
+            format!(r#"{{"id": 6537, "title": "Made Up Film", "original_language": "es", "fetched_at": "{STALE}"}}"#),
+        );
+        // job-k's copy was answered and then deleted: missing.
+        write(&tmp.0.join("corpus/job-k/lookup-status.txt"), "tmdb movie/6537 200\r\n");
+        let lines = |shown: &str| {
+            format!(
+                "lazymkv-dev retune: {shown}/job-j/tmdb.json: unmeasured: the TMDb copy is missing or more than six months old (fetched_at 2026-01-01), and a job folder's copy is fetched again only by lazymkvctl retune --jobs\n\
+                 lazymkv-dev retune: {shown}/job-k/tmdb.json: unmeasured: the TMDb copy is missing or more than six months old (no fetched_at), and a job folder's copy is fetched again only by lazymkvctl retune --jobs\n"
+            )
+        };
+        assert_eq!(over(&tmp, &[corpus.as_str()], &[]), (0, out, lines("corpus/owner")));
+        let other = ok_folder(&tmp, "other");
+        let (code, several, err) = over(&tmp, &[other.as_str(), corpus.as_str()], &[]);
+        assert_eq!((code, err), (0, lines(corpus.as_str())), "{several}");
+        assert!(!several.contains("job-j") && !several.contains("job-k"), "{several}");
+    }
+}

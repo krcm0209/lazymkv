@@ -27,7 +27,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("reconcile", cmd::reconcile::run as Command, "<scan> <title> <mkvmerge_json> [--selection all|eng] [--rip-log FILE]"),
     ("decide", cmd::decide::run as Command, "(<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE]"),
     ("plan", cmd::plan::run as Command, "<slug|recording dir|scan file> [--evidence DIR] [--settings FILE] [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE]"),
-    ("retune", cmd::retune::run as Command, "[--evidence DIR] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]"),
+    ("retune", cmd::retune::run as Command, "[--evidence DIR[=TEXTDIR] ...] [--set NAME=VALUE ...] [--snapshot FILE] [--compare FILE] [--spec FILE] [--allow-unmeasured] [--subtitles] [--text DIR]"),
     ("levels-args", cmd::levels_args::run as Command, "[--evidence DIR] <slug|dir> <label>"),
     ("titles", cmd::titles::run as Command, "[--evidence DIR] <slug|dir>"),
     ("audio-report", cmd::audio_report::run as Command, "<folder> ..."),
@@ -43,6 +43,8 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("ocr-compare", cmd::ocr_compare::run as Command, "<tess> <ocrs> [--rec DIR] [--tag CODE]"),
     ("golden", cmd::golden::run as Command, "write|check [--evidence DIR] [--text DIR]"),
     ("census", cmd::census::run as Command, "[--evidence DIR]"),
+    #[cfg(feature = "ocr-trial")]
+    ("ocr-trial", cmd::ocr_trial::run as Command, cmd::ocr_trial::SYNOPSIS),
 ];
 
 const USAGE: &str = "usage: lazymkv-dev <command> [arguments]";
@@ -320,6 +322,18 @@ mod tests {
             assert!(text.contains(&format!("  {} {}\n", name, synopsis)), "{}", text);
         }
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn the_help_lists_ocr_trial_only_with_the_feature() {
+        let ctx = evidence::Ctx::for_test(Path::new("."));
+        let (mut out, mut err): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+        assert_eq!(dispatch(&ctx, &words(&["--help"]), &mut out, &mut err), 0);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.contains("\n  ocr-trial "), cfg!(feature = "ocr-trial"), "{text}");
+        let (mut out, mut err): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+        let code = dispatch(&ctx, &words(&["ocr-trial", "--help"]), &mut out, &mut err);
+        assert_eq!(code, if cfg!(feature = "ocr-trial") { 0 } else { 2 });
     }
 
     #[test]

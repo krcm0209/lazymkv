@@ -17,8 +17,12 @@ lazymkv-core = { path = "../core" }
 lazymkv-platform = { path = "../platform" }
 # plan, decide and retune through lazymkv_dev::dispatch (design part 9.5, P23).
 lazymkv-dev = { path = "../dev" }
+# The two embedded models for export-models and licenses, without rten (design parts 9.6 and 11.4; notes E3, call 23).
+lazymkv-ocr-models = { path = "../ocr-models" }
 serde_json.workspace = true
 
 [dev-dependencies]
 lazymkv-core = { path = "../core", features = ["testsupport"] }
 lazymkv-platform = { path = "../platform", features = ["fakes"] }
+# export-models' test checks the written files' SHA-256 (notes call 16).
+sha2.workspace = true

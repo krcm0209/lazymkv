@@ -1,2 +1,3 @@
 {"responses":[{"args_contain":["-show_streams"],"stdout":"ffprobe-streams.json"},
+ {"args_contain":["proxy-check.json"],"creates":[{"in_cwd":"proxy-check.json","copy_from":"proxy-check-1.json"}]},
  {"args_contain":["-version"],"stdout":"ffprobe-version.txt"}]}

@@ -46,6 +46,11 @@ pub struct SubtitleFacts<'a> {
     /// The owner's Override tracks for this title (spec 11), by scan stream; they win over remembered ones. Task 13 passes
     /// `overrides.subtitles_of(title.number)` (that title's entries of `Overrides.subtitles`, by stream).
     pub reviewed: Option<&'a BTreeMap<u32, SubtitleOverride>>,
+    /// Design part 10.8 (P19): the streams 6.4 step 10 did not read, by scan stream, each with its reason (`time cap of
+    /// {s} s reached after {k} of {m} events`, or the error), as `subs-ocr\summary.json` names them. Each gives one
+    /// note subtitle_text_unread; while any is here `decide_subtitles` compares no text for the title. Def: T5-2.
+    /// Use: T5-2, T5-15.
+    pub unread: BTreeMap<u32, String>,
 }
 
 /// Why a subtitle stream was dropped (spec 8.7, and the overrides of spec 5 and 11). Serialised as `{"why": "<snake
@@ -366,7 +371,7 @@ fn only_group(groups: &[Vec<u32>], holds: impl Fn(u32) -> bool) -> Option<usize>
 }
 
 pub use roles::{
-    confidence, decide_subtitles, text_disagreements, SubtitleCase, SubtitleDecision, SubtitleTrack,
+    confidence, decide_subtitles, text_disagreements, unread_detail, SubtitleCase, SubtitleDecision, SubtitleTrack,
     SUBTITLE_ALIGNMENT_CONFIDENCE, SUBTITLE_AMBIGUOUS_CONFIDENCE, SUBTITLE_FLAGS_CONFIDENCE, SUBTITLE_ONE_FULL_CONFIDENCE,
 };
 
@@ -529,7 +534,8 @@ mod roles {
         /// `confidence(case)`, or 1.00 when remembered or review overrides cover every English and no-language
         /// subtitle stream of the title still in the file (spec 5, 8.8).
         pub confidence: f64,
-        /// partial_subtitle_dropped and subtitle_text_disagrees, each naming its stream, in the order raised.
+        /// partial_subtitle_dropped, subtitle_text_disagrees and subtitle_text_unread, each naming its stream, in the
+        /// order raised.
         pub notes: Vec<Noted>,
         /// subtitle_ambiguous, or nothing (sorted and unique).
         pub reviews: Vec<ReviewReason>,
@@ -685,8 +691,9 @@ mod roles {
     /// those with no events dropped NoEvents; `text_disagreements` (subtitle_ambiguous and one subtitle_text_disagrees
     /// note per stream), only where 6.4 step 10 runs (`step10_runs`: the text rule's decisions are used only when the
     /// file holds two or more English or no-language subtitle streams, 8.7 "Text"; otherwise `facts.text` is ignored);
-    /// the confidence case; remembered then review overrides applied last (decided_by "remembered" or
-    /// "reviewed"; an override naming a stream that is not an English or no-language subtitle stream is ignored), with
+    /// then one subtitle_text_unread note per stream of `facts.unread`, with no review, the text being compared only
+    /// when `facts.unread` is empty (design part 10.8); the confidence case; remembered then review overrides applied
+    /// last (decided_by "remembered" or "reviewed"; an override naming a stream that is not an English or no-language subtitle stream is ignored), with
     /// confidence lookup::REMEMBERED_CONFIDENCE (1.00) and subtitle_ambiguous cleared when every English and
     /// no-language subtitle stream of the title still in the file (not in facts.removed) has an override
     /// (other-language streams are dropped by 8.7's first sentence; the case unchanged). A title with one English
@@ -702,7 +709,7 @@ mod roles {
     /// a one-track group SDH and keeps its track among the two of a larger group; every forced source needs at least
     /// one event but the one English stream in the file flagged forced; a not-full track that is not the forced track
     /// is dropped as NoEvents with no events and as ExtraForced with fewer than FORCED_MAX_EVENTS. Spec 8.7, D15, D20,
-    /// R5, R6. Def: T10. Use: T13, T16, T18.
+    /// R5, R6. Def: T10, T5-2. Use: T13, T16, T18, T5-15.
     pub fn decide_subtitles(title: &Title, facts: &SubtitleFacts<'_>, settings: &Settings) -> SubtitleDecision {
         let aside = set_aside(title);
         // The English and no-language subtitle streams (Task 9's `english_or_none`, the one copy): the streams 8.7 judges.
@@ -1015,8 +1022,9 @@ mod roles {
         // 8.7 "Text": where the text's verdict differs from the counts and timing, subtitle_ambiguous and one
         // subtitle_text_disagrees note per stream; the text never changes a role, a drop or a flag (D20). The text is
         // read only where 6.4 step 10 runs (two or more English or no-language subtitle streams in the file): a title
-        // with one English track keeps it as "English" without the flag.
-        if let Some(text) = facts.text.filter(|_| step10_runs(title, &facts.removed)) {
+        // with one English track keeps it as "English" without the flag. A title with a stream step 10 did not read uses
+        // no text (design part 10.8).
+        if let Some(text) = facts.text.filter(|_| step10_runs(title, &facts.removed) && facts.unread.is_empty()) {
             for (stream, read, role) in disagreements(&kept, &dropped, text) {
                 if overrides.contains_key(&stream) {
                     continue;
@@ -1028,6 +1036,11 @@ mod roles {
                     detail: text_line(stream, read, role),
                 });
             }
+        }
+
+        // Design part 10.8: one subtitle_text_unread note per stream step 10 did not read; no review.
+        for (&stream, reason) in &facts.unread {
+            notes.push(Noted { note: Note::SubtitleTextUnread, stream: Some(stream), detail: unread_detail(stream, reason) });
         }
 
         // The confidence table: a review first; then nothing left to count (no English stream at all, or flags
@@ -1107,6 +1120,12 @@ mod roles {
             None => "drop it".to_string(),
         };
         format!("stream {stream}: the text reads {}, the counts {counts} (8.7 \"Text\")", read.as_str())
+    }
+
+    /// The detail of a subtitle_text_unread note (design part 10.8): `stream {stream} was not read: {reason}`, a fact
+    /// with no subtitle text. Def: T5-2. Use: T5-2, T5-15.
+    pub fn unread_detail(stream: u32, reason: &str) -> String {
+        format!("stream {stream} was not read: {reason}")
     }
 
     /// `decided_by` of a track a remembered decision keeps (spec 5), and of one the owner's Override tracks keeps (spec 11).

@@ -377,7 +377,7 @@ fn subs_goldens(tree: &dyn Tree, slug: &str, label: &str, text: Option<&Path>, w
     let rule = TextRule::default();
     let rec = PathKey::new(&format!("{slug}/{label}"));
     let reading_key = PathKey::new(READING);
-    let run = subs_run(tree, &rec, &text_tree, &reading_key, None, rule.CLEAR_MAX_BYTES, &rule);
+    let run = subs_run(tree, &rec, &text_tree, &reading_key, None, rule.CLEAR_MAX_BYTES, &rule, &[]);
     if run.exit_code != 0 {
         let reason = format!("the subs run exited {}: {}", run.exit_code, run.stderr.join("; "));
         return both(if writing { NotProduced::Failed(reason) } else { NotProduced::Skipped(reason) });

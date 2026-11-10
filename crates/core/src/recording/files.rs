@@ -197,11 +197,36 @@ pub struct OcrSummary {
     pub streams: Vec<serde_json::Map<String, Value>>,
 }
 
-/// One entry of subs-ocr/sub-<n>.frames.json (a list): the frame number and its OCR line count.
+impl OcrSummary {
+    /// The streams step 10 did not read (design part 10.8, T5-R51), in file order, as (`n`, `why`): each entry whose
+    /// `"read"` is the JSON value `false` and that has an integer `n` and a string `why`. An entry without a `read`
+    /// key (phase 0's ocr-subs.ps1 writes none) or with any other value is not unread. Def: T5-2. Use: T5-2, T5-6,
+    /// T5-15.
+    pub fn unread(&self) -> Vec<(i64, String)> {
+        self.streams
+            .iter()
+            .filter(|entry| entry.get("read") == Some(&Value::Bool(false)))
+            .filter_map(|entry| {
+                let n = entry.get("n").and_then(Value::as_i64)?;
+                let why = entry.get("why").and_then(Value::as_str)?;
+                Some((n, why.to_string()))
+            })
+            .collect()
+    }
+}
+
+/// One entry of subs-ocr/sub-<n>.frames.json (a list): the frame number, its OCR line count and, when the reading has
+/// them, its two times (R6-phase0-16, 18).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct FrameEntry {
     pub frame: i64,
     pub lines: Option<i64>,
+    /// The frame's time in seconds from the file's start (showinfo's pts_time), absent in older readings (R6-phase0-16,
+    /// 18). Def: T5-10. Use: T5-10.
+    pub t: Option<f64>,
+    /// `t` plus the file's start time, the packets' pts_time; absent in the proof of concept's readings (R6-phase0-16,
+    /// 18; T5-R24). Def: T5-10. Use: T5-10.
+    pub pts: Option<f64>,
 }
 
 /// One record of sub-<n>.ocr.jsonl or ocrs-s<n>[-crop<pad>].jsonl. Holds subtitle text: in memory only, never
@@ -503,6 +528,18 @@ mod tests {
     }
 
     #[test]
+    fn a_frames_json_entry_without_t_or_pts_reads_with_both_none() {
+        let frames: Vec<FrameEntry> = serde_json::from_str(
+            r#"[{"frame": 0, "file": "f-00000000.png", "t": 0.25, "pts": 61.353, "chars": 0, "lines": 0, "markers": {"bracket": 0}},
+                {"frame": 1, "t": 0.5}, {"frame": 2, "lines": 1}]"#,
+        )
+        .unwrap();
+        assert_eq!((frames[0].t, frames[0].pts), (Some(0.25), Some(61.353)));
+        assert_eq!((frames[1].t, frames[1].pts), (Some(0.5), None));
+        assert_eq!((frames[2].t, frames[2].pts, frames[2].lines), (None, None, Some(1)));
+    }
+
+    #[test]
     fn packets_jsonl_discdb_and_lookup_status_read_as_the_python() {
         let object: PacketsFile =
             serde_json::from_str(r#"{"packets": [{"pts_time": "1.5", "duration_time": "2.0", "size": "120"}]}"#).unwrap();
@@ -551,5 +588,27 @@ mod tests {
         .unwrap();
         assert_eq!(odd.original_language.as_deref(), Some("es"));
         assert_eq!((odd.id, odd.title, odd.name, odd.release_date, odd.external_ids), (None, None, None, None, None));
+    }
+
+    #[test]
+    fn ocr_summary_reads_only_streams_marked_read_false() {
+        let summary: OcrSummary = serde_json::from_value(json!({"streams": [
+            {"n": 0, "codec": "S_HDMV/PGS", "read": true},
+            {"n": 1, "codec": "S_HDMV/PGS", "read": false, "why": "time cap of 60.0 s reached after 12 of 20 events"},
+            {"n": 2, "language": "eng", "codec": "hdmv_pgs_subtitle", "frames": 80, "text_frames": 40},
+            {"n": 3, "codec": "S_HDMV/PGS", "read": "false", "why": "made-up reason three"},
+            {"n": 4, "codec": "S_HDMV/PGS", "read": false},
+            {"n": "5", "codec": "S_VOBSUB", "read": false, "why": "made-up reason five"},
+            {"n": 6, "codec": "S_VOBSUB", "read": false, "why": "made-up reason six"}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            summary.unread(),
+            vec![
+                (1, "time cap of 60.0 s reached after 12 of 20 events".to_string()),
+                (6, "made-up reason six".to_string()),
+            ]
+        );
+        assert_eq!(OcrSummary::default().unread(), Vec::<(i64, String)>::new());
     }
 }

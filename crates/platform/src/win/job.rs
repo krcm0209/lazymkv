@@ -53,7 +53,8 @@ use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 /// (`security::child_environment`); T9-e otherwise holds (Ruling W7, amended at review round 1 of pull request 3
 /// (V1)). The engine's environment is built over HKCU's Environment, which a non-elevated process of the owner can
 /// write, so an option variable there (JAVA_TOOL_OPTIONS, FFREPORT, MKVTOOLNIX_OPTIONS) reaches no elevated tool, nor
-/// the relay's `lazymkvctl`, nor any grandchild, makemkvcon's Java included.
+/// the relay's `lazymkvctl`, nor any grandchild, makemkvcon's Java included. `Spawn::cwd`, when set, is the child's
+/// working folder (T5-R37).
 /// Def: T3-5. Use: T3-23.
 pub struct JobProcessGuard;
 
@@ -66,15 +67,19 @@ impl ProcessGuard for JobProcessGuard {
         let flags = if spawn.below_normal { flags | BELOW_NORMAL_PRIORITY_CLASS } else { flags };
         // std's own spawn keeps its handle discipline, so a concurrent spawn never inherits this child's pipe ends. Its
         // error is returned unchanged (a missing program is NotFound) while the empty job closes.
-        let mut child = Command::new(&spawn.program)
+        let mut command = Command::new(&spawn.program);
+        command
             .args(&spawn.args)
             .env_clear()
             .envs(child_environment(std::env::vars_os(), &spawn.env))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .creation_flags(flags)
-            .spawn()?;
+            .creation_flags(flags);
+        if let Some(dir) = &spawn.cwd {
+            command.current_dir(dir);
+        }
+        let mut child = command.spawn()?;
         // The child has run no instruction yet, so whatever it starts is in the job too (Review Focus 3).
         if let Err(error) = job.assign(&child) {
             let _ = child.kill();
@@ -256,7 +261,10 @@ mod tests {
     };
 
     use super::JobProcessGuard;
-    use crate::process::tests::{check_kills_its_child, check_pipes_both_streams_and_adds_env, helper, say, RAISED};
+    use crate::process::tests::{
+        check_kills_its_child, check_pipes_both_streams_and_adds_env, check_runs_in_its_cwd, check_runs_where_it_did, helper, say,
+        RAISED,
+    };
     use crate::testutil::ci_factor;
     use crate::{GuardedChild, ProcessGuard, Spawn};
 
@@ -643,9 +651,19 @@ mod tests {
     fn a_program_that_cannot_start_is_the_os_error() {
         let scratch = Scratch::new("job-missing");
         let dir = &scratch.0;
-        let spawn = Spawn { program: dir.join("absent.exe"), args: Vec::new(), env: Vec::new(), below_normal: false };
+        let spawn = Spawn { program: dir.join("absent.exe"), args: Vec::new(), env: Vec::new(), below_normal: false, cwd: None };
         let error = JobProcessGuard.spawn(&spawn).err().expect("an absent program does not start");
         std::fs::remove_dir(dir).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_job_spawn_with_cwd_runs_in_that_folder() {
+        check_runs_in_its_cwd(&JobProcessGuard);
+    }
+
+    #[test]
+    fn a_job_spawn_without_cwd_runs_where_it_did() {
+        check_runs_where_it_did(&JobProcessGuard);
     }
 }

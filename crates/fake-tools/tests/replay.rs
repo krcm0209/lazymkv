@@ -1,11 +1,13 @@
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 // Every direct run of a freshly copied stand-in goes through `retry_busy` (Rulings R29.c3, R29.c4).
+use lazymkv_engine::testkit::ci_factor;
 use lazymkv_engine::testkit::retry_busy;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
+use std::time::Instant;
 
 #[test]
 fn replays_output_creates_files_and_returns_the_exit_code() {
@@ -206,6 +208,39 @@ fn a_hanging_run_sleeps_until_killed() {
     assert_eq!(rest, "");
 }
 
+/// T5-R48: the files a response creates first exist while it hangs, so a stand-in worker can be killed after writing
+/// its records. The wait for the file scales by ci_factor; the 150 ms check that it still runs is the hang test's.
+#[test]
+fn files_created_first_exist_while_the_run_hangs() {
+    let dir = Scratch::new("fake-first");
+    let tool = stand_in(&dir.0, "lazymkv-ocr");
+    dir.write(
+        "lazymkv-ocr.json",
+        r#"{"responses":[{"args_contain":["--stream"],"hang_after_line":0,
+            "creates_first":[{"dir_arg_from_end":1,"name":"sub-0.ocr.jsonl","copy_from":"records.txt"}]}]}"#,
+    );
+    dir.write("records.txt", "{\"pts\":1.0,\"size\":900}\n");
+    let out = dir.0.join("out");
+    let mut child = retry_busy(|| {
+        Command::new(&tool)
+            .args(["evidence.mks", "--stream", "0", "--clear-max", "64", "--out", out.to_str().unwrap()])
+            .env_remove("LAZYMKV_FAKE_DIR")
+            .spawn()
+    })
+    .unwrap();
+    let file = out.join("sub-0.ocr.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(10) * ci_factor();
+    while !file.is_file() {
+        assert!(Instant::now() < deadline, "sub-0.ocr.jsonl was not created within 10 s");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(150) * ci_factor());
+    assert!(child.try_wait().unwrap().is_none(), "the stand-in exited before it was killed");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "{\"pts\":1.0,\"size\":900}\n");
+}
+
 #[test]
 fn output_stops_at_the_given_line_and_exits_with_the_given_code() {
     let dir = Scratch::new("fake-stop");
@@ -249,4 +284,22 @@ fn the_ffmpeg_stem_selects_ffmpeg_json() {
 
     assert_eq!(hashed.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&hashed.stdout), "0,a,MD5=00\n");
+}
+
+#[test]
+fn a_create_in_cwd_writes_the_file_in_the_stand_ins_working_folder() {
+    let (dir, work) = (Scratch::new("fake-cwd"), Scratch::new("fake-cwd-work"));
+    let tool = stand_in(&dir.0, "ffmpeg");
+    dir.write(
+        "ffmpeg.json",
+        r#"{"responses":[{"args_contain":["-/filter_complex"],"creates":[{"in_cwd":"raw-main-mix.txt","copy_from":"raw.txt"}]}]}"#,
+    );
+    dir.write("raw.txt", "lavfi.astats.Overall.RMS_level=-20.100000\n");
+    let mut command = Command::new(&tool);
+    command.args(["-v", "warning", "-i", "raw.mkv", "-/filter_complex", "graph.txt"]).current_dir(&work.0);
+    command.env_remove("LAZYMKV_FAKE_DIR");
+    let ran = retry_busy(|| command.output()).unwrap();
+    assert_eq!(ran.status.code(), Some(0), "{}", String::from_utf8_lossy(&ran.stderr));
+    assert_eq!(fs::read_to_string(work.0.join("raw-main-mix.txt")).unwrap(), "lavfi.astats.Overall.RMS_level=-20.100000\n");
+    assert!(!dir.0.join("raw-main-mix.txt").exists(), "the file is in the working folder, not the scenario's");
 }

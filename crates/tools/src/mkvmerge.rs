@@ -1,6 +1,6 @@
-//! The mkvmerge driver (design parts 5.3, 5.7, 5.11): the header read, the remux's arguments and the remux itself.
-//! Both calls run below normal priority and record their run with `run_recorded`. A call that is killed pauses
-//! `limits.after_kill` before it returns (S56).
+//! The mkvmerge driver (design parts 5.3, 5.7, 5.11): the header read, the remux's arguments and the remux itself,
+//! and step 10's subtitle extraction. Every call runs below normal priority and records its run with `run_recorded`.
+//! A call that is killed pauses `limits.after_kill` before it returns (S56).
 
 use std::io;
 use std::path::Path;
@@ -108,6 +108,35 @@ pub fn gui_progress(line: &str) -> Option<f64> {
 /// `ctx.on_progress`. Exit code 0 or 1 gives `Ok`, because verification of the result decides (PIPE-14; design parts
 /// 5.3, 5.11); a cancel or any other exit code gives the `Err` text. Def: T14. Use: T24.
 pub fn remux(ctx: &ToolCtx, program: &Path, args: &[String], out: &Path) -> io::Result<Result<(), String>> {
+    run_gui(ctx, program, args, out)
+}
+
+/// `["--gui-mode","-o",<evidence>,"-D","-A","-s","<ids joined by ,>",<raw>]`: the subtitle tracks `ids` of `raw`
+/// and nothing else (no video, no audio), written to `evidence`, with no `--compression` option, so mkvmerge's default
+/// zlib compression of PGS and VobSub tracks stays and the engine's evidence files read as phase 0's (K1,
+/// R2-decoders-9); `--gui-mode` and no `-q`, so its progress lines arrive (design parts 5.7 step 10 and 5.11).
+/// Def: T5-13. Use: T5-14, T5-24.
+pub fn extract_args(evidence: &Path, ids: &[i64], raw: &Path) -> Vec<String> {
+    let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
+    ["--gui-mode", "-o"]
+        .into_iter()
+        .map(String::from)
+        .chain([evidence.display().to_string()])
+        .chain(["-D", "-A", "-s"].into_iter().map(String::from))
+        .chain([ids.join(","), raw.display().to_string()])
+        .collect()
+}
+
+/// Step 10's subtitle extraction, below normal priority, with no time limit, recorded into `out`: it feeds each
+/// `#GUI#progress` line to `ctx.on_progress`, takes exit code 0 or 1 as `Ok` (PIPE-14) and gives `CANCELLED` or
+/// `mkvmerge exited with code <c>` otherwise; the caller checks that the evidence file exists (design parts 5.3,
+/// 5.7 step 10, 5.11). Def: T5-13. Use: T5-14.
+pub fn extract(ctx: &ToolCtx, program: &Path, args: &[String], out: &Path) -> io::Result<Result<(), String>> {
+    run_gui(ctx, program, args, out)
+}
+
+/// A `--gui-mode` call of mkvmerge with no time limit: the shared body of `remux` and `extract`.
+fn run_gui(ctx: &ToolCtx, program: &Path, args: &[String], out: &Path) -> io::Result<Result<(), String>> {
     let run = run_paused(ctx, program, args, out, None, &mut |line| {
         if let Some(fraction) = gui_progress(line) {
             (ctx.on_progress)(fraction);
@@ -130,7 +159,7 @@ pub(crate) fn code_text(exit_code: Option<i32>) -> String {
 
 /// `run_recorded` below normal priority, then the pause of S56 after any kill. It pauses too when the recorder gives
 /// `Err`, because the recorder kills the tool on its error paths without saying so.
-fn run_paused(
+pub(crate) fn run_paused(
     ctx: &ToolCtx,
     program: &Path,
     args: &[String],
@@ -189,6 +218,13 @@ mod tests {
 
     fn layout(tracks: Vec<OutputTrack>) -> Layout {
         Layout { tracks, chapters_kept: true }
+    }
+
+    #[test]
+    fn extract_args_keep_mkvmerges_default_compression() {
+        let args = extract_args(Path::new("t00.mks"), &[3, 4, 7], Path::new("raw.mkv"));
+        assert_eq!(args, ["--gui-mode", "-o", "t00.mks", "-D", "-A", "-s", "3,4,7", "raw.mkv"]);
+        assert!(!args.iter().any(|arg| arg.contains("compression")), "{args:?}");
     }
 
     #[test]
