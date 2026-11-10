@@ -187,16 +187,19 @@ engine only spawns the worker and kills it at the time cap, after which the stre
 `subtitle_text_unread`, as it is when the worker aborts on an allocation that fails. The exposure is memory pressure
 on the mini PC for at most one stream's cap, not a failed job. A bound can be put only inside the frozen paths, or as
 a process memory limit on the worker through the Job Object, which design part 5.3 lists no limit for ("these limits
-and no others"); the choice is the owner's, under "Pull request 5: the owner's decisions". The copy retried before every
+and no others"); the owner chose on 2026-11-10 to record it and take it up with pull request 6 or the next reopened
+trial, under "Pull request 5: the owner's decisions". The copy retried before every
 step (efficiency): design part 7.5 and call 10 set the retry's triggers, engine start and "whenever `ShareConnector`
 finds `tuning_root` reachable before another step", `start_copy` asks the shares on the copy thread so the owner thread
 asks none, and its guards bound the cost to one attempt in flight per pending job, since a job whose copy runs is
 skipped, each attempt that waits writing design part 7.1's one job.log line; it stands as built, and narrowing the
-trigger is the owner's to rule on. The CI pins: T5-R28 and the owner's plan-time yes of 2026-11-07 pin MKVToolNix
+trigger was the owner's to rule on, who left it as built on 2026-11-10. The CI pins: T5-R28 and the owner's plan-time
+yes of 2026-11-07 pin MKVToolNix
 82.0-1build2 by apt on ubuntu (noble's package), 103.0 by brew on macos with the version check and 103.0 by the
 installer on windows, under P33 and design part 12.1, so a formula that moves on fails the job and goes to the owner
 for a new pin, as `ci.yml`'s comment on the macos step says, and an `ubuntu-latest` that moves to the next release
-fails the apt pin the same way, which no comment says; nothing changed. The marker names (reuse): the level folder's
+fails the apt pin the same way, which no comment says; nothing changed, and on 2026-11-10 the owner left the runner
+image at `ubuntu-latest`. The marker names (reuse): the level folder's
 name prefix is core's `audio::pass::LEVEL_PREFIX`, which `level_folder` writes and `staged.rs` and `tuning.rs` read,
 and `PROXY_JSON` is step 10a's alone, which `staged_state` and `tuning.rs` read (T5-R68, below). The exit file's
 readers (simplification): `steps::exit_file` is the one reader of a run's `<out>.exit.json` for job.log's `ended` lines
@@ -1302,7 +1305,7 @@ The owner may overturn any of them.
 The planner's rulings of 2026-11-06, each settling an item the notes leave open or where two sources disagree, and each
 naming the task that builds it. On 2026-11-07 the owner let every ruling stand. T5-R66 and T5-R67 were added, and
 T5-R59 amended, at the review of pull request 16 on 2026-11-09, and T5-R68 and T5-R69 at its threads outside
-correctness on 2026-11-10, not by the planner; they name no task, and the owner has not yet ruled on them.
+correctness on 2026-11-10, not by the planner; they name no task. On 2026-11-10 the owner let all five stand.
 
 - T5-R1 (R2-decoders-4, R3-worker-3, R4-commands-15, R4-commands-68). The `ocr` crate is call 23's two packages; the models' build script belongs to `lazymkv-ocr-models`; engine.md's crates table records the split, and T5-26 amends design 4.1, 4.7 and 10.11 for it (T5-R50).
 - T5-R2 (R3-worker-4, R4-commands-11). `lazymkvctl` links `lazymkv-ocr-models` only (E3 binds over spec 4.4's "compiled into `lazymkvctl.exe`" and design 11.1's ocrs row); T5-12 rewords spec 4.4's ocrs row and T5-26 design 11.1's.
@@ -1436,10 +1439,14 @@ The owner's decisions of 2026-11-06, taken in the brainstorm before the notes
 - T5-25 restore: settings restored, stand-in removed, 2026-11-09
 - design amendments T5-R50 (T5-26 Step 9): yes, 2026-11-09
 - ready for review (T5-26 Step 9): yes, 2026-11-09
+- the review of pull request 16's rulings (T5-R66, T5-R67, the T5-R59 amendment, T5-R68, T5-R69): all stand, 2026-11-10
+- the decoders' allocation sizes (the review's robustness thread): (a), recorded here and taken up with pull request 6 or the next reopened trial, 2026-11-10
+- the copy retried before every step (the review's efficiency thread): left as built, 2026-11-10
+- the ubuntu runner image (the review's CI thread): left `ubuntu-latest`, 2026-11-10
 
 The final whole-branch review's items for the owner (HEAD `7bbc55d`, before the fix wave; the wave changed none of them
 except two of the timing races, F8 to F10), each needing a ruling or recorded for the owner's knowledge:
-- Findings in frozen paths (T5-R54), each left because an edit there, even a doc line, fails the freeze check and makes a new trial: the `pub(crate)` helpers `sha256_hex` (no doc) and the test helper `blocks` (no design part, no `Def:` tail); the `Def:` tails of `LINE_MARGIN` (`T5-5`, added by `164099d` in T5-12's fix) and `palette_luma` (`T5-4`, added by `d36f34f` in T5-11's fix); the model URL docs that say CI's models job only although the build script downloads in any build without `LAZYMKV_OCRS_MODELS`, with T5-5's and T5-11's naming minors (`Grey`, `DECODER_VERSION`, `bt601_luma` misnamed, `palette_luma` could be `pub(crate)`, `pgs.rs` importing from `vobsub.rs`, a test comment saying grey 136 where the chain gives 123); and the unbounded zlib inflation in `mkv.rs` (`decompress_to_vec_zlib` without a limit), which runs only in the sacrificial worker over mkvmerge's own output. The owner chooses: a doc-only edit with a ruling that it needs no new trial, this record, or pull request 6.
+- Findings in frozen paths (T5-R54), each left because an edit there, even a doc line, fails the freeze check and makes a new trial: the `pub(crate)` helpers `sha256_hex` (no doc) and the test helper `blocks` (no design part, no `Def:` tail); the `Def:` tails of `LINE_MARGIN` (`T5-5`, added by `164099d` in T5-12's fix) and `palette_luma` (`T5-4`, added by `d36f34f` in T5-11's fix); the model URL docs that say CI's models job only although the build script downloads in any build without `LAZYMKV_OCRS_MODELS`, with T5-5's and T5-11's naming minors (`Grey`, `DECODER_VERSION`, `bt601_luma` misnamed, `palette_luma` could be `pub(crate)`, `pgs.rs` importing from `vobsub.rs`, a test comment saying grey 136 where the chain gives 123); and the unbounded zlib inflation in `mkv.rs` (`decompress_to_vec_zlib` without a limit), which runs only in the sacrificial worker over mkvmerge's own output. The owner chooses: a doc-only edit with a ruling that it needs no new trial, this record, or pull request 6. The review of pull request 16 adds the decoders' allocation sizes beside the inflation: the formats bound a PGS canvas and a PGS object at 65535 x 65535 bytes each and a VobSub object at 4096 x 4096, the VobSub idx frame size is unbounded, and the time cap bounds the exposure to one stream's cap of memory pressure; the owner chose (a) on 2026-11-10, this record and pull request 6 or the next reopened trial (Left for later pull requests, below).
 - Design limits: H3, the relayed retune's refresh of a held job's mirror runs outside the owner's one-refresh-per-job guard, so a concurrent refresh can share a `.partial` and the relayed retune can exit 3 once (a rerun clears it), fixed at the review of pull request 16 by T5-R67, whose claim on the target folder orders the two refreshes; H6, a `tuning_root` containing `=` corrupts the engine-built `DIR=TEXTDIR` word and `Settings::validate` has no check for it; a relayed `retune --jobs --evidence <clone>` cannot refetch a stale clone copy, because G3 narrowed design part 9.5's refetch to `<tuning_root>\recordings` and the child reads `TMDB_TOKEN` from an environment the engine does not give it (the workaround is a local `lazymkv-dev retune --evidence <clone>` with the token set); and a relayed `decide --job --title` of a job whose copy is done reads `--text <tuning_root>\dataset` as a flat folder for a title with no `subs-ocr`, which walks the whole dataset share (`--text <exact subs-ocr folder>` works around it).
 - Known CI and build-box timing flakes: CF8, `owner::tests::a_no_event_step_gives_the_token_back_beside_a_stale_step_of_its_job` on windows (the stale Plan ended first at 3.76 s and 3.84 s against 3 s, once, on `62d096e`); `a_rip_result_that_cannot_be_persisted_fails_the_job_and_gives_the_token_back` on windows once (CI run 42567502713); two `engine_tuning` and `engine_disc_phase` races, fixed by the fix wave (F8 to F10, with F7's docs); and C.5, the build box's `ci_factor` of 1, which let `engine_file_phase` tests hit the 10 s harness wait under load (T5-18's first run, and the junction runs of this task, Pull request 5 on the mini PC, below).
 - Observations: test constants in `crates/core/src/naming.rs` and `crates/core/src/settings.rs`, on `main` before this branch, use a UNC path whose host the owner should confirm is a generic device default and not the real name; a real film's name appears in more than 100 lines of `main`; and an unreachable staging share at `ExtractSubtitleEvidence`'s `staged_file` listing fails as `DecisionFailed` class `Unknown` where Probe has the same pattern (the fix wave's F2 guard covers the later `clear_incomplete` window only).
@@ -1449,7 +1456,7 @@ The review of pull request 16's items for the owner, each standing until the own
 C3's marker list with an empty `streamhash.txt` for a title whose probe lists no audio stream; the amendment of T5-R59,
 under which `lazymkv-dev decide` counts the subtitles section's events at its `--settings` file's
 `sub_clear_max_bytes`; and T5-R67, the claim that orders the owner's and a relayed retune's refresh of one job's
-recordings copy. Its five threads outside correctness, settled 2026-11-10, add T5-R68 and T5-R69 (two refactors), the
+recordings copy; on 2026-11-10 the owner let all five stand. Its five threads outside correctness, settled 2026-11-10, add T5-R68 and T5-R69 (two refactors), the
 copy retry's trigger left as design part 7.5 and call 10 set it, and the CI pins left as T5-R28 set them. One of them
 needs the owner's ruling, since every fix is inside the frozen paths or amends design part 5.3: the decoders'
 allocation sizes (the review's robustness thread; the sizes and the exposure are in "Pull request 5" above). The
@@ -1458,7 +1465,8 @@ code now; (b) a process memory limit on the worker through the Job Object (`JOB_
 `Spawn` field that a guard wrapper of step 10 fills, since the frozen driver's `..Spawn::default()` leaves it unset),
 Windows only, which amends design part 5.3's "no others" and ends a worker over the limit with
 `lazymkv-ocr exited with code <c>` and the stream unread; (c) bounds inside the decoders now (a canvas and object cap
-such as 4096 x 2304 and an inflate limit), which reopens the trial under T5-R54. The controller recommends (a).
+such as 4096 x 2304 and an inflate limit), which reopens the trial under T5-R54. The controller recommended (a); the
+owner chose (a) on 2026-11-10.
 
 ### Pull request 5: rulings made during execution
 
@@ -1598,13 +1606,15 @@ The plans' "Not covered" lists, with the items the reviews of pull requests 2 an
 - `lazymkv-ocr.exe` and its below-normal run, copied by `engine-task.ps1`: T5-9, T5-15 (T5-R35);
 - layer 2 with MKVToolNix on CI: T5-24;
 - design part 7.5's mirror of the cleanup's deletion into `<tuning_root>\recordings\<job id>\` (Task 20), and the tuning evidence copy (Task 19), which ends Owner decision 22's interim: the cleanup holds a `Filed` job's staging data only while its dataset copy is pending (`tuning_copy` is `pending` in `state.json`), and a job with no staged tuning folder has nothing pending (C2).
-- the release layout's `resources` folder in use: moved to pull request 6 (G1).
+- the release layout's `resources` folder in use: moved to pull request 6 (G1);
+- a bound on the decoders' allocation sizes and the zlib inflate, inside the frozen paths (a new trial under T5-R54) or as a worker memory limit through the Job Object (an amendment of design part 5.3's closed list of limits): pull request 6 or the next reopened trial (the review of pull request 16's robustness thread; the owner's (a), 2026-11-10).
 
 **Pull request 6** (design part 12.6 item 6 as B1 (scope) numbers it, the release): the release layout and its
 `resources` folder in use (G1), the zip, the release workflow's dry run on a branch (P28), the minimal FFmpeg build with
 its once-only re-run of the reference tests and `retune` on the mini PC (P16, P24, design part 11), the release job's
-use of the committed crate notices (E1, T5-R43), and the self-test's check of spec 13's minimum versions of MKVToolNix
-and FFmpeg (S80, T5-R65).
+use of the committed crate notices (E1, T5-R43), the self-test's check of spec 13's minimum versions of MKVToolNix
+and FFmpeg (S80, T5-R65), and the bound on the decoders' allocation sizes and the zlib inflate, or the worker memory
+limit (the review of pull request 16's robustness thread, the owner's (a) of 2026-11-10).
 
 **Pull request 7** (design part 12.6 item 7, acceptance): design part 12.7's checklist with `compare-job` (G1), P27's
 second disc, and with it the first real job with several English subtitle streams (T5-R47).
