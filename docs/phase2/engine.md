@@ -1929,7 +1929,7 @@ all 3437.
 - T5-26 Step 2, 2026-11-09, SSH, the junction run on 0369f02, first attempt: exit 101 at fake-tools engine_file_phase (85 passed, 2 failed: rerun::a_retry_after_a_lookup_pending_decide_does_not_decode_again and step_10a_writes_the_level_folder_and_the_proxy_into_the_staged_folder_and_the_level_folder_into_the_job_folder, both at the 10 s harness wait under load); the binary alone 87 passed, 0 failed in 150 s; the full run repeated below
 - T5-26 Step 2, 2026-11-09, SSH, the junction run on 0369f02, second attempt: exit 101 again at fake-tools engine_file_phase (86 passed, 1 failed: rerun::a_retry_after_a_lookup_pending_decide_does_not_decode_again, waited 10s for AwaitingLookup); the binary alone with the junction and LAZYMKV_EVIDENCE set passed 87, 0 failed in 152 s; the task stopped for the controller
 - T5-26 Step 3, 2026-11-09, SSH, the junction run on 0369f02, third attempt (cargo test --workspace --locked --no-fail-fast, 988 s): every test result line ok; the test list and the junction run: N 3450 tests listed (capture 8, clients 103, core 1845, ctl 48, dev 467, engine 260, fake-tools 448, ocr 23, ocr-models 8, platform 192, tools 48), 15 more with ocr-trial; 3437 passed, 0 failed, 13 ignored, 46 skipped: lines (Task 0's 42, two layer 2 lines "no mkvmerge" and two decoder-goldens lines "no tuning dataset" without LAZYMKV_OCR_TEXT); Cargo.lock unchanged
-- The review of pull request 16, 2026-11-09, SSH, the junction run on the working tree over 1cfff5b with that review's fixes (cargo test --workspace --locked): every test result line ok; 3446 passed, 0 failed, 13 ignored, 3459 in all (capture 8, clients 103, core 1845, ctl 48, dev 468, engine 264, fake-tools 452, ocr 23, ocr-models 8, platform 192, tools 48), 46 skipped: lines; Cargo.lock unchanged
+- The review of pull request 16, 2026-11-09, SSH, the junction run on the tree of f752d78, that review's fixes over 1cfff5b (cargo test --workspace --locked): every test result line ok; 3446 passed, 0 failed, 13 ignored, 3459 in all (capture 8, clients 103, core 1845, ctl 48, dev 468, engine 264, fake-tools 452, ocr 23, ocr-models 8, platform 192, tools 48), 46 skipped: lines; Cargo.lock unchanged
 
 ## Tests
 
@@ -1956,8 +1956,9 @@ box at T5-25 Step 4 (5 passed, 0 skipped), and two
 `skipped: no tuning dataset: give LAZYMKV_OCR_TEXT, the folder holding <slug>/<label>/subs-ocr/ (scripts/phase0/ocr-goldens.ps1 sets it)`
 lines from the decoder goldens, which ran in the desktop session at T5-11 (2 passed, 0 failed).
 
-After the review of pull request 16, the same run on the mini PC, the junction run of the working tree over `1cfff5b`
-with that review's fixes, counts 3459 tests: 1845 in `lazymkv-core`, 468 in `lazymkv-dev`, 452 in `fake-tools`, 264 in
+After the review of pull request 16, the same run on the mini PC, the junction run of the tree of `f752d78`
+(that review's fixes over `1cfff5b`), counts 3459 tests:
+1845 in `lazymkv-core`, 468 in `lazymkv-dev`, 452 in `fake-tools`, 264 in
 `lazymkv-engine`, 192 in `lazymkv-platform`, 103 in `lazymkv-clients`, 48 in `lazymkv-ctl`, 48 in `lazymkv-tools`, 23
 in `lazymkv-ocr`, 8 in `lazymkv-capture` and 8 in `lazymkv-ocr-models`, the passed and ignored of its test result
 lines. The review added 9 tests against the 3450 of `0369f02` and removed none: 4 in `lazymkv-engine`, 4 in
