@@ -38,7 +38,7 @@ png = "0.18"
 sha2 = "0.11"
 # The zlib inflater of evidence.mks's compressed blocks, used by lazymkv-core; the 0.8 line png already pulls in
 # (design parts 4.7 and 10.3).
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 
 # ocrs, rten and its rten-* crates build optimised in the dev profile, which the test profile inherits, so the worker's
 # tests on CI and the mini PC run at release speed (T5-R42; notes F1).

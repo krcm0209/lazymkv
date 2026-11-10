@@ -316,7 +316,7 @@ version = "0.0.0"
 dependencies = [
  "fancy-regex",
  "md-5",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "regex",
  "serde",
  "serde_json",
