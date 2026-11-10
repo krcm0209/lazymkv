@@ -27,7 +27,7 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 # rten 0.26, and a second rten minor in the tree would be an incompatible copy (design parts 4.5, 4.7 and 10.7; notes
 # call 1, A1, A2).
 ocrs = { version = "=0.13.1", default-features = false, features = ["onnx"] }
-rten = { version = "=0.26.0", default-features = false }
+rten = { version = "=0.27.0", default-features = false }
 # The line rectangles ocrs's recognize_text takes, which ocrs does not re-export; pinned to the version rten 0.26.0
 # pulls in, so the lock keeps one entry (T5-R63).
 rten-imageproc = "=0.26.0"
