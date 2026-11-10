@@ -3,11 +3,12 @@
 //! outside the reducer; and the recordings refresh (design part 7.5; call 11; T5-R15, T5-R16): the job folder's
 //! changed files to `<tuning_root>\recordings\<job id>\`, `state.json` first.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use lazymkv_core::lookup::stale::TMDB_COPIES;
@@ -232,6 +233,41 @@ pub(crate) const RECORDINGS: &str = "recordings";
 /// modification time; those are its own earlier copies (T5-R16). Def: T5-20. Use: T5-20, T5-22.
 pub(crate) const REFRESH_MANIFEST: &str = ".lazymkv-refresh.json";
 
+/// The recordings folders a refresh writes now, process-wide, and the signal each gives as its refresh ends, so the
+/// owner's refresh of a job (`request_refresh`, one at a time per job) and a relayed retune's (`spawn_retune_refetch`)
+/// never write one `<tuning_root>\recordings\<job id>\` at once: they would share its `.partial` files and its
+/// manifest's temporary file (design part 7.5; G3; H3, T5-R67). Def: T5-20. Use: T5-20, T5-22.
+static REFRESHING: (Mutex<BTreeSet<PathBuf>>, Condvar) = (Mutex::new(BTreeSet::new()), Condvar::new());
+
+/// A refresh's hold on its target folder: dropped, it frees the folder and wakes every refresh waiting for one
+/// (T5-R67). Def: T5-20. Use: T5-20, T5-22.
+struct RefreshClaim(PathBuf);
+
+impl Drop for RefreshClaim {
+    fn drop(&mut self) {
+        let (held, ended) = &REFRESHING;
+        lock(held).remove(&self.0);
+        ended.notify_all();
+    }
+}
+
+/// Waits until no refresh holds `target`, then holds it until the claim drops (T5-R67). Def: T5-20. Use: T5-20,
+/// T5-22.
+fn claim_target(target: &Path) -> RefreshClaim {
+    let (held, ended) = &REFRESHING;
+    let mut folders = lock(held);
+    while folders.contains(target) {
+        folders = ended.wait(folders).unwrap_or_else(PoisonError::into_inner);
+    }
+    folders.insert(target.to_path_buf());
+    RefreshClaim(target.to_path_buf())
+}
+
+/// Locks `mutex`, ignoring a poison a panicked thread left.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The manifest's `format` (design part 7.4's versioned files). Def: T5-20. Use: T5-20.
 pub(crate) const REFRESH_FORMAT: &str = "lazymkv refresh v1";
 
@@ -399,8 +435,11 @@ fn refresh_file(
 /// Refreshes `target`, `<tuning_root>\recordings\<job id>\`, from `job_dir` (design part 7.5; call 11; T5-R15, T5-R16):
 /// copies each file whose size or modification time changed since its copy, `state.json` first, never writes or
 /// deletes `OWNER_FILES`, and deletes only a TMDb copy the manifest lists that `job_dir` no longer holds; a file that
-/// cannot be copied does not stop the others, and the first error is returned. Def: T5-20. Use: T5-20, T5-22.
+/// cannot be copied does not stop the others, and the first error is returned. It first waits until no other refresh
+/// of `target` runs (`claim_target`), so the owner's refresh and a relayed retune's never overlap (H3, T5-R67).
+/// Def: T5-20. Use: T5-20, T5-22.
 pub(crate) fn refresh_recordings(job_dir: &Path, target: &Path) -> io::Result<RefreshEnd> {
+    let _claim = claim_target(target);
     let mut sources = Vec::new();
     refresh_sources(job_dir, job_dir, &mut sources)?;
     sources.sort();
@@ -722,6 +761,9 @@ mod tests {
         use serde_json::Value;
         use std::fs;
         use std::path::{Path, PathBuf};
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::sync::Barrier;
+        use std::thread;
         use std::time::{Duration, UNIX_EPOCH};
 
         const ID: &str = "0000000000000000000000000000000a-1";
@@ -924,6 +966,71 @@ mod tests {
             assert_eq!(fs::read(target.join("t00-x").join("decide.json")).unwrap(), b"b");
             assert_eq!(fs::read(target.join("state.json")).unwrap(), b"a");
             assert_eq!(listed(&target), ["state.json", "t00-x/decide.json"]);
+        }
+
+        /// T5-R67: a refresh of a folder another refresh holds, as a relayed retune's against the owner's, waits until
+        /// that one ends and then runs whole.
+        #[test]
+        fn a_refresh_waits_for_another_refresh_of_its_folder() {
+            let (_scratch, job, target) = folders("refresh-wait", &[("state.json", "a"), ("tmdb.json", "b")]);
+            let claim = claim_target(&target);
+            let (sender, answers) = mpsc::channel();
+            let (from, to) = (job.clone(), target.clone());
+            let waiting = thread::spawn(move || sender.send(refresh_recordings(&from, &to)).unwrap());
+            assert!(matches!(answers.recv_timeout(Duration::from_millis(200)), Err(RecvTimeoutError::Timeout)));
+            assert!(!target.join(REFRESH_MANIFEST).exists());
+            drop(claim);
+            assert_eq!(answers.recv_timeout(Duration::from_secs(10)).unwrap().unwrap(), end(2, &[]));
+            waiting.join().unwrap();
+            assert_eq!(listed(&target), ["state.json", "tmdb.json"]);
+        }
+
+        /// T5-R67: the claim is the target folder's, not one lock over every refresh.
+        #[test]
+        fn a_refresh_of_another_folder_does_not_wait() {
+            let (scratch, job, target) = folders("refresh-other", &[("state.json", "a")]);
+            let other = scratch.0.join("tuning").join("recordings").join("other-1");
+            let _claim = claim_target(&target);
+            let (sender, answers) = mpsc::channel();
+            let to = other.clone();
+            let refresh = thread::spawn(move || sender.send(refresh_recordings(&job, &to)).unwrap());
+            assert_eq!(answers.recv_timeout(Duration::from_secs(10)).unwrap().unwrap(), end(1, &[]));
+            refresh.join().unwrap();
+            assert_eq!(listed(&other), ["state.json"]);
+        }
+
+        /// T5-R67 (H3): eight refreshes of one folder started together share no `.partial` file and no manifest
+        /// temporary file, so each ends Ok and the manifest names every file.
+        #[test]
+        fn refreshes_of_one_folder_at_once_all_land_with_every_entry() {
+            let mut sources = vec![("state.json".to_string(), "a".to_string())];
+            for title in 0..7 {
+                for file in 0..7 {
+                    sources.push((format!("t0{title}-00800/file{file}.txt"), format!("title {title} file {file}")));
+                }
+            }
+            let pairs: Vec<(&str, &str)> = sources.iter().map(|(path, text)| (path.as_str(), text.as_str())).collect();
+            let (_scratch, job, target) = folders("refresh-at-once", &pairs);
+            let start = Arc::new(Barrier::new(8));
+            let refreshes: Vec<_> = (0..8)
+                .map(|_| {
+                    let (start, job, target) = (Arc::clone(&start), job.clone(), target.clone());
+                    thread::spawn(move || {
+                        start.wait();
+                        refresh_recordings(&job, &target).map(|_| ()).map_err(|error| error.to_string())
+                    })
+                })
+                .collect();
+            for refresh in refreshes {
+                assert_eq!(refresh.join().unwrap(), Ok(()));
+            }
+            let mut expected: Vec<String> = sources.into_iter().map(|(path, _)| path).collect();
+            expected.sort();
+            assert_eq!(expected.len(), 50);
+            assert_eq!(listed(&target), expected);
+            let temporary = |name: &String| name.ends_with(PARTIAL) || name.ends_with(TEMP_SUFFIX);
+            let left: Vec<String> = files(&target).into_iter().filter(temporary).collect();
+            assert!(left.is_empty(), "{left:?}");
         }
     }
 }

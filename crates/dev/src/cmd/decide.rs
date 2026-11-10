@@ -1,7 +1,8 @@
 //! `lazymkv-dev decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE]
 //! [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--evidence DIR]` (port spec 3.4; `--settings FILE`,
-//! spec 14's settings for the plan and decision sections, is phase 1's; the three replay flags are phase 2's): the
-//! first form of the design spec's phase 1 command that reads a recording and prints its decisions.
+//! spec 14's settings for the plan and decision sections and the subtitles section's event threshold, is phase 1's;
+//! the three replay flags are phase 2's): the first form of the design spec's phase 1 command that reads a recording
+//! and prints its decisions.
 //! For one rip label it prints one JSON document, `DecideDoc`: `reconcile` (the scan's streams against
 //! mkvmerge.json, spec 3.3), `audio` (the content rule over every audio-levels-20ms-* folder of the label, or why a
 //! folder was skipped), `subtitles` (the text rule over the title's OCR text, or why it was skipped) and `reviews`
@@ -98,9 +99,10 @@ arguments:
   --text DIR            the OCR text: DIR/<slug>/<label>/subs-ocr/sub-<n>.ocr.jsonl, else DIR/sub-<n>.ocr.jsonl
                         (default: LAZYMKV_OCR_TEXT)
   --selection {all,eng} the rip's track selection (default: eng for the profile eng-only.mmcp.xml, else all)
-  --settings FILE       spec 14's settings for the plan and decision sections: a JSON file naming the keys it
-                        changes, such as movies_root and tv_root (default: spec 14's defaults, which set no library
-                        root, so the decision has no final path); a file it refuses skips both sections
+  --settings FILE       spec 14's settings for the plan and decision sections and the subtitles section's event
+                        threshold (sub_clear_max_bytes): a JSON file naming the keys it changes, such as movies_root
+                        and tv_root (default: spec 14's defaults, which set no library root, so the decision has no
+                        final path); a file it refuses skips both sections
   --tmdb-search FILE    a TMDb /search/multi answer for the disc's name, for the plan section (as plan's)
   --tmdb-record FILE    a TMDb /movie/{id} or /tv/{id} answer: replaces the recording's tmdb.json for the plan
                         section and names the decision's file
@@ -339,7 +341,9 @@ pub struct EngineDecideDoc {
 /// compare_tracks.main reads them. `text` is taken against ctx.cwd when relative, and so are the files of `options`.
 /// The library roots of `options.settings` are checked first, before the rip label (`check_library_roots`, design part
 /// 9.5, OR13), `answers` are `replay_answers`: the recording's, with `--tmdb-record`'s record in place of tmdb.json's,
-/// and `remembered` is `replay_remembered`: `--remembered`'s decision. Def: T19. Use: T19, T20, T25, T27.
+/// and `remembered` is `replay_remembered`: `--remembered`'s decision. The subtitles section counts events at the plan
+/// section's `settings.sub_clear_max_bytes`, spec 14's 64 without `--settings` or when the plan is skipped (T5-R59 as
+/// amended at the review of pull request 16). Def: T19. Use: T19, T20, T25, T27.
 pub fn read_decide_inputs(
     ctx: &Ctx,
     rec: &Recording,
@@ -364,11 +368,17 @@ pub fn read_decide_inputs(
     let report = reconcile(&scan, title, &ident, selection, log).map_err(refused)?;
     let audio = audio_section(rec, label);
     let text = text.map(|dir| ctx.cwd.join(dir));
-    let subtitles = subtitle_section(rec, label, text.as_deref(), TextRule::default().CLEAR_MAX_BYTES);
     let plan = match plan_doc(ctx, &PlanSource::Recording(rec), options) {
         Ok(found) => PlanEntry::Results(found),
         Err(refused) => PlanEntry::Skipped { skipped: refused.line },
     };
+    // T5-R59 as amended: the event threshold of decide's settings (the job's in the relayed form), so the text rule's
+    // events and the worker's records agree; spec 14's 64 without --settings or when the plan section is skipped.
+    let clear_max = match &plan {
+        PlanEntry::Results(found) => found.settings.sub_clear_max_bytes,
+        PlanEntry::Skipped { .. } => TextRule::default().CLEAR_MAX_BYTES,
+    };
+    let subtitles = subtitle_section(rec, label, text.as_deref(), clear_max);
     let answers = replay_answers(ctx, rec, options);
     let remembered = replay_remembered(ctx, options);
     let (index, packets) = read_subs(tree, &label_dir);
@@ -546,9 +556,10 @@ fn reading_folder(text: &Path, slug: &str, label: &str) -> Option<(PathBuf, Stri
 /// sub-<n>.ocr.jsonl for any stream, or an English or no-language bitmap stream without one). Skipped too without
 /// `text`, or when no folder holds the text. The streams `<label>/subs-ocr/summary.json` marks unread are passed to
 /// `subs_run`, which then refuses the title with one line per stream (design part 10.8, T5-R51); a summary.json that
-/// does not parse skips the section with its error. `clear_max` is the event threshold (T5-R59): `lazymkv-dev decide`
-/// passes `TextRule::default().CLEAR_MAX_BYTES` (64), the engine the job's `sub_clear_max_bytes`, the value its worker
-/// and `check_events` took. (now pub, with clear_max) Def: T19, T5-15. Use: T19, T5-15.
+/// does not parse skips the section with its error. `clear_max` is the event threshold (T5-R59): `read_decide_inputs`
+/// passes the `sub_clear_max_bytes` of decide's settings (64 without `--settings` or when the plan section is skipped;
+/// the job's own in the relayed `decide --job --title`), the engine the job's `sub_clear_max_bytes`, the value its
+/// worker and `check_events` took. (now pub, with clear_max) Def: T19, T5-15. Use: T19, T5-15.
 pub fn subtitle_section(rec: &Recording, label: &str, text: Option<&Path>, clear_max: i64) -> SubtitleEntry {
     let text = match text {
         Some(text) => text,
@@ -2574,6 +2585,38 @@ SINFO:0,4,6,0,"PGS"
         assert_eq!(kept_subtitles(&stricter.decision), forced_kept_tracks(40));
         assert_eq!(stricter.facts.text_streams, Vec::<u32>::new());
         assert_eq!(stricter.decision.confidences.track, 0.90);
+    }
+
+    /// T5-R59 as amended at the review of pull request 16: the subtitles section counts events at the settings file's
+    /// sub_clear_max_bytes, so the relayed `decide --job --title` pairs the worker's records as the engine did (R-B1).
+    #[test]
+    fn a_settings_files_sub_clear_max_bytes_is_the_subtitles_sections_event_threshold() {
+        let tmp = Scratch::new("decide-settings-clear-max");
+        let root = tmp.0.clone();
+        disc_a_with_text(&root);
+        write(&root.join("settings.json"), json!({"sub_clear_max_bytes": 20}).to_string());
+        let streams = |args: &[&str]| {
+            let (code, out, err) = run_in(&root, args);
+            assert_eq!((code, err.as_str()), (0, ""));
+            let value: Value = serde_json::from_str(&out).unwrap();
+            let counted: Vec<(Value, Value)> = (0..2)
+                .map(|i| &value["subtitles"]["streams"][i])
+                .map(|stream| (stream["events"].clone(), stream["pairing"].clone()))
+                .collect();
+            (value, counted)
+        };
+        // At 20 the 30-byte clear packets are events too: 80 of them, and the 40 records pair by time.
+        let (value, counted) = streams(&["recs/disc-a", "eng-only", "--text", "text", "--settings", "settings.json"]);
+        assert_eq!(counted, vec![(json!(80), json!("text by time, 40 frames with text, 0 unmatched")); 2]);
+        assert_eq!(value["decision"]["facts"]["text_streams"], json!([]));
+        // Without --settings, spec 14's 64: the characterisation's 40 events, paired by order.
+        let (_, counted) = streams(&["recs/disc-a", "eng-only", "--text", "text"]);
+        assert_eq!(counted, vec![(json!(40), json!("text by order, 40 frames with text, 0 unmatched")); 2]);
+        // A settings file plan_doc refuses skips the plan and the decision, and the section keeps 64.
+        write(&root.join("bad.json"), r#"{"sub_clear_max_bytes": "x"}"#);
+        let (value, counted) = streams(&["recs/disc-a", "eng-only", "--text", "text", "--settings", "bad.json"]);
+        assert!(value["plan"]["skipped"].is_string(), "{}", value["plan"]);
+        assert_eq!(counted, vec![(json!(40), json!("text by order, 40 frames with text, 0 unmatched")); 2]);
     }
 
     /// A cap reason as step 10 writes it into summary.json (design part 10.8); the numbers are made up.

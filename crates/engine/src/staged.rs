@@ -127,13 +127,14 @@ pub(crate) enum Staged {
 }
 
 /// Whether a title's staged tuning folder is complete (notes C3): the staged level folder's own `audio-proxy.json`,
-/// written last there (T5-R13), or with `keep_tuning_evidence` off `streamhash.txt`; and `subs-ocr\summary.json`,
-/// written last into the staged `subs-ocr\` (T5-R12), when step 10 runs for the title. Def: T5-18. Use: T5-18.
-pub(crate) fn staged_state(tuning: &Path, keep_tuning_evidence: bool, step10: bool) -> Staged {
+/// written last there (T5-R13), or `streamhash.txt` with `keep_tuning_evidence` off or for a title whose probe lists
+/// no audio stream (`audio` false, T5-R66); and `subs-ocr\summary.json`, written last into the staged `subs-ocr\`
+/// (T5-R12), when step 10 runs for the title. Def: T5-18. Use: T5-18.
+pub(crate) fn staged_state(tuning: &Path, keep_tuning_evidence: bool, audio: bool, step10: bool) -> Staged {
     if !tuning.is_dir() {
         return Staged::Absent;
     }
-    let audio = if keep_tuning_evidence {
+    let audio = if keep_tuning_evidence && audio {
         match fs::read_dir(tuning) {
             Ok(entries) => entries.filter_map(Result::ok).any(|entry| {
                 let path = entry.path();
@@ -376,7 +377,7 @@ mod tests {
     #[test]
     fn a_missing_staged_folder_is_absent() {
         let s = Scratch::new("staged-absent");
-        assert_eq!(staged_state(&s.0.join("tuning"), true, true), Staged::Absent);
+        assert_eq!(staged_state(&s.0.join("tuning"), true, true, true), Staged::Absent);
     }
 
     #[test]
@@ -390,7 +391,7 @@ mod tests {
             "subs-ocr/sub-0.ocr.jsonl",
             "subs-ocr/summary.json",
         ]);
-        assert_eq!(staged_state(&tuning, true, true), Staged::Complete);
+        assert_eq!(staged_state(&tuning, true, true, true), Staged::Complete);
     }
 
     #[test]
@@ -402,34 +403,49 @@ mod tests {
             "audio-levels-20ms-1-2/main-mix.txt",
             "subs-ocr/summary.json",
         ]);
-        assert_eq!(staged_state(&tuning, true, true), Staged::Incomplete);
+        assert_eq!(staged_state(&tuning, true, true, true), Staged::Incomplete);
     }
 
     #[test]
     fn a_staged_folder_without_summary_json_where_step_10_runs_is_incomplete() {
         let s = Scratch::new("staged-no-summary");
         let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json", "subs-ocr/sub-0.ocr.jsonl"]);
-        assert_eq!(staged_state(&tuning, true, true), Staged::Incomplete);
+        assert_eq!(staged_state(&tuning, true, true, true), Staged::Incomplete);
     }
 
     #[test]
     fn without_step_10_summary_json_is_not_asked_for() {
         let s = Scratch::new("staged-no-step-10");
         let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json"]);
-        assert_eq!(staged_state(&tuning, true, false), Staged::Complete);
+        assert_eq!(staged_state(&tuning, true, true, false), Staged::Complete);
     }
 
     #[test]
     fn with_the_setting_off_streamhash_txt_is_the_audio_marker() {
         let s = Scratch::new("staged-off");
         let tuning = staged(&s, &["streamhash.txt", "subs-ocr/summary.json"]);
-        assert_eq!(staged_state(&tuning, false, true), Staged::Complete);
+        assert_eq!(staged_state(&tuning, false, true, true), Staged::Complete);
         let s = Scratch::new("staged-off-level-only");
         let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json", "subs-ocr/summary.json"]);
-        assert_eq!(staged_state(&tuning, false, true), Staged::Incomplete);
+        assert_eq!(staged_state(&tuning, false, true, true), Staged::Incomplete);
         let s = Scratch::new("staged-on-streamhash-only");
         let tuning = staged(&s, &["streamhash.txt", "subs-ocr/summary.json"]);
-        assert_eq!(staged_state(&tuning, true, true), Staged::Incomplete);
+        assert_eq!(staged_state(&tuning, true, true, true), Staged::Incomplete);
+    }
+
+    #[test]
+    fn a_title_without_an_audio_stream_is_complete_with_streamhash_txt_whatever_the_setting() {
+        let s = Scratch::new("staged-no-audio");
+        let tuning = staged(&s, &["streamhash.txt"]);
+        assert_eq!(staged_state(&tuning, true, false, false), Staged::Complete);
+        assert_eq!(staged_state(&tuning, false, false, false), Staged::Complete);
+        assert_eq!(staged_state(&tuning, true, false, true), Staged::Incomplete);
+        let s = Scratch::new("staged-no-audio-summary-only");
+        let tuning = staged(&s, &["subs-ocr/summary.json"]);
+        assert_eq!(staged_state(&tuning, true, false, true), Staged::Incomplete);
+        let s = Scratch::new("staged-no-audio-level-only");
+        let tuning = staged(&s, &["audio-levels-20ms-1/audio-proxy.json"]);
+        assert_eq!(staged_state(&tuning, true, false, false), Staged::Incomplete);
     }
 
     #[test]

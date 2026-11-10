@@ -618,6 +618,87 @@ fn a_pass_that_leaves_no_hash_file_is_decision_failed() {
     assert!(!work(&h, &id).exists());
 }
 
+/// Step 10a's job.log sentence after `<key>: ` for a title whose probe lists no audio stream (T5-R66).
+const NO_AUDIO: &str =
+    "the file has no audio stream, so step 10a runs no ffmpeg pass and writes an empty streamhash.txt";
+
+/// movie-direct without its audio stream (`movie-direct-no-audio`, then `variants`), the title kept in the plan by a
+/// remembered decision (`remembered_no_audio`), since the 8.2 filter leaves a title without audio out as a menu loop.
+fn no_audio(variants: &[&str], settings: Value) -> Harness {
+    let mut overlays = vec!["movie-direct-no-audio"];
+    overlays.extend_from_slice(variants);
+    let h = harness(&overlays, settings);
+    let fp = h.fingerprint("movie-direct");
+    fs::create_dir_all(h.data().join("remembered")).unwrap();
+    fs::write(h.data().join("remembered").join(format!("{fp}.json")), remembered_no_audio(&fp)).unwrap();
+    h
+}
+
+/// Inserts movie-direct in tok0 and waits until the job is in `state` or Failed; a failed job fails the test with its
+/// message.
+fn run_to_or_failed(h: &Harness, state: &str) -> String {
+    h.insert("tok0", "movie-direct");
+    let id = job_id(h);
+    h.wait(state, |h| [state, "Failed"].contains(&h.state_of(&id).as_str()));
+    assert_eq!(h.state_of(&id), state, "{:?}", h.record(&id).message);
+    id
+}
+
+/// Inserts movie-direct in tok0, waits for the hold of a title without wanted audio (`no_wanted_audio`), approves it
+/// and waits until the job is Filed; a failed job fails the test with its message.
+fn filed_after_the_no_audio_hold(h: &Harness) -> String {
+    let id = run_to_or_failed(h, "NeedsReview");
+    let no_wanted_audio = [ReviewReason::NoWantedAudio];
+    let held = |e: &Event| matches!(e, Event::DecisionDone { reasons, .. } if *reasons == no_wanted_audio);
+    assert!(events(h, &id).iter().any(held), "{:?}", events(h, &id));
+    let mut c = Client::open(h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve"}));
+    h.wait("Filed", |h| ["Filed", "Failed"].contains(&h.state_of(&id).as_str()));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    id
+}
+
+/// T5-R66: a planned title whose probe lists no audio stream gets no step 10a ffmpeg pass; with the setting off an
+/// empty streamhash.txt lands in the job folder and then the staged folder, and the job files once its hold is
+/// approved.
+#[test]
+fn a_title_without_an_audio_stream_writes_an_empty_streamhash_txt_and_files() {
+    let h = no_audio(&[], json!({}));
+    let id = filed_after_the_no_audio_hold(&h);
+    let key_dir = h.job_dir(&id).join(KEY);
+    assert!(key_dir.join("decide.json").is_file());
+    assert_eq!(fs::read(key_dir.join("streamhash.txt")).unwrap(), b"");
+    assert_eq!(files_under(&staged(&h, &id)), BTreeSet::from(["streamhash.txt".to_string()]));
+    assert_eq!(fs::read(staged(&h, &id).join("streamhash.txt")).unwrap(), b"");
+    assert!(spawns_holding(&h, &["0:a", "streamhash"]).is_empty());
+    assert!(spawns_holding(&h, &["-/filter_complex"]).is_empty());
+    let log = job_log(&h, &id);
+    assert!(log.contains(&format!("{KEY}: {NO_AUDIO}")), "{log}");
+    assert!(!work(&h, &id).exists());
+}
+
+/// T5-R66 with the setting on: no level folder in either place, the staged streamhash.txt is the title's marker, and
+/// the dataset copy lands it.
+#[test]
+fn with_the_setting_on_a_title_without_an_audio_stream_has_no_level_folder_and_its_dataset_copy_lands() {
+    let h = no_audio(&[], evidence_on());
+    let id = filed_after_the_no_audio_hold(&h);
+    let (key_dir, tuning) = (h.job_dir(&id).join(KEY), staged(&h, &id));
+    h.wait("the dataset copy", |h| h.record(&id).tuning_copy == Some(lazymkv_core::record::TuningCopy::Done));
+    for dir in [&key_dir, &tuning] {
+        let names: Vec<String> =
+            fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|name| !name.starts_with("audio-levels-20ms-")), "{names:?}");
+    }
+    assert_eq!(files_under(&tuning), BTreeSet::from(["streamhash.txt".to_string()]));
+    assert_eq!(fs::read(tuning.join("streamhash.txt")).unwrap(), b"");
+    assert!(spawns_holding(&h, &["-layouts"]).is_empty());
+    assert!(spawns_holding(&h, &["-/filter_complex"]).is_empty());
+    let copied = h.tuning().join("dataset").join(&id).join(KEY).join("streamhash.txt");
+    assert_eq!(fs::read(&copied).unwrap_or_else(|e| panic!("{}: {e}", copied.display())), b"");
+}
+
 #[test]
 fn the_engines_decide_inputs_render_as_read_decide_inputs_over_the_finished_job_folder() {
     let h = harness(&[], json!({}));
@@ -663,6 +744,15 @@ fn remembered_keep(fp: &str) -> String {
         r#""source_file":"00800.mpls","dvd_title":null,"segment_map":"1","seconds":7150,"role":{{"role":"feature"}},"#,
         r#""audio":[{{"signature":{{"kind":"audio","language":"eng","codec":"dts-hd-ma","channels":6,"position":0}},"#,
         r#""action":"keep","order":0,"default":true}}],"subtitles":[]}}]}}"#), fp = fp)
+}
+
+/// `remembered_keep` without its audio entry: a remembered decision for movie-direct's disc `fp` whose one title, the
+/// feature 00800.mpls, has no audio stream (`movie-direct-no-audio`).
+fn remembered_no_audio(fp: &str) -> String {
+    format!(concat!(
+        r#"{{"format":"lazymkv remembered v1","fingerprint":"{fp}","tmdb":{{"kind":"movie","id":900001}},"titles":[{{"#,
+        r#""source_file":"00800.mpls","dvd_title":null,"segment_map":"1","seconds":7150,"role":{{"role":"feature"}},"#,
+        r#""audio":[],"subtitles":[]}}]}}"#), fp = fp)
 }
 
 /// Ruling T4-R21, the second half of engine.md's V14 item, accepted with no code: Decide reads only the job's own
@@ -946,7 +1036,9 @@ fn a_title_with_an_unread_stream_has_the_unread_line_as_its_subtitles_section() 
 
 /// T5-R59: the job's own sub_clear_max_bytes reaches the worker, the cross-check and the subtitles section, so a
 /// 50-byte packet is an event at 40 for all three. (The text's reviews stay out at any threshold but 64: dev's
-/// `text_decisions` uses no text when `settings.text_rule()` is not the default, RP15.)
+/// `text_decisions` uses no text when `settings.text_rule()` is not the default, RP15.) Dev's readers, given the job's
+/// settings.json and the staged text, count at the same threshold and render decide.json (R-B1; T5-R59 as amended at
+/// the review of pull request 16).
 #[test]
 fn a_job_whose_clear_max_is_not_64_decides_with_the_workers_events() {
     let h = two_subs(&["movie-direct-two-subs-clear-40"], json!({"sub_clear_max_bytes": 40}));
@@ -959,6 +1051,15 @@ fn a_job_whose_clear_max_is_not_64_decides_with_the_workers_events() {
     assert_eq!(staged.lines().count(), 3);
     let doc = json_of(&h.job_dir(&id).join(KEY).join("decide.json"));
     assert_eq!((&doc["subtitles"]["streams"][0]["events"], &doc["subtitles"]["streams"][1]["events"]), (&json!(2), &json!(3)));
+    let read = read_back(&h, &id, Some(&staged_ocr(&h, &id)));
+    let mut written = doc.clone();
+    let object = written.as_object_mut().unwrap();
+    object.remove("audio_rule_version");
+    object.remove("lazymkv_version");
+    assert_eq!(
+        dumps(&written, Style::INDENT1_ASCII),
+        dumps(&serde_json::to_value(decide_doc(&read)).unwrap(), Style::INDENT1_ASCII)
+    );
 }
 
 /// T5-R12: the staged summary.json, C3's marker, lands only after the job folder's: when the job folder's cannot be
@@ -2043,6 +2144,22 @@ mod rerun {
         h.fire_timers();
         decided(&h, &id);
         assert_eq!(unit_spawns(&h), first, "step 10a ran again");
+        assert_eq!(job_log(&h, &id).matches(SKIPPED).count(), 1);
+    }
+
+    /// T5-R66: with the setting on, a title without an audio stream has no level folder, and its staged streamhash.txt
+    /// marks the folder complete, so a re-run skips steps 10 and 10a.
+    #[test]
+    fn a_title_without_an_audio_stream_is_skipped_as_complete_on_a_rerun() {
+        let h = no_audio(&["movie-direct-two-subs-lookup-late"], on());
+        let id = stale_before_the_probe(&h);
+        assert_eq!(run_to_or_failed(&h, "AwaitingLookup"), id);
+        let first = unit_spawns(&h);
+        assert!(first.is_empty(), "{first:?}");
+        h.fire_timers();
+        decided(&h, &id);
+        assert_eq!(unit_spawns(&h), first, "steps 10 and 10a ran again");
+        assert!(!job_log(&h, &id).contains(CLEARED));
         assert_eq!(job_log(&h, &id).matches(SKIPPED).count(), 1);
     }
 }

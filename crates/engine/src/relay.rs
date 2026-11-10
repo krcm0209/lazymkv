@@ -345,11 +345,12 @@ fn recordings_folders(recordings: &Path) -> io::Result<Vec<PathBuf>> {
 /// `recordings\` is not listed. A folder named for a job the owner holds is that job's mirror: its stale copies are
 /// fetched again into the job folder with `refetch_stale` (`OwedCheck::Wait`), each `log_lines` line written to its
 /// job.log; `for_decide`'s Err is the refusal `job_refusal(id, reason)`; otherwise, when anything was fetched,
-/// `refresh_recordings` copies the job folder across, whose error is the refusal `job <id>: the recordings copy could
-/// not be refreshed: <error>`, since the child would read the stale mirror. Any other folder is an orphan, its copies
-/// fetched again into it with `refetch_orphan`: each copy fetched is an `orphan_fetched` warning and each not fetched
-/// an `orphan_unmeasured` one, which never refuse the run. Every folder is done before the one `Msg::CommandRefetched`,
-/// Ok with no refusal, else Err of the refusals joined with "; ", and the warnings. Def: T5-22. Use: T5-22.
+/// `refresh_recordings` copies the job folder across once any owner refresh of that folder has ended (T5-R67), whose
+/// error is the refusal `job <id>: the recordings copy could not be refreshed: <error>`, since the child would read
+/// the stale mirror. Any other folder is an orphan, its copies fetched again into it with `refetch_orphan`: each copy
+/// fetched is an `orphan_fetched` warning and each not fetched an `orphan_unmeasured` one, which never refuse the run.
+/// Every folder is done before the one `Msg::CommandRefetched`, Ok with no refusal, else Err of the refusals joined
+/// with "; ", and the warnings. Def: T5-22. Use: T5-22.
 pub(crate) fn spawn_retune_refetch(
     work: RetuneRefetch,
     client: u64,

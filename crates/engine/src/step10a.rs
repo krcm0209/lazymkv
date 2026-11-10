@@ -37,6 +37,9 @@ pub(crate) const PROXY_JSON: &str = "audio-proxy.json";
 /// The redo's working folder under the title's work folder, so the redo leaves the first pass's files as they are (C1).
 /// Def: T5-17. Use: T5-17.
 pub(crate) const REDO: &str = "redo";
+/// The job.log sentence after `<key>: ` for a title whose probe lists no audio stream (T5-R66). Def: T5-17. Use: T5-17.
+pub(crate) const NO_AUDIO: &str =
+    "the file has no audio stream, so step 10a runs no ffmpeg pass and writes an empty streamhash.txt";
 
 /// The proxy as ffmpeg writes it, in the pass's working folder, before the checks keep it.
 const PROXY_PARTIAL: &str = "audio-proxy.mka.partial";
@@ -46,8 +49,9 @@ const PROXY_CHECK: &str = "proxy-check.json";
 const JOB_LINE: &str = "scripts/phase0/job.sh audio-levels.ps1 ";
 
 /// What one title's pass reads and where it writes (design part 5.7 step 10a; T5-R39): the staged file, the job ID
-/// and title key, the job folder's `<title key>\`, the staged tuning folder, the work folder, and the job's own
-/// `keep_tuning_evidence` (ENG-19). Def: T5-17. Use: T5-17.
+/// and title key, the job folder's `<title key>\`, the staged tuning folder, the work folder, the job's own
+/// `keep_tuning_evidence` (ENG-19), and whether Probe's ffprobe-streams.json lists an audio stream (`has_audio`,
+/// T5-R66). Def: T5-17. Use: T5-17.
 pub(crate) struct PassInputs<'a> {
     pub(crate) raw: &'a Path,
     pub(crate) job_id: &'a str,
@@ -56,14 +60,17 @@ pub(crate) struct PassInputs<'a> {
     pub(crate) tuning: &'a Path,
     pub(crate) title_work: &'a Path,
     pub(crate) keep: bool,
+    pub(crate) audio: bool,
 }
 
 /// How a pass ended (design part 5.7 step 10a): the level folder's name and whether a proxy was kept (C1, call 22),
-/// or the setting-off pass's `streamhash.txt`. Def: T5-17. Use: T5-17.
+/// the setting-off pass's `streamhash.txt`, or `NoAudio`: a file whose probe lists no audio stream, for which no pass
+/// ran and `streamhash.txt` is empty (T5-R66). Def: T5-17. Use: T5-17.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PassEnd {
     Levels { folder: String, proxy_kept: bool },
     Streamhash,
+    NoAudio,
 }
 
 /// `<path>: <error>`, the sentence of a file step 10a could not read or write.
@@ -170,10 +177,10 @@ impl Runner<'_, '_> {
 }
 
 /// Step 10a for one title (design parts 5.7, 7.5, 7.6; T5-R13, T5-R38, T5-R39, T5-R55 to T5-R57): the setting-on pass
-/// with its -30 dB redo, or the setting-off streamhash pass, run in the work folder, its files copied into the job
-/// folder and then the staged folder through `staged::copy_checked`, the work folder deleted. `log` takes job.log
-/// lines. Err: `Failed` for a tool, read or decode failure, `Staging` for a write error on the staging share (T5-R56).
-/// Def: T5-17. Use: T5-17.
+/// with its -30 dB redo, or the setting-off streamhash pass, or for a title with no audio stream `no_audio_pass` under
+/// either setting (T5-R66), run in the work folder, its files copied into the job folder and then the staged folder
+/// through `staged::copy_checked`, the work folder deleted. `log` takes job.log lines. Err: `Failed` for a tool, read
+/// or decode failure, `Staging` for a write error on the staging share (T5-R56). Def: T5-17. Use: T5-17.
 pub(crate) fn run_pass(
     ctx: &ToolCtx,
     ffmpeg: &Path,
@@ -191,7 +198,9 @@ pub(crate) fn run_pass(
         .map_err(|error| UnitError::Staging(shown(inputs.tuning, error)))
         .and_then(|()| {
             let runner = Runner { ctx, key: inputs.key, title_work: work, log };
-            if inputs.keep {
+            if !inputs.audio {
+                no_audio_pass(inputs)
+            } else if inputs.keep {
                 levels_pass(&runner, ffmpeg, ffprobe, inputs)
             } else {
                 streamhash_pass(&runner, ffmpeg, inputs)
@@ -212,6 +221,12 @@ fn read_probe(label_dir: &Path) -> Result<(FfprobeStreams, Value), UnitError> {
     let typed: FfprobeStreams = serde_json::from_slice(&bytes).map_err(|error| UnitError::Failed(shown(&path, error)))?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|error| UnitError::Failed(shown(&path, error)))?;
     Ok((typed, value))
+}
+
+/// Whether `<label_dir>\ffprobe-streams.json` lists an audio stream: `pass_streams`' codec_type "audio" test, as
+/// levels-args reads it (T5-R66). Err: read_probe's `Failed`. Def: T5-17. Use: T5-17, T5-18.
+pub(crate) fn has_audio(label_dir: &Path) -> Result<bool, UnitError> {
+    Ok(!pass_streams(&read_probe(label_dir)?.0.streams).is_empty())
 }
 
 /// The k-th line of `streamhash.txt` in the working folder `dir` as the MD5 of `audio[k]`'s stream (R1-evidence-9).
@@ -237,6 +252,17 @@ fn streamhash_pass(runner: &Runner, ffmpeg: &Path, inputs: &PassInputs) -> Resul
     into_job(&work.join(STREAMHASH), &inputs.label_dir.join(STREAMHASH))?;
     into_staged(&work.join(STREAMHASH), &inputs.tuning.join(STREAMHASH))?;
     Ok(PassEnd::Streamhash)
+}
+
+/// A title whose probe lists no audio stream (spec 6.4 step 10a's "every audio stream" with none; T5-R66): no ffmpeg
+/// pass, an empty `streamhash.txt` written in the work folder, copied into the job folder, then into the staged folder,
+/// C3's marker whatever keep_tuning_evidence is.
+fn no_audio_pass(inputs: &PassInputs) -> Result<PassEnd, UnitError> {
+    let from = inputs.title_work.join(STREAMHASH);
+    write_work(&from, b"")?;
+    into_job(&from, &inputs.label_dir.join(STREAMHASH))?;
+    into_staged(&from, &inputs.tuning.join(STREAMHASH))?;
+    Ok(PassEnd::NoAudio)
 }
 
 /// `copy_into_job`, its error `Failed("<to>: <error>")`.

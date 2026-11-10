@@ -30,7 +30,7 @@ use lazymkv_core::profile::JOB_PROFILE_FILE;
 use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, TuningCopy, DRIVES_FORMAT, JOB_FORMAT};
 use lazymkv_core::remembered::Overrides;
 use lazymkv_core::review::{Note, Noted};
-use lazymkv_core::settings::{Settings, SettingsProblem};
+use lazymkv_core::settings::{configured_root, Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_platform::{
     DriveEvent, DriveWatcher, Ejector, Host, IpcStream, IpcTransport, KeepAwake, Platform, Reach, SecretStore,
@@ -1534,7 +1534,8 @@ impl Owner {
     /// asks the share of `tuning_root` and runs `refresh_recordings` into `<tuning_root>\recordings\<id>\`: a root
     /// not reached or a failed refresh writes its job.log line, each deleted copy its engine.log line, and whatever
     /// the end it sends `Msg::Refreshed`, saying whether it failed; a failed refresh is retried at the next cleanup
-    /// pass (`refresh_failed`). Def: T5-20. Use: T5-20, T5-22.
+    /// pass (`refresh_failed`). `refreshing` keeps one owner refresh per job; `refresh_recordings`' claim on its target
+    /// also orders it after a relayed retune's refresh of the same folder (T5-R67). Def: T5-20. Use: T5-20, T5-22.
     fn request_refresh(&mut self, id: &str) {
         if self.stopping || self.quiet.is_some() {
             return;
@@ -1605,9 +1606,10 @@ impl Owner {
     /// Starts the dataset copy of `id` on a thread of its own (design part 7.5, EVID-4; call 10), `retry` for every
     /// attempt but the one after the unit's DecisionDone. Nothing starts while the engine stops or a forced shutdown
     /// waits, for an unknown job, for a job whose `tuning_copy` is not pending, or for one whose copy runs. A job whose
-    /// own settings name no `staging_root` or no `tuning_root` gets the job.log line `pending_line(retry, "<name> is
-    /// unset")` and no thread. The thread, which `shut_down` joins, runs `copy_dataset` with the engine's stop flag
-    /// and the testkit's `copy_with`, and sends `Msg::TuningCopied`; it asks the shares, so the owner thread does not.
+    /// own settings name no `staging_root` or `tuning_root`, or a blank one (`configured_root`, as `Settings::validate`
+    /// reads it), gets the job.log line `pending_line(retry, "<name> is unset")` and no thread. The thread, which
+    /// `shut_down` joins, runs `copy_dataset` with the engine's stop flag and the testkit's `copy_with`, and sends
+    /// `Msg::TuningCopied`; it asks the shares, so the owner thread does not.
     fn start_copy(&mut self, id: &str, retry: bool) {
         if self.stopping || self.quiet.is_some() || self.copies.contains(id) {
             return;
@@ -1615,8 +1617,10 @@ impl Owner {
         let Some(job) = self.jobs.get(id).filter(|job| job.record.tuning_copy == Some(TuningCopy::Pending)) else {
             return;
         };
-        let (staging_root, tuning_root) = match (&job.settings.staging_root, &job.settings.tuning_root) {
-            (Some(staging), Some(tuning)) => (staging.clone(), tuning.clone()),
+        let staging = configured_root(job.settings.staging_root.as_deref());
+        let tuning = configured_root(job.settings.tuning_root.as_deref());
+        let (staging_root, tuning_root) = match (staging, tuning) {
+            (Some(staging), Some(tuning)) => (staging.to_string(), tuning.to_string()),
             (None, _) => return self.store.job_log(id, &pending_line(retry, "staging_root is unset")),
             (_, None) => return self.store.job_log(id, &pending_line(retry, "tuning_root is unset")),
         };

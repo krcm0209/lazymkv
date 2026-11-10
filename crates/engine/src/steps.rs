@@ -72,7 +72,7 @@ use crate::staged::{
 };
 use crate::step10;
 use crate::step10::{read_streams, stream_cap, OCR_MISSING};
-use crate::step10a::{run_pass, PassEnd, PassInputs, WORK_KIND};
+use crate::step10a::{has_audio, run_pass, PassEnd, PassInputs, NO_AUDIO, WORK_KIND};
 use crate::store::Store;
 use crate::EngineConfig;
 
@@ -1538,14 +1538,16 @@ impl Step<'_> {
     /// gives ToolMissing first (design part 5.7, R5-code-28). Step 10 runs where `needs_step10` holds: no mkvmerge
     /// gives ToolMissing, then the worker check (`OCR_MISSING`), the evidence extraction (`step10::extract` over the
     /// staged file and `<key>/mkvmerge.json`) and `read_streams`. Step 10a is `run_pass` with the job's own
-    /// `keep_tuning_evidence` (R5-code-33). On a re-run of the unit (a retry after a Decide whose refetch failed, a
-    /// restart), a title whose staged tuning folder is complete (`staged_state`) skips both steps with the job.log line
-    /// `<key>: steps 10 and 10a skipped: the staged tuning folder is complete`, and Decide reads what the first run
-    /// left in the job folder and the staged folder (design part 5.10); an incomplete folder and the job folder's
-    /// outputs of the two steps are deleted first (`clear_incomplete`) and both steps run again (notes C3; T5-R12,
-    /// T5-R13), and when either is there (`unit_outputs_left`), a staging share that does not answer gives the staging
-    /// failure before anything is deleted. Their errors feed DecisionFailed, a staging write classed by the share check
-    /// (`unit_result`, T5-R56); a cancelled step posts nothing. It returns no event when every title is done.
+    /// `keep_tuning_evidence` (R5-code-33), or, for a title whose probe lists no audio stream (`has_audio`), no pass
+    /// and an empty streamhash.txt, its marker under either setting (T5-R66). On a re-run of the unit (a retry after a
+    /// Decide whose refetch failed, a restart), a title whose staged tuning folder is complete (`staged_state`) skips
+    /// both steps with the job.log line `<key>: steps 10 and 10a skipped: the staged tuning folder is complete`, and
+    /// Decide reads what the first run left in the job folder and the staged folder (design part 5.10); an incomplete
+    /// folder and the job folder's outputs of the two steps are deleted first (`clear_incomplete`) and both steps run
+    /// again (notes C3; T5-R12, T5-R13), and when either is there (`unit_outputs_left`), a staging share that does not
+    /// answer gives the staging failure before anything is deleted. Their errors feed DecisionFailed, a staging write
+    /// classed by the share check (`unit_result`, T5-R56); a cancelled step posts nothing. It returns no event when
+    /// every title is done.
     fn extract_subtitle_evidence(&self) -> Outcome {
         let failed = |failure| Event::DecisionFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -1563,7 +1565,11 @@ impl Step<'_> {
             let label_dir = self.job.job_dir.join(key);
             let tuning = tuning_dir(staging, self.id, key);
             let step10 = self.needs_step10(&scan, &typed, planned).map_err(|error| unknown(failed, error))?;
-            let state = staged_state(&tuning, self.job.settings.keep_tuning_evidence, step10);
+            let audio = match has_audio(&label_dir) {
+                Ok(audio) => audio,
+                Err(error) => return Ok(unit_result(error, || self.staging_health())),
+            };
+            let state = staged_state(&tuning, self.job.settings.keep_tuning_evidence, audio, step10);
             if state == Staged::Complete {
                 self.log(&format!("{key}: {SKIPPED_COMPLETE}"));
                 continue;
@@ -1623,6 +1629,7 @@ impl Step<'_> {
                 tuning: &tuning,
                 title_work: &title_work,
                 keep: self.job.settings.keep_tuning_evidence, // the job's own settings (R5-code-33)
+                audio,
             };
             let log = |line: &str| self.log(line);
             let ended = self.ctx(&no_progress, |ctx| run_pass(ctx, &ffmpeg, &ffprobe, &inputs, &log));
@@ -1635,6 +1642,7 @@ impl Step<'_> {
                     self.log(&format!("{key}: step 10a wrote {folder}, no proxy kept"))
                 }
                 Ok(PassEnd::Streamhash) => self.log(&format!("{key}: step 10a wrote streamhash.txt")),
+                Ok(PassEnd::NoAudio) => self.log(&format!("{key}: {NO_AUDIO}")),
                 Err(error) => return Ok(unit_result(error, || self.staging_health())),
             }
         }

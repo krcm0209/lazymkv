@@ -347,6 +347,34 @@ fn a_pending_copy_is_retried_at_the_cleanup_pass_of_an_idle_engine() {
     assert!(staged(&h, &id).join("audio-proxy.mka").is_file(), "the job's retention has not passed, so its staging data stays");
 }
 
+/// Spec 14, call 10: a blank `staging_root` or `tuning_root` in a job's own settings (ENG-19) is unset, as
+/// `configured_root` reads it, so the copy stays pending with the unset line, asks no share and adds no note.
+#[test]
+fn a_blank_root_in_the_jobs_own_settings_leaves_the_copy_pending_as_unset() {
+    let h = harness(&[], on());
+    let id = pending_then_reachable(&h);
+    let path = h.job_dir(&id).join("settings.json");
+    for (key, blank) in [("tuning_root", ""), ("tuning_root", "   "), ("tuning_root", "/"), ("staging_root", "")] {
+        // An attempt that asked the fake share would land its copy; Unreachable keeps it from writing anywhere.
+        h.shares().set_reach(blank, Reach::Unreachable("blank".into()));
+        let mut value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["staging_root"] = json!(h.staging().display().to_string());
+        value["tuning_root"] = json!(root(&h));
+        value[key] = json!(blank);
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let before = tuning_lines(&h, &id).len();
+        h.restart();
+        let line = format!("tuning copy retried: still pending: {key} is unset");
+        h.wait("the unset line", |h| tuning_lines(h, &id)[before..].iter().any(|found| *found == line));
+        h.settle();
+        assert_eq!(&tuning_lines(&h, &id)[before..], &[line.clone()], "{key} {blank:?}");
+        assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Pending));
+        assert_eq!(pending_notes(&h, &id), 1);
+        assert_eq!(h.shares().reaches(blank), 0, "{key} {blank:?}");
+        assert!(!dataset(&h, &id).exists());
+    }
+}
+
 /// The recordings refresh and the cleanup's mirror (design part 7.5; call 11; T5-R15, T5-R16, T5-R57).
 mod refresh {
     use super::common::Client;
