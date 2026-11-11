@@ -9,10 +9,12 @@ use lazymkv_engine::testkit::{ci_factor, BusyRetry};
 use lazymkv_platform::fakes::FakeHost;
 use lazymkv_platform::{GuardedChild, ProcessGuard, Spawn, StdProcessGuard};
 use lazymkv_tools::ocr::{end_reason, ocr_args, run_worker, WorkerEnd};
-use lazymkv_tools::{run_recorded, with_suffix, CancelToken, LineAction, Limits, ToolCtx};
+use lazymkv_tools::{
+    run_recorded, run_worker_limited, with_suffix, CancelToken, LineAction, Limits, ToolCtx, WORKER_MEMORY_LIMIT,
+};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -55,9 +57,24 @@ fn work(scratch: &Scratch) -> Work {
     Work { capture: dir.join("s0.capture.txt"), dir, args, out }
 }
 
-/// Runs the worker on its own thread and waits up to 30 s, so a kill that regressed fails the test instead of hanging
-/// it; the bound proves a kill and is not scaled. Gives the end and every line `on_output` got.
+/// A worker driver: `run_worker` or `run_worker_limited`, which take the same arguments.
+type Driver = fn(&ToolCtx<'_>, &Path, &[String], &Path, Duration) -> io::Result<WorkerEnd>;
+
+/// `run_through` with `run_worker`.
 fn run(guard: Arc<Recording>, tool: PathBuf, work: &Work, cap: Duration, cancel: CancelToken) -> (WorkerEnd, Vec<String>) {
+    run_through(run_worker, guard, tool, work, cap, cancel)
+}
+
+/// Runs the worker through `driver` on its own thread and waits up to 30 s, so a kill that regressed fails the test
+/// instead of hanging it; the bound proves a kill and is not scaled. Gives the end and every line `on_output` got.
+fn run_through(
+    driver: Driver,
+    guard: Arc<Recording>,
+    tool: PathBuf,
+    work: &Work,
+    cap: Duration,
+    cancel: CancelToken,
+) -> (WorkerEnd, Vec<String>) {
     let (args, capture) = (work.args.clone(), work.capture.clone());
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -66,7 +83,7 @@ fn run(guard: Arc<Recording>, tool: PathBuf, work: &Work, cap: Duration, cancel:
         let seen = Mutex::new(Vec::new());
         let on_output = |_: OutputStream, line: &str| seen.lock().unwrap().push(line.to_string());
         let ctx = ToolCtx { guard: &*guard, host: &host, limits: &limits, cancel, on_output: &on_output, on_progress: &|_: f64| {} };
-        let end = run_worker(&ctx, &tool, &args, &capture, cap).map_err(|error| error.to_string());
+        let end = driver(&ctx, &tool, &args, &capture, cap).map_err(|error| error.to_string());
         let _ = sender.send((end, seen.into_inner().unwrap()));
     });
     let (end, seen) = receiver.recv_timeout(Duration::from_secs(30)).expect("run_worker did not return within 30 s");
@@ -90,6 +107,26 @@ fn the_worker_gets_rten_num_threads_3_and_below_normal_priority() {
     assert_eq!(spawns.len(), 1);
     assert_eq!(spawns[0].program, tool);
     assert_eq!(spawns[0].args, work.args);
+    assert_eq!(spawns[0].env, [("RTEN_NUM_THREADS".to_string(), "3".to_string())]);
+    assert!(spawns[0].below_normal);
+}
+
+/// Notes A1 and call 10, T6-R2: the limited driver is `run_worker` with the limit of 2 gibibytes (GiB) and no other
+/// change.
+#[test]
+fn run_worker_limited_adds_the_2_gib_limit_and_nothing_else() {
+    let dir = Scratch::new("ocr-limit");
+    let tool = stand_in(&dir, r#"{"responses":[{"args_contain":["--stream"]}]}"#);
+    let work = work(&dir);
+    let guard = Arc::new(Recording::default());
+    let cancel = CancelToken::default();
+    let (end, _) = run_through(run_worker_limited, Arc::clone(&guard), tool.clone(), &work, long(), cancel);
+    assert_eq!(end, WorkerEnd::Read);
+    let spawns = guard.0.lock().unwrap();
+    assert_eq!(spawns.len(), 1);
+    assert_eq!((&spawns[0].program, &spawns[0].args), (&tool, &work.args));
+    assert_eq!(spawns[0].memory_limit, Some(2_147_483_648));
+    assert_eq!(WORKER_MEMORY_LIMIT, 2_147_483_648);
     assert_eq!(spawns[0].env, [("RTEN_NUM_THREADS".to_string(), "3".to_string())]);
     assert!(spawns[0].below_normal);
 }

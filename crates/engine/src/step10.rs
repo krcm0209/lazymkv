@@ -15,7 +15,9 @@ use lazymkv_core::subtitle::bitmap::evidence::{
 };
 use lazymkv_core::subtitle::text::{is_text_codec, packet_events, READING};
 use lazymkv_platform::write_atomic;
-use lazymkv_tools::{end_reason, ffprobe, mkvmerge, ocr_args, run_worker, with_suffix, ToolCtx, WorkerEnd};
+use lazymkv_tools::{
+    end_reason, ffprobe, mkvmerge, ocr_args, run_worker_limited, with_suffix, ToolCtx, WorkerEnd, WORKER_MEMORY_LIMIT,
+};
 use serde_json::{json, Value};
 
 use crate::staged::{copy_checked, copy_tree_checked, move_checked, UnitError};
@@ -335,10 +337,15 @@ fn read_into(
         let args = ocr_args(&evidence, n, clear_max, &out);
         log(&format!("run lazymkv-ocr s{n}: {} {}", worker.display(), args.join(" ")));
         let limit = cap(events);
-        let end = run_worker(ctx, worker, &args, &capture, limit)
+        let end = run_worker_limited(ctx, worker, &args, &capture, limit)
             .map_err(|error| UnitError::Failed(format!("lazymkv-ocr could not run: {error}")))?;
         let (exit, wall_ms) = exit_file(&capture).unwrap_or((None, 0));
         log(&format!("ended lazymkv-ocr s{n}: exit {} after {wall_ms} ms", code_text(exit)));
+        if matches!(end, WorkerEnd::Exited(_)) {
+            // T6-R3: what the engine asked for, true on every system; only Windows enforces it.
+            let started = format!("lazymkv-ocr s{n} was started with a memory limit of {WORKER_MEMORY_LIMIT} bytes");
+            log(&format!("{started} (design part 5.3)"));
+        }
 
         let outcome = match &end {
             WorkerEnd::Cancelled => return Err(UnitError::Failed(CANCELLED.to_string())),

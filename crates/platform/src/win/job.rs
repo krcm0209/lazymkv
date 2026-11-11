@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
     TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     OpenThread, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
@@ -54,14 +54,16 @@ use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 /// (V1)). The engine's environment is built over HKCU's Environment, which a non-elevated process of the owner can
 /// write, so an option variable there (JAVA_TOOL_OPTIONS, FFREPORT, MKVTOOLNIX_OPTIONS) reaches no elevated tool, nor
 /// the relay's `lazymkvctl`, nor any grandchild, makemkvcon's Java included. `Spawn::cwd`, when set, is the child's
-/// working folder (T5-R37).
+/// working folder (T5-R37). `Spawn::memory_limit`, when set, is the job's committed-memory limit,
+/// `JOB_OBJECT_LIMIT_JOB_MEMORY` with `JobMemoryLimit`, which covers the child's whole tree since each child has a job
+/// of its own (design part 5.3; notes A1 and call 10; T6-R1).
 /// Def: T3-5. Use: T3-23.
 pub struct JobProcessGuard;
 
 impl ProcessGuard for JobProcessGuard {
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
         // Nothing has started if the job cannot be made.
-        let job = Job::new()?;
+        let job = Job::new(spawn.memory_limit)?;
         // A console of its own with no window (review round 1 of pull request 3 (V9)).
         let flags = CREATE_SUSPENDED | CREATE_NO_WINDOW;
         let flags = if spawn.below_normal { flags | BELOW_NORMAL_PRIORITY_CLASS } else { flags };
@@ -111,8 +113,10 @@ impl Job {
     /// the process with its code instead of holding it on a fault dialog. The rip, a job's drive listing, the remux
     /// and the relay's command have no time limit, so such a dialog held the step until someone answered it. Set on
     /// the job, not on the engine, the error mode covers only the tool trees, and a grandchild started with
-    /// `CREATE_DEFAULT_ERROR_MODE` cannot escape it (review round 1 of pull request 3 (R1)).
-    fn new() -> io::Result<Job> {
+    /// `CREATE_DEFAULT_ERROR_MODE` cannot escape it (review round 1 of pull request 3 (R1)). With `memory_limit`, a
+    /// third: `JOB_OBJECT_LIMIT_JOB_MEMORY`, with that many bytes as `JobMemoryLimit`, the most memory the job's
+    /// processes may commit together, so an allocation past it fails (design part 5.3; T6-R1).
+    fn new(memory_limit: Option<u64>) -> io::Result<Job> {
         // SAFETY: both pointers may be null: default security, so the handle is not inherited, and no name.
         let raw = unsafe { CreateJobObjectW(null(), null()) };
         if raw.is_null() {
@@ -123,6 +127,10 @@ impl Job {
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        if let Some(limit) = memory_limit {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = limit as usize;
+        }
         let length = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
         // SAFETY: the job handle is open; `info` is the structure JobObjectExtendedLimitInformation reads, it outlives
         // the call, and `length` is its size.
@@ -252,7 +260,7 @@ mod tests {
     use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, SetConsoleCtrlHandler, CTRL_BREAK_EVENT};
     use windows_sys::Win32::System::JobObjects::{
         JobObjectExtendedLimitInformation, QueryInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetPriorityClass, OpenProcess, WaitForSingleObject, BELOW_NORMAL_PRIORITY_CLASS,
@@ -274,6 +282,8 @@ mod tests {
     /// How long the console probe waits for its guarded child after the Ctrl+Break: a child the event reaches ends at
     /// once (review round 1 of pull request 3 (V9)).
     const BREAK_ENDS_WITHIN: Duration = Duration::from_secs(2);
+    /// One mebibyte (MiB), the unit of the memory limit tests.
+    const MIB: u64 = 1024 * 1024;
     /// The arguments that make this test binary run only `probe_child`.
     const PROBE_ARGS: [&str; 4] = ["--exact", "win::job::tests::probe_child", "--ignored", "--nocapture"];
 
@@ -563,7 +573,59 @@ mod tests {
     /// dialog hold a process of it: an exception nothing handles ends the process at once, with the exception's code.
     #[test]
     fn a_job_kills_on_close_and_lets_no_fault_dialog_hold_its_processes() {
-        let job = super::Job::new().unwrap();
+        let info = limits_of(&super::Job::new(None).unwrap());
+        assert_eq!(
+            info.BasicLimitInformation.LimitFlags,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+        );
+    }
+
+    /// Notes A1 and call 10, T6-R1: a memory limit is the job-wide committed-memory limit, beside the two others.
+    #[test]
+    fn a_job_with_a_memory_limit_has_the_job_memory_flag_and_value() {
+        let info = limits_of(&super::Job::new(Some(256 * MIB)).unwrap());
+        let flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+            | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        assert_eq!(info.BasicLimitInformation.LimitFlags, flags);
+        assert_eq!(info.JobMemoryLimit, (256 * MIB) as usize);
+    }
+
+    /// Notes A1, T6-R1, T6-R18: a guarded child that allocates past its limit ends without success, at once, and
+    /// before it writes its `allocated` line; one that allocates within the limit runs to its end. The bound catches a
+    /// hang, so it does not scale (Global Constraints).
+    #[test]
+    fn a_child_that_allocates_past_its_limit_ends_without_success_and_one_within_it_runs() {
+        let allocating = |mib: &str| {
+            let mut spawn = Spawn { memory_limit: Some(256 * MIB), ..helper("allocate") };
+            spawn.env.push(("LAZYMKV_TEST_ALLOCATE_MIB".to_string(), mib.to_string()));
+            spawn
+        };
+
+        let mut child = JobProcessGuard.spawn(&allocating("1024")).unwrap();
+        let mut stdout = child.take_stdout();
+        let killer = child.killer();
+        let (tx, rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || tx.send(child.wait().map_err(|error| error.kind())).unwrap());
+        let status = rx.recv_timeout(ENDS_WITHIN);
+        // A child still running after the bound is ended, so the waiter returns.
+        killer.kill().unwrap();
+        waiter.join().unwrap();
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).unwrap();
+        let status = status.expect("the child past its limit did not end within 10 s");
+        assert!(matches!(status, Ok(Some(code)) if code != 0), "{status:?}");
+        assert!(!out.lines().any(|line| line.starts_with("allocated")), "{out}");
+
+        let mut child = JobProcessGuard.spawn(&allocating("16")).unwrap();
+        let mut out = String::new();
+        child.take_stdout().read_to_string(&mut out).unwrap();
+        assert!(out.lines().any(|line| line == "allocated 16"), "{out}");
+        assert_eq!(child.wait().unwrap(), Some(0));
+    }
+
+    /// The limits `job` holds, read back with `QueryInformationJobObject`.
+    fn limits_of(job: &super::Job) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         let length = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
         // SAFETY: the job handle is open; `info` is the structure JobObjectExtendedLimitInformation fills, it outlives
@@ -578,10 +640,7 @@ mod tests {
             )
         };
         assert_ne!(read, 0, "the job's limits could not be read: {}", io::Error::last_os_error());
-        assert_eq!(
-            info.BasicLimitInformation.LimitFlags,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
-        );
+        info
     }
 
     /// Review round 1 of pull request 3 (R1): a guarded child that raises an exception nothing handles ends with the
@@ -651,7 +710,14 @@ mod tests {
     fn a_program_that_cannot_start_is_the_os_error() {
         let scratch = Scratch::new("job-missing");
         let dir = &scratch.0;
-        let spawn = Spawn { program: dir.join("absent.exe"), args: Vec::new(), env: Vec::new(), below_normal: false, cwd: None };
+        let spawn = Spawn {
+            program: dir.join("absent.exe"),
+            args: Vec::new(),
+            env: Vec::new(),
+            below_normal: false,
+            cwd: None,
+            memory_limit: None,
+        };
         let error = JobProcessGuard.spawn(&spawn).err().expect("an absent program does not start");
         std::fs::remove_dir(dir).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);

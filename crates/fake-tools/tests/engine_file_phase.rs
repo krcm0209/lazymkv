@@ -21,7 +21,7 @@ use lazymkv_engine::testkit::ci_factor;
 use lazymkv_engine::testkit::Harness;
 use lazymkv_platform::Spawn;
 use lazymkv_platform::{Host, Reach, SecretStore};
-use lazymkv_tools::exe_name;
+use lazymkv_tools::{exe_name, WORKER_MEMORY_LIMIT};
 use lazymkv_tools::ffprobe::packets_args;
 use lazymkv_tools::mkvmerge::extract_args;
 use serde_json::{json, Value};
@@ -909,6 +909,7 @@ fn the_worker_runs_once_per_english_or_no_language_stream_one_at_a_time_below_no
         assert_eq!(spawn.program, h.tools().join(format!("lazymkv-ocr{}", std::env::consts::EXE_SUFFIX)));
         assert_eq!(spawn.env, [("RTEN_NUM_THREADS".to_string(), "3".to_string())]);
         assert!(spawn.below_normal);
+        assert_eq!(spawn.memory_limit, Some(WORKER_MEMORY_LIMIT));
     }
     let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
     let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("job.log lacks {needle}: {log}"));
@@ -959,6 +960,38 @@ fn a_worker_that_panics_leaves_the_stream_unread_with_its_exit_code_and_no_stder
     assert!(!h.engine_log().contains(SENTINEL));
     assert!(!Client::open(&h).snapshot().to_string().contains(SENTINEL));
     assert!(files_under(&jobs).iter().all(|name| !name.contains("capture")), "{:?}", files_under(&jobs));
+}
+
+/// Notes A1 and call 10, T6-R2: the worker runs under the memory limit and no other tool of the job does. The job is
+/// stopped at its DecisionDone, as the worker test above does, by which point the scan and the rip, the identification,
+/// step 10's extraction and packet lists, the worker and step 10a's ffmpeg passes have all run.
+#[test]
+fn only_the_worker_runs_under_a_memory_limit() {
+    let h = two_subs(&[], json!({}));
+    decided(&h);
+    let spawns = h.spawns();
+    let stem = |spawn: &Spawn| spawn.program.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stems: BTreeSet<String> = spawns.iter().map(stem).collect();
+    assert!(stems.is_superset(&set(&["ffmpeg", "ffprobe", "lazymkv-ocr", "makemkvcon64", "mkvmerge"])), "{stems:?}");
+    for spawn in &spawns {
+        let want = (stem(spawn) == "lazymkv-ocr").then_some(WORKER_MEMORY_LIMIT);
+        assert_eq!(spawn.memory_limit, want, "{}", spawn.program.display());
+    }
+}
+
+/// T6-R3: after a worker that exited with a code that is none of its own, job.log names the memory limit in force,
+/// once, after that stream's `ended` line; a stream that was read gets no such line.
+#[test]
+fn a_worker_that_exits_with_a_code_logs_the_memory_limit_in_force() {
+    let h = two_subs(&["movie-direct-two-subs-panic"], json!({}));
+    let id = held(&h);
+    assert_eq!(unread_notes(&h, &id), [unread(3, "lazymkv-ocr exited with code 101")]);
+    let log = job_log(&h, &id);
+    let line = "lazymkv-ocr s1 was started with a memory limit of 2147483648 bytes (design part 5.3)";
+    assert_eq!(log.matches(line).count(), 1, "{log}");
+    let ended = log.find("ended lazymkv-ocr s1: exit 101").unwrap_or_else(|| panic!("job.log lacks s1's end: {log}"));
+    assert!(ended < log.find(line).unwrap(), "{log}");
+    assert!(!log.contains("lazymkv-ocr s0 was started with a memory limit"), "{log}");
 }
 
 /// Review Focus 2, design part 10.3: records the listing does not have leave the stream unread with numbers only.
