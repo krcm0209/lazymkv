@@ -544,7 +544,7 @@ fn the_ffmpeg_check_script_parses_and_prints_no_name() {
         "\"listing: $audio audio streams, $audioKeys differing keys; other streams: $otherKeys differing keys$named\"",
         "\"packets row ${r}: $(Get-Same $same)\"",
         "\"corpus copy: $($files.Count) files, $bytes bytes\"",
-        "@{ key = 'golden'; line = 'golden check'; exits = @(0, 1) }",
+        "@{ key = 'golden'; line = 'golden check'; exits = @(0) }",
         "@{ key = 'retune'; line = 'retune'; exits = @(0, 1, 3) }",
         "\"$($part.line): $word; exit $($exits[$before]) then $($exits[$after])\"",
         "'RESULT ok'",

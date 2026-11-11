@@ -11,12 +11,21 @@
 # checks the two programs in -Candidate, which must have the two SHA-256 (Secure Hash Algorithm 256) values given; that
 # folder goes first on PATH before env.ps1 is dot-sourced, so this script, audio-levels.ps1 and lazymkv-dev all use it.
 # The film is phase 0's kept UHD (Ultra HD Blu-ray) all-tracks rip: the one recording whose folder name ends -uhd and
-# whose all-tracks folder holds a finished level folder (audio-levels-20ms-<main>[-<cand>...] with audio-proxy.json).
+# whose all-tracks folder holds at least one finished level folder (audio-levels-20ms-<main>[-<cand>...] with
+# audio-proxy.json); none or several such recordings is a failure. The check repeats phase 0's sequence of level
+# passes (the controller's ruling P15): one audio-levels.ps1 pass per finished level folder, all into the same scratch
+# roots, so the first pass writes the proxy and the later ones find it and keep it, as phase 0's did. The first is the
+# one folder that holds proxy-check.json, which audio-levels.ps1 writes only in a pass that writes the proxy; the
+# others follow by the time of their manifest.txt, then by name. Only the first matters: a pass that keeps the proxy
+# reads nothing else that an earlier pass wrote, since each writes its own level folder. All the folders must share
+# one main stream. The passes are named on the levels line by their stream numbers, which are not names.
 # The parts, each one output line, in this order (T6-R13):
 #   hashes         the candidate's two SHA-256 values against the ones given; nothing else runs unless they are equal
-#   levels         one audio-levels.ps1 pass over the kept rip with -RecordingsRoot and -TuningRoot under -Work
-#                  (T6-R12); every series file, streamhash.txt and graph.txt byte for byte against phase 0's level
-#                  folder, and manifest.txt line by line with the run time (seconds=) of its second line left out
+#   levels         phase 0's audio-levels.ps1 passes over the kept rip with -RecordingsRoot and -TuningRoot under
+#                  -Work (T6-R12); in each pass's folder every series file, streamhash.txt and graph.txt byte for byte
+#                  against phase 0's folder of the same name, and manifest.txt byte for byte with the run time
+#                  (seconds=) of its second line left out; the counts are summed and each word is equal only if
+#                  equal in every folder
 #   proxy          the installed full ffmpeg's packet hashes (streamhash) of the new proxy against phase 0's proxy
 #   listing        the candidate ffprobe's stream listing of the kept rip, key by key, against the recording's
 #                  ffprobe-streams.json: no key of an audio stream may differ; other streams' differing keys are named
@@ -25,11 +34,14 @@
 #                  recording's subs\sub-<n>.packets.json (six lines, rows from C:\lazymkv\phase0\trial-tracks.txt)
 #   corpus copy    the whole of -Evidence copied to <Work>\evidence; refused above 4 GB
 #   golden check   lazymkv-dev golden check and lazymkv-dev retune over the copy, before and after the film's new
-#   retune         listing and level folder are put into it: the two standard output captures of each and the two
-#                  standard error captures of each must be the same bytes, with the same exit code. The run before
-#                  must also show that the command read the copy, not refused it: its standard output is not empty,
-#                  and its exit code is 0 or 1 for golden check (0 all pass, 1 a golden fails; 3 is nothing checked
-#                  and 2 an argument error, golden.rs) and 0, 1 or 3 for retune (0 pass, 1 a FAIL, 3 something not
+#   retune         listing and level folders are put into it (the listing whole; of each level folder the measured
+#                  files only, Set-NewLevelFiles below): the two standard output captures of each and the two
+#                  standard error captures of each must be the same bytes, with the same exit code; a difference is
+#                  reported in line numbers only. Both run in C:\lazymkv\src, since lazymkv-dev finds the spec from
+#                  the repository root above its current folder. The run before must also show that the command read
+#                  the copy, not refused it: its standard output is not empty, and its exit code is 0 for golden check
+#                  (all pass; 1 is a golden that fails, 3 nothing checked and 2 an argument error, golden.rs) and
+#                  0, 1 or 3 for retune (0 pass, 1 a FAIL, 3 something not
 #                  checked; 2 an argument or spec error; retune.rs). retune's refusals (no evidence, a TMDb copy more
 #                  than six months old that cannot be fetched again) exit 3 with nothing on standard output, so the
 #                  empty capture tells them apart from a measured exit 3.
@@ -53,6 +65,7 @@ $DEV = 'C:\lazymkv\target\release\lazymkv-dev.exe'
 $LevelsScript = 'C:\lazymkv\src\scripts\phase0\audio-levels.ps1'
 $Spec = 'C:\lazymkv\src\docs\superpowers\specs\2026-10-04-lazymkv-design.md'
 $Label = 'all-tracks'
+$RepoRoot = 'C:\lazymkv\src'
 $MaxCopyBytes = 4GB
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 
@@ -98,16 +111,45 @@ function Read-Json([string]$Path) {
     $text | ConvertFrom-Json
 }
 
-# manifest.txt's bytes as text, one character per byte (ISO 8859-1, so no byte is lost or changed and line ends
-# stay as they are), with only the run time of its second line (" seconds=<n> ") masked (T6-R13).
-function Get-ManifestText([string]$Path) {
-    $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
-    $first = $text.IndexOf("`n")
-    if ($first -lt 0) { return $text }
-    $second = $text.IndexOf("`n", $first + 1)
-    if ($second -lt 0) { $second = $text.Length }
-    $line = $text.Substring($first + 1, $second - $first - 1) -replace ' seconds=\d+ ', ' seconds=- '
-    $text.Substring(0, $first + 1) + $line + $text.Substring($second)
+# A file's bytes as text, one character per byte (ISO 8859-1, so no byte is lost or changed and line ends stay as
+# they are), and back.
+$Latin1 = [Text.Encoding]::GetEncoding(28591)
+function Read-Bytes([string]$Path) { $Latin1.GetString([IO.File]::ReadAllBytes($Path)) }
+
+# A manifest's text with the run time of its second line (" seconds=<n> ") set to $Value; nothing else changes.
+function Set-RunTime([string]$Text, [string]$Value) {
+    $first = $Text.IndexOf("`n")
+    if ($first -lt 0) { return $Text }
+    $second = $Text.IndexOf("`n", $first + 1)
+    if ($second -lt 0) { $second = $Text.Length }
+    $line = $Text.Substring($first + 1, $second - $first - 1) -replace ' seconds=\d+ ', " seconds=$Value "
+    $Text.Substring(0, $first + 1) + $line + $Text.Substring($second)
+}
+
+# manifest.txt with only its run time masked (T6-R13).
+function Get-ManifestText([string]$Path) { Set-RunTime (Read-Bytes $Path) '-' }
+
+# The run time on a manifest's second line, or '' when it has none.
+function Get-RunTime([string]$Path) {
+    $m = [regex]::Match((Read-Bytes $Path), '\A[^\n]*\n[^\n]* seconds=(\d+) ')
+    if ($m.Success) { return $m.Groups[1].Value }
+    ''
+}
+
+# Where two captures first differ, in numbers only: their line counts, how many lines differ and the first that does.
+function Get-LineDiff([string]$A, [string]$B) {
+    $one = @((Read-Bytes $A) -split "`n")
+    $two = @((Read-Bytes $B) -split "`n")
+    $count = [math]::Max($one.Count, $two.Count)
+    $differ = 0
+    $first = 0
+    for ($i = 0; $i -lt $count; $i++) {
+        if ($i -ge $one.Count -or $i -ge $two.Count -or $one[$i] -cne $two[$i]) {
+            $differ++
+            if ($first -eq 0) { $first = $i + 1 }
+        }
+    }
+    "$($one.Count) lines before, $($two.Count) after, $differ lines differ, the first at line $first"
 }
 
 function Test-SameManifest([string]$A, [string]$B) {
@@ -165,6 +207,36 @@ function Compare-Node($A, $B, [string]$Path, [System.Collections.ArrayList]$Diff
     if ($A.GetType() -ne $B.GetType() -or [string]$A -cne [string]$B) { [void]$Diffs.Add($Path) }
 }
 
+# Puts one new level folder's measured files into the evidence copy's folder of the same name: the series files,
+# streamhash.txt, graph.txt and streams.json (the rule reads its stream list), as the new pass wrote them, and
+# manifest.txt as the new pass wrote it but with phase 0's run time, the one field T6-R13 leaves out and which golden
+# check prints ("measured in <n> s"). The copy keeps phase 0's run-dependent files: audio-proxy.json (its times and
+# ffmpeg line), command.txt (absolute paths), ffmpeg.txt, ffprobe.txt and proxy-check.json. A measured file that
+# phase 0's folder has and the new one lacks is removed from the copy, so the difference shows.
+function Set-NewLevelFiles([string]$From, [string]$Old, [string]$To) {
+    $fixed = @('streamhash.txt', 'graph.txt', 'streams.json')
+    $measured = @(@(Get-ChildItem -LiteralPath $From -File) + @(Get-ChildItem -LiteralPath $To -File) |
+        ForEach-Object { $_.Name } |
+        Where-Object { $_ -cmatch '^(main-mix|main-fc|cand-\d+)\.txt$' -or $fixed -ccontains $_ } | Sort-Object -Unique)
+    foreach ($name in $measured) {
+        if (Test-Path -LiteralPath "$From\$name" -PathType Leaf) {
+            Copy-Item -LiteralPath "$From\$name" -Destination "$To\$name" -Force -ErrorAction Stop
+        } else {
+            Remove-Item -LiteralPath "$To\$name" -Force -ErrorAction Stop
+        }
+    }
+    $time = Get-RunTime "$Old\manifest.txt"
+    if (-not $time) { Stop-Part 'a manifest.txt of phase 0 has no run time on its second line' }
+    $text = Set-RunTime (Read-Bytes "$From\manifest.txt") $time
+    [IO.File]::WriteAllBytes("$To\manifest.txt", $Latin1.GetBytes($text))
+}
+
+# The evidence copy's audio-dataset.json as it was before a retune run: put back, or removed when there was none.
+function Restore-Baseline([bool]$Had, [string]$Kept, [string]$Baseline) {
+    if ($Had) { Copy-Item -LiteralPath $Kept -Destination $Baseline -Force -ErrorAction Stop }
+    elseif (Test-Path -LiteralPath $Baseline) { Remove-Item -LiteralPath $Baseline -Force -ErrorAction Stop }
+}
+
 # Copied from engine-ocr-trial.ps1 (each script runs alone): the six rows of trial-tracks.txt; a line of another form
 # stops the run, naming its number only.
 function Get-TrialRows {
@@ -207,6 +279,7 @@ $haveFilm = $false
 $levelsDone = $false
 $listingDone = $false
 $copyDone = $false
+$pushed = $false
 $hashesPrinted = $false
 try {
     # The inputs and the candidate (call 12 (a): the two SHA-256 values must be equal before anything runs).
@@ -271,7 +344,8 @@ try {
         Add-Failure "the inputs: $(Get-Reason $_)"
     }
 
-    # The film: the one recording ending -uhd whose all-tracks folder holds a finished level folder.
+    # The film: the one recording ending -uhd whose all-tracks folder holds a finished level folder, and its finished
+    # level folders in the order phase 0's passes wrote them (P15).
     if ($go) {
         try {
             $found = @()
@@ -280,22 +354,42 @@ try {
                 $at = "$($r.FullName)\$Label"
                 if (-not (Test-Path -LiteralPath $at -PathType Container)) { continue }
                 $levelDirs = @(Get-ChildItem -LiteralPath $at -Directory -Filter 'audio-levels-20ms-*')
+                $finished = @()
                 foreach ($l in $levelDirs) {
                     if ($l.Name -cmatch '^audio-levels-20ms-\d+(-\d+)*$' -and
                         (Test-Path -LiteralPath "$($l.FullName)\audio-proxy.json" -PathType Leaf)) {
-                        $found += [pscustomobject]@{ folder = $r.Name; level = $l.Name }
+                        $finished += $l.Name
                     }
                 }
+                if ($finished.Count -gt 0) { $found += [pscustomobject]@{ folder = $r.Name; levels = $finished } }
             }
             if ($found.Count -ne 1) {
                 Stop-Part "$($found.Count) recordings ending -uhd hold a finished all-tracks level folder, not 1"
             }
             $film = $found[0].folder
-            $level = $found[0].level
-            $numbers = @($level.Substring('audio-levels-20ms-'.Length) -split '-' | ForEach-Object { [int]$_ })
-            $main = $numbers[0]
-            [int[]]$cands = @()
-            if ($numbers.Count -gt 1) { [int[]]$cands = $numbers[1..($numbers.Count - 1)] }
+            $levels = @($found[0].levels)
+            $passes = @()
+            foreach ($name in $levels) {
+                $streams = @($name.Substring('audio-levels-20ms-'.Length) -split '-' | ForEach-Object { [int]$_ })
+                [int[]]$others = @()
+                if ($streams.Count -gt 1) { [int[]]$others = $streams[1..($streams.Count - 1)] }
+                $folder = "$Recordings\$film\$Label\$name"
+                $passes += [pscustomobject]@{
+                    level = $name; main = $streams[0]; cands = $others
+                    suffix = $name.Substring('audio-levels-20ms-'.Length)
+                    first = Test-Path -LiteralPath "$folder\proxy-check.json" -PathType Leaf
+                    time = (Get-Item -LiteralPath "$folder\manifest.txt" -ErrorAction Stop).LastWriteTimeUtc
+                }
+            }
+            if (@($passes | ForEach-Object { $_.main } | Sort-Object -Unique).Count -ne 1) {
+                Stop-Part "the $($levels.Count) finished level folders do not share one main stream"
+            }
+            $firsts = @($passes | Where-Object { $_.first }).Count
+            if ($firsts -ne 1) {
+                Stop-Part "$firsts of the $($levels.Count) finished level folders hold proxy-check.json, not 1"
+            }
+            $passes = @(@($passes | Where-Object { $_.first }) +
+                @($passes | Where-Object { -not $_.first } | Sort-Object -Property time, level))
             $mkvs = @(Get-ChildItem -LiteralPath "$Staging\$film\$Label" -File -ErrorAction Stop |
                 Where-Object { $_.Extension -eq '.mkv' })
             if ($mkvs.Count -ne 1) { Stop-Part "the film's staging folder holds $($mkvs.Count) .mkv files, not 1" }
@@ -306,32 +400,47 @@ try {
         }
     }
 
-    # levels: one audio-levels.ps1 pass, under -Work only (T6-R12), against phase 0's level folder. Its output names
-    # the rip and paths, so none of it reaches the log; it runs with the Continue preference it was written for.
+    # levels: phase 0's passes repeated, under -Work only (T6-R12), each against phase 0's level folder of the same
+    # name. Their output names the rip and paths, so none of it reaches the log; they run with the Continue preference
+    # they were written for. A pass that does not finish stops the rest.
     if ($haveFilm) {
         try {
-            $ErrorActionPreference = 'Continue'
-            try {
-                $levelOutput = @(& $LevelsScript -Slug $film -Label $Label -Main $main -Cand $cands `
-                    -RecordingsRoot "$Work\recordings" -TuningRoot "$Work\dataset" *>&1)
-            } finally { $ErrorActionPreference = 'Stop' }
-            if ($levelOutput.Count -eq 0 -or [string]$levelOutput[-1] -cne 'RESULT ok') {
-                Stop-Part 'the level pass did not end RESULT ok'
+            foreach ($pass in $passes) {
+                $main = $pass.main
+                $cands = $pass.cands
+                $ErrorActionPreference = 'Continue'
+                try {
+                    $levelOutput = @(& $LevelsScript -Slug $film -Label $Label -Main $main -Cand $cands `
+                        -RecordingsRoot "$Work\recordings" -TuningRoot "$Work\dataset" *>&1)
+                } finally { $ErrorActionPreference = 'Stop' }
+                if ($levelOutput.Count -eq 0 -or [string]$levelOutput[-1] -cne 'RESULT ok') {
+                    Stop-Part "the level pass $($pass.suffix) did not end RESULT ok"
+                }
             }
             $levelsDone = $true
-            $oldLevel = "$Recordings\$film\$Label\$level"
-            $newLevel = "$Work\recordings\$film\$Label\$level"
-            $names = @(@(Get-ChildItem -LiteralPath $oldLevel -File -ErrorAction Stop) +
-                @(Get-ChildItem -LiteralPath $newLevel -File -ErrorAction Stop) | ForEach-Object { $_.Name } |
-                Where-Object { $_ -cmatch '^(main-mix|main-fc|cand-\d+)\.txt$' } | Sort-Object -Unique)
+            $names = New-Object System.Collections.ArrayList
             $equal = 0
-            foreach ($name in $names) { if (Test-SameBytes "$oldLevel\$name" "$newLevel\$name") { $equal++ } }
+            $hash = $true
+            $graph = $true
+            $manifest = $true
+            foreach ($pass in $passes) {
+                $oldLevel = "$Recordings\$film\$Label\$($pass.level)"
+                $newLevel = "$Work\recordings\$film\$Label\$($pass.level)"
+                $series = @(@(Get-ChildItem -LiteralPath $oldLevel -File -ErrorAction Stop) +
+                    @(Get-ChildItem -LiteralPath $newLevel -File -ErrorAction Stop) | ForEach-Object { $_.Name } |
+                    Where-Object { $_ -cmatch '^(main-mix|main-fc|cand-\d+)\.txt$' } | Sort-Object -Unique)
+                foreach ($name in $series) {
+                    [void]$names.Add("$($pass.suffix) $name")
+                    if (Test-SameBytes "$oldLevel\$name" "$newLevel\$name") { $equal++ }
+                }
+                if (-not (Test-SameBytes "$oldLevel\streamhash.txt" "$newLevel\streamhash.txt")) { $hash = $false }
+                if (-not (Test-SameBytes "$oldLevel\graph.txt" "$newLevel\graph.txt")) { $graph = $false }
+                if (-not (Test-SameManifest "$oldLevel\manifest.txt" "$newLevel\manifest.txt")) { $manifest = $false }
+            }
             $different = $names.Count - $equal
-            $hash = Test-SameBytes "$oldLevel\streamhash.txt" "$newLevel\streamhash.txt"
-            $graph = Test-SameBytes "$oldLevel\graph.txt" "$newLevel\graph.txt"
-            $manifest = Test-SameManifest "$oldLevel\manifest.txt" "$newLevel\manifest.txt"
+            $passText = ($passes | ForEach-Object { $_.suffix }) -join ' then '
             "levels: $($names.Count) series files, $equal equal, $different different; streamhash $(Get-Same $hash); " +
-                "graph $(Get-Same $graph); manifest $(Get-Same $manifest)"
+                "graph $(Get-Same $graph); manifest $(Get-Same $manifest); passes $passText"
             if ($names.Count -eq 0 -or $different -gt 0 -or -not ($hash -and $graph -and $manifest)) {
                 Add-Failure 'the level files differ from phase 0''s'
             }
@@ -479,34 +588,55 @@ try {
         try {
             New-Item -ItemType Directory -Path "$Work\temp" -ErrorAction Stop | Out-Null
             foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) { Set-Item -Path "Env:$name" -Value "$Work\temp" }
+            # lazymkv-dev finds the spec (row 13, which labels.json and the retune golden read) from the repository
+            # root above its current folder, so both commands run in the synced source tree.
+            if (-not (Test-Path -LiteralPath "$RepoRoot\Cargo.toml" -PathType Leaf)) {
+                Stop-Part 'the source tree is missing'
+            }
+            Push-Location -LiteralPath $RepoRoot
+            $pushed = $true
             $goldenArgs = @('golden', 'check', '--evidence', "$Work\evidence")
             $retuneArgs = @('retune', '--evidence', "$Work\evidence", '--spec', $Spec)
+            # retune writes its snapshot over the copy's audio-dataset.json when it differs; that file is put back
+            # after each retune run, so both golden check runs read the mirror's own baseline.
+            New-Item -ItemType Directory -Force -Path "$Work\runs" -ErrorAction Stop | Out-Null
+            $baseline = "$Work\evidence\audio-dataset.json"
+            $keptBaseline = "$Work\runs\audio-dataset.kept"
+            $hadBaseline = Test-Path -LiteralPath $baseline -PathType Leaf
+            if ($hadBaseline) { Copy-Item -LiteralPath $baseline -Destination $keptBaseline -ErrorAction Stop }
             $exits['golden-before'] = Invoke-Recorded "$Work\runs\golden-before.txt" $DEV $goldenArgs
             $exits['retune-before'] = Invoke-Recorded "$Work\runs\retune-before.txt" $DEV $retuneArgs
+            Restore-Baseline $hadBaseline $keptBaseline $baseline
             if ($levelsDone -and $listingDone) {
                 $dest = "$Work\evidence\$film\$Label"
                 if (-not (Test-Path -LiteralPath "$dest\ffprobe-streams.json" -PathType Leaf)) {
                     Stop-Part 'the evidence copy holds no listing of the film'
                 }
-                if (-not (Test-Path -LiteralPath "$dest\$level" -PathType Container)) {
-                    Stop-Part 'the evidence copy holds no level folder of the film'
-                }
                 Copy-Item -LiteralPath $listing -Destination "$dest\ffprobe-streams.json" -Force -ErrorAction Stop
-                Remove-Item -LiteralPath "$dest\$level" -Recurse -Force -ErrorAction Stop
-                Copy-Item -LiteralPath $newLevel -Destination "$dest\$level" -Recurse -ErrorAction Stop
+                foreach ($pass in $passes) {
+                    $to = "$dest\$($pass.level)"
+                    $from = "$Work\recordings\$film\$Label\$($pass.level)"
+                    $old = "$Recordings\$film\$Label\$($pass.level)"
+                    if (-not (Test-Path -LiteralPath $to -PathType Container)) {
+                        Stop-Part "the evidence copy holds no level folder $($pass.suffix) of the film"
+                    }
+                    Set-NewLevelFiles $from $old $to
+                }
                 $exits['golden-after'] = Invoke-Recorded "$Work\runs\golden-after.txt" $DEV $goldenArgs
                 $exits['retune-after'] = Invoke-Recorded "$Work\runs\retune-after.txt" $DEV $retuneArgs
+                Restore-Baseline $hadBaseline $keptBaseline $baseline
             }
         } catch {
             Add-Failure "golden check and retune: $(Get-Reason $_)"
         } finally {
+            if ($pushed) { Pop-Location }
             foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) {
                 if ($savedTemp[$name]) { Set-Item -Path "Env:$name" -Value $savedTemp[$name] }
                 elseif (Test-Path "Env:$name") { Remove-Item -Path "Env:$name" }
             }
         }
     }
-    $parts = @(@{ key = 'golden'; line = 'golden check'; exits = @(0, 1) },
+    $parts = @(@{ key = 'golden'; line = 'golden check'; exits = @(0) },
         @{ key = 'retune'; line = 'retune'; exits = @(0, 1, 3) })
     foreach ($part in $parts) {
         $before = "$($part.key)-before"
@@ -522,9 +652,13 @@ try {
         $sameErr = Test-SameBytes "$one.stderr" "$two.stderr"
         $word = if ($sameOut -and $sameErr) { 'same output' } else { 'different output' }
         "$($part.line): $word; exit $($exits[$before]) then $($exits[$after])"
-        if (-not $sameOut) { Add-Failure "$($part.line)'s output changed with the film's new listing and level folder" }
+        if (-not $sameOut) {
+            Add-Failure ("$($part.line)'s output changed with the film's new listing and level folders (" +
+                "$(Get-LineDiff $one $two))")
+        }
         if (-not $sameErr) {
-            Add-Failure "$($part.line)'s standard error changed with the film's new listing and level folder"
+            Add-Failure ("$($part.line)'s standard error changed with the film's new listing and level folders (" +
+                "$(Get-LineDiff "$one.stderr" "$two.stderr"))")
         }
         if ($exits[$before] -ne $exits[$after]) { Add-Failure "$($part.line)'s exit code changed" }
         # The run before read the copy: a known exit and some standard output (the header's rule).
