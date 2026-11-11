@@ -2,7 +2,9 @@
 # extracts the zip into -Root, makes Administrators (S-1-5-32-544) the owner of the whole tree, gives -Root the
 # protected access list D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA), which lets only SYSTEM and Administrators write,
 # with every file and folder below inheriting it (an owner other than those two would count as able to write, W17),
-# starts bin\lazymkv-engine.exe --data <Data> hidden with its standard error to a file, waits up to 60 s for
+# runs bin\lazymkvctl.exe status once and goes on only when it answers that no engine is running (exit 4 with that
+# message), since an engine already running would answer this script's status and selftest and be stopped by its
+# stop, then starts bin\lazymkv-engine.exe --data <Data> hidden with its standard error to a file, waits up to 60 s for
 # bin\lazymkvctl.exe status to answer, runs bin\lazymkvctl.exe selftest and reads its JSON (JavaScript Object
 # Notation). mkvmerge, ffprobe and ffmpeg must each be ok, found in resources, at the expected version; MakeMKV is not
 # required, so the self-test as a whole need not pass. Then bin\lazymkvctl.exe stop, a wait of up to 30 s for the
@@ -175,6 +177,16 @@ try {
         if ($owner -ne 'O:BA') { throw "$($item.FullName) has the owner $(Hide-Names $owner), not O:BA" }
     }
     Write-Line "owner O:BA on $($items.Count) items; -Root's access list: $(Hide-Names $dacl)"
+
+    # No engine may be running before this script starts its own: only exit 4 with the no-engine message lets it go
+    # on. Exit 0 is another engine answering; any other exit, or exit 4 for another reason (an engine that refused the
+    # connection, or one only an elevated client may reach), is a failure with its code.
+    $before = Invoke-Program $ctl 'status' 15
+    if ($before.Code -eq 0) { throw 'an engine is already running on this machine; stop it first' }
+    if ($before.Code -ne 4 -or $before.Err.Trim() -ne 'lazymkvctl: no engine is running') {
+        throw "lazymkvctl status before the start exited $($before.Code): $($before.Err.Trim())"
+    }
+    Write-Line 'no engine is running before the start'
 
     $engine = Start-Process -FilePath $engineExe -ArgumentList ('--data "' + $Data + '"') -WindowStyle Hidden `
         -RedirectStandardError $engineErr -PassThru

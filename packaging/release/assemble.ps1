@@ -218,8 +218,8 @@ foreach ($source in $sources) {
 }
 
 # Step 2: mkvmerge.exe alone, run from resources\ outside any installation (ARCH-19). The portable archive holds
-# more than one file named mkvmerge.exe, so the one at <top folder>\mkvmerge.exe is chosen by rule and extracted by
-# its exact path, without -r.
+# one file named mkvmerge.exe, at <top folder>\mkvmerge.exe; it is chosen by rule and extracted by its exact path,
+# without -r, so that a future archive layout with a second file of that name cannot change which one ships.
 $mkvmergeEntry = Select-TopEntry $portable 'mkvmerge.exe'
 & 7z e $portable "-o$resources" $mkvmergeEntry.Path -y
 if ($LASTEXITCODE -ne 0) { throw "7z could not extract $($mkvmergeEntry.Path) from $portable (exit $LASTEXITCODE)" }

@@ -15,10 +15,11 @@ name: Release
 # resources (C1, call 13). The zip, the source archives, the build settings, the model files, their attribution and
 # SHA256SUMS are uploaded as the artifact lazymkv-release-dry-run, kept 14 days (call 14).
 #
-# The publish job runs only for a pushed v* tag. It alone has contents: write. It runs gate.sh publish first, which
-# refuses unless the tag is v<workspace version>, the version is not 0.0.0 and the FFmpeg build is verified (T6-R11),
-# and only then creates a draft release, which only the owner can publish (D1). The workspace version stays 0.0.0 in
-# phase 2, so the job refuses every tag until the first real version (call 7).
+# The publish job runs only for a pushed v* tag, never for a run started by hand, even on a tag ref. It alone has
+# contents: write; GH_TOKEN is set on its last step only, and its checkout keeps no credentials. It runs gate.sh
+# publish first, which refuses unless the tag is v<workspace version>, the version is not 0.0.0 and the FFmpeg build
+# is verified (T6-R11), and only then creates a draft release, which only the owner can publish (D1). The workspace
+# version stays 0.0.0 in phase 2, so the job refuses every tag until the first real version (call 7).
 #
 # It runs on a pull request that changes packaging/ or either release workflow, by hand, and for a v* tag (T6-R10).
 # No step writes an event value into a script; values reach scripts through env.
@@ -172,19 +173,20 @@ jobs:
           retention-days: 14
 
   publish:
-    # D1 and T6-R11: a draft release, for a pushed v* tag only, after gate.sh publish passes.
+    # D1 and T6-R11: a draft release, for a pushed v* tag only (a push event, so not a run started by hand on a tag
+    # ref), after gate.sh publish passes. GH_TOKEN and GH_REPO are set only on the step that creates the draft, and
+    # the checkout does not keep the token in .git/config.
     name: publish (draft release)
     runs-on: ubuntu-24.04
     needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download the release dry run
         uses: actions/download-artifact@v4
@@ -210,6 +212,8 @@ jobs:
       - name: Create the draft release
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.gate.outputs.version }}
         run: |
           set -euo pipefail

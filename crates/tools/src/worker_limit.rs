@@ -18,7 +18,9 @@ pub const WORKER_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 /// `ocr::run_worker` under `WORKER_MEMORY_LIMIT` (design part 5.3; notes A1 and call 10; T6-R2): `ctx`'s runner
 /// wrapped in `MemoryLimited`, `ctx`'s other five fields unchanged. Step 10 and `lazymkv-dev ocr-trial read` start the
 /// worker through it, so a trial measures what ships. A stream whose worker meets the limit ends unread, as a
-/// worker abort does (notes A1). Def: T6-1. Use: T6-1.
+/// worker abort does (notes A1). In a desktop session the end of a worker that met its limit can come some tens of
+/// seconds late, held by Windows Error Reporting (31 s to about 60 s measured), and the worker's time cap bounds the
+/// wait. Def: T6-1. Use: T6-1.
 pub fn run_worker_limited(
     ctx: &ToolCtx,
     program: &Path,

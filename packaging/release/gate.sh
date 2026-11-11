@@ -3,9 +3,13 @@
 #
 #   gate.sh status
 #     Prints "verified" when ffmpeg.built records both programs' SHA-256 (Secure Hash Algorithm 256) values and
-#     ffmpeg.built.verified.inputs_sha256 equals INPUTS_SHA256; else "unverified: <reason>", the reason one of
-#     "no build is recorded", "the build was never verified on the target machine" or "the build's inputs changed
-#     after it was verified". Exits 0 either way: the caller decides what an unverified build means.
+#     ffmpeg.built.verified, the record of the check on the target machine, holds the inputs digest and the two
+#     programs' values that check saw ({ "date", "inputs_sha256", "ffmpeg_exe_sha256", "ffprobe_exe_sha256" }), with
+#     inputs_sha256 equal to INPUTS_SHA256 and the two programs' values equal to the two recorded in ffmpeg.built;
+#     else "unverified: <reason>", the reason one of "no build is recorded", "the build was never verified on the
+#     target machine", "the build's inputs changed after it was verified" or "the recorded programs changed after
+#     they were verified", checked in that order, so changed inputs are reported before changed programs. Exits 0
+#     either way: the caller decides what an unverified build means.
 #   gate.sh hashes <ffmpeg.exe> <ffprobe.exe>
 #     Exits 0 when both files' SHA-256 values equal the manifest's. While the manifest records neither value, it
 #     prints the two files' values and "not recorded yet" and exits 0, so the first build's values can be recorded.
@@ -91,13 +95,20 @@ judge() {
   elif [ "$verified" = null ]; then
     reason="the build was never verified on the target machine"
   else
-    local verified_inputs
+    local verified_inputs verified_ffmpeg verified_ffprobe
     verified_inputs="$(recorded .ffmpeg.built.verified.inputs_sha256)"
     [ "$verified_inputs" != null ] || error "ffmpeg.built.verified in $manifest is set but holds no inputs_sha256"
-    if [ "$verified_inputs" = "$inputs" ]; then
-      reason=""
-    else
+    verified_ffmpeg="$(recorded .ffmpeg.built.verified.ffmpeg_exe_sha256)"
+    [ "$verified_ffmpeg" != null ] || error "ffmpeg.built.verified in $manifest is set but holds no ffmpeg_exe_sha256"
+    verified_ffprobe="$(recorded .ffmpeg.built.verified.ffprobe_exe_sha256)"
+    [ "$verified_ffprobe" != null ] ||
+      error "ffmpeg.built.verified in $manifest is set but holds no ffprobe_exe_sha256"
+    if [ "$verified_inputs" != "$inputs" ]; then
       reason="the build's inputs changed after it was verified"
+    elif [ "$verified_ffmpeg" != "$ffmpeg_sha" ] || [ "$verified_ffprobe" != "$ffprobe_sha" ]; then
+      reason="the recorded programs changed after they were verified"
+    else
+      reason=""
     fi
   fi
 }

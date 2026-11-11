@@ -24,7 +24,9 @@
       "ffprobe_exe_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "verified": {
         "date": "2026-01-01",
-        "inputs_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "inputs_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ffmpeg_exe_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "ffprobe_exe_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       }
     }
   },

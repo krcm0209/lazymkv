@@ -279,6 +279,12 @@ mod tests {
     /// How long a killed tree may take to end. A hang is the failure it catches, so it does not scale (Global
     /// Constraints).
     const ENDS_WITHIN: Duration = Duration::from_secs(10);
+    /// How long a child that allocates past its memory limit may take to end. Rust aborts on a failed allocation with a
+    /// fast-fail that `SEM_NOGPFAULTERRORBOX` does not cover, and in an interactive desktop session Windows Error
+    /// Reporting collects a report and holds the process meanwhile: 31 s to about 60 s measured on the project's
+    /// machine on 2026-11-11, while it ends at once over SSH (Secure Shell) and in continuous integration. A hang is
+    /// the failure it catches, so it does not scale (Global Constraints).
+    const OVER_LIMIT_ENDS_WITHIN: Duration = Duration::from_secs(120);
     /// How long the console probe waits for its guarded child after the Ctrl+Break: a child the event reaches ends at
     /// once (review round 1 of pull request 3 (V9)).
     const BREAK_ENDS_WITHIN: Duration = Duration::from_secs(2);
@@ -591,9 +597,12 @@ mod tests {
         assert_eq!(info.JobMemoryLimit, (256 * MIB) as usize);
     }
 
-    /// Notes A1, T6-R1, T6-R18: a guarded child that allocates past its limit ends without success, at once, and
-    /// before it writes its `allocated` line; one that allocates within the limit runs to its end. The bound catches a
-    /// hang, so it does not scale (Global Constraints).
+    /// Notes A1, T6-R1, T6-R18: a guarded child that allocates past its limit ends without success, before it writes
+    /// its `allocated` line; one that allocates within the limit runs to its end. The child dies as the real worker
+    /// does, by Rust's abort on a failed allocation, a fast-fail that `SEM_NOGPFAULTERRORBOX` does not cover: in an
+    /// interactive desktop session Windows Error Reporting collects a report and holds the process meanwhile (31 s to
+    /// about 60 s measured), so the first wait has its own bound, `OVER_LIMIT_ENDS_WITHIN`. The bound proves the child
+    /// is not held for ever, so it does not scale (Global Constraints).
     #[test]
     fn a_child_that_allocates_past_its_limit_ends_without_success_and_one_within_it_runs() {
         let allocating = |mib: &str| {
@@ -607,13 +616,13 @@ mod tests {
         let killer = child.killer();
         let (tx, rx) = mpsc::channel();
         let waiter = std::thread::spawn(move || tx.send(child.wait().map_err(|error| error.kind())).unwrap());
-        let status = rx.recv_timeout(ENDS_WITHIN);
+        let status = rx.recv_timeout(OVER_LIMIT_ENDS_WITHIN);
         // A child still running after the bound is ended, so the waiter returns.
         killer.kill().unwrap();
         waiter.join().unwrap();
         let mut out = String::new();
         stdout.read_to_string(&mut out).unwrap();
-        let status = status.expect("the child past its limit did not end within 10 s");
+        let status = status.expect("the child past its limit did not end within 120 s");
         assert!(matches!(status, Ok(Some(code)) if code != 0), "{status:?}");
         assert!(!out.lines().any(|line| line.starts_with("allocated")), "{out}");
 

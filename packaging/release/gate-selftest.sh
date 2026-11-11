@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# The release gate's self-test (notes call 4, T6-R6, T6-R11): runs packaging/release/gate.sh over the five fixture
+# The release gate's self-test (notes call 4, T6-R6, T6-R11): runs packaging/release/gate.sh over the six fixture
 # manifests of packaging/release/fixtures with INPUTS_SHA256 set to 64 a digits, and stops at the first call whose
 # output (stdout and stderr together) or exit status differs from the expected one, printing both. The fixtures
 # hold made-up hashes only. The hashes cases use two made-up programs this script writes into a temporary folder
 # with fixed text; unverified.json records those two files' SHA-256 (Secure Hash Algorithm 256) values, so no
 # fixture changes at run time. Then packaging/ffmpeg/inputs-digest.sh runs twice over the real manifest and must
 # print the same 64 hex digits both times.
-# Prints "gate self-test: 13 passed" and exits 0 when every case passes; exits 1 at the first failure.
+# Prints "gate self-test: 15 passed" and exits 0 when every case passes; exits 1 at the first failure.
 # Usage: bash packaging/release/gate-selftest.sh
 set -euo pipefail
 [ "$#" -eq 0 ] || { echo "usage: bash packaging/release/gate-selftest.sh" >&2; exit 2; }
@@ -67,6 +67,9 @@ check verified.json "$(printf '%s\n%s' \
   "ffmpeg.exe: the file's SHA-256 is $made_up_ffmpeg, the manifest records $c64" \
   "ffprobe.exe: the file's SHA-256 is $made_up_ffprobe, the manifest records $d64")" 1 \
   hashes "$work/ffmpeg.exe" "$work/ffprobe.exe"
+check rehashed.json "unverified: the recorded programs changed after they were verified" 0 status
+check rehashed.json "refused: unverified: the recorded programs changed after they were verified" 1 \
+  publish refs/tags/v1.2.3 1.2.3
 
 first="$(MANIFEST="$here/../tools.json" bash "$here/../ffmpeg/inputs-digest.sh")"
 second="$(MANIFEST="$here/../tools.json" bash "$here/../ffmpeg/inputs-digest.sh")"
