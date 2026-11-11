@@ -174,17 +174,64 @@ jobs:
           if ($hash -ne $portable.sha256) {
             throw "$($portable.url) has SHA-256 $hash, not the pinned $($portable.sha256)"
           }
+          # The archive's entries in 7-Zip's technical listing (-slt): one block of "Key = value" lines per entry,
+          # after the line of ten dashes; the blocks before it describe the archive itself.
+          $listing = @(& 7z l -slt $archive)
+          if ($LASTEXITCODE -ne 0) { throw "7z l exited $LASTEXITCODE" }
+          $start = [Array]::IndexOf($listing, '----------')
+          if ($start -lt 0) { throw "7z l -slt printed no entry list for $archive" }
+          $entries = @()
+          $entry = $null
+          foreach ($line in $listing[($start + 1)..($listing.Count - 1)]) {
+            if ($line -match '^Path = (.*)$') {
+              $entry = [pscustomobject]@{ Path = $Matches[1]; Size = ''; Folder = '' ; Attributes = '' }
+              $entries += $entry
+            } elseif ($null -ne $entry -and $line -match '^(Size|Folder|Attributes) = (.*)$') {
+              $entry.($Matches[1]) = $Matches[2]
+            }
+          }
+          $isFolder = { param($e) $e.Folder -eq '+' -or $e.Attributes.StartsWith('D') }
+          $matching = @($entries | Where-Object {
+            -not (& $isFolder $_) -and ($_.Path -split '[\\/]')[-1] -eq 'mkvmerge.exe'
+          })
+          "The archive's entries named mkvmerge.exe ($($matching.Count)):"
+          foreach ($m in $matching) { "  $($m.Path)  $($m.Size) bytes" }
+          # The one entry by rule: <top folder>\mkvmerge.exe, where <top folder> is the archive's single top-level
+          # folder (the usual layout is mkvtoolnix\mkvmerge.exe), the match with exactly one path separator.
+          $tops = @($entries | ForEach-Object { ($_.Path -split '[\\/]')[0] } | Sort-Object -Unique)
+          if ($tops.Count -ne 1) { throw "the archive has $($tops.Count) top-level entries, not one folder: $tops" }
+          $chosen = @($matching | Where-Object { ($_.Path -split '[\\/]').Count -eq 2 })
+          if ($chosen.Count -ne 1) {
+            throw "$($chosen.Count) entries are $($tops[0])\mkvmerge.exe, not one: $($matching.Path -join ', ')"
+          }
+          $path = $chosen[0].Path
+          "Extracting $path alone"
           $dir = Join-Path $env:RUNNER_TEMP 'mkvmerge'
           New-Item -ItemType Directory -Path $dir | Out-Null
-          7z e $archive "-o$dir" mkvmerge.exe -r -y
-          if ($LASTEXITCODE -ne 0) { throw "7z exited $LASTEXITCODE" }
-          $files = @(Get-ChildItem -LiteralPath $dir -File)
-          if ($files.Count -ne 1 -or $files[0].Name -ne 'mkvmerge.exe') {
+          # -r- turns recursion off, so 7-Zip matches the one path from the archive's root and no other entry.
+          $extracted = @(& 7z e $archive "-o$dir" $path -r- -y)
+          $status = $LASTEXITCODE
+          $extracted
+          if ($status -ne 0) { throw "7z e exited $status" }
+          $counts = @($extracted | Select-String -Pattern '^Files: (\d+)$')
+          if ($counts.Count -gt 0 -and $counts[0].Matches[0].Groups[1].Value -ne '1') {
+            throw "7z extracted $($counts[0].Matches[0].Groups[1].Value) files for $path, not one"
+          }
+          $files = @(Get-ChildItem -LiteralPath $dir -File -Recurse)
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'mkvmerge.exe' -or $files[0].DirectoryName -ne $dir) {
             throw "7z extracted $($files.Count) files into $dir, not mkvmerge.exe alone"
           }
           $mkvmerge = $files[0].FullName
-          & $mkvmerge --version
+          $sha = (Get-FileHash -LiteralPath $mkvmerge -Algorithm SHA256).Hash.ToLowerInvariant()
+          "mkvmerge.exe from $path`: SHA-256 $sha, $($files[0].Length) bytes"
+          $version = (Get-Content -LiteralPath packaging/tools.json -Raw | ConvertFrom-Json).mkvtoolnix.version
+          $printed = @(& $mkvmerge --version)
           if ($LASTEXITCODE -ne 0) { throw "mkvmerge --version exited $LASTEXITCODE" }
+          $printed
+          if ($printed.Count -eq 0 -or -not $printed[0].StartsWith("mkvmerge v$version ")) {
+            $first = $printed | Select-Object -First 1
+            throw "mkvmerge --version's first line does not start 'mkvmerge v$version ': $first"
+          }
           "LAZYMKV_TEST_MKVMERGE=$mkvmerge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # All five layer 2 tests must pass with nothing skipped: a missing component of the minimal build fails here.
