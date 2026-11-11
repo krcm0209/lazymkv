@@ -11,7 +11,9 @@
             "binutils-mingw-w64-x86-64=2.41.90.20240122-1ubuntu1+11.4",
             "mingw-w64-x86-64-dev=11.0.1-3build1", "mingw-w64-common=11.0.1-3build1", "nasm=2.16.01-1build1",
             "make=4.3-4.1build2"],
-    "built": { "ffmpeg_exe_sha256": null, "ffprobe_exe_sha256": null, "verified": null }
+    "built": { "ffmpeg_exe_sha256": "38ae6affcd0dd91f2c4d2c69c4d6b7d2b6497d84b13b5711dd47b059be8545e9",
+               "ffprobe_exe_sha256": "3ece157938d65a7ea38076d0f64d24c989ec1610fcfcdabf0d0cf921df7b0992",
+               "verified": null }
   },
   "mkvtoolnix": {
     "version": "100.0",
