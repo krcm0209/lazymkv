@@ -4,7 +4,8 @@
 //! LAZYMKV_TEST_FFPROBE or LAZYMKV_TEST_FFMPEG, else the first match on PATH, and ffmpeg and ffprobe must be FFmpeg
 //! 7.0 or later (K11). Without a tool, or with an older FFmpeg, a test prints `skipped: <reason>` and passes; on CI
 //! (`CI` set), where every runner installs the three, it fails instead, so a green run proves that layer 2 ran. Every
-//! file is made up: block shapes and sine tones, no byte of the evidence clone (RP21).
+//! file is made up: block shapes and sine tones, no byte of the evidence clone (RP21). The lavfi input files are made
+//! by the FFmpeg LAZYMKV_TEST_FFMPEG_FULL names when it is set, else by the ffmpeg under test (T6-R8).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -171,6 +172,24 @@ fn real_tools(wanted: &[(&str, Tool)]) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
+/// The ffmpeg that makes the lavfi input files (T6-R8): the path LAZYMKV_TEST_FFMPEG_FULL names when it is set and
+/// not empty, which must be a file and FFmpeg 7.0 or later, else `ffmpeg`, the tool under test. None after a skip (or
+/// a CI failure) when the named one does not qualify. The release's minimal build has no lavfi, so its smoke job names
+/// a full FFmpeg here and the minimal one as LAZYMKV_TEST_FFMPEG.
+fn generator(ffmpeg: &Path) -> Option<PathBuf> {
+    const FULL: &str = "LAZYMKV_TEST_FFMPEG_FULL";
+    if std::env::var_os(FULL).filter(|value| !value.is_empty()).is_none() {
+        return Some(ffmpeg.to_path_buf());
+    }
+    match real_tool(FULL, Tool::Ffmpeg) {
+        Ok(path) => Some(path),
+        Err(reason) => {
+            skip_or_fail(&reason);
+            None
+        }
+    }
+}
+
 /// Makes `dir/raw.mkv` with the real ffmpeg: one FFV1 video (stream 0) and one FLAC audio stream per `(source,
 /// language)` (streams 1 to n), 3 s long, as a rip's streams are numbered. Both encoders are FFmpeg's own, so the file
 /// needs no external library.
@@ -258,7 +277,8 @@ fn real_ffmpeg_step_10a_pass_writes_phase_0s_level_files_over_a_lavfi_file() {
     let (ffmpeg, ffprobe) = (&tools[0], &tools[1]);
     let scratch = Scratch::new("layer2-pass");
     let env = Env::new();
-    let raw = lavfi_mkv(ffmpeg, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa")]);
+    let Some(source) = generator(ffmpeg) else { return };
+    let raw = lavfi_mkv(&source, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa")]);
     let label = scratch.0.join("job/t00");
     let work = scratch.0.join("work/levels-j-t00");
     std::fs::create_dir_all(&label).unwrap();
@@ -321,7 +341,8 @@ fn real_ffmpeg_streamhash_pass_lists_every_audio_stream() {
     let ffmpeg = &tools[0];
     let scratch = Scratch::new("layer2-streamhash");
     let env = Env::new();
-    let raw = lavfi_mkv(ffmpeg, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa"), (MONO, "eng")]);
+    let Some(source) = generator(ffmpeg) else { return };
+    let raw = lavfi_mkv(&source, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa"), (MONO, "eng")]);
     let work = scratch.0.join("work/levels-j-t00");
     std::fs::create_dir_all(&work).unwrap();
     let args = streamhash_args(&raw, "streamhash.txt");
@@ -342,7 +363,8 @@ fn real_mkvmerge_identifies_and_remuxes_a_lavfi_file() {
     let (mkvmerge, ffmpeg) = (&tools[0], &tools[1]);
     let scratch = Scratch::new("layer2-remux");
     let env = Env::new();
-    let raw = lavfi_mkv(ffmpeg, &scratch.0, &[(SURROUND, "spa"), (STEREO, "eng")]);
+    let Some(source) = generator(ffmpeg) else { return };
+    let raw = lavfi_mkv(&source, &scratch.0, &[(SURROUND, "spa"), (STEREO, "eng")]);
     let job = scratch.0.join("job/t00");
     std::fs::create_dir_all(&job).unwrap();
     let identified = env.run(|ctx| ident(ctx, mkvmerge, &raw, &job.join("mkvmerge.json"))).unwrap().unwrap();

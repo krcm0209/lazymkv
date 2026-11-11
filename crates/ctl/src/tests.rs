@@ -365,3 +365,60 @@ fn the_ci_notices_job_fails_when_the_committed_notices_differ() {
     let lower = ci.to_lowercase();
     assert!(!lower.contains("report only") && !lower.contains("is not committed yet"));
 }
+
+use lazymkv_ocr_models::{DETECTION_URL, RECOGNITION_URL};
+
+/// Notes call 1: packaging/tools.json names the same two model files, by URL and SHA-256, as the embedded pins.
+#[test]
+fn the_manifests_model_pins_are_the_embedded_models_pins() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../packaging/tools.json")).unwrap();
+    for (name, url, sha256) in [(DETECTION_NAME, DETECTION_URL, DETECTION_SHA256),
+                                (RECOGNITION_NAME, RECOGNITION_URL, RECOGNITION_SHA256)] {
+        assert_eq!(manifest["models"][name], json!({ "url": url, "sha256": sha256 }), "{name}");
+    }
+}
+
+/// Walks `value`, counting in `seen` every key that is `sha256` or ends `_sha256`, and fails on one whose value is
+/// not 64 lower-case hex digits, or null outside `ffmpeg.built`.
+fn check_sha256_keys(value: &serde_json::Value, path: &mut Vec<String>, seen: &mut usize) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                path.push(key.clone());
+                if key == "sha256" || key.ends_with("_sha256") {
+                    *seen += 1;
+                    let at = path.join(".");
+                    let under_built = path.len() > 2 && path[0] == "ffmpeg" && path[1] == "built";
+                    match inner {
+                        serde_json::Value::String(text) => assert!(
+                            text.len() == 64 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                            "{at} is {text:?}, not 64 lower-case hex digits"),
+                        serde_json::Value::Null => assert!(under_built, "{at} is null outside ffmpeg.built"),
+                        other => panic!("{at} is {other}, neither a string nor null"),
+                    }
+                }
+                check_sha256_keys(inner, path, seen);
+                path.pop();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                path.push(index.to_string());
+                check_sha256_keys(item, path, seen);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Notes calls 1 and 4: every SHA-256 the manifest holds is well formed; only the built programs' values and their
+/// `verified` record may be null, before the first build is recorded.
+#[test]
+fn every_sha256_of_the_manifest_is_64_lower_case_hex_digits_or_null() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../packaging/tools.json")).unwrap();
+    let mut seen = 0;
+    check_sha256_keys(&manifest, &mut Vec::new(), &mut seen);
+    // The FFmpeg and zlib sources, the two built programs, the two MKVToolNix archives and the two models.
+    assert!(seen >= 8, "only {seen} SHA-256 keys were found in packaging/tools.json");
+}
