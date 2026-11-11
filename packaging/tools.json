@@ -13,7 +13,8 @@
             "make=4.3-4.1build2"],
     "built": { "ffmpeg_exe_sha256": "38ae6affcd0dd91f2c4d2c69c4d6b7d2b6497d84b13b5711dd47b059be8545e9",
                "ffprobe_exe_sha256": "3ece157938d65a7ea38076d0f64d24c989ec1610fcfcdabf0d0cf921df7b0992",
-               "verified": null }
+               "verified": { "date": "2026-11-11",
+                             "inputs_sha256": "9304a35ef1b122ee23d6edbc17de72706467b005c4588d87f861966372d22aab" } }
   },
   "mkvtoolnix": {
     "version": "100.0",
