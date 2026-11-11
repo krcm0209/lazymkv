@@ -25,7 +25,14 @@
 #                  recording's subs\sub-<n>.packets.json (six lines, rows from C:\lazymkv\phase0\trial-tracks.txt)
 #   corpus copy    the whole of -Evidence copied to <Work>\evidence; refused above 4 GB
 #   golden check   lazymkv-dev golden check and lazymkv-dev retune over the copy, before and after the film's new
-#   retune         listing and level folder are put into it: the two captures of each must be the same bytes
+#   retune         listing and level folder are put into it: the two standard output captures of each and the two
+#                  standard error captures of each must be the same bytes, with the same exit code. The run before
+#                  must also show that the command read the copy, not refused it: its standard output is not empty,
+#                  and its exit code is 0 or 1 for golden check (0 all pass, 1 a golden fails; 3 is nothing checked
+#                  and 2 an argument error, golden.rs) and 0, 1 or 3 for retune (0 pass, 1 a FAIL, 3 something not
+#                  checked; 2 an argument or spec error; retune.rs). retune's refusals (no evidence, a TMDb copy more
+#                  than six months old that cannot be fetched again) exit 3 with nothing on standard output, so the
+#                  empty capture tells them apart from a measured exit 3.
 # Every listing and both commands' output are captured as bytes with lazymkv-capture record --out, never through a
 # PowerShell pipeline. A part that cannot run without an earlier one prints "<part>: not run".
 # The script prints numbers, equal or different, key names, stream kinds and row numbers only: no name of a film, a
@@ -91,42 +98,55 @@ function Read-Json([string]$Path) {
     $text | ConvertFrom-Json
 }
 
-# manifest.txt's lines from its bytes, with the run time of its second line ("seconds=<n>") left out (T6-R13).
-function Get-ManifestLines([string]$Path) {
-    $lines = @($Utf8.GetString([IO.File]::ReadAllBytes($Path)) -split "`r?`n")
-    if ($lines.Count -gt 1) { $lines[1] = $lines[1] -replace ' seconds=\d+ ', ' seconds=- ' }
-    $lines
+# manifest.txt's bytes as text, one character per byte (ISO 8859-1, so no byte is lost or changed and line ends
+# stay as they are), with only the run time of its second line (" seconds=<n> ") masked (T6-R13).
+function Get-ManifestText([string]$Path) {
+    $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
+    $first = $text.IndexOf("`n")
+    if ($first -lt 0) { return $text }
+    $second = $text.IndexOf("`n", $first + 1)
+    if ($second -lt 0) { $second = $text.Length }
+    $line = $text.Substring($first + 1, $second - $first - 1) -replace ' seconds=\d+ ', ' seconds=- '
+    $text.Substring(0, $first + 1) + $line + $text.Substring($second)
 }
 
 function Test-SameManifest([string]$A, [string]$B) {
     if (-not (Test-Path -LiteralPath $A -PathType Leaf)) { return $false }
     if (-not (Test-Path -LiteralPath $B -PathType Leaf)) { return $false }
-    $one = @(Get-ManifestLines $A)
-    $two = @(Get-ManifestLines $B)
-    if ($one.Count -ne $two.Count) { return $false }
-    for ($i = 0; $i -lt $one.Count; $i++) { if ($one[$i] -cne $two[$i]) { return $false } }
-    $true
+    (Get-ManifestText $A) -ceq (Get-ManifestText $B)
+}
+
+# A key path as it may be printed: letters, digits and _ . [ ] - only; any other key, which a file's own tag could
+# name, prints as "(unnamed key)".
+function Get-KeyName([string]$Key) {
+    if ($Key -ceq '(the whole stream)' -or $Key -cmatch '^[A-Za-z0-9_.\[\]-]+$') { return $Key }
+    '(unnamed key)'
+}
+
+# An object's members as a dictionary whose keys compare by ordinal, so a key whose case changed differs.
+function Get-Members($Object) {
+    $members = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($p in @($Object.PSObject.Properties)) { $members[$p.Name] = $p.Value }
+    ,$members
 }
 
 # Adds to $Diffs the path of every key whose value differs between two parsed JSON values: objects key by key (a key
-# on one side only differs), arrays element by element (an element on one side only differs, named <path>[<i>]), and
-# leaves by type and text. Values are never kept, only key paths.
+# on one side only differs, and keys compare case-sensitively), arrays element by element (an element on one side
+# only differs, named <path>[<i>]), and leaves by type and text. Values are never kept, only key paths.
 function Compare-Node($A, $B, [string]$Path, [System.Collections.ArrayList]$Diffs) {
     $objA = $A -is [System.Management.Automation.PSCustomObject]
     $objB = $B -is [System.Management.Automation.PSCustomObject]
     $arrA = $A -is [array]
     $arrB = $B -is [array]
     if ($objA -and $objB) {
+        $ma = Get-Members $A
+        $mb = Get-Members $B
         $names = New-Object System.Collections.ArrayList
-        foreach ($p in @($A.PSObject.Properties) + @($B.PSObject.Properties)) {
-            if (-not $names.Contains($p.Name)) { [void]$names.Add($p.Name) }
-        }
+        foreach ($name in @($ma.Keys) + @($mb.Keys)) { if (-not $names.Contains($name)) { [void]$names.Add($name) } }
         foreach ($name in $names) {
             $key = if ($Path) { "$Path.$name" } else { $name }
-            $pa = $A.PSObject.Properties[$name]
-            $pb = $B.PSObject.Properties[$name]
-            if ($null -eq $pa -or $null -eq $pb) { [void]$Diffs.Add($key); continue }
-            Compare-Node $pa.Value $pb.Value $key $Diffs
+            if (-not ($ma.ContainsKey($name) -and $mb.ContainsKey($name))) { [void]$Diffs.Add($key); continue }
+            Compare-Node $ma[$name] $mb[$name] $key $Diffs
         }
         return
     }
@@ -354,8 +374,10 @@ try {
             $code = Invoke-Recorded $listing $FFPROBE $probeArgs
             if ($code -ne 0) { Stop-Part "the candidate ffprobe's listing of the kept rip exited $code" }
             $listingDone = $true
-            $oldStreams = @((Read-Json "$Recordings\$film\$Label\ffprobe-streams.json").streams)
-            $newStreams = @((Read-Json $listing).streams)
+            $oldListing = Read-Json "$Recordings\$film\$Label\ffprobe-streams.json"
+            $newListing = Read-Json $listing
+            $oldStreams = @($oldListing.streams)
+            $newStreams = @($newListing.streams)
             $audio = 0
             $audioKeys = 0
             $otherKeys = 0
@@ -375,13 +397,23 @@ try {
                 } else {
                     $otherKeys += $diffs.Count
                     foreach ($d in $diffs) {
-                        if (-not $otherNames.Contains("$kind $d")) { [void]$otherNames.Add("$kind $d") }
+                        $pair = "$kind $(Get-KeyName $d)"
+                        if (-not $otherNames.Contains($pair)) { [void]$otherNames.Add($pair) }
                     }
                 }
+            }
+            # The format section is reported as the kind format, as other streams are, and fails nothing.
+            $diffs = New-Object System.Collections.ArrayList
+            Compare-Node $oldListing.format $newListing.format '' $diffs
+            $otherKeys += $diffs.Count
+            foreach ($d in $diffs) {
+                $pair = if ($d) { "format $(Get-KeyName $d)" } else { 'format (the whole section)' }
+                if (-not $otherNames.Contains($pair)) { [void]$otherNames.Add($pair) }
             }
             $named = if ($otherNames.Count -gt 0) { ': ' + ($otherNames -join ', ') } else { '' }
             "listing: $audio audio streams, $audioKeys differing keys; other streams: $otherKeys differing keys$named"
             if ($audioKeys -gt 0) { Add-Failure 'a key of an audio stream differs in the listing' }
+            if ($audio -eq 0) { Add-Failure 'phase 0''s listing holds no audio stream' }
         } catch {
             'listing: not run'
             Add-Failure "listing: $(Get-Reason $_)"
@@ -474,7 +506,9 @@ try {
             }
         }
     }
-    foreach ($part in @(@{ key = 'golden'; line = 'golden check' }, @{ key = 'retune'; line = 'retune' })) {
+    $parts = @(@{ key = 'golden'; line = 'golden check'; exits = @(0, 1) },
+        @{ key = 'retune'; line = 'retune'; exits = @(0, 1, 3) })
+    foreach ($part in $parts) {
         $before = "$($part.key)-before"
         $after = "$($part.key)-after"
         if (-not ($exits.ContainsKey($before) -and $exits.ContainsKey($after))) {
@@ -482,11 +516,22 @@ try {
             if ($copyDone) { Add-Failure "$($part.line) did not run before and after" }
             continue
         }
-        $same = Test-SameBytes "$Work\runs\$before.txt" "$Work\runs\$after.txt"
-        $word = if ($same) { 'same output' } else { 'different output' }
+        $one = "$Work\runs\$before.txt"
+        $two = "$Work\runs\$after.txt"
+        $sameOut = Test-SameBytes $one $two
+        $sameErr = Test-SameBytes "$one.stderr" "$two.stderr"
+        $word = if ($sameOut -and $sameErr) { 'same output' } else { 'different output' }
         "$($part.line): $word; exit $($exits[$before]) then $($exits[$after])"
-        if (-not $same) { Add-Failure "$($part.line)'s output changed with the film's new listing and level folder" }
+        if (-not $sameOut) { Add-Failure "$($part.line)'s output changed with the film's new listing and level folder" }
+        if (-not $sameErr) {
+            Add-Failure "$($part.line)'s standard error changed with the film's new listing and level folder"
+        }
         if ($exits[$before] -ne $exits[$after]) { Add-Failure "$($part.line)'s exit code changed" }
+        # The run before read the copy: a known exit and some standard output (the header's rule).
+        $code = $exits[$before]
+        if (@($part.exits) -notcontains $code) { Add-Failure "$($part.line) refused the evidence copy (exit $code)" }
+        $printed = (Test-Path -LiteralPath $one -PathType Leaf) -and ((Get-Item -LiteralPath $one).Length -gt 0)
+        if (-not $printed) { Add-Failure "$($part.line) printed nothing on its standard output (exit $code)" }
     }
 } catch {
     Add-Failure "the check stopped: $(Get-Reason $_)"

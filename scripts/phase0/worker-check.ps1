@@ -18,9 +18,10 @@
 #   row <r>: events <n>, wall <s> s, end <the read line's end word>
 #   row <r>: peak committed <MiB> MiB
 #   row <r>: records equal | different (<n> lines here, <n> kept, <d> lines differ) | not compared (no kept output)
-# A line whose part did not run says "not run". A worker SHA-256 that differs, a read that does not end Read, a peak
-# of 1 GiB or more, row 4's wall time above 600 s (P26) and records that differ fail the run; missing kept output
-# does not (call 11). The lines name the row only, never a slug, a label, a share or a path, and no subtitle text.
+# A line whose part did not run says "not run". A worker SHA-256 that differs, a read that does not end Read or
+# counts no event, a peak of 1 GiB or more, row 4's wall time above 600 s (P26), records that differ and a records
+# file with no line fail the run; missing kept output does not (call 11). The lines name the row only, never a slug,
+# a label, a share or a path, and no subtitle text.
 # It writes only below -Work (default C:\lazymkv\tmp\pr6\worker-<row>), which must not exist; the script creates it
 # and always removes it. It never writes into the trial's kept output, the recordings or the tuning dataset.
 # The last line is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws (wait.sh exits 1).
@@ -202,6 +203,7 @@ try {
     }
     $runLine = "row ${Row}: events $events, wall $wall s, end $end"
     if ($readExit -ne 0 -or $end -cne 'Read') { Add-Failure "row ${Row}: the read did not end Read (exit $readExit)" }
+    if ($events -notmatch '^\d+$' -or [int]$events -eq 0) { Add-Failure "row ${Row}: the read counted no event" }
     if ($Row -eq 4) {
         if ($wall -eq '-') { Add-Failure 'row 4: the read printed no wall time' }
         elseif ([double]::Parse($wall, $Invariant) -gt $Row4LimitS) {
@@ -237,6 +239,7 @@ try {
         $word = if ($differ -eq 0) { 'equal' } else { 'different' }
         $recordsLine = "row ${Row}: records $word ($($one.Count) lines here, $($two.Count) kept, $differ lines differ)"
         if ($differ -gt 0) { Add-Failure "row ${Row}: the records differ from the trial's" }
+        if ($one.Count -eq 0 -or $two.Count -eq 0) { Add-Failure "row ${Row}: a records file holds no line" }
     }
 } catch {
     Add-Failure "row ${Row}: $(Get-Reason $_)"
