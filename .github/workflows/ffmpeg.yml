@@ -213,13 +213,14 @@ jobs:
           $status = $LASTEXITCODE
           $extracted
           if ($status -ne 0) { throw "7z e exited $status" }
-          $counts = @($extracted | Select-String -Pattern '^Files: (\d+)$')
-          if ($counts.Count -gt 0 -and $counts[0].Matches[0].Groups[1].Value -ne '1') {
-            throw "7z extracted $($counts[0].Matches[0].Groups[1].Value) files for $path, not one"
-          }
+          # 7-Zip's own "Files:" line is not read: on a solid archive it counts the files of the block it unpacked.
           $files = @(Get-ChildItem -LiteralPath $dir -File -Recurse)
           if ($files.Count -ne 1 -or $files[0].Name -ne 'mkvmerge.exe' -or $files[0].DirectoryName -ne $dir) {
             throw "7z extracted $($files.Count) files into $dir, not mkvmerge.exe alone"
+          }
+          if ([string]$files[0].Length -ne $chosen[0].Size) {
+            $listed = $chosen[0].Size
+            throw "the extracted mkvmerge.exe has $($files[0].Length) bytes; the listing gives $listed for $path"
           }
           $mkvmerge = $files[0].FullName
           $sha = (Get-FileHash -LiteralPath $mkvmerge -Algorithm SHA256).Hash.ToLowerInvariant()
