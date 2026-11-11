@@ -1,0 +1,505 @@
+# The one-off check of a minimal FFmpeg build on the mini PC (design part 11.3; pull request 6's notes, call 12 (a);
+# Rulings T6-R12, T6-R13 and T6-R14). It runs in the owner's desktop session, since it reads the staging share, so it
+# lives under scripts\phase0\, the only folder run-interactive.ps1 runs, and its output is the log
+# C:\lazymkv\phase0\logs\<log name>.txt. Build first over SSH (scripts/box.sh "cargo build --release --locked
+# -p lazymkv-dev -p lazymkv-capture"), and run no scripts/box.sh until the job ends: each sync replaces C:\lazymkv\src.
+# Usage: scripts/phase0/job.sh ffmpeg-check.ps1 <log name> -Self [-Evidence <dir>] [-Work <dir>]
+#        scripts/phase0/job.sh ffmpeg-check.ps1 <log name> -FfmpegSha256 <hex> -FfprobeSha256 <hex>
+#            [-Candidate <dir>] [-Evidence <dir>] [-Work <dir>]
+# job.sh passes the arguments unquoted, so no value may hold a space or a quote; every path has a default.
+# -Self checks the FFmpeg that env.ps1 resolves (the installed build) and leaves PATH alone (T6-R14). The other form
+# checks the two programs in -Candidate, which must have the two SHA-256 (Secure Hash Algorithm 256) values given; that
+# folder goes first on PATH before env.ps1 is dot-sourced, so this script, audio-levels.ps1 and lazymkv-dev all use it.
+# The film is phase 0's kept UHD (Ultra HD Blu-ray) all-tracks rip: the one recording whose folder name ends -uhd and
+# whose all-tracks folder holds a finished level folder (audio-levels-20ms-<main>[-<cand>...] with audio-proxy.json).
+# The parts, each one output line, in this order (T6-R13):
+#   hashes         the candidate's two SHA-256 values against the ones given; nothing else runs unless they are equal
+#   levels         one audio-levels.ps1 pass over the kept rip with -RecordingsRoot and -TuningRoot under -Work
+#                  (T6-R12); every series file, streamhash.txt and graph.txt byte for byte against phase 0's level
+#                  folder, and manifest.txt line by line with the run time (seconds=) of its second line left out
+#   proxy          the installed full ffmpeg's packet hashes (streamhash) of the new proxy against phase 0's proxy
+#   listing        the candidate ffprobe's stream listing of the kept rip, key by key, against the recording's
+#                  ffprobe-streams.json: no key of an audio stream may differ; other streams' differing keys are named
+#                  by stream kind and key path, never by value, and do not fail the check
+#   packets row    the candidate ffprobe's packet listing of each trial row's evidence.mks, byte for byte against the
+#                  recording's subs\sub-<n>.packets.json (six lines, rows from C:\lazymkv\phase0\trial-tracks.txt)
+#   corpus copy    the whole of -Evidence copied to <Work>\evidence; refused above 4 GB
+#   golden check   lazymkv-dev golden check and lazymkv-dev retune over the copy, before and after the film's new
+#   retune         listing and level folder are put into it: the two captures of each must be the same bytes
+# Every listing and both commands' output are captured as bytes with lazymkv-capture record --out, never through a
+# PowerShell pipeline. A part that cannot run without an earlier one prints "<part>: not run".
+# The script prints numbers, equal or different, key names, stream kinds and row numbers only: no name of a film, a
+# track, a share or a path. It reads the recordings, the tuning dataset, the staging share and the evidence mirror and
+# writes only below -Work, which must not exist; the script creates it and always removes it.
+# The last line is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws (wait.sh exits 1).
+param(
+    [switch]$Self,
+    [string]$FfmpegSha256 = '',
+    [string]$FfprobeSha256 = '',
+    [string]$Candidate = 'C:\lazymkv\tmp\pr6\ffmpeg',
+    [string]$Evidence = 'C:\lazymkv\evidence\owner',
+    [string]$Work = 'C:\lazymkv\tmp\pr6\check'
+)
+$ErrorActionPreference = 'Stop'
+
+$DEV = 'C:\lazymkv\target\release\lazymkv-dev.exe'
+$LevelsScript = 'C:\lazymkv\src\scripts\phase0\audio-levels.ps1'
+$Spec = 'C:\lazymkv\src\docs\superpowers\specs\2026-10-04-lazymkv-design.md'
+$Label = 'all-tracks'
+$MaxCopyBytes = 4GB
+$Utf8 = New-Object System.Text.UTF8Encoding($false)
+
+$failures = New-Object System.Collections.ArrayList
+function Add-Failure([string]$Reason) { [void]$failures.Add($Reason) }
+
+# A reason this script wrote itself; it never names a film, a track or a path.
+function Stop-Part([string]$Reason) { throw "check: $Reason" }
+
+# The reason to print for an error: this script's own text, or else the error's type and line only, since a system
+# error's message may name a path.
+function Get-Reason($Record) {
+    $message = [string]$Record.Exception.Message
+    if ($message.StartsWith('check: ')) { return $message.Substring(7) }
+    $where = [string]$Record.InvocationInfo.ScriptName
+    if ($where) { $where = ' of ' + [IO.Path]::GetFileName($where) }
+    "an error of type $($Record.Exception.GetType().Name) at line $($Record.InvocationInfo.ScriptLineNumber)$where"
+}
+
+function Get-Same([bool]$Same) { if ($Same) { 'equal' } else { 'different' } }
+
+# A program's standard output captured as bytes into $Out by lazymkv-capture (its standard error goes to
+# $Out.stderr); nothing reaches the log. Returns the program's exit code. A native standard-error line never becomes
+# an error record here: the preference is Continue inside this function only.
+function Invoke-Recorded([string]$Out, [string]$Program, [string[]]$Arguments) {
+    $ErrorActionPreference = 'Continue'
+    & $CAP record --out $Out -- $Program @Arguments 2>&1 | Out-Null
+    $LASTEXITCODE
+}
+
+# Two files with the same bytes; false when either is missing.
+function Test-SameBytes([string]$A, [string]$B) {
+    if (-not (Test-Path -LiteralPath $A -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $B -PathType Leaf)) { return $false }
+    if ((Get-Item -LiteralPath $A).Length -ne (Get-Item -LiteralPath $B).Length) { return $false }
+    (Get-FileHash -LiteralPath $A -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $B -Algorithm SHA256).Hash
+}
+
+# A JSON (JavaScript Object Notation) file read from its bytes as UTF-8, with or without a byte order mark.
+function Read-Json([string]$Path) {
+    $text = $Utf8.GetString([IO.File]::ReadAllBytes($Path))
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    $text | ConvertFrom-Json
+}
+
+# manifest.txt's lines from its bytes, with the run time of its second line ("seconds=<n>") left out (T6-R13).
+function Get-ManifestLines([string]$Path) {
+    $lines = @($Utf8.GetString([IO.File]::ReadAllBytes($Path)) -split "`r?`n")
+    if ($lines.Count -gt 1) { $lines[1] = $lines[1] -replace ' seconds=\d+ ', ' seconds=- ' }
+    $lines
+}
+
+function Test-SameManifest([string]$A, [string]$B) {
+    if (-not (Test-Path -LiteralPath $A -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $B -PathType Leaf)) { return $false }
+    $one = @(Get-ManifestLines $A)
+    $two = @(Get-ManifestLines $B)
+    if ($one.Count -ne $two.Count) { return $false }
+    for ($i = 0; $i -lt $one.Count; $i++) { if ($one[$i] -cne $two[$i]) { return $false } }
+    $true
+}
+
+# Adds to $Diffs the path of every key whose value differs between two parsed JSON values: objects key by key (a key
+# on one side only differs), arrays element by element (an element on one side only differs, named <path>[<i>]), and
+# leaves by type and text. Values are never kept, only key paths.
+function Compare-Node($A, $B, [string]$Path, [System.Collections.ArrayList]$Diffs) {
+    $objA = $A -is [System.Management.Automation.PSCustomObject]
+    $objB = $B -is [System.Management.Automation.PSCustomObject]
+    $arrA = $A -is [array]
+    $arrB = $B -is [array]
+    if ($objA -and $objB) {
+        $names = New-Object System.Collections.ArrayList
+        foreach ($p in @($A.PSObject.Properties) + @($B.PSObject.Properties)) {
+            if (-not $names.Contains($p.Name)) { [void]$names.Add($p.Name) }
+        }
+        foreach ($name in $names) {
+            $key = if ($Path) { "$Path.$name" } else { $name }
+            $pa = $A.PSObject.Properties[$name]
+            $pb = $B.PSObject.Properties[$name]
+            if ($null -eq $pa -or $null -eq $pb) { [void]$Diffs.Add($key); continue }
+            Compare-Node $pa.Value $pb.Value $key $Diffs
+        }
+        return
+    }
+    if ($arrA -and $arrB) {
+        $count = [math]::Max($A.Count, $B.Count)
+        for ($i = 0; $i -lt $count; $i++) {
+            $key = "$Path[$i]"
+            if ($i -ge $A.Count -or $i -ge $B.Count) { [void]$Diffs.Add($key); continue }
+            Compare-Node $A[$i] $B[$i] $key $Diffs
+        }
+        return
+    }
+    if ($objA -or $objB -or $arrA -or $arrB) { [void]$Diffs.Add($Path); return }
+    if ($null -eq $A -and $null -eq $B) { return }
+    if ($null -eq $A -or $null -eq $B) { [void]$Diffs.Add($Path); return }
+    if ($A.GetType() -ne $B.GetType() -or [string]$A -cne [string]$B) { [void]$Diffs.Add($Path) }
+}
+
+# Copied from engine-ocr-trial.ps1 (each script runs alone): the six rows of trial-tracks.txt; a line of another form
+# stops the run, naming its number only.
+function Get-TrialRows {
+    $tracks = "$P0\trial-tracks.txt"
+    if (-not (Test-Path -LiteralPath $tracks)) { Stop-Part 'trial-tracks.txt is missing' }
+    $lines = @(Get-Content -LiteralPath $tracks -Encoding UTF8 -ErrorAction Stop | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne '' })
+    if ($lines.Count -ne 6) { Stop-Part "trial-tracks.txt holds $($lines.Count) rows, not 6" }
+    $rows = @()
+    for ($k = 0; $k -lt 6; $k++) {
+        $m = [regex]::Match($lines[$k], '^([a-z0-9][a-z0-9-]*)/([a-z0-9][a-z0-9-]*)/s(\d+)$')
+        if (-not $m.Success) { Stop-Part "line $($k + 1) of trial-tracks.txt is not of the form name/name/s<n>" }
+        $rows += [pscustomobject]@{
+            row = $k + 1; slug = $m.Groups[1].Value; label = $m.Groups[2].Value; stream = [int]$m.Groups[3].Value
+        }
+    }
+    $rows
+}
+
+# A row's evidence.mks, found as engine-ocr-trial.ps1's inventory step finds it (lazymkv-dev ocr-trial inventory):
+# the dataset copy beside the Tesseract reading, then the path the recording's subs-ocr\summary.json names, then
+# phase 0's staging layout. $null when there is none.
+function Find-Evidence($Track) {
+    $candidates = @("$TuningData\$($Track.slug)\$($Track.label)\subs-ocr\evidence.mks")
+    $summary = "$Recordings\$($Track.slug)\$($Track.label)\subs-ocr\summary.json"
+    if (Test-Path -LiteralPath $summary -PathType Leaf) {
+        $named = [string](Read-Json $summary).evidence
+        if ($named) { $candidates += $named }
+    }
+    $candidates += "$Staging\$($Track.slug)\$($Track.label)\evidence.mks"
+    foreach ($c in $candidates) { if (Test-Path -LiteralPath $c -PathType Leaf) { return $c } }
+    $null
+}
+
+$made = $false
+$savedPath = $env:Path
+$savedTemp = @{ TEMP = $env:TEMP; TMP = $env:TMP; TMPDIR = $env:TMPDIR }
+$go = $false
+$haveFilm = $false
+$levelsDone = $false
+$listingDone = $false
+$copyDone = $false
+$hashesPrinted = $false
+try {
+    # The inputs and the candidate (call 12 (a): the two SHA-256 values must be equal before anything runs).
+    try {
+        if ($Self -and ($FfmpegSha256 -or $FfprobeSha256)) {
+            Stop-Part 'give -Self or the two SHA-256 values, not both'
+        }
+        if (-not $Self) {
+            foreach ($h in @($FfmpegSha256, $FfprobeSha256)) {
+                if ($h -notmatch '^[0-9a-fA-F]{64}$') {
+                    Stop-Part 'give -Self, or -FfmpegSha256 and -FfprobeSha256 as 64 hexadecimal digits each'
+                }
+            }
+        }
+        if (Test-Path -LiteralPath $Work) { Stop-Part 'the -Work folder exists already; remove it or name another' }
+        . C:\lazymkv\src\scripts\phase0\env.ps1
+        $fullFfmpeg = $FFMPEG
+        if (-not $fullFfmpeg) { Stop-Part 'the installed ffmpeg was not found' }
+        foreach ($exe in @($CAP, $DEV, $LevelsScript)) {
+            if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+                Stop-Part "$([IO.Path]::GetFileName($exe)) is missing"
+            }
+        }
+        if ($Self) {
+            'hashes: not checked (the installed build)'
+            $hashesPrinted = $true
+            if (-not $FFPROBE) { Stop-Part 'the installed ffprobe was not found' }
+            $go = $true
+        } else {
+            $candFull = [IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+            foreach ($exe in @('ffmpeg.exe', 'ffprobe.exe')) {
+                if (-not (Test-Path -LiteralPath "$candFull\$exe" -PathType Leaf)) {
+                    Stop-Part "the candidate folder holds no $exe"
+                }
+            }
+            $h1 = (Get-FileHash -LiteralPath "$candFull\ffmpeg.exe" -Algorithm SHA256).Hash
+            $h2 = (Get-FileHash -LiteralPath "$candFull\ffprobe.exe" -Algorithm SHA256).Hash
+            $same = ($h1 -ieq $FfmpegSha256) -and ($h2 -ieq $FfprobeSha256)
+            "hashes: $(Get-Same $same)"
+            $hashesPrinted = $true
+            if (-not $same) {
+                Add-Failure 'the candidate programs do not have the SHA-256 values given, so nothing else ran'
+            } else {
+                $env:Path = "$candFull;$savedPath"
+                . C:\lazymkv\src\scripts\phase0\env.ps1
+                if (-not $FFMPEG -or -not $FFPROBE) {
+                    Stop-Part 'ffmpeg or ffprobe is not found with the candidate first on PATH'
+                }
+                $inFfmpeg = [IO.Path]::GetDirectoryName($FFMPEG).TrimEnd('\') -ieq $candFull
+                $inFfprobe = [IO.Path]::GetDirectoryName($FFPROBE).TrimEnd('\') -ieq $candFull
+                if (-not ($inFfmpeg -and $inFfprobe)) {
+                    Stop-Part 'with the candidate first on PATH, env.ps1 still resolves ffmpeg or ffprobe outside it'
+                }
+                $go = $true
+            }
+        }
+        New-Item -ItemType Directory -Path $Work -ErrorAction Stop | Out-Null
+        $made = $true
+    } catch {
+        $go = $false
+        if (-not $hashesPrinted) { 'hashes: not run' }
+        Add-Failure "the inputs: $(Get-Reason $_)"
+    }
+
+    # The film: the one recording ending -uhd whose all-tracks folder holds a finished level folder.
+    if ($go) {
+        try {
+            $found = @()
+            foreach ($r in @(Get-ChildItem -LiteralPath $Recordings -Directory -ErrorAction Stop)) {
+                if ($r.Name -notlike '*-uhd') { continue }
+                $at = "$($r.FullName)\$Label"
+                if (-not (Test-Path -LiteralPath $at -PathType Container)) { continue }
+                $levelDirs = @(Get-ChildItem -LiteralPath $at -Directory -Filter 'audio-levels-20ms-*')
+                foreach ($l in $levelDirs) {
+                    if ($l.Name -cmatch '^audio-levels-20ms-\d+(-\d+)*$' -and
+                        (Test-Path -LiteralPath "$($l.FullName)\audio-proxy.json" -PathType Leaf)) {
+                        $found += [pscustomobject]@{ folder = $r.Name; level = $l.Name }
+                    }
+                }
+            }
+            if ($found.Count -ne 1) {
+                Stop-Part "$($found.Count) recordings ending -uhd hold a finished all-tracks level folder, not 1"
+            }
+            $film = $found[0].folder
+            $level = $found[0].level
+            $numbers = @($level.Substring('audio-levels-20ms-'.Length) -split '-' | ForEach-Object { [int]$_ })
+            $main = $numbers[0]
+            [int[]]$cands = @()
+            if ($numbers.Count -gt 1) { [int[]]$cands = $numbers[1..($numbers.Count - 1)] }
+            $mkvs = @(Get-ChildItem -LiteralPath "$Staging\$film\$Label" -File -ErrorAction Stop |
+                Where-Object { $_.Extension -eq '.mkv' })
+            if ($mkvs.Count -ne 1) { Stop-Part "the film's staging folder holds $($mkvs.Count) .mkv files, not 1" }
+            $rip = $mkvs[0].FullName
+            $haveFilm = $true
+        } catch {
+            Add-Failure "finding the film: $(Get-Reason $_)"
+        }
+    }
+
+    # levels: one audio-levels.ps1 pass, under -Work only (T6-R12), against phase 0's level folder. Its output names
+    # the rip and paths, so none of it reaches the log; it runs with the Continue preference it was written for.
+    if ($haveFilm) {
+        try {
+            $ErrorActionPreference = 'Continue'
+            try {
+                $levelOutput = @(& $LevelsScript -Slug $film -Label $Label -Main $main -Cand $cands `
+                    -RecordingsRoot "$Work\recordings" -TuningRoot "$Work\dataset" *>&1)
+            } finally { $ErrorActionPreference = 'Stop' }
+            if ($levelOutput.Count -eq 0 -or [string]$levelOutput[-1] -cne 'RESULT ok') {
+                Stop-Part 'the level pass did not end RESULT ok'
+            }
+            $levelsDone = $true
+            $oldLevel = "$Recordings\$film\$Label\$level"
+            $newLevel = "$Work\recordings\$film\$Label\$level"
+            $names = @(@(Get-ChildItem -LiteralPath $oldLevel -File -ErrorAction Stop) +
+                @(Get-ChildItem -LiteralPath $newLevel -File -ErrorAction Stop) | ForEach-Object { $_.Name } |
+                Where-Object { $_ -cmatch '^(main-mix|main-fc|cand-\d+)\.txt$' } | Sort-Object -Unique)
+            $equal = 0
+            foreach ($name in $names) { if (Test-SameBytes "$oldLevel\$name" "$newLevel\$name") { $equal++ } }
+            $different = $names.Count - $equal
+            $hash = Test-SameBytes "$oldLevel\streamhash.txt" "$newLevel\streamhash.txt"
+            $graph = Test-SameBytes "$oldLevel\graph.txt" "$newLevel\graph.txt"
+            $manifest = Test-SameManifest "$oldLevel\manifest.txt" "$newLevel\manifest.txt"
+            "levels: $($names.Count) series files, $equal equal, $different different; streamhash $(Get-Same $hash); " +
+                "graph $(Get-Same $graph); manifest $(Get-Same $manifest)"
+            if ($names.Count -eq 0 -or $different -gt 0 -or -not ($hash -and $graph -and $manifest)) {
+                Add-Failure 'the level files differ from phase 0''s'
+            }
+        } catch {
+            'levels: not run'
+            Add-Failure "levels: $(Get-Reason $_)"
+        }
+    } else { 'levels: not run' }
+
+    # proxy: the installed full ffmpeg's packet hashes of the new proxy and of phase 0's.
+    if ($levelsDone) {
+        try {
+            $oldProxy = "$TuningData\$film\$Label\audio-proxy.mka"
+            $newProxy = "$Work\dataset\$film\$Label\audio-proxy.mka"
+            if (-not (Test-Path -LiteralPath $oldProxy -PathType Leaf)) { Stop-Part 'phase 0''s proxy is missing' }
+            if (-not (Test-Path -LiteralPath $newProxy -PathType Leaf)) { Stop-Part 'the level pass wrote no proxy' }
+            $hashArgs = @('-v', 'error', '-i', '', '-map', '0', '-c', 'copy', '-f', 'streamhash', '-hash', 'md5', '-')
+            $hashArgs[3] = $oldProxy
+            $code = Invoke-Recorded "$Work\proxy\old.streamhash.txt" $fullFfmpeg $hashArgs
+            if ($code -ne 0) { Stop-Part "the streamhash of phase 0's proxy exited $code" }
+            $hashArgs[3] = $newProxy
+            $code = Invoke-Recorded "$Work\proxy\new.streamhash.txt" $fullFfmpeg $hashArgs
+            if ($code -ne 0) { Stop-Part "the streamhash of the new proxy exited $code" }
+            $tracks = @([IO.File]::ReadAllLines("$Work\proxy\new.streamhash.txt") |
+                Where-Object { $_ -match '^\d+,a,MD5=' }).Count
+            $same = Test-SameBytes "$Work\proxy\old.streamhash.txt" "$Work\proxy\new.streamhash.txt"
+            "proxy: $tracks tracks, packet hashes $(Get-Same $same)"
+            if (-not $same -or $tracks -eq 0) { Add-Failure 'the proxy''s packet hashes differ from phase 0''s' }
+        } catch {
+            'proxy: not run'
+            Add-Failure "proxy: $(Get-Reason $_)"
+        }
+    } else { 'proxy: not run' }
+
+    # listing: the candidate ffprobe with probe_args' words over the kept rip, against ffprobe-streams.json.
+    if ($haveFilm) {
+        try {
+            $listing = "$Work\listing\ffprobe-streams.json"
+            $probeArgs = @('-v', 'error', '-show_streams', '-show_format', '-of', 'json', $rip)
+            $code = Invoke-Recorded $listing $FFPROBE $probeArgs
+            if ($code -ne 0) { Stop-Part "the candidate ffprobe's listing of the kept rip exited $code" }
+            $listingDone = $true
+            $oldStreams = @((Read-Json "$Recordings\$film\$Label\ffprobe-streams.json").streams)
+            $newStreams = @((Read-Json $listing).streams)
+            $audio = 0
+            $audioKeys = 0
+            $otherKeys = 0
+            $otherNames = New-Object System.Collections.ArrayList
+            $count = [math]::Max($oldStreams.Count, $newStreams.Count)
+            for ($i = 0; $i -lt $count; $i++) {
+                $o = if ($i -lt $oldStreams.Count) { $oldStreams[$i] } else { $null }
+                $n = if ($i -lt $newStreams.Count) { $newStreams[$i] } else { $null }
+                $kind = if ($null -ne $o) { [string]$o.codec_type } else { [string]$n.codec_type }
+                if ($kind -cnotmatch '^[a-z]+$') { $kind = 'unknown' }
+                $diffs = New-Object System.Collections.ArrayList
+                if ($null -eq $o -or $null -eq $n) { [void]$diffs.Add('(the whole stream)') }
+                else { Compare-Node $o $n '' $diffs }
+                if ($kind -ceq 'audio') {
+                    if ($null -ne $o) { $audio++ }
+                    $audioKeys += $diffs.Count
+                } else {
+                    $otherKeys += $diffs.Count
+                    foreach ($d in $diffs) {
+                        if (-not $otherNames.Contains("$kind $d")) { [void]$otherNames.Add("$kind $d") }
+                    }
+                }
+            }
+            $named = if ($otherNames.Count -gt 0) { ': ' + ($otherNames -join ', ') } else { '' }
+            "listing: $audio audio streams, $audioKeys differing keys; other streams: $otherKeys differing keys$named"
+            if ($audioKeys -gt 0) { Add-Failure 'a key of an audio stream differs in the listing' }
+        } catch {
+            'listing: not run'
+            Add-Failure "listing: $(Get-Reason $_)"
+        }
+    } else { 'listing: not run' }
+
+    # packets row <r>: packets_args' words over each row's evidence.mks, against the recording's packet listing.
+    $rows = $null
+    if ($go) {
+        try { $rows = @(Get-TrialRows) } catch { Add-Failure "the trial's rows: $(Get-Reason $_)" }
+    }
+    for ($r = 1; $r -le 6; $r++) {
+        if ($null -eq $rows) { "packets row ${r}: not run"; continue }
+        try {
+            $t = $rows[$r - 1]
+            $mks = Find-Evidence $t
+            if (-not $mks) { Stop-Part "row ${r}: no evidence.mks was found" }
+            $packets = "$Work\packets\row-$r.json"
+            $packetArgs = @('-v', 'error', '-select_streams', "s:$($t.stream)", '-show_entries',
+                'packet=pts_time,duration_time,size', '-of', 'json', $mks)
+            $code = Invoke-Recorded $packets $FFPROBE $packetArgs
+            if ($code -ne 0) { Stop-Part "row ${r}: the packet listing exited $code" }
+            $same = Test-SameBytes $packets "$Recordings\$($t.slug)\$($t.label)\subs\sub-$($t.stream).packets.json"
+            "packets row ${r}: $(Get-Same $same)"
+            if (-not $same) { Add-Failure "the packet listing of row $r differs" }
+        } catch {
+            "packets row ${r}: not run"
+            Add-Failure "packets row ${r}: $(Get-Reason $_)"
+        }
+    }
+
+    # corpus copy: the whole evidence mirror into <Work>\evidence, refused above 4 GB.
+    if ($go) {
+        try {
+            if (-not (Test-Path -LiteralPath $Evidence -PathType Container)) {
+                Stop-Part 'the evidence mirror is missing'
+            }
+            $files = @(Get-ChildItem -LiteralPath $Evidence -Recurse -Force -File -ErrorAction Stop)
+            $bytes = [long]($files | Measure-Object -Property Length -Sum).Sum
+            if ($bytes -gt $MaxCopyBytes) {
+                "corpus copy: $($files.Count) files, $bytes bytes, refused (above 4 GB)"
+                Add-Failure 'the evidence mirror is above 4 GB, so it was not copied'
+            } else {
+                Copy-Item -LiteralPath $Evidence -Destination "$Work\evidence" -Recurse -Force -ErrorAction Stop
+                $copied = @(Get-ChildItem -LiteralPath "$Work\evidence" -Recurse -Force -File -ErrorAction Stop)
+                $copiedBytes = [long]($copied | Measure-Object -Property Length -Sum).Sum
+                if ($copied.Count -ne $files.Count -or $copiedBytes -ne $bytes) {
+                    Stop-Part ("the copy holds $($copied.Count) files and $copiedBytes bytes, " +
+                        "not $($files.Count) and $bytes")
+                }
+                "corpus copy: $($files.Count) files, $bytes bytes"
+                $copyDone = $true
+            }
+        } catch {
+            'corpus copy: not run'
+            Add-Failure "corpus copy: $(Get-Reason $_)"
+        }
+    } else { 'corpus copy: not run' }
+
+    # golden check and retune over the copy, before and after the film's new listing and level folder go into it.
+    $exits = @{}
+    if ($copyDone) {
+        try {
+            New-Item -ItemType Directory -Path "$Work\temp" -ErrorAction Stop | Out-Null
+            foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) { Set-Item -Path "Env:$name" -Value "$Work\temp" }
+            $goldenArgs = @('golden', 'check', '--evidence', "$Work\evidence")
+            $retuneArgs = @('retune', '--evidence', "$Work\evidence", '--spec', $Spec)
+            $exits['golden-before'] = Invoke-Recorded "$Work\runs\golden-before.txt" $DEV $goldenArgs
+            $exits['retune-before'] = Invoke-Recorded "$Work\runs\retune-before.txt" $DEV $retuneArgs
+            if ($levelsDone -and $listingDone) {
+                $dest = "$Work\evidence\$film\$Label"
+                if (-not (Test-Path -LiteralPath "$dest\ffprobe-streams.json" -PathType Leaf)) {
+                    Stop-Part 'the evidence copy holds no listing of the film'
+                }
+                if (-not (Test-Path -LiteralPath "$dest\$level" -PathType Container)) {
+                    Stop-Part 'the evidence copy holds no level folder of the film'
+                }
+                Copy-Item -LiteralPath $listing -Destination "$dest\ffprobe-streams.json" -Force -ErrorAction Stop
+                Remove-Item -LiteralPath "$dest\$level" -Recurse -Force -ErrorAction Stop
+                Copy-Item -LiteralPath $newLevel -Destination "$dest\$level" -Recurse -ErrorAction Stop
+                $exits['golden-after'] = Invoke-Recorded "$Work\runs\golden-after.txt" $DEV $goldenArgs
+                $exits['retune-after'] = Invoke-Recorded "$Work\runs\retune-after.txt" $DEV $retuneArgs
+            }
+        } catch {
+            Add-Failure "golden check and retune: $(Get-Reason $_)"
+        } finally {
+            foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) {
+                if ($savedTemp[$name]) { Set-Item -Path "Env:$name" -Value $savedTemp[$name] }
+                elseif (Test-Path "Env:$name") { Remove-Item -Path "Env:$name" }
+            }
+        }
+    }
+    foreach ($part in @(@{ key = 'golden'; line = 'golden check' }, @{ key = 'retune'; line = 'retune' })) {
+        $before = "$($part.key)-before"
+        $after = "$($part.key)-after"
+        if (-not ($exits.ContainsKey($before) -and $exits.ContainsKey($after))) {
+            "$($part.line): not run"
+            if ($copyDone) { Add-Failure "$($part.line) did not run before and after" }
+            continue
+        }
+        $same = Test-SameBytes "$Work\runs\$before.txt" "$Work\runs\$after.txt"
+        $word = if ($same) { 'same output' } else { 'different output' }
+        "$($part.line): $word; exit $($exits[$before]) then $($exits[$after])"
+        if (-not $same) { Add-Failure "$($part.line)'s output changed with the film's new listing and level folder" }
+        if ($exits[$before] -ne $exits[$after]) { Add-Failure "$($part.line)'s exit code changed" }
+    }
+} catch {
+    Add-Failure "the check stopped: $(Get-Reason $_)"
+} finally {
+    $env:Path = $savedPath
+    if ($made) {
+        try { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction Stop } catch { }
+        if (Test-Path -LiteralPath $Work) { Add-Failure 'the -Work folder could not be removed' }
+    }
+}
+if ($failures.Count -eq 0) {
+    'RESULT ok'
+} else {
+    "RESULT FAILED: $($failures -join '; ')"
+    throw 'ffmpeg-check.ps1 failed (the RESULT line says why)'
+}

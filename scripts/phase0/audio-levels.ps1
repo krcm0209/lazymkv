@@ -54,15 +54,21 @@
 # (for example "unknown", as for LPCM in Matroska) is taken as ffmpeg's guess for that many channels, the layout
 # ffmpeg itself mixes such a stream down as (6 channels: 5.1; 8: 7.1); the manifest says layout_guessed=<name>.
 # Stream numbers are ffprobe's stream indexes (0 is normally the video).
+# -RecordingsRoot and -TuningRoot (Ruling T6-R12) replace $Recordings and $TuningData for one run, so a check can
+# write its level folder and proxy under its own folder; without them the script behaves as before.
 # The last line is "RESULT ok" or "RESULT FAILED: <reason>"; after a failure the script throws.
 param(
     [Parameter(Mandatory)][string]$Slug,
     [Parameter(Mandatory)][string]$Label,
     [Parameter(Mandatory)][int]$Main,
     [int[]]$Cand = @(),
-    [switch]$Force
+    [switch]$Force,
+    [string]$RecordingsRoot = '',
+    [string]$TuningRoot = ''
 )
 . C:\lazymkv\src\scripts\phase0\env.ps1
+if ($RecordingsRoot) { $Recordings = $RecordingsRoot }
+if ($TuningRoot) { $TuningData = $TuningRoot }
 
 $Key = 'lavfi.astats.Overall.RMS_level='
 $PeakKey = 'lavfi.astats.Overall.Peak_level='
