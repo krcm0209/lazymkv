@@ -19,6 +19,7 @@ pub mod review;
 pub mod settings;
 pub mod snapshot;
 pub mod subtitle;
+pub mod toolver;
 pub mod tracks;
 pub mod ustar;
 pub mod verify;

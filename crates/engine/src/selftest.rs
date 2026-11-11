@@ -1,9 +1,10 @@
 //! The self-test (design parts 3.7, 9.4; Rulings S53, S79 to S81, RP-9): the MakeMKV check with the (version,
-//! licence code) it records across restarts, each tool's path, version and where it was found, the write, rename and
-//! delete probe of the three roots, the TMDb token's check, the two webhooks' connection checks (Ruling T4-R14), and
-//! what a `retry` re-checks for a waiting job. Every run is recorded capture-style under `<data>/selftest/` (design
-//! part 7.2). The owner thread runs none of this itself: it hands each self-test and re-check to a thread of its own
-//! (design part 4.4).
+//! licence code) it records across restarts, each tool's path, version and where it was found, with mkvmerge, ffprobe
+//! and ffmpeg judged against their minimum versions (S80 as amended by call 9 of pull request 6's notes, decision E1,
+//! Rulings T6-R4, T6-R5), the write, rename and delete probe of the three roots, the TMDb token's check, the two
+//! webhooks' connection checks (Ruling T4-R14), and what a `retry` re-checks for a waiting job. Every run is recorded
+//! capture-style under `<data>/selftest/` (design part 7.2). The owner thread runs none of this itself: it hands each
+//! self-test and re-check to a thread of its own (design part 4.4).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -19,6 +20,7 @@ use lazymkv_core::job::{Event, State, Tool};
 use lazymkv_core::plan::Kind;
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::{version_triple, Settings};
+use lazymkv_core::toolver::{self, Standing};
 use lazymkv_platform::{rename_no_replace, write_atomic, Host, ProcessGuard, Reach, SecretStore, ShareConnector};
 use lazymkv_tools::makemkv::{Kill, EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use lazymkv_tools::{
@@ -176,6 +178,30 @@ fn found_text(found: Found) -> Option<String> {
 /// Use: T26.
 pub(crate) fn below_minimum(version: &str, minimum: &str) -> bool {
     matches!((version_of(version), version_triple(minimum)), (Some(have), Some(need)) if have < need)
+}
+
+/// A found tool's `ok` and detail (S80 as amended by call 9, decision E1, Ruling T6-R5): `<tool> <version>` at or
+/// above `minimum` or with no minimum; `<tool> is version <version>, below the minimum <minimum>`, not ok; and, ok,
+/// `<tool> <version>; the version could not be judged against the minimum <minimum>` for a version
+/// `toolver::release_number` cannot read, `<tool> printed no version; it could not be judged against the minimum
+/// <minimum>` for no version, or `<tool> printed no version` for no version and no minimum. Def: T6-2. Use: T6-2.
+pub(crate) fn judged(name: &str, version: Option<&str>, minimum: Option<&str>) -> (bool, String) {
+    let Some(minimum) = minimum else {
+        return match version {
+            Some(version) => (true, format!("{name} {version}")),
+            None => (true, format!("{name} printed no version")),
+        };
+    };
+    let Some(version) = version else {
+        return (true, format!("{name} printed no version; it could not be judged against the minimum {minimum}"));
+    };
+    match toolver::standing(version, minimum) {
+        Standing::AtLeast => (true, format!("{name} {version}")),
+        Standing::Below => (false, format!("{name} is version {version}, below the minimum {minimum}")),
+        Standing::Unreadable => {
+            (true, format!("{name} {version}; the version could not be judged against the minimum {minimum}"))
+        }
+    }
 }
 
 /// The version a tool prints (design part 9.2): the word after "mkvmerge v", "ffprobe version " or "ffmpeg version "
@@ -478,9 +504,11 @@ impl CheckEnv {
         found
     }
 
-    /// One of the other four tools' checks (S80): its path, the version `tool_version` reads, recorded at
-    /// `<data>/selftest/<tool>-version.txt`, and where it was found; ok when found. The java check's detail also says
-    /// Java use at the last scan, or that no scan ran yet. Once the check's cancel token is raised, no tool runs.
+    /// One of the other four tools' checks (S80 as amended by call 9 of pull request 6's notes): its path, the version
+    /// `tool_version` reads, recorded at `<data>/selftest/<tool>-version.txt`, and where it was found; ok and the
+    /// detail come from `judged` against `toolver::minimum` (Ruling T6-R5), so a found tool is ok unless its version
+    /// is below its minimum. The java check's detail also says Java use at the last scan, or that no scan ran yet.
+    /// Once the check's cancel token is raised, no tool runs.
     fn tool_check(&self, settings: &Settings, tool: Tool) -> SelfTestCheck {
         let name = tool.as_str();
         if self.cancel.is_cancelled() {
@@ -493,15 +521,12 @@ impl CheckEnv {
                 let version = out.ok().and_then(|out| {
                     self.with_ctx(settings, |ctx| tool_version(ctx, tool, &location.path, &out))
                 });
-                let detail = match &version {
-                    Some(version) => format!("{name} {version}"),
-                    None => format!("{name} printed no version"),
-                };
+                let (ok, detail) = judged(name, version.as_deref(), toolver::minimum(tool));
                 SelfTestCheck {
                     path: Some(location.path.display().to_string()),
                     version,
                     found: found_text(location.found),
-                    ..check(name, true, detail)
+                    ..check(name, ok, detail)
                 }
             }
         };
@@ -850,6 +875,21 @@ mod tests {
         let check = token_check(&refused, Some("test-token"));
         assert!(!check.ok && check.detail.contains("401"));
         assert!(!token_check(&RecordedTransport::new(), None).ok);
+    }
+
+    #[test]
+    fn a_found_tool_is_judged_against_its_minimum() {
+        let judged = |v: Option<&str>, m: Option<&str>| judged("ffmpeg", v, m);
+        assert_eq!(judged(Some("9.0.2"), Some("7.0")), (true, "ffmpeg 9.0.2".to_string()));
+        assert_eq!(judged(Some("6.1.1-3ubuntu5"), Some("7.0")),
+                   (false, "ffmpeg is version 6.1.1-3ubuntu5, below the minimum 7.0".to_string()));
+        assert_eq!(judged(Some("N-121000-g5d8a9d5e3b"), Some("7.0")),
+                   (true, "ffmpeg N-121000-g5d8a9d5e3b; the version could not be judged against the minimum 7.0"
+                       .to_string()));
+        assert_eq!(judged(None, Some("7.0")),
+                   (true, "ffmpeg printed no version; it could not be judged against the minimum 7.0".to_string()));
+        assert_eq!(judged(Some("21.0.2"), None), (true, "ffmpeg 21.0.2".to_string()));
+        assert_eq!(judged(None, None), (true, "ffmpeg printed no version".to_string()));
     }
 
     #[test]

@@ -1742,6 +1742,42 @@ fn each_tool_check_reports_the_version_its_stand_in_prints() {
     }
 }
 
+/// S80 as amended by call 9 of pull request 6's notes (decision E1, Ruling T6-R5): mkvmerge 64.0 and ffmpeg
+/// 6.1.1 fail their checks, and ffprobe's git build, which has no release number, passes with a note.
+#[test]
+fn a_tool_below_its_minimum_fails_its_check_and_an_unreadable_version_passes_with_a_note() {
+    let h = stand_in(&["movie-direct", "movie-direct-old-tools"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    let seen = |tool: &str| {
+        let f = check(&result, tool);
+        (f["ok"].clone(), f["detail"].clone(), f["version"].clone())
+    };
+    assert_eq!(seen("mkvmerge"), (json!(false),
+        json!("mkvmerge is version 64.0, below the minimum 65.0"), json!("64.0")));
+    assert_eq!(seen("ffprobe"), (json!(true),
+        json!("ffprobe N-121000-g0a1b2c3d4e; the version could not be judged against the minimum 7.0"),
+        json!("N-121000-g0a1b2c3d4e")));
+    assert_eq!(seen("ffmpeg"), (json!(false),
+        json!("ffmpeg is version 6.1.1-3ubuntu5, below the minimum 7.0"), json!("6.1.1-3ubuntu5")));
+}
+
+/// Call 9: a tool below its minimum fails the self-test only; no job is held for it, so a disc inserted with the
+/// same two scenarios is ripped, remuxed and filed.
+#[test]
+fn no_job_is_held_for_a_tool_below_its_minimum() {
+    let h = stand_in(&["movie-direct", "movie-direct-old-tools"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    assert_eq!((&check(&result, "mkvmerge")["ok"], &check(&result, "ffmpeg")["ok"]), (&json!(false), &json!(false)));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    // Filed: no stand-in of the job runs beside the self-test's version calls (the stand-ins' counter files).
+    c.until_state(None, "Filed");
+}
+
 #[test]
 fn the_selftest_java_check_reports_the_last_scans_java_use() {
     let h = stand_in(&["movie-direct", "movie-direct-java"], settings());
