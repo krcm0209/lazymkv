@@ -13,7 +13,7 @@
 # The film is phase 0's kept UHD (Ultra HD Blu-ray) all-tracks rip: the one recording whose folder name ends -uhd and
 # whose all-tracks folder holds at least one finished level folder (audio-levels-20ms-<main>[-<cand>...] with
 # audio-proxy.json); none or several such recordings is a failure. The check repeats phase 0's sequence of level
-# passes (the controller's ruling P15): one audio-levels.ps1 pass per finished level folder, all into the same scratch
+# passes (controller ruling T6-E15): one audio-levels.ps1 pass per finished level folder, all into the same scratch
 # roots, so the first pass writes the proxy and the later ones find it and keep it, as phase 0's did. The first is the
 # one folder that holds proxy-check.json, which audio-levels.ps1 writes only in a pass that writes the proxy; the
 # others follow by the time of their manifest.txt, then by name. Only the first matters: a pass that keeps the proxy
@@ -345,7 +345,7 @@ try {
     }
 
     # The film: the one recording ending -uhd whose all-tracks folder holds a finished level folder, and its finished
-    # level folders in the order phase 0's passes wrote them (P15).
+    # level folders in the order phase 0's passes wrote them (T6-E15).
     if ($go) {
         try {
             $found = @()
