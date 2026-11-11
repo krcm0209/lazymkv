@@ -245,6 +245,37 @@ fn the_bundled_tools_licences_print_only_with_a_licenses_folder_beside_bin() {
     );
 }
 
+/// T6-R9 (call 8): a release tree's `licenses\` holds lazymkv's MIT text, the models' part and the crate notices as
+/// files beside the bundled tools' licences; each of those three equals a text licenses already printed from its own
+/// bytes, so only the bundled tool's licence is printed after the four parts.
+#[test]
+fn a_release_tree_prints_each_text_once() {
+    let s = Scratch::new("ctl-licenses-release-tree");
+    s.write("release/licenses/lazymkv-LICENSE.txt", MIT_TEXT);
+    s.write("release/licenses/crate-notices.txt", CRATE_NOTICES);
+    // The models' part's body byte for byte, as release step 4 cuts it from licenses' output.
+    s.write("release/licenses/ocrs-models.txt", ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
+    s.write("release/licenses/zlib-LICENSE.txt", "made-up zlib licence\n");
+    let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
+    let mut parts = four_parts();
+    parts.push("Bundled tool licence: zlib-LICENSE.txt\n\nmade-up zlib licence\n".to_string());
+    assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
+}
+
+/// T6-R9: only a file whose text equals a printed one is left out; one letter changed is a different text, printed.
+#[test]
+fn a_licence_file_that_differs_from_the_embedded_text_by_one_byte_is_still_printed() {
+    let s = Scratch::new("ctl-licenses-one-byte");
+    let changed = MIT_TEXT.replacen("Permission", "Permissiom", 1);
+    assert_ne!(changed, MIT_TEXT, "the MIT text holds the word Permission");
+    assert_eq!(changed.len(), MIT_TEXT.len());
+    s.write("release/licenses/lazymkv-LICENSE.txt", &changed);
+    let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
+    let mut parts = four_parts();
+    parts.push(format!("Bundled tool licence: lazymkv-LICENSE.txt\n\n{}", ended(&changed)));
+    assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
+}
+
 #[test]
 fn licenses_prints_tmdbs_sentence_verbatim_with_its_address() {
     assert_eq!(TMDB_NOTICE, "This product uses the TMDB API but is not endorsed or certified by TMDB.");

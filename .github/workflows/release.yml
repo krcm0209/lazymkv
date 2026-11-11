@@ -1,0 +1,217 @@
+name: Release
+
+# Builds lazymkv's Windows release as a dry run, and from a v<version> tag on, a draft release (design parts 11.4 and
+# 11.5, P24, P28; notes D1 and calls 6 to 8, 13 and 14; Rulings T6-R6 and T6-R9 to T6-R11).
+#
+# The ffmpeg job calls ffmpeg.yml for a fresh, twice-built minimal FFmpeg and its Windows smoke run; its artifact
+# ffmpeg-windows-x64 feeds the package job. The package job follows design part 11.5's steps on windows-latest:
+# step 1 builds lazymkv-engine, lazymkv-ocr and lazymkvctl with --locked --release, with the OCR (optical character
+# recognition) model cache restored as in ffmpeg.yml; three bash steps then run the release gate's self-test, check
+# that the inputs' digest computed here equals the artifact's inputs-sha256.txt (T6-R6), and run step 3: the
+# artifact's two programs must have the SHA-256 (Secure Hash Algorithm 256) values the manifest records, and a build
+# that is not verified on the target machine is written as a warning. packaging/release/assemble.ps1 runs steps 2 and
+# 4 to 6 and writes the zip and the assets; packaging/release/smoke.ps1 extracts the zip into a folder only SYSTEM and
+# Administrators can write, starts the engine and requires its self-test to find mkvmerge, ffprobe and ffmpeg in
+# resources (C1, call 13). The zip, the source archives, the build settings, the model files, their attribution and
+# SHA256SUMS are uploaded as the artifact lazymkv-release-dry-run, kept 14 days (call 14).
+#
+# The publish job runs only for a pushed v* tag. It alone has contents: write. It runs gate.sh publish first, which
+# refuses unless the tag is v<workspace version>, the version is not 0.0.0 and the FFmpeg build is verified (T6-R11),
+# and only then creates a draft release, which only the owner can publish (D1). The workspace version stays 0.0.0 in
+# phase 2, so the job refuses every tag until the first real version (call 7).
+#
+# It runs on a pull request that changes packaging/ or either release workflow, by hand, and for a v* tag (T6-R10).
+# No step writes an event value into a script; values reach scripts through env.
+
+on:
+  pull_request:
+    paths: ['packaging/**', '.github/workflows/release.yml', '.github/workflows/ffmpeg.yml']
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The two OCR models' SHA-256 pins, the values of crates/ocr-models/src/pins.rs, ci.yml, ffmpeg.yml and
+  # packaging/tools.json; they key the model cache, and the package job checks them against the manifest.
+  OCRS_DETECTION_SHA256: a917b23dbd9524b465df7e922641b3ff2981623df4ded5a0234004ef2fee7cfe
+  OCRS_RECOGNITION_SHA256: 86c145c2edb96c8caed5b1ebb8f44d706408922211451c309c625157dd6061c5
+
+jobs:
+  ffmpeg:
+    name: ffmpeg
+    uses: ./.github/workflows/ffmpeg.yml
+
+  package:
+    name: package (Windows, dry run)
+    runs-on: windows-latest
+    needs: ffmpeg
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          cargo --version
+
+      - name: The model cache's pins are the manifest's
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $models = (Get-Content -LiteralPath packaging/tools.json -Raw | ConvertFrom-Json).models
+          if ($models.'text-detection.onnx'.sha256 -ne $env:OCRS_DETECTION_SHA256) {
+            throw "OCRS_DETECTION_SHA256 is not the manifest's text-detection.onnx pin"
+          }
+          if ($models.'text-recognition.onnx'.sha256 -ne $env:OCRS_RECOGNITION_SHA256) {
+            throw "OCRS_RECOGNITION_SHA256 is not the manifest's text-recognition.onnx pin"
+          }
+
+      - name: Restore the OCR models
+        id: models
+        uses: actions/cache/restore@v4
+        with:
+          path: .ocrs-models
+          key: ocrs-models-${{ env.OCRS_DETECTION_SHA256 }}-${{ env.OCRS_RECOGNITION_SHA256 }}
+          enableCrossOsArchive: true
+
+      # Only on a hit: on a miss the variable stays unset and the models' build script downloads them by their pins.
+      - name: Use the restored OCR models
+        if: steps.models.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          "LAZYMKV_OCRS_MODELS=$(Join-Path $env:GITHUB_WORKSPACE '.ocrs-models')" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Release step 1 (design part 11.5): the first Windows build of lazymkv-ocr in CI (call 6).
+      - name: Build the three release programs
+        run: cargo build --locked --release -p lazymkv-engine -p lazymkv-ocr -p lazymkv-ctl
+
+      - name: Download the minimal FFmpeg
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-x64
+          path: ${{ runner.temp }}/ffmpeg-windows-x64
+
+      - name: The release gate's self-test
+        shell: bash
+        run: bash packaging/release/gate-selftest.sh
+
+      # T6-R6: the digest of the manifest's FFmpeg inputs and build.sh, computed on Windows, must equal the one the
+      # Linux build wrote, so the gate below judges this artifact against this checkout's inputs.
+      - name: The inputs' digest is the artifact's
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null 2>&1 || { echo "::error::jq is not on PATH"; exit 1; }
+          artifact="$(cygpath -u "$RUNNER_TEMP")/ffmpeg-windows-x64"
+          built="$(tr -d '\r\n' < "$artifact/inputs-sha256.txt")"
+          here="$(bash packaging/ffmpeg/inputs-digest.sh)"
+          echo "inputs' digest: here $here, in the artifact $built"
+          if [ "$here" != "$built" ]; then
+            echo "::error::the inputs' digest here, $here, is not the artifact's inputs-sha256.txt, $built"
+            exit 1
+          fi
+
+      # Release step 3 (design part 11.5, call 4): the programs' SHA-256 values against the manifest must pass; a build
+      # not verified on the target machine is a warning here and a refusal in the publish job.
+      - name: The release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$(cygpath -u "$RUNNER_TEMP")/ffmpeg-windows-x64"
+          (cd "$artifact" && sha256sum --check --strict SHA256SUMS)
+          bash packaging/release/gate.sh hashes "$artifact/ffmpeg.exe" "$artifact/ffprobe.exe"
+          status="$(bash packaging/release/gate.sh status)"
+          echo "gate.sh status: $status"
+          case "$status" in
+            verified) ;;
+            "unverified: "*)
+              echo "::warning::the FFmpeg build is not verified on the target machine: ${status#unverified: }" ;;
+            *)
+              echo "::error::gate.sh status printed '$status'"
+              exit 1 ;;
+          esac
+
+      # Release steps 2 and 4 to 6, and the zip, the model files and SHA256SUMS of step 6.
+      - name: Assemble the release tree and its assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'packaging\release\assemble.ps1'
+          & $script -Bin (Join-Path $env:GITHUB_WORKSPACE 'target\release') `
+            -Ffmpeg (Join-Path $env:RUNNER_TEMP 'ffmpeg-windows-x64') `
+            -Out (Join-Path $env:RUNNER_TEMP 'release-dry-run')
+
+      # C1 and call 13: the zip's tree in a folder only SYSTEM and Administrators can write.
+      - name: Smoke-run the zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'release-dry-run'
+          $zips = @(Get-ChildItem -LiteralPath $out -Filter 'lazymkv-*-windows-x64.zip' -File)
+          if ($zips.Count -ne 1) { throw "$out holds $($zips.Count) release zips, not one" }
+          $script = Join-Path $env:GITHUB_WORKSPACE 'packaging\release\smoke.ps1'
+          & $script -Zip $zips[0].FullName -Root (Join-Path $env:RUNNER_TEMP 'smoke-root') `
+            -Data (Join-Path $env:RUNNER_TEMP 'smoke-data')
+          if ($LASTEXITCODE -ne 0) { throw "smoke.ps1 exited $LASTEXITCODE" }
+
+      - name: Upload the release dry run
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazymkv-release-dry-run
+          path: ${{ runner.temp }}/release-dry-run
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    # D1 and T6-R11: a draft release, for a pushed v* tag only, after gate.sh publish passes.
+    name: publish (draft release)
+    runs-on: ubuntu-24.04
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release dry run
+        uses: actions/download-artifact@v4
+        with:
+          name: lazymkv-release-dry-run
+          path: ${{ runner.temp }}/release
+
+      # The workspace version from Cargo.toml's [workspace.package], read as text: this job installs no Rust.
+      - name: The release gate
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          versions="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml)"
+          if [ -z "$versions" ] || [ "$(printf '%s\n' "$versions" | wc -l)" -ne 1 ]; then
+            echo "::error::Cargo.toml's [workspace.package] does not give one version"
+            exit 1
+          fi
+          (cd "$RUNNER_TEMP/release" && sha256sum --check --strict SHA256SUMS)
+          bash packaging/release/gate.sh publish "$GITHUB_REF" "$versions"
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+
+      - name: Create the draft release
+        shell: bash
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "lazymkv $VERSION" \
+            --notes "This release is unsigned (P15)." "$RUNNER_TEMP"/release/*

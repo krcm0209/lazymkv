@@ -186,6 +186,20 @@ fn the_task_script_parses_without_errors() {
     assert!(errors.is_empty(), "{errors}");
 }
 
+/// Notes calls 8 and 13 (pull request 6's Task 4): the release job's assembly script and the zip's smoke script, which
+/// the mini PC also runs under Windows PowerShell 5.1, parse there without errors; neither runs here.
+#[cfg(windows)]
+#[test]
+fn the_release_scripts_parse_without_errors() {
+    for name in ["assemble.ps1", "smoke.ps1"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(r"..\..\packaging\release").join(name);
+        let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert!(text.is_ascii(), "{name}: PowerShell 5.1 reads a file with no byte order mark in the system code page");
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{name}: {errors}");
+    }
+}
+
 /// Design part 12.4, Task T3-25: the script that runs one module's platform tests, its ignored ones included, in the
 /// owner's desktop session through `job.sh`. A parse error there would show only after a wait and a disc cue (Ruling
 /// T3-25-h).
