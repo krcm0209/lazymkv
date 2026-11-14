@@ -70,7 +70,7 @@ commands run here (design parts 9.5, 9.6):
   plan <slug|recording dir|scan file> [lazymkv-dev plan's flags]   or   plan --job ID
   decide (<slug> <label> | --rec DIR) [lazymkv-dev decide's flags]   or   decide --job ID --title KEY
   retune [lazymkv-dev retune's flags]   or   retune --jobs [lazymkv-dev retune's flags]
-  licenses
+  licenses [--models]
   export-models DIR
 ";
 
@@ -119,13 +119,19 @@ pub(crate) fn argument_error(err: &mut dyn Write, name: &str, message: &str) -> 
 }
 
 /// `licenses` or `export-models` (`argv[0]`); returns the exit code (design part 9.6; call 15, call 16).
-/// `licenses` takes no argument and prints `licenses_text` for this program's own path, exit 1 with the message when a
-/// bundled licence cannot be read; `export-models DIR` takes one folder, through `ctx.abs`, and writes the models
-/// there; a DIR starting with `-` is refused (a folder of that name is given as `./-name`).
+/// `licenses` alone prints `licenses_text` for this program's own path, exit 1 with the message when a
+/// bundled licence cannot be read; `licenses --models`, with nothing after it, prints `licenses::models_text` alone and
+/// reads no file, so the release's `licenses\ocrs-models.txt` is written by this program (the review of pull request
+/// #21 (X9)); `export-models DIR` takes one folder, through `ctx.abs`, and writes the models there; a DIR starting with
+/// `-` is refused (a folder of that name is given as `./-name`).
 fn own(argv: &[String], env: Env) -> i32 {
     let name = argv[0].as_str();
     let rest = &argv[1..];
     if name == "licenses" {
+        if rest.len() == 1 && rest[0] == "--models" {
+            let _ = env.out.write_all(licenses::models_text().as_bytes());
+            return 0;
+        }
         if !rest.is_empty() {
             return argument_error(env.err, name, &format!("unrecognized arguments: {}", rest.join(" ")));
         }

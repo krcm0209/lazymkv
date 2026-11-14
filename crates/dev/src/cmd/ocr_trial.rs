@@ -24,8 +24,8 @@ use lazymkv_core::subtitle::bitmap::prepare::{crop, Grey};
 use lazymkv_core::subtitle::text::{packet_events, subs_run, Decision, Measures, PairRow, Rule, SubsRun, Track};
 use lazymkv_ocr::{read_png_grey, Ocr};
 use lazymkv_platform::{native_guard, write_atomic, Host, ProcessGuard};
-use lazymkv_tools::ocr::{end_reason, ocr_args, run_worker, WorkerEnd};
-use lazymkv_tools::{CancelToken, Limits, ToolCtx};
+use lazymkv_tools::ocr::{end_reason, ocr_args, WorkerEnd};
+use lazymkv_tools::{run_worker_limited, CancelToken, Limits, ToolCtx};
 use serde_json::Value;
 
 use crate::cmd::ocr_compare::{cer, exact_mean, norm_text};
@@ -376,8 +376,9 @@ fn run_inventory(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn 
 
 // ------------------------------------------------------------------ read, arm R (design 10.9 step 3, 10.8, T5-R44)
 
-/// Arm R (design 10.9 step 3, K2; T5-R44, T5-R62): the sibling `lazymkv-ocr` through `run_worker` over a `ToolCtx`
-/// holding `guard` and `host`, with the engine's fixed cap `time_cap_s(events)`. Def: T5-10. Use: T5-10, T5-12.
+/// Arm R (design 10.9 step 3, K2; T5-R44, T5-R62): the sibling `lazymkv-ocr` through `run_worker_limited` over a
+/// `ToolCtx` holding `guard` and `host`, with the engine's fixed cap `time_cap_s(events)` and its memory limit, so a
+/// trial measures what ships (T6-R2). Def: T5-10. Use: T5-10, T5-12.
 pub fn read_with(guard: &dyn ProcessGuard, host: &dyn Host, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     const AT: usize = 1;
     let parsed = match parse(args, &["--stream", "--clear-max", "--packets", "--out"], &[], &["evidence.mks"]) {
@@ -429,7 +430,7 @@ pub fn read_with(guard: &dyn ProcessGuard, host: &dyn Host, args: &[String], out
     };
     let started = host.now_ms();
     let args = ocr_args(&evidence, stream, clear_max, &out_dir);
-    let end = match run_worker(&ctx, &program, &args, &capture, Duration::from_secs_f64(cap_s)) {
+    let end = match run_worker_limited(&ctx, &program, &args, &capture, Duration::from_secs_f64(cap_s)) {
         Ok(end) => end,
         Err(error) => return not_started(out, &error.to_string()),
     };
@@ -1354,6 +1355,7 @@ mod tests {
         assert_eq!(spawned[0].args, ocr_args(&s.0.join("evidence.mks"), 0, 64, &s.0.join("r")));
         assert_eq!(spawned[0].env, vec![("RTEN_NUM_THREADS".to_string(), "3".to_string())]);
         assert!(spawned[0].below_normal);
+        assert_eq!(spawned[0].memory_limit, Some(lazymkv_tools::WORKER_MEMORY_LIMIT));
         assert!(s.0.join("r").is_dir(), "read makes --out before the start");
     }
 

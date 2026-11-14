@@ -1,0 +1,35 @@
+{
+  "ffmpeg": {
+    "version": "9.0.2",
+    "source": { "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+                "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e" },
+    "zlib": { "version": "1.3.2",
+              "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz",
+              "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3" },
+    "runner": "ubuntu-24.04",
+    "apt": ["gcc-mingw-w64-x86-64-win32=13.2.0-6ubuntu1+26.1",
+            "binutils-mingw-w64-x86-64=2.41.90.20240122-1ubuntu1+11.4",
+            "mingw-w64-x86-64-dev=11.0.1-3build1", "mingw-w64-common=11.0.1-3build1", "nasm=2.16.01-1build1",
+            "make=4.3-4.1build2"],
+    "built": { "ffmpeg_exe_sha256": "38ae6affcd0dd91f2c4d2c69c4d6b7d2b6497d84b13b5711dd47b059be8545e9",
+               "ffprobe_exe_sha256": "3ece157938d65a7ea38076d0f64d24c989ec1610fcfcdabf0d0cf921df7b0992",
+               "verified": {
+                 "date": "2026-11-11",
+                 "inputs_sha256": "9304a35ef1b122ee23d6edbc17de72706467b005c4588d87f861966372d22aab",
+                 "ffmpeg_exe_sha256": "38ae6affcd0dd91f2c4d2c69c4d6b7d2b6497d84b13b5711dd47b059be8545e9",
+                 "ffprobe_exe_sha256": "3ece157938d65a7ea38076d0f64d24c989ec1610fcfcdabf0d0cf921df7b0992" } }
+  },
+  "mkvtoolnix": {
+    "version": "100.0",
+    "portable": { "url": "https://mkvtoolnix.download/windows/releases/100.0/mkvtoolnix-64-bit-100.0.7z",
+                  "sha256": "061de38bd10e7e28697b897e0b890b78d6f2ec8d668a9c198600ed45c19672ab" },
+    "source": { "url": "https://mkvtoolnix.download/sources/mkvtoolnix-100.0.tar.xz",
+                "sha256": "74480d07a261beeaa8baf898248e668ecc56335e2527bbffa841ef056dc028a1" }
+  },
+  "models": {
+    "text-detection.onnx": { "url": "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.onnx",
+                             "sha256": "a917b23dbd9524b465df7e922641b3ff2981623df4ded5a0234004ef2fee7cfe" },
+    "text-recognition.onnx": { "url": "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.onnx",
+                               "sha256": "86c145c2edb96c8caed5b1ebb8f44d706408922211451c309c625157dd6061c5" }
+  }
+}

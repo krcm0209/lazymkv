@@ -1742,6 +1742,72 @@ fn each_tool_check_reports_the_version_its_stand_in_prints() {
     }
 }
 
+/// S80 as amended by call 9 of pull request 6's notes (decision E1, Ruling T6-R5): mkvmerge 64.0 and ffmpeg
+/// 6.1.1 fail their checks, and ffprobe's git build, which has no release number, passes with a note.
+#[test]
+fn a_tool_below_its_minimum_fails_its_check_and_an_unreadable_version_passes_with_a_note() {
+    let h = stand_in(&["movie-direct", "movie-direct-old-tools"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    let seen = |tool: &str| {
+        let f = check(&result, tool);
+        (f["ok"].clone(), f["detail"].clone(), f["version"].clone())
+    };
+    assert_eq!(seen("mkvmerge"), (json!(false),
+        json!("mkvmerge is version 64.0, below the minimum 65.0"), json!("64.0")));
+    assert_eq!(seen("ffprobe"), (json!(true),
+        json!("ffprobe N-121000-g0a1b2c3d4e; the version could not be judged against the minimum 7.0"),
+        json!("N-121000-g0a1b2c3d4e")));
+    assert_eq!(seen("ffmpeg"), (json!(false),
+        json!("ffmpeg is version 6.1.1-3ubuntu5, below the minimum 7.0"), json!("6.1.1-3ubuntu5")));
+}
+
+/// The review of pull request #21 (X3): a found tool whose version run did not complete fails its check with no
+/// version, its path and place kept. mkvmerge prints its version line and then hangs, so the header limit, the
+/// harness's 10 s, kills it and the line it printed is not reported; java's path names a file that is not a program,
+/// so it cannot start. This test takes more than 10 s.
+#[test]
+fn a_tool_whose_version_run_did_not_complete_fails_its_check() {
+    let h = stand_in(&[DISC_A], settings());
+    fs::write(h.tools().join("mkvmerge.json"),
+        r#"{"responses":[{"args_contain":["--version"],"stdout":"mkvmerge-version.txt","hang_after_line":1}]}"#)
+        .unwrap();
+    let java = h.tools().join(format!("not-a-program{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&java, "not a program\n").unwrap();
+    let java = java.display().to_string();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("settings_set", json!({"tool_paths": {"java": java}}));
+    let started = Instant::now();
+    let result = c.ok("run_selftest", Value::Null);
+    assert!(started.elapsed() >= Duration::from_secs(10), "{:?}", started.elapsed());
+    let mkvmerge = check(&result, "mkvmerge");
+    assert_eq!((&mkvmerge["ok"], &mkvmerge["detail"], &mkvmerge["version"], &mkvmerge["found"]), (&json!(false),
+        &json!("mkvmerge did not finish its version run within the header limit and was killed"), &Value::Null,
+        &json!("settings")));
+    let java_check = check(&result, "java");
+    assert_eq!((&java_check["ok"], &java_check["version"], &java_check["path"], &java_check["found"]),
+               (&json!(false), &Value::Null, &json!(java), &json!("settings")));
+    let detail = java_check["detail"].as_str().unwrap();
+    assert!(detail.starts_with("java could not run: ") && detail.ends_with("; no scan yet"), "{detail}");
+}
+
+/// Call 9: a tool below its minimum fails the self-test only; no job is held for it, so a disc inserted with the
+/// same two scenarios is ripped, remuxed and filed.
+#[test]
+fn no_job_is_held_for_a_tool_below_its_minimum() {
+    let h = stand_in(&["movie-direct", "movie-direct-old-tools"], settings());
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let result = c.ok("run_selftest", Value::Null);
+    assert_eq!((&check(&result, "mkvmerge")["ok"], &check(&result, "ffmpeg")["ok"]), (&json!(false), &json!(false)));
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    // Filed: no stand-in of the job runs beside the self-test's version calls (the stand-ins' counter files).
+    c.until_state(None, "Filed");
+}
+
 #[test]
 fn the_selftest_java_check_reports_the_last_scans_java_use() {
     let h = stand_in(&["movie-direct", "movie-direct-java"], settings());

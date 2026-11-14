@@ -48,6 +48,7 @@ pub fn run_ffmpeg(
         env: Vec::new(),
         below_normal: true,
         cwd: cwd.map(Path::to_path_buf),
+        memory_limit: None,
     };
     let ran = run_recorded_in(ctx, &spawn, out, None, &mut |_| LineAction::Continue);
     if ran.as_ref().map_or(true, |run| run.timed_out || run.cancelled) {

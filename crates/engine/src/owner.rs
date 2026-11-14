@@ -3100,7 +3100,7 @@ impl Owner {
             self.command = None;
             return self.reply(client, id, Err(COMMAND_NO_CTL.to_string()));
         };
-        let spawn = Spawn { program: ctl, args, env: Vec::new(), below_normal: true, cwd: None };
+        let spawn = Spawn { program: ctl, args, env: Vec::new(), below_normal: true, cwd: None, memory_limit: None };
         match self.parts.env.processes.spawn(&spawn) {
             Err(error) => {
                 self.command = None;

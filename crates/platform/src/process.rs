@@ -1,7 +1,7 @@
 //! The process runner on `std::process` (design part 4.2): the runner on Linux and macOS, and on Windows the one the
 //! driver tests in `crates/fake-tools/tests` keep (Ruling W7). It kills only the child it started, not the child's own
-//! children, and ignores `Spawn::below_normal` (S43). The engine on Windows takes `win::JobProcessGuard` through
-//! `native_guard`, which kills the tree.
+//! children, and ignores `Spawn::below_normal` (S43) and `Spawn::memory_limit` (T6-R1). The engine on Windows takes
+//! `win::JobProcessGuard` through `native_guard`, which kills the tree.
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
@@ -11,8 +11,9 @@ use std::time::Duration;
 use crate::{GuardedChild, KillHandle, ProcessGuard, Spawn};
 
 /// Starts children with `std::process::Command`: standard input null, standard output and error piped, `Spawn::env`
-/// added to the inherited environment (Ruling T9-e, design part 4.2, S13). `below_normal` does nothing here.
-/// `Spawn::cwd`, when set, is the child's working folder (T5-R37).
+/// added to the inherited environment (Ruling T9-e, design part 4.2, S13). `below_normal` does nothing here, nor does
+/// `memory_limit`, since `std::process` has no such limit (design part 5.3; T6-R1). `Spawn::cwd`, when set, is the
+/// child's working folder (T5-R37).
 /// Def: T9. Use: T11, T13, T23.
 pub struct StdProcessGuard;
 
@@ -107,6 +108,7 @@ pub(crate) mod tests {
             env: vec![("LAZYMKV_TEST_HELPER".to_string(), mode.to_string())],
             below_normal: false,
             cwd: None,
+            memory_limit: None,
         }
     }
 
@@ -127,7 +129,9 @@ pub(crate) mod tests {
     /// sleeps 60 s; `print-pid-sleep` writes `grandchild <pid>` and sleeps 60 s; `raise`, on Windows only, raises the
     /// exception `RAISED`, which nothing handles; `print-env` writes `env <NAME>` on a line of its own for each
     /// variable of its environment, the names only, never the values, which hold the account name; `print-cwd` writes
-    /// `cwd <its working folder>` on a line of its own. Any other mode returns at once.
+    /// `cwd <its working folder>` on a line of its own; `allocate` takes as many mebibytes (MiB) as
+    /// LAZYMKV_TEST_ALLOCATE_MIB names in one block, writes one byte of each 4096, then writes `allocated <MiB>` on a
+    /// line of its own (T6-R1). Any other mode returns at once.
     #[test]
     #[ignore]
     fn helper_child() {
@@ -160,6 +164,14 @@ pub(crate) mod tests {
                 }
             }
             Ok("print-cwd") => say(&format!("cwd {}", std::env::current_dir().unwrap().display())),
+            Ok("allocate") => {
+                let mib: usize = std::env::var("LAZYMKV_TEST_ALLOCATE_MIB").unwrap().parse().unwrap();
+                let mut block = vec![0u8; mib * 1024 * 1024];
+                // A byte in each 4096, so every page of the block is touched.
+                block.iter_mut().step_by(4096).for_each(|byte| *byte = 1);
+                std::hint::black_box(&block);
+                say(&format!("allocated {mib}"));
+            }
             #[cfg(windows)]
             Ok("raise") => {
                 use windows_sys::Win32::System::Diagnostics::Debug::RaiseException;

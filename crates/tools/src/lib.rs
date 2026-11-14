@@ -18,6 +18,9 @@ pub mod mkvmerge;
 pub mod ocr;
 mod record;
 mod snapshot;
+/// The OCR worker's memory limit: `run_worker` through `lazymkv_platform::MemoryLimited` at a fixed 2 gibibytes
+/// (GiB) (design part 5.3; notes A1, A2 and call 10; T6-R2). Def: T6-1. Use: T6-1.
+pub mod worker_limit;
 
 pub use ffmpeg::{layouts_args, run_ffmpeg, streamhash_args};
 pub use ffprobe::{packets, packets_args, probe, probe_args, proxy_check_args};
@@ -33,6 +36,7 @@ pub use record::{
     RunResult, ToolCtx,
 };
 pub use snapshot::{list_files, snapshot};
+pub use worker_limit::{run_worker_limited, WORKER_MEMORY_LIMIT};
 
 #[cfg(test)]
 pub(crate) mod testutil {

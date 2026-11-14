@@ -4,7 +4,8 @@
 //! LAZYMKV_TEST_FFPROBE or LAZYMKV_TEST_FFMPEG, else the first match on PATH, and ffmpeg and ffprobe must be FFmpeg
 //! 7.0 or later (K11). Without a tool, or with an older FFmpeg, a test prints `skipped: <reason>` and passes; on CI
 //! (`CI` set), where every runner installs the three, it fails instead, so a green run proves that layer 2 ran. Every
-//! file is made up: block shapes and sine tones, no byte of the evidence clone (RP21).
+//! file is made up: block shapes and sine tones, no byte of the evidence clone (RP21). The lavfi input files are made
+//! by the FFmpeg LAZYMKV_TEST_FFMPEG_FULL names when it is set, else by the ffmpeg under test (T6-R8).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ use lazymkv_core::subtitle::bitmap::mkv::read_stream;
 use lazymkv_core::subtitle::bitmap::CODEC_PGS;
 use lazymkv_core::testsupport::mks::{mks, pgs_display_set, MksBlock, MksEncoding, MksShape, MksTrack};
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
+use lazymkv_core::toolver::{standing, Standing, FFMPEG_MIN};
 use lazymkv_core::tracks::layout::{Layout, OutputTrack};
 use lazymkv_core::verify::VerifyReport;
 use lazymkv_platform::fakes::FakeHost;
@@ -91,8 +93,9 @@ fn text(value: &Option<serde_json::Value>) -> String {
 }
 
 /// None when the first line of `-version` names FFmpeg 7.0 or later, else the reason it does not (K11). The release
-/// word is the third when the second is `version`; its major number is the run of ASCII digits at its start after one
-/// leading lowercase `n` (BtbN's `n7.1` builds).
+/// word is the third when the second is `version`, none otherwise; `lazymkv_core::toolver::standing` judges it against
+/// `FFMPEG_MIN`, the rule the self-test applies, so a dated git build has no release number here too (the review of
+/// pull request #21 (X11)).
 fn below_7_0(first_line: &str) -> Option<String> {
     let words: Vec<&str> = first_line.split_whitespace().collect();
     if words.is_empty() {
@@ -102,18 +105,17 @@ fn below_7_0(first_line: &str) -> Option<String> {
     }
     let shown = words.iter().take(3).copied().collect::<Vec<_>>().join(" ");
     let release = if words.get(1) == Some(&"version") { words.get(2).copied() } else { None };
-    let release = release.unwrap_or("");
-    let release = release.strip_prefix('n').unwrap_or(release);
-    let digits: String = release.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return Some(format!(
+    let judged = match release {
+        Some(word) => standing(word, FFMPEG_MIN),
+        None => Standing::Unreadable,
+    };
+    match judged {
+        Standing::AtLeast => None,
+        Standing::Below => Some(format!("{shown} is below FFmpeg 7.0, layer 2's minimum (K11)")),
+        Standing::Unreadable => Some(format!(
             "{shown} names no release number, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)"
-        ));
+        )),
     }
-    if digits.parse::<u64>().unwrap_or(u64::MAX) < 7 {
-        return Some(format!("{shown} is below FFmpeg 7.0, layer 2's minimum (K11)"));
-    }
-    None
 }
 
 /// One tool: the path in `var` when set and not empty (it must be a file), else the first match on `PATH`. ffmpeg and
@@ -169,6 +171,24 @@ fn real_tools(wanted: &[(&str, Tool)]) -> Option<Vec<PathBuf>> {
         }
     }
     Some(paths)
+}
+
+/// The ffmpeg that makes the lavfi input files (T6-R8): the path LAZYMKV_TEST_FFMPEG_FULL names when it is set and
+/// not empty, which must be a file and FFmpeg 7.0 or later, else `ffmpeg`, the tool under test. None after a skip (or
+/// a CI failure) when the named one does not qualify. The release's minimal build has no lavfi, so its smoke job names
+/// a full FFmpeg here and the minimal one as LAZYMKV_TEST_FFMPEG.
+fn generator(ffmpeg: &Path) -> Option<PathBuf> {
+    const FULL: &str = "LAZYMKV_TEST_FFMPEG_FULL";
+    if std::env::var_os(FULL).filter(|value| !value.is_empty()).is_none() {
+        return Some(ffmpeg.to_path_buf());
+    }
+    match real_tool(FULL, Tool::Ffmpeg) {
+        Ok(path) => Some(path),
+        Err(reason) => {
+            skip_or_fail(&reason);
+            None
+        }
+    }
 }
 
 /// Makes `dir/raw.mkv` with the real ffmpeg: one FFV1 video (stream 0) and one FLAC audio stream per `(source,
@@ -258,7 +278,8 @@ fn real_ffmpeg_step_10a_pass_writes_phase_0s_level_files_over_a_lavfi_file() {
     let (ffmpeg, ffprobe) = (&tools[0], &tools[1]);
     let scratch = Scratch::new("layer2-pass");
     let env = Env::new();
-    let raw = lavfi_mkv(ffmpeg, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa")]);
+    let Some(source) = generator(ffmpeg) else { return };
+    let raw = lavfi_mkv(&source, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa")]);
     let label = scratch.0.join("job/t00");
     let work = scratch.0.join("work/levels-j-t00");
     std::fs::create_dir_all(&label).unwrap();
@@ -321,7 +342,8 @@ fn real_ffmpeg_streamhash_pass_lists_every_audio_stream() {
     let ffmpeg = &tools[0];
     let scratch = Scratch::new("layer2-streamhash");
     let env = Env::new();
-    let raw = lavfi_mkv(ffmpeg, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa"), (MONO, "eng")]);
+    let Some(source) = generator(ffmpeg) else { return };
+    let raw = lavfi_mkv(&source, &scratch.0, &[(SURROUND, "eng"), (STEREO, "spa"), (MONO, "eng")]);
     let work = scratch.0.join("work/levels-j-t00");
     std::fs::create_dir_all(&work).unwrap();
     let args = streamhash_args(&raw, "streamhash.txt");
@@ -342,7 +364,8 @@ fn real_mkvmerge_identifies_and_remuxes_a_lavfi_file() {
     let (mkvmerge, ffmpeg) = (&tools[0], &tools[1]);
     let scratch = Scratch::new("layer2-remux");
     let env = Env::new();
-    let raw = lavfi_mkv(ffmpeg, &scratch.0, &[(SURROUND, "spa"), (STEREO, "eng")]);
+    let Some(source) = generator(ffmpeg) else { return };
+    let raw = lavfi_mkv(&source, &scratch.0, &[(SURROUND, "spa"), (STEREO, "eng")]);
     let job = scratch.0.join("job/t00");
     std::fs::create_dir_all(&job).unwrap();
     let identified = env.run(|ctx| ident(ctx, mkvmerge, &raw, &job.join("mkvmerge.json"))).unwrap().unwrap();
@@ -420,6 +443,9 @@ fn the_layer_2_skip_reads_ffmpegs_version_and_skips_below_7_0() {
     }
     assert_eq!(below_7_0("ffmpeg version N-117000-g0123abcd Copyright (c) 2000-2025 the FFmpeg developers"),
         Some("ffmpeg version N-117000-g0123abcd names no release number, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)".to_string()));
+    let no_number = "names no release number, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)";
+    assert_eq!(below_7_0("ffmpeg version 2026-10-01-git-0a1b2c3d4e Copyright (c) 2000-2026 the FFmpeg developers"),
+        Some(format!("ffmpeg version 2026-10-01-git-0a1b2c3d4e {no_number}")));
     assert_eq!(below_7_0("   "),
         Some("-version printed nothing, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)".to_string()));
 }

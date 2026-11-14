@@ -1,0 +1,6 @@
+# The Windows programs link the C runtime statically, so the release zip runs on a Windows without the Visual C++
+# Redistributable: a program built without it imports VCRUNTIME140.dll, which the zip does not carry and Windows does
+# not ship (the review of pull request #21 (X1)). The setting covers every Windows build, the tests' included, so the
+# tests and the mini PC's trials measure what ships.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

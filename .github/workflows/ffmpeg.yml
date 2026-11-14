@@ -1,0 +1,202 @@
+name: FFmpeg
+
+# Builds lazymkv's minimal LGPL (GNU Lesser General Public License) FFmpeg for Windows and smoke-tests it (design parts
+# 11.2 and 11.3, P16, K1, K4; notes calls 2 to 5; T6-R6 to T6-R8). packaging/ffmpeg/build.sh is the authority for the
+# configure line and reads every pin from packaging/tools.json: the FFmpeg tarball and the zlib source archive by URL
+# and SHA-256 (Secure Hash Algorithm 256), checked before unpacking, and the runner's apt packages at their pinned
+# versions, which the script installs itself (T6-R7). The build runs on the fixed label ubuntu-24.04, never
+# ubuntu-latest (call 2).
+#
+# The build job first runs the release gate's self-test, then builds twice from clean in the same fixed folder and
+# fails unless both ffmpeg.exe and both ffprobe.exe are byte-identical (K4, call 3). gate.sh hashes then compares the
+# programs with the SHA-256 values the manifest records: while none are recorded it prints the two values, which a
+# later commit records; once they are, any other bytes fail here. Only then is the first build uploaded as the
+# artifact ffmpeg-windows-x64, with its build settings, the licence texts, the inputs' digest and SHA256SUMS.
+#
+# The smoke job runs the programs on Windows (call 5): -version for both and ffmpeg -hide_banner -layouts, then the
+# whole of layer 2 (crates/fake-tools/tests/layer2.rs) with the three programs that ship as the tools under test: the
+# minimal ffmpeg.exe and ffprobe.exe, and the mkvmerge.exe of the manifest's MKVToolNix portable archive, checked and
+# extracted by release step 2's own code (packaging/release/archive.ps1; the review of pull request #21 (X8)).
+# Chocolatey's full FFmpeg only makes layer 2's lavfi input files, named by LAZYMKV_TEST_FFMPEG_FULL (T6-R8, the
+# owner's item 3). The test program links lazymkvctl's crate, so the job restores the OCR (optical character
+# recognition) model cache as ci.yml's test job does; on a miss the models' build script downloads them by their pins.
+#
+# It runs on a push to a branch that changes the manifest, packaging/ffmpeg, packaging/release/archive.ps1 (the smoke
+# job's mkvmerge code) or this file (the workflow is part of what builds the bytes), by hand, and when release.yml calls
+# it (workflow_call). The push trigger names branches because GitHub does not apply a path filter to a tag push, so
+# without them every tag would also start a standalone run beside the one release.yml starts for a v* tag (the review
+# of pull request #21 (X4)).
+
+on:
+  push:
+    branches: ['**']
+    paths: ['packaging/tools.json', 'packaging/ffmpeg/**', 'packaging/release/archive.ps1',
+            '.github/workflows/ffmpeg.yml']
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The two OCR models' SHA-256 pins, the values of crates/ocr-models/src/pins.rs, ci.yml and packaging/tools.json;
+  # they key the model cache, and the smoke job checks them against the manifest.
+  OCRS_DETECTION_SHA256: a917b23dbd9524b465df7e922641b3ff2981623df4ded5a0234004ef2fee7cfe
+  OCRS_RECOGNITION_SHA256: 86c145c2edb96c8caed5b1ebb8f44d706408922211451c309c625157dd6061c5
+
+jobs:
+  build:
+    name: build (minimal FFmpeg, twice)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The release gate's self-test
+        run: bash packaging/release/gate-selftest.sh
+
+      - name: First build
+        run: bash packaging/ffmpeg/build.sh "$RUNNER_TEMP/out1"
+
+      - name: Second build, from clean
+        run: bash packaging/ffmpeg/build.sh "$RUNNER_TEMP/out2"
+
+      # K4: the two builds of the same inputs must give the same bytes, or nothing is kept.
+      - name: The two builds are byte-identical
+        run: |
+          set -euo pipefail
+          for program in ffmpeg.exe ffprobe.exe; do
+            if ! cmp "$RUNNER_TEMP/out1/$program" "$RUNNER_TEMP/out2/$program"; then
+              echo "::error::the two builds differ: $program"
+              sha256sum "$RUNNER_TEMP/out1/$program" "$RUNNER_TEMP/out2/$program"
+              exit 1
+            fi
+          done
+          sha256sum "$RUNNER_TEMP/out1/ffmpeg.exe" "$RUNNER_TEMP/out1/ffprobe.exe"
+
+      - name: The programs' SHA-256 values against the manifest
+        run: bash packaging/release/gate.sh hashes "$RUNNER_TEMP/out1/ffmpeg.exe" "$RUNNER_TEMP/out1/ffprobe.exe"
+
+      - name: Write SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/out1"
+          LC_ALL=C sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the first build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows-x64
+          path: ${{ runner.temp }}/out1
+          if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    name: smoke (Windows, layer 2)
+    runs-on: windows-latest
+    needs: build
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          cargo --version
+
+      - name: The model cache's pins are the manifest's
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $models = (Get-Content -LiteralPath packaging/tools.json -Raw | ConvertFrom-Json).models
+          if ($models.'text-detection.onnx'.sha256 -ne $env:OCRS_DETECTION_SHA256) {
+            throw "OCRS_DETECTION_SHA256 is not the manifest's text-detection.onnx pin"
+          }
+          if ($models.'text-recognition.onnx'.sha256 -ne $env:OCRS_RECOGNITION_SHA256) {
+            throw "OCRS_RECOGNITION_SHA256 is not the manifest's text-recognition.onnx pin"
+          }
+
+      - name: Restore the OCR models
+        id: models
+        uses: actions/cache/restore@v4
+        with:
+          path: .ocrs-models
+          key: ocrs-models-${{ env.OCRS_DETECTION_SHA256 }}-${{ env.OCRS_RECOGNITION_SHA256 }}
+          enableCrossOsArchive: true
+
+      # Only on a hit: on a miss the variable stays unset and the models' build script downloads them by their pins.
+      - name: Use the restored OCR models
+        if: steps.models.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          "LAZYMKV_OCRS_MODELS=$(Join-Path $env:GITHUB_WORKSPACE '.ocrs-models')" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download the minimal FFmpeg
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-x64
+          path: ${{ runner.temp }}/ffmpeg-windows-x64
+
+      - name: Check and run the minimal programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$(cygpath -u "$RUNNER_TEMP")/ffmpeg-windows-x64"
+          sha256sum --check --strict SHA256SUMS
+          ./ffmpeg.exe -version | sed -n 1p
+          ./ffprobe.exe -version | sed -n 1p
+          ./ffmpeg.exe -hide_banner -layouts | sed -n 1p
+
+      # The owner's item 3: Chocolatey's full FFmpeg makes layer 2's lavfi input files only (T6-R8).
+      - name: Install the generator FFmpeg (Chocolatey)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install ffmpeg exited $LASTEXITCODE" }
+          $full = (Get-Command ffmpeg.exe).Source
+          & $full -version | Select-Object -First 1
+          "LAZYMKV_TEST_FFMPEG_FULL=$full" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Release step 2's own code (packaging/release/archive.ps1, the review of pull request #21 (X8)): the manifest's
+      # portable archive, its SHA-256 checked, mkvmerge.exe alone extracted and its version checked.
+      - name: Fetch mkvmerge from the manifest's MKVToolNix portable archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          . (Join-Path $env:GITHUB_WORKSPACE 'packaging\release\archive.ps1')
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'packaging\tools.json'
+          $manifest = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+          $downloads = Join-Path $env:RUNNER_TEMP 'mkvtoolnix-download'
+          $mkvmerge = Get-Mkvmerge $manifest $downloads (Join-Path $env:RUNNER_TEMP 'mkvmerge')
+          if (-not (Test-Path -LiteralPath $mkvmerge -PathType Leaf)) {
+            throw "Get-Mkvmerge returned '$mkvmerge', which is not a file"
+          }
+          "LAZYMKV_TEST_MKVMERGE=$mkvmerge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # All five layer 2 tests must pass with nothing skipped: a missing component of the minimal build fails here.
+      - name: Layer 2 with the minimal programs
+        shell: bash
+        env:
+          LAZYMKV_TEST_FFMPEG: ${{ runner.temp }}\ffmpeg-windows-x64\ffmpeg.exe
+          LAZYMKV_TEST_FFPROBE: ${{ runner.temp }}\ffmpeg-windows-x64\ffprobe.exe
+        run: |
+          set -euo pipefail
+          log="$(cygpath -u "$RUNNER_TEMP")/layer2.txt"
+          cargo test -p fake-tools --locked --test layer2 -- --nocapture 2>&1 | tee "$log"
+          if ! grep -q 'test result: ok\. 5 passed; 0 failed' "$log"; then
+            echo "::error::layer 2 did not end with 5 passed and 0 failed"
+            exit 1
+          fi
+          if grep -n 'skipped:' "$log"; then
+            echo "::error::a layer 2 test was skipped"
+            exit 1
+          fi

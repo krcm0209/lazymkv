@@ -225,7 +225,7 @@ pub fn version_triple(text: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// One part of a version: ASCII digits only, at least one, within u32.
-fn version_part(part: &str) -> Option<u32> {
+pub(crate) fn version_part(part: &str) -> Option<u32> {
     if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
