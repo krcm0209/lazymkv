@@ -4,6 +4,9 @@
 //! `scripts/phase0/platform-ignored.ps1`, the desktop-session run of the platform's ignored tests (design part 12.4;
 //! Task T3-25), and `scripts/phase0/engine-ocr-trial.ps1`, the OCR trial's desktop-session steps (design part 10.9;
 //! pull request 5's Task 10), are read and parsed here too, never run.
+//! Pull request 6's sitting scripts, `scripts/phase0/ffmpeg-check.ps1` and `scripts/phase0/worker-check.ps1`, the
+//! helper functions they share, `scripts/phase0/check-common.ps1` (the review of pull request #21 (X13)), and
+//! `audio-levels.ps1`'s two roots (Task 5) are read on every system and parsed on Windows, never run.
 
 use std::fs;
 #[cfg(windows)]
@@ -184,6 +187,21 @@ fn the_task_script_parses_without_errors() {
     assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
     let errors = parse_errors(&path);
     assert!(errors.is_empty(), "{errors}");
+}
+
+/// Notes calls 8 and 13 (pull request 6's Task 4): the release job's assembly script and the zip's smoke script, which
+/// the mini PC also runs under Windows PowerShell 5.1, and `archive.ps1`, a file of functions that is dot-sourced,
+/// parse there without errors; none runs here.
+#[cfg(windows)]
+#[test]
+fn the_release_scripts_parse_without_errors() {
+    for name in ["assemble.ps1", "smoke.ps1", "archive.ps1"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(r"..\..\packaging\release").join(name);
+        let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert!(text.is_ascii(), "{name}: PowerShell 5.1 reads a file with no byte order mark in the system code page");
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{name}: {errors}");
+    }
 }
 
 /// Design part 12.4, Task T3-25: the script that runs one module's platform tests, its ignored ones included, in the
@@ -493,4 +511,290 @@ fn the_ocr_goldens_script_parses_sets_its_four_variables_and_runs_no_cargo() {
         let errors = parse_errors(&path);
         assert!(errors.is_empty(), "{errors}");
     }
+}
+
+/// A script of scripts/phase0 and its text.
+fn phase0_script(name: &str) -> (PathBuf, String) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let path = root.join("scripts").join("phase0").join(name);
+    let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    (path, text)
+}
+
+/// The lines of a PowerShell script that are code: trimmed, neither empty nor a comment.
+fn code_lines(text: &str) -> Vec<&str> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect()
+}
+
+/// Notes call 12 (a), Rulings T6-R12 and T6-R13 (pull request 6's Task 5): the FFmpeg check prints its eight kinds of
+/// line in the brief's order, and no name. The film's folder name is held in `$film`, and the rule is textual: every
+/// `$film` in the code is either its one assignment (`$film = $found[0].folder`), the `-Slug $film` argument of the
+/// call of audio-levels.ps1, or comes right after a backslash, that is a path segment inside a path string such as
+/// `"$Recordings\$film\$Label"`; and no line holding `$film` throws, fails a part or writes. So `"levels: $film"`,
+/// `"$($film)"`, `$name = $film` and `Stop-Part "...\$film"` all fail here. The one call of audio-levels.ps1 passes
+/// `-RecordingsRoot` and `-TuningRoot` under `-Work` and no `-Force`. Read on every system, parsed on Windows; never
+/// run.
+#[test]
+fn the_ffmpeg_check_script_parses_and_prints_no_name() {
+    let (path, text) = phase0_script("ffmpeg-check.ps1");
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+    let stems = [
+        "'hashes: not checked (the installed build)'",
+        "\"hashes: $(Get-Same $same)\"",
+        "\"levels: $($names.Count) series files, $equal equal, $different different; streamhash $(Get-Same $hash); \"",
+        "\"proxy: $tracks tracks, packet hashes $(Get-Same $same)\"",
+        "\"listing: $audio audio streams, $audioKeys differing keys; other streams: $otherKeys differing keys$named\"",
+        "\"packets row ${r}: $(Get-Same $same)\"",
+        "\"corpus copy: $($files.Count) files, $bytes bytes\"",
+        "@{ key = 'golden'; line = 'golden check'; exits = @(0) }",
+        "@{ key = 'retune'; line = 'retune'; exits = @(0, 1, 3) }",
+        "\"$($part.line): $word; exit $($exits[$before]) then $($exits[$after])\"",
+        "'RESULT ok'",
+        "\"RESULT FAILED: $($failures -join '; ')\"",
+    ];
+    let mut last = 0;
+    for stem in stems {
+        let found = text[last..].find(stem);
+        last += found.unwrap_or_else(|| panic!("ffmpeg-check.ps1 lacks, after the lines before it in order: {stem}"));
+    }
+    for line in ["'hashes: not run'", "'levels: not run'", "'proxy: not run'", "'listing: not run'",
+        "\"packets row ${r}: not run\"", "'corpus copy: not run'", "\"$($part.line): not run\""] {
+        assert!(text.contains(line), "ffmpeg-check.ps1 lacks: {line}");
+    }
+
+    let code = code_lines(&text);
+    let mut uses = 0;
+    for line in code.iter().filter(|line| line.contains("$film")) {
+        for writer in ["Stop-Part", "Add-Failure", "throw", "Write-", "Out-File", "Set-Content"] {
+            assert!(!line.contains(writer), "a line holding the film's folder name calls {writer}: {line}");
+        }
+        for (at, _) in line.match_indices("$film") {
+            uses += 1;
+            let before = &line[..at];
+            let ok = before.ends_with('\\')
+                || before.ends_with("-Slug ")
+                || (at == 0 && *line == "$film = $found[0].folder");
+            assert!(ok, "the film's folder name reaches more than a path: {line}");
+        }
+    }
+    assert!(uses >= 8, "ffmpeg-check.ps1 uses $film {uses} times; the rule above checked nothing");
+    assert_eq!(code.iter().filter(|line| line.contains("$found[0].folder")).count(), 1, "the film's name is read once");
+
+    let calls: Vec<usize> =
+        code.iter().enumerate().filter(|(_, line)| line.contains("& $LevelsScript")).map(|(i, _)| i).collect();
+    assert_eq!(calls.len(), 1, "ffmpeg-check.ps1 calls audio-levels.ps1 {} times, not once", calls.len());
+    let mut call = String::new();
+    for line in &code[calls[0]..] {
+        call.push_str(line.trim_end_matches('`'));
+        call.push(' ');
+        if !line.ends_with('`') {
+            break;
+        }
+    }
+    for part in ["-Slug $film -Label $Label -Main $main -Cand $cands", r#"-RecordingsRoot "$Work\recordings""#,
+        r#"-TuningRoot "$Work\dataset""#] {
+        assert!(call.contains(part), "the call of audio-levels.ps1 lacks {part}: {call}");
+    }
+    assert!(!call.contains("-Force"), "the call of audio-levels.ps1 passes -Force: {call}");
+    let named: Vec<&&str> = code.iter().filter(|line| line.contains("audio-levels.ps1")).collect();
+    assert_eq!(named, [&r"$LevelsScript = 'C:\lazymkv\src\scripts\phase0\audio-levels.ps1'"], "one path to it");
+    #[cfg(windows)]
+    {
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{errors}");
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
+/// Notes call 11, Ruling T6-R15 (pull request 6's Task 5): the worker check's output lines name the row only, and it
+/// never writes into the trial's kept output. Output is textual here: a code line that starts with a quote and does not
+/// continue the line before it (which ends with a comma, an opening bracket, a plus, a pipe or a backtick) is a bare
+/// string, so printed, and must start `'RESULT ok'` or `"RESULT FAILED: `; a line that is one variable alone is printed
+/// too and must be one of the four line variables, which are assigned only strings starting `"row ${Row}: `. The one
+/// exception is named: the sampler job's `$peak`; the values of the helpers it shares with the FFmpeg check are
+/// check-common.ps1's, tested below (the review of pull request #21 (X13)). The kept output: `subs-ocr-engine` is named
+/// in `$engineOut` only, `$engineOut` reaches only `$kept`, `$kept` is only tested and read, and no line that copies,
+/// moves or writes names any of the three. Read on every system, parsed on Windows; never run.
+#[test]
+fn the_worker_check_script_parses_names_rows_only_and_never_writes_the_trials_kept_output() {
+    let (path, text) = phase0_script("worker-check.ps1");
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+    let code = code_lines(&text);
+    let lines = ["$shaLine", "$runLine", "$peakLine", "$recordsLine"];
+    let returns = ["$peak"];
+    let mut printed = Vec::new();
+    for (i, line) in code.iter().enumerate() {
+        let continues = i > 0 && ['+', ',', '(', '|', '`'].iter().any(|end| code[i - 1].ends_with(*end));
+        if (line.starts_with('"') || line.starts_with('\'')) && !continues {
+            assert!(line.starts_with("'RESULT ok'") || line.starts_with("\"RESULT FAILED: "), "an output line: {line}");
+            printed.push(*line);
+        }
+        let alone = line.len() > 1 && line.starts_with('$') && line[1..].chars().all(|c| c.is_ascii_alphanumeric());
+        if alone && !returns.contains(line) {
+            assert!(lines.contains(line), "an output line that is not one of the four: {line}");
+            printed.push(*line);
+        }
+        for name in lines {
+            if let Some(value) = line.strip_prefix(&format!("{name} = ")) {
+                assert!(value.starts_with("\"row ${Row}: "), "{name} gets a line that does not name the row: {line}");
+            }
+        }
+    }
+    let mut expected: Vec<&str> = lines.to_vec();
+    expected.extend(["'RESULT ok'", "\"RESULT FAILED: $($failures -join '; ')\""]);
+    assert_eq!(printed, expected, "worker-check.ps1 prints the four row lines, then its RESULT line");
+    for absent in ["Write-Host", "Write-Output"] {
+        assert!(!code.iter().any(|line| line.contains(absent)), "worker-check.ps1 calls {absent}");
+    }
+
+    let kept = ["subs-ocr-engine", "$engineOut", "$kept"];
+    let writers =
+        ["Copy-Item", "Copy-Checked", "Set-Content", "Out-File", "WriteAll", "Move-Item", "New-Item", "Add-Content"];
+    for line in &code {
+        if writers.iter().any(|writer| line.contains(writer)) {
+            assert!(!kept.iter().any(|name| line.contains(name)), "a line writes into the kept output: {line}");
+        }
+    }
+    let users = |name: &str| code.iter().copied().filter(|line| line.contains(name)).collect::<Vec<&str>>();
+    let named = r#"$engineOut = "$TuningData\$($track.slug)\$($track.label)\subs-ocr-engine""#;
+    assert_eq!(users("subs-ocr-engine"), [named]);
+    assert_eq!(users("$engineOut"), [
+        named,
+        r#"$kept = "$engineOut\sub-$n.ocr.jsonl""#,
+    ]);
+    assert_eq!(users("$kept"), [
+        r#"$kept = "$engineOut\sub-$n.ocr.jsonl""#,
+        "if (-not (Test-Path -LiteralPath $kept -PathType Leaf)) {",
+        "$two = @(Get-RecordLines $kept)",
+    ]);
+    for needle in [r#"-replace ',"ms":\{[^{}]*\}\}$', '}'"#, "PeakPagedMemorySize64", "Start-Sleep -Milliseconds 500",
+        "Assert-Quiet", "Get-FileHash -LiteralPath $worker -Algorithm SHA256"] {
+        assert!(text.contains(needle), "worker-check.ps1 lacks: {needle}");
+    }
+    #[cfg(windows)]
+    {
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{errors}");
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
+/// The review of pull request #21 (X13): the five helpers the FFmpeg check and the worker check share are one copy, in
+/// check-common.ps1. The rules are textual, as above: its unindented code lines only open or close the five
+/// functions' definitions, each defined once; its only bare output lines are the functions' values, Get-Reason's text,
+/// Invoke-Recorded's `$LASTEXITCODE` and Get-TrialRows' `$rows`; and it calls nothing that prints, copies, moves or
+/// writes. Each of the two scripts dot-sources it exactly once, by its absolute path, on the code line right after
+/// `$ErrorActionPreference = 'Stop'` and so before its first call of any of the five, still creates the `$failures`
+/// list Add-Failure fills, and defines none of the five itself. Read on every system, parsed on Windows; never run.
+#[test]
+fn the_check_helpers_are_one_copy_both_checks_dot_source_and_print_and_write_nothing() {
+    let (path, text) = phase0_script("check-common.ps1");
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+    let functions = ["Add-Failure", "Stop-Part", "Get-Reason", "Invoke-Recorded", "Get-TrialRows"];
+    let mut defined = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty() && !line.starts_with([' ', '\t', '#'])) {
+        match line.strip_prefix("function ") {
+            Some(rest) => defined.push(rest.split(['(', ' ']).next().unwrap_or(rest)),
+            None => assert_eq!(line, "}", "check-common.ps1 runs more than its functions' definitions: {line}"),
+        }
+    }
+    assert_eq!(defined, functions, "check-common.ps1 defines the five helpers, each once");
+    let code = code_lines(&text);
+    let mut printed = Vec::new();
+    for (i, line) in code.iter().enumerate() {
+        let continues = i > 0 && ['+', ',', '(', '|', '`'].iter().any(|end| code[i - 1].ends_with(*end));
+        let quoted = (line.starts_with('"') || line.starts_with('\'')) && !continues;
+        let alone = line.len() > 1 && line.starts_with('$') && line[1..].chars().all(|c| c.is_ascii_alphanumeric());
+        if quoted || alone {
+            printed.push(*line);
+        }
+    }
+    assert_eq!(printed.len(), 3, "check-common.ps1's bare output lines are its three functions' values: {printed:?}");
+    assert!(printed[0].starts_with("\"an error of type "), "Get-Reason's text is not the first: {}", printed[0]);
+    assert_eq!(printed[1..], ["$LASTEXITCODE", "$rows"], "Invoke-Recorded's and Get-TrialRows' values");
+    for command in
+        ["Write-Host", "Write-Output", "Out-File", "Set-Content", "Copy-Item", "Move-Item", "New-Item", "Remove-Item"]
+    {
+        let lower = command.to_ascii_lowercase();
+        let calls = code.iter().any(|line| line.to_ascii_lowercase().contains(&lower));
+        assert!(!calls, "check-common.ps1 calls {command}");
+    }
+
+    let source = r". C:\lazymkv\src\scripts\phase0\check-common.ps1";
+    for name in ["ffmpeg-check.ps1", "worker-check.ps1"] {
+        let (_, script) = phase0_script(name);
+        let code = code_lines(&script);
+        let named: Vec<usize> =
+            code.iter().enumerate().filter(|(_, line)| line.contains("check-common.ps1")).map(|(i, _)| i).collect();
+        assert_eq!(named.len(), 1, "{name} names check-common.ps1 on {} code lines, not one", named.len());
+        let at = named[0];
+        assert_eq!(code[at], source, "{name} does not dot-source check-common.ps1 by its absolute path");
+        let preference = code
+            .iter()
+            .position(|line| *line == "$ErrorActionPreference = 'Stop'")
+            .unwrap_or_else(|| panic!("{name} sets no error preference"));
+        assert_eq!(at, preference + 1, "{name} dot-sources check-common.ps1 elsewhere than right after its preference");
+        assert!(
+            code.contains(&"$failures = New-Object System.Collections.ArrayList"),
+            "{name} does not create the list Add-Failure fills"
+        );
+        for function in functions {
+            let definition = format!("function {}", function.to_ascii_lowercase());
+            assert!(
+                !code.iter().any(|line| line.to_ascii_lowercase().contains(&definition)),
+                "{name} still defines {function}"
+            );
+            let first = code
+                .iter()
+                .position(|line| line.contains(function))
+                .unwrap_or_else(|| panic!("{name} never calls {function}"));
+            assert!(first > at, "{name} calls {function} before it dot-sources check-common.ps1");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{errors}");
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
+/// Ruling T6-R12 (pull request 6's Task 5): audio-levels.ps1's two optional roots are declared empty in its param
+/// block and, on the two lines right after the dot-source of env.ps1 (which sets $Recordings and $TuningData), each
+/// replaces its variable only when given; nothing else assigns either variable or reads either root, so without them
+/// the script behaves as before. Read on every system, parsed on Windows; never run.
+#[test]
+fn audio_levels_takes_its_two_roots_only_when_given() {
+    let (path, text) = phase0_script("audio-levels.ps1");
+    assert!(text.is_ascii(), "Windows PowerShell 5.1 reads a file without a byte order mark in the system code page");
+    assert!(text.contains("T6-R12"), "the header names the ruling");
+    let code = code_lines(&text);
+    let start = code.iter().position(|line| *line == "param(").expect("a param block");
+    let end = start + code[start..].iter().position(|line| *line == ")").expect("the param block ends");
+    for declared in ["[string]$RecordingsRoot = ''", "[string]$TuningRoot = ''"] {
+        assert!(code[start..end].iter().any(|line| line.trim_end_matches(',') == declared), "param lacks {declared}");
+    }
+    let source = code.iter().position(|line| *line == r". C:\lazymkv\src\scripts\phase0\env.ps1").expect("env.ps1");
+    assert!(source > end, "env.ps1 is dot-sourced after the param block");
+    let replaces =
+        ["if ($RecordingsRoot) { $Recordings = $RecordingsRoot }", "if ($TuningRoot) { $TuningData = $TuningRoot }"];
+    assert_eq!(code[source + 1..source + 3], replaces, "the two roots replace their variables right after env.ps1");
+    for line in &code {
+        if replaces.contains(line) {
+            continue;
+        }
+        for name in ["$Recordings =", "$TuningData =", "$RecordingsRoot", "$TuningRoot"] {
+            assert!(!line.contains(name) || line.starts_with("[string]$"), "audio-levels.ps1 also uses {name}: {line}");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let errors = parse_errors(&path);
+        assert!(errors.is_empty(), "{errors}");
+    }
+    #[cfg(not(windows))]
+    let _ = path;
 }

@@ -1,9 +1,11 @@
 //! The self-test (design parts 3.7, 9.4; Rulings S53, S79 to S81, RP-9): the MakeMKV check with the (version,
-//! licence code) it records across restarts, each tool's path, version and where it was found, the write, rename and
-//! delete probe of the three roots, the TMDb token's check, the two webhooks' connection checks (Ruling T4-R14), and
-//! what a `retry` re-checks for a waiting job. Every run is recorded capture-style under `<data>/selftest/` (design
-//! part 7.2). The owner thread runs none of this itself: it hands each self-test and re-check to a thread of its own
-//! (design part 4.4).
+//! licence code) it records across restarts, each tool's path, version and where it was found, with mkvmerge, ffprobe
+//! and ffmpeg judged against their minimum versions (S80 as amended by call 9 of pull request 6's notes, decision E1,
+//! Rulings T6-R4, T6-R5) and a tool whose version run did not complete failing its check (the review of pull request
+//! #21 (X3)), the write, rename and delete probe of the three roots, the TMDb token's check, the two webhooks'
+//! connection checks (Ruling T4-R14), and what a `retry` re-checks for a waiting job. Every run is recorded
+//! capture-style under `<data>/selftest/` (design part 7.2). The owner thread runs none of this itself: it hands each
+//! self-test and re-check to a thread of its own (design part 4.4).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -19,6 +21,7 @@ use lazymkv_core::job::{Event, State, Tool};
 use lazymkv_core::plan::Kind;
 use lazymkv_core::record::JobRecord;
 use lazymkv_core::settings::{version_triple, Settings};
+use lazymkv_core::toolver::{self, Standing};
 use lazymkv_platform::{rename_no_replace, write_atomic, Host, ProcessGuard, Reach, SecretStore, ShareConnector};
 use lazymkv_tools::makemkv::{Kill, EXIT_WAIT_PASSED, LISTING_PAST_LIMIT};
 use lazymkv_tools::{
@@ -178,6 +181,30 @@ pub(crate) fn below_minimum(version: &str, minimum: &str) -> bool {
     matches!((version_of(version), version_triple(minimum)), (Some(have), Some(need)) if have < need)
 }
 
+/// A found tool's `ok` and detail (S80 as amended by call 9, decision E1, Ruling T6-R5): `<tool> <version>` at or
+/// above `minimum` or with no minimum; `<tool> is version <version>, below the minimum <minimum>`, not ok; and, ok,
+/// `<tool> <version>; the version could not be judged against the minimum <minimum>` for a version
+/// `toolver::release_number` cannot read, `<tool> printed no version; it could not be judged against the minimum
+/// <minimum>` for no version, or `<tool> printed no version` for no version and no minimum. Def: T6-2. Use: T6-2.
+pub(crate) fn judged(name: &str, version: Option<&str>, minimum: Option<&str>) -> (bool, String) {
+    let Some(minimum) = minimum else {
+        return match version {
+            Some(version) => (true, format!("{name} {version}")),
+            None => (true, format!("{name} printed no version")),
+        };
+    };
+    let Some(version) = version else {
+        return (true, format!("{name} printed no version; it could not be judged against the minimum {minimum}"));
+    };
+    match toolver::standing(version, minimum) {
+        Standing::AtLeast => (true, format!("{name} {version}")),
+        Standing::Below => (false, format!("{name} is version {version}, below the minimum {minimum}")),
+        Standing::Unreadable => {
+            (true, format!("{name} {version}; the version could not be judged against the minimum {minimum}"))
+        }
+    }
+}
+
 /// The version a tool prints (design part 9.2): the word after "mkvmerge v", "ffprobe version " or "ffmpeg version "
 /// on stdout's first line, or for java the text between the first two `"` of stderr's first line; None otherwise.
 /// Def: T26. Use: T26.
@@ -202,17 +229,63 @@ pub(crate) fn version_in(tool: Tool, stdout: &str, stderr: &str) -> Option<Strin
     }
 }
 
+/// How a tool's version run ended (design part 9.2; the review of pull request #21 (X3)). Def: T26, the review of
+/// pull request #21 (X3). Use: T26.
+#[derive(Debug, PartialEq)]
+pub(crate) enum VersionRun {
+    /// The run completed, whatever its exit code, and `version_in` read this version from it, or none.
+    Completed(Option<String>),
+    /// The run could not be recorded or the program could not start: the error's text.
+    NotRun(String),
+    /// `limits.header` passed and the run was killed.
+    PastLimit,
+    /// The check's cancel token ended the run.
+    Cancelled,
+}
+
 /// Runs `<program> --version` (mkvmerge) or `-version` (ffprobe, ffmpeg, java) under `limits.header`, recorded at
-/// `out` (`<data>/selftest/<tool>-version.txt`, design part 7.2), and reads it with `version_in`. Def: T26. Use: T26.
-pub(crate) fn tool_version(ctx: &ToolCtx, tool: Tool, program: &Path, out: &Path) -> Option<String> {
+/// `out` (`<data>/selftest/<tool>-version.txt`, design part 7.2): a run that completed, whatever its exit code, is
+/// read with `version_in`; a run that could not be recorded or started, one the header limit killed and one the
+/// cancel token ended are each told apart, with no version (the review of pull request #21 (X3)). Def: T26.
+/// Use: T26.
+pub(crate) fn tool_version(ctx: &ToolCtx, tool: Tool, program: &Path, out: &Path) -> VersionRun {
     let flag = if tool == Tool::Mkvmerge { "--version" } else { "-version" };
-    let run = run_recorded(ctx, program, &[flag.to_string()], out, Some(ctx.limits.header), false, &mut |_| {
+    let ran = run_recorded(ctx, program, &[flag.to_string()], out, Some(ctx.limits.header), false, &mut |_| {
         LineAction::Continue
-    })
-    .ok()?;
+    });
+    let run = match ran {
+        Ok(run) => run,
+        Err(error) => return VersionRun::NotRun(error.to_string()),
+    };
+    if run.cancelled {
+        return VersionRun::Cancelled;
+    }
+    if run.timed_out {
+        return VersionRun::PastLimit;
+    }
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     let stderr = fs::read(with_suffix(out, ".stderr")).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    version_in(tool, &stdout, &stderr.unwrap_or_default())
+    VersionRun::Completed(version_in(tool, &stdout, &stderr.unwrap_or_default()))
+}
+
+/// A found tool's `ok`, detail and version from its version run (S80 as amended by call 9, Ruling T6-R5; the review
+/// of pull request #21 (X3)): a completed run is `judged` against `minimum` and keeps the version it printed; a run
+/// that did not complete is not ok and has no version, with `<tool> could not run: <error>` when it could not be
+/// recorded or started, `<tool> did not finish its version run within the header limit and was killed` when
+/// `limits.header` killed it, and `the version run was cancelled` when the check's cancel token ended it, as the
+/// MakeMKV check words its listing's. Def: T26, the review of pull request #21 (X3). Use: T26.
+pub(crate) fn version_check(name: &str, run: VersionRun, minimum: Option<&str>) -> (bool, String, Option<String>) {
+    match run {
+        VersionRun::Completed(version) => {
+            let (ok, detail) = judged(name, version.as_deref(), minimum);
+            (ok, detail, version)
+        }
+        VersionRun::NotRun(error) => (false, format!("{name} could not run: {error}"), None),
+        VersionRun::PastLimit => {
+            (false, format!("{name} did not finish its version run within the header limit and was killed"), None)
+        }
+        VersionRun::Cancelled => (false, "the version run was cancelled".to_string(), None),
+    }
 }
 
 /// The write, rename and delete probe of spec 7 in `dir`: `lazymkv-selftest.probe` written, renamed with
@@ -478,9 +551,13 @@ impl CheckEnv {
         found
     }
 
-    /// One of the other four tools' checks (S80): its path, the version `tool_version` reads, recorded at
-    /// `<data>/selftest/<tool>-version.txt`, and where it was found; ok when found. The java check's detail also says
-    /// Java use at the last scan, or that no scan ran yet. Once the check's cancel token is raised, no tool runs.
+    /// One of the other four tools' checks (S80 as amended by call 9 of pull request 6's notes): its path, the version
+    /// `tool_version` reads, recorded at `<data>/selftest/<tool>-version.txt`, and where it was found; ok, the detail
+    /// and the version come from `version_check`: a version run that completed is `judged` against `toolver::minimum`
+    /// (Ruling T6-R5), so the tool is ok unless its version is below its minimum, and a run that could not be recorded
+    /// or started, that the header limit killed or that the check's cancel token ended is not ok, with no version (the
+    /// review of pull request #21 (X3)). The java check's detail also says Java use at the last scan, or that no scan
+    /// ran yet. Once the check's cancel token is raised, no tool runs.
     fn tool_check(&self, settings: &Settings, tool: Tool) -> SelfTestCheck {
         let name = tool.as_str();
         if self.cancel.is_cancelled() {
@@ -489,19 +566,16 @@ impl CheckEnv {
         let mut found = match self.locate(tool, settings) {
             None => check(name, false, format!("{name} was not found")),
             Some(location) => {
-                let out = self.record_path(&format!("{name}-version.txt"));
-                let version = out.ok().and_then(|out| {
-                    self.with_ctx(settings, |ctx| tool_version(ctx, tool, &location.path, &out))
-                });
-                let detail = match &version {
-                    Some(version) => format!("{name} {version}"),
-                    None => format!("{name} printed no version"),
+                let run = match self.record_path(&format!("{name}-version.txt")) {
+                    Ok(out) => self.with_ctx(settings, |ctx| tool_version(ctx, tool, &location.path, &out)),
+                    Err(error) => VersionRun::NotRun(error.to_string()),
                 };
+                let (ok, detail, version) = version_check(name, run, toolver::minimum(tool));
                 SelfTestCheck {
                     path: Some(location.path.display().to_string()),
                     version,
                     found: found_text(location.found),
-                    ..check(name, true, detail)
+                    ..check(name, ok, detail)
                 }
             }
         };
@@ -850,6 +924,70 @@ mod tests {
         let check = token_check(&refused, Some("test-token"));
         assert!(!check.ok && check.detail.contains("401"));
         assert!(!token_check(&RecordedTransport::new(), None).ok);
+    }
+
+    #[test]
+    fn a_found_tool_is_judged_against_its_minimum() {
+        let judged = |v: Option<&str>, m: Option<&str>| judged("ffmpeg", v, m);
+        assert_eq!(judged(Some("9.0.2"), Some("7.0")), (true, "ffmpeg 9.0.2".to_string()));
+        assert_eq!(judged(Some("6.1.1-3ubuntu5"), Some("7.0")),
+                   (false, "ffmpeg is version 6.1.1-3ubuntu5, below the minimum 7.0".to_string()));
+        assert_eq!(judged(Some("N-121000-g5d8a9d5e3b"), Some("7.0")),
+                   (true, "ffmpeg N-121000-g5d8a9d5e3b; the version could not be judged against the minimum 7.0"
+                       .to_string()));
+        assert_eq!(judged(None, Some("7.0")),
+                   (true, "ffmpeg printed no version; it could not be judged against the minimum 7.0".to_string()));
+        assert_eq!(judged(Some("21.0.2"), None), (true, "ffmpeg 21.0.2".to_string()));
+        assert_eq!(judged(None, None), (true, "ffmpeg printed no version".to_string()));
+    }
+
+    /// The review of pull request #21 (X3): a version run that completed is judged as before, whatever its exit code,
+    /// and keeps its version; one that could not run, that the header limit killed or that was cancelled fails the
+    /// check with no version.
+    #[test]
+    fn a_version_run_that_did_not_complete_fails_the_check() {
+        let text =
+            |ok: bool, detail: &str, version: Option<&str>| (ok, detail.to_string(), version.map(str::to_string));
+        let minimum = Some("7.0");
+        assert_eq!(version_check("ffmpeg", VersionRun::Completed(Some("7.1".to_string())), minimum),
+                   text(true, "ffmpeg 7.1", Some("7.1")));
+        assert_eq!(version_check("ffmpeg", VersionRun::Completed(Some("6.1.1".to_string())), minimum),
+                   text(false, "ffmpeg is version 6.1.1, below the minimum 7.0", Some("6.1.1")));
+        assert_eq!(version_check("ffmpeg", VersionRun::Completed(None), minimum),
+                   text(true, "ffmpeg printed no version; it could not be judged against the minimum 7.0", None));
+        assert_eq!(version_check("java", VersionRun::Completed(None), None),
+                   text(true, "java printed no version", None));
+        assert_eq!(version_check("ffmpeg", VersionRun::NotRun("access is denied".to_string()), minimum),
+                   text(false, "ffmpeg could not run: access is denied", None));
+        assert_eq!(version_check("mkvmerge", VersionRun::PastLimit, Some("65.0")),
+                   text(false, "mkvmerge did not finish its version run within the header limit and was killed", None));
+        assert_eq!(version_check("java", VersionRun::Cancelled, None),
+                   text(false, "the version run was cancelled", None));
+    }
+
+    /// The review of pull request #21 (X3): a program that cannot start gives `VersionRun::NotRun`, not a completed run
+    /// that printed no version.
+    #[test]
+    fn a_program_that_cannot_start_is_a_version_run_that_did_not_run() {
+        use std::time::Duration;
+        let s = Scratch::new("version-not-run");
+        let host = lazymkv_platform::fakes::FakeHost::new("2026-10-23", 1_792_800_000);
+        let guard = lazymkv_platform::native_guard();
+        let second = Duration::from_secs(1);
+        let limits = Limits { header: second * 10, scan: second, exit_wait: second, after_kill: Duration::ZERO };
+        let on_output = |_: OutputStream, _: &str| {};
+        let on_progress = |_: f64| {};
+        let ctx = ToolCtx {
+            guard: guard.as_ref(),
+            host: &host,
+            limits: &limits,
+            cancel: CancelToken::default(),
+            on_output: &on_output,
+            on_progress: &on_progress,
+        };
+        let out = s.0.join("selftest").join("ffmpeg-version.txt");
+        let run = tool_version(&ctx, Tool::Ffmpeg, &s.0.join("no-such-tool"), &out);
+        assert!(matches!(run, VersionRun::NotRun(_)), "{run:?}");
     }
 
     #[test]

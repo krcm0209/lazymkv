@@ -191,7 +191,7 @@ fn ctl_plan_over_a_folder_with_a_stale_copy_and_no_token_exits_3() {
     assert_eq!(local, dev(&ctx, &["plan", "recs/disc-a"]));
 }
 
-use super::licenses::{licenses_text, CRATE_NOTICES, MIT_TEXT, TMDB_ADDRESS, TMDB_NOTICE};
+use super::licenses::{licenses_text, models_text, CRATE_NOTICES, MIT_TEXT, TMDB_ADDRESS, TMDB_NOTICE};
 use super::models::export_models;
 use lazymkv_ocr_models::{
     ATTRIBUTION, DETECTION, DETECTION_LEN, DETECTION_NAME, DETECTION_SHA256, LICENCE_TEXT, RECOGNITION,
@@ -243,6 +243,68 @@ fn the_bundled_tools_licences_print_only_with_a_licenses_folder_beside_bin() {
         licenses_text(Some(&s.0.join("release").join("bin").join("lazymkvctl.exe"))).unwrap(),
         format!("{four}\nBundled tool licence: GPL-2.0.txt\n\nmade-up GPL licence\n")
     );
+}
+
+/// T6-R9 (call 8): a release tree's `licenses\` holds lazymkv's MIT text, the models' part and the crate notices as
+/// files beside the bundled tools' licences; each of those three equals a text licenses already printed from its own
+/// bytes, so only the bundled tool's licence is printed after the four parts.
+#[test]
+fn a_release_tree_prints_each_text_once() {
+    let s = Scratch::new("ctl-licenses-release-tree");
+    s.write("release/licenses/lazymkv-LICENSE.txt", MIT_TEXT);
+    s.write("release/licenses/crate-notices.txt", CRATE_NOTICES);
+    // The models' part's body byte for byte, as release step 4 writes it with licenses --models (the review of
+    // pull request #21 (X9)).
+    s.write("release/licenses/ocrs-models.txt", ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
+    s.write("release/licenses/zlib-LICENSE.txt", "made-up zlib licence\n");
+    let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
+    let mut parts = four_parts();
+    parts.push("Bundled tool licence: zlib-LICENSE.txt\n\nmade-up zlib licence\n".to_string());
+    assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
+}
+
+/// T6-R9: only a file whose text equals a printed one is left out; one letter changed is a different text, printed.
+#[test]
+fn a_licence_file_that_differs_from_the_embedded_text_by_one_byte_is_still_printed() {
+    let s = Scratch::new("ctl-licenses-one-byte");
+    let changed = MIT_TEXT.replacen("Permission", "Permissiom", 1);
+    assert_ne!(changed, MIT_TEXT, "the MIT text holds the word Permission");
+    assert_eq!(changed.len(), MIT_TEXT.len());
+    s.write("release/licenses/lazymkv-LICENSE.txt", &changed);
+    let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
+    let mut parts = four_parts();
+    parts.push(format!("Bundled tool licence: lazymkv-LICENSE.txt\n\n{}", ended(&changed)));
+    assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
+}
+
+/// The review of pull request #21 (X9): `licenses --models` prints the body of the models' part, attribution then
+/// text, and nothing else, from the carried texts alone (no `licenses\` folder is read).
+#[test]
+fn licenses_models_prints_the_models_part_body_and_nothing_else() {
+    let s = Scratch::new("ctl-licenses-models");
+    let ctx = Ctx::for_test(&s.0);
+    let (code, out, err) = ctl(&ctx, &["licenses", "--models"]);
+    assert_eq!((code, err), (0, vec![]));
+    assert_eq!(String::from_utf8(out).unwrap(), ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
+    assert_eq!(models_text(), ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
+    let part = format!("The ocrs models: CC-BY-SA-4.0\n\n{}", models_text());
+    assert_eq!(four_parts()[1], part);
+}
+
+/// The review of pull request #21 (X9): a release tree whose `licenses\ocrs-models.txt` holds exactly what
+/// `licenses --models` prints has that file left out of the bundled tools' licences.
+#[test]
+fn a_models_file_written_from_licenses_models_is_not_printed_again() {
+    let s = Scratch::new("ctl-licenses-models-file");
+    let ctx = Ctx::for_test(&s.0);
+    let (code, out, _) = ctl(&ctx, &["licenses", "--models"]);
+    assert_eq!(code, 0);
+    s.write("release/licenses/ocrs-models.txt", String::from_utf8(out).unwrap());
+    s.write("release/licenses/zlib-LICENSE.txt", "made-up zlib licence\n");
+    let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
+    let mut parts = four_parts();
+    parts.push("Bundled tool licence: zlib-LICENSE.txt\n\nmade-up zlib licence\n".to_string());
+    assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
 }
 
 #[test]
@@ -309,6 +371,8 @@ fn licenses_and_export_models_take_exactly_their_arguments() {
     let ctx = Ctx::for_test(&s.0);
     for (argv, message) in [
         (&["licenses", "extra"][..], "lazymkvctl licenses: error: unrecognized arguments: extra"),
+        (&["licenses", "--models", "extra"][..], "lazymkvctl licenses: error: unrecognized arguments: --models extra"),
+        (&["licenses", "--model"][..], "lazymkvctl licenses: error: unrecognized arguments: --model"),
         (&["export-models"][..], "lazymkvctl export-models: error: the following arguments are required: DIR"),
         (&["export-models", "a", "b", "c"][..], "lazymkvctl export-models: error: unrecognized arguments: b c"),
         (&["export-models", "--help"][..], "lazymkvctl export-models: error: unrecognized arguments: --help"),
@@ -330,7 +394,7 @@ fn help_lists_licenses_and_export_models_among_the_commands_run_here() {
     let help = String::from_utf8(out).unwrap();
     assert_eq!(code, 0);
     assert!(help.contains("\ncommands run here (design parts 9.5, 9.6):\n  plan "), "{help}");
-    assert!(help.contains("\n  licenses\n  export-models DIR\n\ncommands sent to the engine (design part 9.6):\n"), "{help}");
+    assert!(help.contains("\n  licenses [--models]\n  export-models DIR\n\ncommands sent to the engine (design part 9.6):\n"), "{help}");
 }
 
 #[test]
@@ -364,4 +428,61 @@ fn the_ci_notices_job_fails_when_the_committed_notices_differ() {
     assert!(job[compare..].contains("exit 1"));
     let lower = ci.to_lowercase();
     assert!(!lower.contains("report only") && !lower.contains("is not committed yet"));
+}
+
+use lazymkv_ocr_models::{DETECTION_URL, RECOGNITION_URL};
+
+/// Notes call 1: packaging/tools.json names the same two model files, by URL and SHA-256, as the embedded pins.
+#[test]
+fn the_manifests_model_pins_are_the_embedded_models_pins() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../packaging/tools.json")).unwrap();
+    for (name, url, sha256) in [(DETECTION_NAME, DETECTION_URL, DETECTION_SHA256),
+                                (RECOGNITION_NAME, RECOGNITION_URL, RECOGNITION_SHA256)] {
+        assert_eq!(manifest["models"][name], json!({ "url": url, "sha256": sha256 }), "{name}");
+    }
+}
+
+/// Walks `value`, counting in `seen` every key that is `sha256` or ends `_sha256`, and fails on one whose value is
+/// not 64 lower-case hex digits, or null outside `ffmpeg.built`.
+fn check_sha256_keys(value: &serde_json::Value, path: &mut Vec<String>, seen: &mut usize) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                path.push(key.clone());
+                if key == "sha256" || key.ends_with("_sha256") {
+                    *seen += 1;
+                    let at = path.join(".");
+                    let under_built = path.len() > 2 && path[0] == "ffmpeg" && path[1] == "built";
+                    match inner {
+                        serde_json::Value::String(text) => assert!(
+                            text.len() == 64 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                            "{at} is {text:?}, not 64 lower-case hex digits"),
+                        serde_json::Value::Null => assert!(under_built, "{at} is null outside ffmpeg.built"),
+                        other => panic!("{at} is {other}, neither a string nor null"),
+                    }
+                }
+                check_sha256_keys(inner, path, seen);
+                path.pop();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                path.push(index.to_string());
+                check_sha256_keys(item, path, seen);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Notes calls 1 and 4: every SHA-256 the manifest holds is well formed; only the built programs' values and their
+/// `verified` record may be null, before the first build is recorded.
+#[test]
+fn every_sha256_of_the_manifest_is_64_lower_case_hex_digits_or_null() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../packaging/tools.json")).unwrap();
+    let mut seen = 0;
+    check_sha256_keys(&manifest, &mut Vec::new(), &mut seen);
+    // The FFmpeg and zlib sources, the two built programs, the two MKVToolNix archives and the two models.
+    assert!(seen >= 8, "only {seen} SHA-256 keys were found in packaging/tools.json");
 }
