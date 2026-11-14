@@ -352,7 +352,7 @@ Every cargo command runs on the mini PC through `scripts/box.sh`, one at a time 
 | `lazymkv-capture` (bin `lazymkv-capture`), changed | `lazymkv-core`, `serde`, `serde_json`, and now `lazymkv-tools` | Its commands as before; `capture disc` now calls `tools::snapshot`, and `disc.rs` is gone, its items moved to `core::snapshot` and `tools::snapshot` (R-B2) |
 | `lazymkv-dev` (bin `lazymkv-dev`), changed | `lazymkv-core`, `lazymkv-clients`, `lazymkv-platform` (since review round 1 of pull request 4, R9), `serde`, `serde_json`; optional `lazymkv-ocr` and `lazymkv-tools` behind the feature `ocr-trial`, off by default (A2) | `decide` split into `read_decide_inputs`, which reads a recording folder into a `DecideInputs` value, and the pure `decide_doc` (K5), with decide's three replay flags (S27); `Args::rest`, which `lazymkvctl` uses beside dev's existing `dispatch` (S85); since pull request 3, `forms::read_forms`, moved from `lazymkv-ctl` so that the engine's relay reads words as `lazymkvctl` does (W24); since pull request 4, the stale-copy gate `stale` and `census` (design part 4.1's `dev` row amended to `core`, `ocr` (R-A5) and `clients`, T4-R23; amended at review round 1 of pull request 4 (R9), below: and `platform`, whose `write_atomic` writes the refetched copies); since pull request 5, `ocr-trial` (feature `ocr-trial`), `retune` over several `--evidence` folders, and the reader of a bare `streamhash.txt` |
 | `lazymkv-ocr-models` (new in pull request 5) | `sha2`; build: `ureq`, `sha2` | The two OCR models, read from `LAZYMKV_OCRS_MODELS` or downloaded by the build script, checked against their SHA-256 pins and embedded, with the CC-BY-SA-4.0 text and the attribution; no rten (design parts 10.11 and 11.4; call 23, T5-R1, T5-R36) |
-| `lazymkv-ocr` (bin `lazymkv-ocr`, new in pull request 5) | `lazymkv-core`, `lazymkv-ocr-models`, `ocrs` (`=0.13.1`), `rten` (`=0.26.0`), `png`, `serde_json`, `rten-imageproc` | The OCR worker `lazymkv-ocr.exe`, which reads one subtitle stream of an evidence file per run and writes its records, `run.json` and crops; the only package that links rten and ocrs, built and tested on ubuntu only on CI and on the mini PC for Windows (design part 10.7; K2, call 23, T5-R1) |
+| `lazymkv-ocr` (bin `lazymkv-ocr`, new in pull request 5) | `lazymkv-core`, `lazymkv-ocr-models`, `ocrs` (`=0.14.0`), `rten` (`=0.28.0`), `png`, `serde_json`, `rten-imageproc` | The OCR worker `lazymkv-ocr.exe`, which reads one subtitle stream of an evidence file per run and writes its records, `run.json` and crops; the only package that links rten and ocrs, built and tested on ubuntu only on CI and on the mini PC for Windows (design part 10.7; K2, call 23, T5-R1) |
 
 The disc snapshot's pure part is `core::snapshot`, and its file input and output is `tools::snapshot`; `capture disc`
 prints and writes the same bytes as before, which `crates/capture/tests/disc_snapshot.rs` pins. Amended at review
@@ -1907,6 +1907,23 @@ The final whole-branch review ran over `324ae50..e337835`, the local signed comm
   - whether Windows PowerShell 5.1's `Expand-Archive` refuses a zip entry that resolves outside its folder; the hash is the guard, since a zip whose hash is the workflow's is trusted to run elevated anyway;
   - how often A2-5's case occurs in the owner's collection; running `lazymkv-dev plan` over the captured scans could measure it, and the owner accepted the limit on 2026-11-24 without that count;
   - whether the lookup-pending rule holds on a real job: no real job of the run was planned with a lookup pending, and the stand-in test of CR-4 showed exit 0, the pending line and no difference.
+
+### The ocrs 0.14 upgrade: the owner's decisions
+
+Dependabot's single bumps of `rten` (#20) and `rten-imageproc` (#17) to 0.27.0 could not build beside ocrs 0.13.1,
+which needs rten ^0.26, and were closed on 2026-11-14; `.github/dependabot.yml` now groups `ocrs`, `rten` and `rten-*`
+(#22). The upgrade is ocrs 0.14.0 with rten 0.28.0, both published on 2026-11-08; rten 0.27.0 is skipped.
+
+- U1 (the lock delta, A1's plan-time yes): ocrs 0.13.1 to 0.14.0; `rten`, `rten-base`, `rten-gemm`, `rten-imageproc`, `rten-onnx`, `rten-parallel`, `rten-shape-inference`, `rten-simd`, `rten-tensor` and `rten-vecmath` 0.26.0 to 0.28.0; `rten-sequence` 0.28.0 added (ocrs's CTC decoder, moved out of rten); `anyhow` removed (only ocrs used it); every one MIT OR Apache-2.0. The second yes, to the written `Cargo.lock`, comes before anything is fetched on the mini PC, and the commit that moves the lock also takes the crate notices job's artifact as `crates/ctl/crate-notices.txt` (`rten-sequence` joins the MIT list, `anyhow` leaves it; call 26), 2026-11-14
+- U2 (the 14-day age rule): kept; both releases are six days old today, so `Cargo.lock` moves on or after 2026-11-22, and until then the branch holds only the manifest, code and document edits, unpushed, 2026-11-14
+- U3 (the trial): the upgrade reopens the trial of design part 10.9 (T5-R54), arms R and R' on 0.14.0 judged against phase 0's arm F as before, with the 600 s bar and `worker-check.ps1` re-made on the new arm R; the items of "The next reopened trial", below, stay for a later reopening, so the parity result is about the engine alone, 2026-11-14
+
+What the upgrade changes, read from the two releases' sources (not yet run): no call lazymkv makes changes signature
+except that ocrs's engine methods return `ocrs::OcrError` instead of `anyhow::Error`, whose plain text leaves out its
+cause, so the worker formats them with `{e:#}`; the `onnx` feature, the two pinned models and their URLs, the
+detector's black padding (detection.rs lines 155 to 160), `expand_dist` (3), `find_text_lines`, the preprocessing and
+rten's thread pool (`RTEN_NUM_THREADS`, K2) are unchanged; the f32 paths of the models' operators have no numeric
+change, so the readings are expected to be the same, which the trial decides.
 
 ## Rulings on the open points
 

@@ -15,9 +15,9 @@ use ocrs::{ImageSource, OcrEngine, OcrEngineParams, OcrInput, TextLine};
 use rten::Model;
 use rten_imageproc::{bounding_rect, RectF, RotatedRect};
 
-/// The ocrs version this worker is built with, the workspace's `=0.13.1` pin (design part 10.7, [ARCH-13]); the two
+/// The ocrs version this worker is built with, the workspace's `=0.14.0` pin (design part 10.7, [ARCH-13]); the two
 /// change together, and `engine` in every record names it (design part 10.12). Def: T5-8. Use: T5-8.
-pub const OCRS_VERSION: &str = "0.13.1";
+pub const OCRS_VERSION: &str = "0.14.0";
 
 /// ocrs's engine over the two embedded models, loaded once per worker process (design part 10.7, K2). Def: T5-8.
 /// Use: T5-8, T5-10.
@@ -86,7 +86,7 @@ impl Ocr {
             recognition_model: Some(recognition),
             ..Default::default()
         })
-        .map_err(|e| failed(e.to_string()))?;
+        .map_err(|e| failed(format!("{e:#}")))?;
         Ok(Ocr { engine })
     }
 
@@ -95,7 +95,7 @@ impl Ocr {
     fn input(&self, image: &Grey) -> Result<OcrInput, String> {
         let rgb: Vec<u8> = image.pixels.iter().flat_map(|&p| [p, p, p]).collect();
         let source = ImageSource::from_bytes(&rgb, (image.width, image.height)).map_err(|e| e.to_string())?;
-        self.engine.prepare_input(source).map_err(|e| e.to_string())
+        self.engine.prepare_input(source).map_err(|e| format!("{e:#}"))
     }
 
     /// Reads the line boxes of one crop with ocrs's `recognize_text`, each box given as one rectangle, in the boxes'
@@ -106,7 +106,7 @@ impl Ocr {
         }
         let input = self.input(image)?;
         let lines: Vec<Vec<RotatedRect>> = boxes.iter().map(line_rect).collect();
-        let read = self.engine.recognize_text(&input, &lines).map_err(|e| e.to_string())?;
+        let read = self.engine.recognize_text(&input, &lines).map_err(|e| format!("{e:#}"))?;
         Ok(kept_lines(read))
     }
 
@@ -115,11 +115,11 @@ impl Ocr {
     pub fn detect(&self, image: &Grey) -> Result<Detected, String> {
         let start = Instant::now();
         let input = self.input(image)?;
-        let words = self.engine.detect_words(&input).map_err(|e| e.to_string())?;
+        let words = self.engine.detect_words(&input).map_err(|e| format!("{e:#}"))?;
         let found = self.engine.find_text_lines(&input, &words);
         let detect_ms = ms_since(start);
         let start = Instant::now();
-        let read = self.engine.recognize_text(&input, &found).map_err(|e| e.to_string())?;
+        let read = self.engine.recognize_text(&input, &found).map_err(|e| format!("{e:#}"))?;
         let recognize_ms = ms_since(start);
         // find_text_lines gives no line without a word, so every found line has a box.
         let boxes = found.iter().filter_map(|line| word_union(line, image)).collect();
@@ -181,9 +181,9 @@ mod tests {
     }
 
     #[test]
-    fn engine_id_names_ocrs_0_13_1_and_both_pins() {
+    fn engine_id_names_ocrs_0_14_0_and_both_pins() {
         let id = engine_id();
-        assert_eq!(id.ocrs, "0.13.1");
+        assert_eq!(id.ocrs, "0.14.0");
         assert_eq!(id.detection_sha256, lazymkv_ocr_models::DETECTION_SHA256);
         assert_eq!(id.recognition_sha256, lazymkv_ocr_models::RECOGNITION_SHA256);
         for pin in [&id.detection_sha256, &id.recognition_sha256] {
@@ -234,8 +234,9 @@ mod tests {
     #[test]
     fn the_embedded_models_load_and_read_a_white_image() {
         let ocr = Ocr::load().unwrap();
-        // Not 64 x 32: ocrs 0.13.1 pads an image smaller than the detector's input with black (detection.rs lines
-        // 155 to 160), and a 64 x 32 white block on black is itself detected as a word; 332 x 72 is read as empty.
+        // Not 64 x 32: ocrs pads an image smaller than the detector's input with black (detection.rs lines 155 to
+        // 160, the same in 0.13.1 and 0.14.0), and a 64 x 32 white block on black is itself detected as a word;
+        // 332 x 72 is read as empty.
         let white = Grey { width: 332, height: 72, pixels: vec![255; 332 * 72] };
         let read = ocr.recognize(&white, &[LineBox { x: 0, y: 0, width: 332, height: 72 }]).unwrap();
         assert!(read.len() <= 1, "one box gives at most one line");

@@ -83,8 +83,8 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_pins_ocrs_0_13_1_and_holds_one_rten_at_0_26_0() {
-        for (wanted, pin) in [("ocrs", "0.13.1"), ("rten", "0.26.0")] {
+    fn the_lock_pins_ocrs_0_14_0_and_holds_one_rten_at_0_28_0() {
+        for (wanted, pin) in [("ocrs", "0.14.0"), ("rten", "0.28.0")] {
             let versions = locked_versions(wanted);
             assert!(!versions.is_empty(), "Cargo.lock lacks {wanted}");
             assert_eq!(versions, [pin], "Cargo.lock holds {wanted} {versions:?}, not {pin} alone (notes call 1)");

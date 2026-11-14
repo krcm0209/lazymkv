@@ -141,7 +141,7 @@ Newline-delimited JSON over the pipe. Every message is `{ "v": 1, "type": ..., "
 
 ### 4.6 Version pins
 
-`gpui-kit =0.7.0`, `gpui-pre =0.3.7`, `gpui-tray =0.1.4`, with `Cargo.lock` committed. GPUI Kit pins weekly snapshots of Zed's GPUI and ships breaking releases often, so upgrades are deliberate and never automatic. Beyond these, `ocrs =0.13.1`, `rten =0.26.0` and `windows-sys` are pinned exactly; every other crate takes a caret requirement, and CI builds and tests with `--locked` (ARCH-13). Bundled tools, their sources and the ocrs models are pinned by URL and SHA-256 in a manifest in the repository; the shipped `ffmpeg.exe` and `ffprobe.exe` are pinned by SHA-256 after the reference run on the target machine.
+`gpui-kit =0.7.0`, `gpui-pre =0.3.7`, `gpui-tray =0.1.4`, with `Cargo.lock` committed. GPUI Kit pins weekly snapshots of Zed's GPUI and ships breaking releases often, so upgrades are deliberate and never automatic. Beyond these, `ocrs =0.14.0`, `rten =0.28.0` and `windows-sys` are pinned exactly; every other crate takes a caret requirement, and CI builds and tests with `--locked` (ARCH-13). Bundled tools, their sources and the ocrs models are pinned by URL and SHA-256 in a manifest in the repository; the shipped `ffmpeg.exe` and `ffprobe.exe` are pinned by SHA-256 after the reference run on the target machine.
 
 ## 5. Identifiers and paths
 
