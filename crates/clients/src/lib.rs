@@ -102,7 +102,7 @@ mod tests {
     fn the_lock_holds_one_ureq_and_one_miniz_oxide_on_the_0_8_line() {
         assert_eq!(
             locked_versions("ureq"),
-            ["3.5.0"],
+            ["3.5.1"],
             "Cargo.lock must hold the one ureq that lazymkv-clients and lazymkv-ocr-models' build script share (T5-R36)"
         );
         let on_0_8: Vec<String> =

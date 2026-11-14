@@ -7,6 +7,19 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # ocrs pins one rten minor, so rten and its rten-* crates only move with ocrs; one PR for the family instead of
+      # single bumps that cannot build (design parts 4.5 and 4.7; notes call 1).
+      ocr-engine:
+        patterns:
+          - "ocrs"
+          - "rten"
+          - "rten-*"
+    ignore:
+      # lazymkv-core's inflater shares the one miniz_oxide 0.8 that png pulls in; a newer line only arrives with png
+      # (design parts 4.7 and 10.3).
+      - dependency-name: "miniz_oxide"
+        versions: [">= 0.9"]
 
   # The toolchain channel pinned in rust-toolchain.toml.
   - package-ecosystem: "rust-toolchain"
