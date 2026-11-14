@@ -22,7 +22,7 @@ windows-sys = "=0.61.2"
 # The blocking HTTP (Hypertext Transfer Protocol) client of the lookups and the notifier: rustls on the ring provider
 # with webpki-roots compiled in, default features off except TLS (Transport Layer Security); used by lazymkv-clients
 # and by lazymkv-ocr-models' build script (design parts 4.7, 8.1 and 10.11; P33, A1; T5-R36).
-ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 # The OCR engine and the runtime of its two models, used by lazymkv-ocr only and pinned exactly: ocrs 0.13.1 needs
 # rten 0.26, and a second rten minor in the tree would be an incompatible copy (design parts 4.5, 4.7 and 10.7; notes
 # call 1, A1, A2).
