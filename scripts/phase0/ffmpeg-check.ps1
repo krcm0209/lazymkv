@@ -60,6 +60,9 @@ param(
     [string]$Work = 'C:\lazymkv\tmp\pr6\check'
 )
 $ErrorActionPreference = 'Stop'
+# Add-Failure, Stop-Part, Get-Reason, Invoke-Recorded and Get-TrialRows, one copy shared with worker-check.ps1 (the
+# review of pull request #21 (X13)).
+. C:\lazymkv\src\scripts\phase0\check-common.ps1
 
 $DEV = 'C:\lazymkv\target\release\lazymkv-dev.exe'
 $LevelsScript = 'C:\lazymkv\src\scripts\phase0\audio-levels.ps1'
@@ -70,31 +73,8 @@ $MaxCopyBytes = 4GB
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 
 $failures = New-Object System.Collections.ArrayList
-function Add-Failure([string]$Reason) { [void]$failures.Add($Reason) }
-
-# A reason this script wrote itself; it never names a film, a track or a path.
-function Stop-Part([string]$Reason) { throw "check: $Reason" }
-
-# The reason to print for an error: this script's own text, or else the error's type and line only, since a system
-# error's message may name a path.
-function Get-Reason($Record) {
-    $message = [string]$Record.Exception.Message
-    if ($message.StartsWith('check: ')) { return $message.Substring(7) }
-    $where = [string]$Record.InvocationInfo.ScriptName
-    if ($where) { $where = ' of ' + [IO.Path]::GetFileName($where) }
-    "an error of type $($Record.Exception.GetType().Name) at line $($Record.InvocationInfo.ScriptLineNumber)$where"
-}
 
 function Get-Same([bool]$Same) { if ($Same) { 'equal' } else { 'different' } }
-
-# A program's standard output captured as bytes into $Out by lazymkv-capture (its standard error goes to
-# $Out.stderr); nothing reaches the log. Returns the program's exit code. A native standard-error line never becomes
-# an error record here: the preference is Continue inside this function only.
-function Invoke-Recorded([string]$Out, [string]$Program, [string[]]$Arguments) {
-    $ErrorActionPreference = 'Continue'
-    & $CAP record --out $Out -- $Program @Arguments 2>&1 | Out-Null
-    $LASTEXITCODE
-}
 
 # Two files with the same bytes; false when either is missing.
 function Test-SameBytes([string]$A, [string]$B) {
@@ -235,25 +215,6 @@ function Set-NewLevelFiles([string]$From, [string]$Old, [string]$To) {
 function Restore-Baseline([bool]$Had, [string]$Kept, [string]$Baseline) {
     if ($Had) { Copy-Item -LiteralPath $Kept -Destination $Baseline -Force -ErrorAction Stop }
     elseif (Test-Path -LiteralPath $Baseline) { Remove-Item -LiteralPath $Baseline -Force -ErrorAction Stop }
-}
-
-# Copied from engine-ocr-trial.ps1 (each script runs alone): the six rows of trial-tracks.txt; a line of another form
-# stops the run, naming its number only.
-function Get-TrialRows {
-    $tracks = "$P0\trial-tracks.txt"
-    if (-not (Test-Path -LiteralPath $tracks)) { Stop-Part 'trial-tracks.txt is missing' }
-    $lines = @(Get-Content -LiteralPath $tracks -Encoding UTF8 -ErrorAction Stop | ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -ne '' })
-    if ($lines.Count -ne 6) { Stop-Part "trial-tracks.txt holds $($lines.Count) rows, not 6" }
-    $rows = @()
-    for ($k = 0; $k -lt 6; $k++) {
-        $m = [regex]::Match($lines[$k], '^([a-z0-9][a-z0-9-]*)/([a-z0-9][a-z0-9-]*)/s(\d+)$')
-        if (-not $m.Success) { Stop-Part "line $($k + 1) of trial-tracks.txt is not of the form name/name/s<n>" }
-        $rows += [pscustomobject]@{
-            row = $k + 1; slug = $m.Groups[1].Value; label = $m.Groups[2].Value; stream = [int]$m.Groups[3].Value
-        }
-    }
-    $rows
 }
 
 # A row's evidence.mks, found as engine-ocr-trial.ps1's inventory step finds it (lazymkv-dev ocr-trial inventory):

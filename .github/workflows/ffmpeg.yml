@@ -16,17 +16,22 @@ name: FFmpeg
 # The smoke job runs the programs on Windows (call 5): -version for both and ffmpeg -hide_banner -layouts, then the
 # whole of layer 2 (crates/fake-tools/tests/layer2.rs) with the three programs that ship as the tools under test: the
 # minimal ffmpeg.exe and ffprobe.exe, and the mkvmerge.exe of the manifest's MKVToolNix portable archive, checked and
-# extracted as release step 2 does. Chocolatey's full FFmpeg only makes layer 2's lavfi input files, named by
-# LAZYMKV_TEST_FFMPEG_FULL (T6-R8, the owner's item 3). The test program links lazymkvctl's crate, so the job restores
-# the OCR (optical character recognition) model cache as ci.yml's test job does; on a miss the models' build script
-# downloads them by their pins.
+# extracted by release step 2's own code (packaging/release/archive.ps1; the review of pull request #21 (X8)).
+# Chocolatey's full FFmpeg only makes layer 2's lavfi input files, named by LAZYMKV_TEST_FFMPEG_FULL (T6-R8, the
+# owner's item 3). The test program links lazymkvctl's crate, so the job restores the OCR (optical character
+# recognition) model cache as ci.yml's test job does; on a miss the models' build script downloads them by their pins.
 #
-# It runs on a push that changes the manifest, packaging/ffmpeg or this file (the workflow is part of what builds the
-# bytes), by hand, and when release.yml calls it (workflow_call).
+# It runs on a push to a branch that changes the manifest, packaging/ffmpeg, packaging/release/archive.ps1 (the smoke
+# job's mkvmerge code) or this file (the workflow is part of what builds the bytes), by hand, and when release.yml calls
+# it (workflow_call). The push trigger names branches because GitHub does not apply a path filter to a tag push, so
+# without them every tag would also start a standalone run beside the one release.yml starts for a v* tag (the review
+# of pull request #21 (X4)).
 
 on:
   push:
-    paths: ['packaging/tools.json', 'packaging/ffmpeg/**', '.github/workflows/ffmpeg.yml']
+    branches: ['**']
+    paths: ['packaging/tools.json', 'packaging/ffmpeg/**', 'packaging/release/archive.ps1',
+            '.github/workflows/ffmpeg.yml']
   workflow_dispatch:
   workflow_call:
 
@@ -160,78 +165,20 @@ jobs:
           & $full -version | Select-Object -First 1
           "LAZYMKV_TEST_FFMPEG_FULL=$full" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # Release step 2's way (design part 11.5): the manifest's portable archive, its SHA-256 checked, mkvmerge.exe
-      # alone extracted.
+      # Release step 2's own code (packaging/release/archive.ps1, the review of pull request #21 (X8)): the manifest's
+      # portable archive, its SHA-256 checked, mkvmerge.exe alone extracted and its version checked.
       - name: Fetch mkvmerge from the manifest's MKVToolNix portable archive
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          $portable = (Get-Content -LiteralPath packaging/tools.json -Raw | ConvertFrom-Json).mkvtoolnix.portable
-          $archive = Join-Path $env:RUNNER_TEMP 'mkvtoolnix-portable.7z'
-          Invoke-WebRequest -Uri $portable.url -OutFile $archive
-          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne $portable.sha256) {
-            throw "$($portable.url) has SHA-256 $hash, not the pinned $($portable.sha256)"
-          }
-          # The archive's entries in 7-Zip's technical listing (-slt): one block of "Key = value" lines per entry,
-          # after the line of ten dashes; the blocks before it describe the archive itself.
-          $listing = @(& 7z l -slt $archive)
-          if ($LASTEXITCODE -ne 0) { throw "7z l exited $LASTEXITCODE" }
-          $start = [Array]::IndexOf($listing, '----------')
-          if ($start -lt 0) { throw "7z l -slt printed no entry list for $archive" }
-          $entries = @()
-          $entry = $null
-          foreach ($line in $listing[($start + 1)..($listing.Count - 1)]) {
-            if ($line -match '^Path = (.*)$') {
-              $entry = [pscustomobject]@{ Path = $Matches[1]; Size = ''; Folder = '' ; Attributes = '' }
-              $entries += $entry
-            } elseif ($null -ne $entry -and $line -match '^(Size|Folder|Attributes) = (.*)$') {
-              $entry.($Matches[1]) = $Matches[2]
-            }
-          }
-          $isFolder = { param($e) $e.Folder -eq '+' -or $e.Attributes.StartsWith('D') }
-          $matching = @($entries | Where-Object {
-            -not (& $isFolder $_) -and ($_.Path -split '[\\/]')[-1] -eq 'mkvmerge.exe'
-          })
-          "The archive's entries named mkvmerge.exe ($($matching.Count)):"
-          foreach ($m in $matching) { "  $($m.Path)  $($m.Size) bytes" }
-          # The one entry by rule: <top folder>\mkvmerge.exe, where <top folder> is the archive's single top-level
-          # folder (the usual layout is mkvtoolnix\mkvmerge.exe), the match with exactly one path separator.
-          $tops = @($entries | ForEach-Object { ($_.Path -split '[\\/]')[0] } | Sort-Object -Unique)
-          if ($tops.Count -ne 1) { throw "the archive has $($tops.Count) top-level entries, not one folder: $tops" }
-          $chosen = @($matching | Where-Object { ($_.Path -split '[\\/]').Count -eq 2 })
-          if ($chosen.Count -ne 1) {
-            throw "$($chosen.Count) entries are $($tops[0])\mkvmerge.exe, not one: $($matching.Path -join ', ')"
-          }
-          $path = $chosen[0].Path
-          "Extracting $path alone"
-          $dir = Join-Path $env:RUNNER_TEMP 'mkvmerge'
-          New-Item -ItemType Directory -Path $dir | Out-Null
-          # -r- turns recursion off, so 7-Zip matches the one path from the archive's root and no other entry.
-          $extracted = @(& 7z e $archive "-o$dir" $path -r- -y)
-          $status = $LASTEXITCODE
-          $extracted
-          if ($status -ne 0) { throw "7z e exited $status" }
-          # 7-Zip's own "Files:" line is not read: on a solid archive it counts the files of the block it unpacked.
-          $files = @(Get-ChildItem -LiteralPath $dir -File -Recurse)
-          if ($files.Count -ne 1 -or $files[0].Name -ne 'mkvmerge.exe' -or $files[0].DirectoryName -ne $dir) {
-            throw "7z extracted $($files.Count) files into $dir, not mkvmerge.exe alone"
-          }
-          if ([string]$files[0].Length -ne $chosen[0].Size) {
-            $listed = $chosen[0].Size
-            throw "the extracted mkvmerge.exe has $($files[0].Length) bytes; the listing gives $listed for $path"
-          }
-          $mkvmerge = $files[0].FullName
-          $sha = (Get-FileHash -LiteralPath $mkvmerge -Algorithm SHA256).Hash.ToLowerInvariant()
-          "mkvmerge.exe from $path`: SHA-256 $sha, $($files[0].Length) bytes"
-          $version = (Get-Content -LiteralPath packaging/tools.json -Raw | ConvertFrom-Json).mkvtoolnix.version
-          $printed = @(& $mkvmerge --version)
-          if ($LASTEXITCODE -ne 0) { throw "mkvmerge --version exited $LASTEXITCODE" }
-          $printed
-          if ($printed.Count -eq 0 -or -not $printed[0].StartsWith("mkvmerge v$version ")) {
-            $first = $printed | Select-Object -First 1
-            throw "mkvmerge --version's first line does not start 'mkvmerge v$version ': $first"
+          . (Join-Path $env:GITHUB_WORKSPACE 'packaging\release\archive.ps1')
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'packaging\tools.json'
+          $manifest = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+          $downloads = Join-Path $env:RUNNER_TEMP 'mkvtoolnix-download'
+          $mkvmerge = Get-Mkvmerge $manifest $downloads (Join-Path $env:RUNNER_TEMP 'mkvmerge')
+          if (-not (Test-Path -LiteralPath $mkvmerge -PathType Leaf)) {
+            throw "Get-Mkvmerge returned '$mkvmerge', which is not a file"
           }
           "LAZYMKV_TEST_MKVMERGE=$mkvmerge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 

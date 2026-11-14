@@ -25,6 +25,7 @@ use lazymkv_core::subtitle::bitmap::mkv::read_stream;
 use lazymkv_core::subtitle::bitmap::CODEC_PGS;
 use lazymkv_core::testsupport::mks::{mks, pgs_display_set, MksBlock, MksEncoding, MksShape, MksTrack};
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
+use lazymkv_core::toolver::{standing, Standing, FFMPEG_MIN};
 use lazymkv_core::tracks::layout::{Layout, OutputTrack};
 use lazymkv_core::verify::VerifyReport;
 use lazymkv_platform::fakes::FakeHost;
@@ -92,8 +93,9 @@ fn text(value: &Option<serde_json::Value>) -> String {
 }
 
 /// None when the first line of `-version` names FFmpeg 7.0 or later, else the reason it does not (K11). The release
-/// word is the third when the second is `version`; its major number is the run of ASCII digits at its start after one
-/// leading lowercase `n` (BtbN's `n7.1` builds).
+/// word is the third when the second is `version`, none otherwise; `lazymkv_core::toolver::standing` judges it against
+/// `FFMPEG_MIN`, the rule the self-test applies, so a dated git build has no release number here too (the review of
+/// pull request #21 (X11)).
 fn below_7_0(first_line: &str) -> Option<String> {
     let words: Vec<&str> = first_line.split_whitespace().collect();
     if words.is_empty() {
@@ -103,18 +105,17 @@ fn below_7_0(first_line: &str) -> Option<String> {
     }
     let shown = words.iter().take(3).copied().collect::<Vec<_>>().join(" ");
     let release = if words.get(1) == Some(&"version") { words.get(2).copied() } else { None };
-    let release = release.unwrap_or("");
-    let release = release.strip_prefix('n').unwrap_or(release);
-    let digits: String = release.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return Some(format!(
+    let judged = match release {
+        Some(word) => standing(word, FFMPEG_MIN),
+        None => Standing::Unreadable,
+    };
+    match judged {
+        Standing::AtLeast => None,
+        Standing::Below => Some(format!("{shown} is below FFmpeg 7.0, layer 2's minimum (K11)")),
+        Standing::Unreadable => Some(format!(
             "{shown} names no release number, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)"
-        ));
+        )),
     }
-    if digits.parse::<u64>().unwrap_or(u64::MAX) < 7 {
-        return Some(format!("{shown} is below FFmpeg 7.0, layer 2's minimum (K11)"));
-    }
-    None
 }
 
 /// One tool: the path in `var` when set and not empty (it must be a file), else the first match on `PATH`. ffmpeg and
@@ -442,6 +443,9 @@ fn the_layer_2_skip_reads_ffmpegs_version_and_skips_below_7_0() {
     }
     assert_eq!(below_7_0("ffmpeg version N-117000-g0123abcd Copyright (c) 2000-2025 the FFmpeg developers"),
         Some("ffmpeg version N-117000-g0123abcd names no release number, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)".to_string()));
+    let no_number = "names no release number, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)";
+    assert_eq!(below_7_0("ffmpeg version 2026-10-01-git-0a1b2c3d4e Copyright (c) 2000-2026 the FFmpeg developers"),
+        Some(format!("ffmpeg version 2026-10-01-git-0a1b2c3d4e {no_number}")));
     assert_eq!(below_7_0("   "),
         Some("-version printed nothing, so layer 2 cannot tell that it is FFmpeg 7.0 or later (K11)".to_string()));
 }

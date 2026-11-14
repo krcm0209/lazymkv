@@ -7,8 +7,11 @@
 # stop, then starts bin\lazymkv-engine.exe --data <Data> hidden with its standard error to a file, waits up to 60 s for
 # bin\lazymkvctl.exe status to answer, runs bin\lazymkvctl.exe selftest and reads its JSON (JavaScript Object
 # Notation). mkvmerge, ffprobe and ffmpeg must each be ok, found in resources, at the expected version; MakeMKV is not
-# required, so the self-test as a whole need not pass. Then bin\lazymkvctl.exe stop, a wait of up to 30 s for the
-# engine to exit, and a kill if it has not.
+# required, so the self-test as a whole need not pass. The expected versions are -Mkvmerge and -Ffmpeg when given; when
+# one is not, the script reads it from the manifest one folder up, mkvtoolnix.version or ffmpeg.version of
+# packaging\tools.json, before it extracts the zip, and fails like any other failure if the manifest is missing, cannot
+# be read or has no such version (the review of pull request #21 (X7)). It prints each expected version and where it
+# came from. Then bin\lazymkvctl.exe stop, a wait of up to 30 s for the engine to exit, and a kill if it has not.
 #
 # The owner and the list are set with icacls.exe, which ships with every Windows and behaves the same under Windows
 # PowerShell 5.1 and PowerShell 7, on a hosted runner (the job runs elevated) and in an administrator's SSH (Secure
@@ -26,14 +29,15 @@
 # For Windows PowerShell 5.1 (the mini PC, Task 6) and PowerShell 7 (release.yml's package job), run elevated.
 # -Root and -Data must not exist; their parent folders must.
 # Usage: powershell -NoProfile -File packaging/release/smoke.ps1 -Zip <file> -Root <folder> -Data <folder>
-#            [-Mkvmerge 100.0] [-Ffmpeg 9.0.2]
+#            [-Mkvmerge <version>] [-Ffmpeg <version>]
+# Either version, when left out, is the manifest's (packaging\tools.json, one folder up from this script).
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Zip,
     [Parameter(Mandatory = $true)][string]$Root,
     [Parameter(Mandatory = $true)][string]$Data,
-    [string]$Mkvmerge = '100.0',
-    [string]$Ffmpeg = '9.0.2'
+    [string]$Mkvmerge = '',
+    [string]$Ffmpeg = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -135,6 +139,40 @@ try {
     if ($Data.Contains('"') -or $Data.EndsWith('\')) { throw "-Data $Data holds a quote or ends with a backslash" }
     # From here on -Data and the standard error file are this run's, so the cleanup may remove them.
     $mayRemove = $true
+
+    # The expected versions: a value given on the command line wins and then needs no manifest; otherwise the manifest
+    # one folder up from this script gives it (the review of pull request #21 (X7)). Only its name is printed.
+    $manifestName = 'packaging\tools.json'
+    $manifest = $null
+    if ($Mkvmerge -eq '' -or $Ffmpeg -eq '') {
+        $manifestPath = Join-Path $PSScriptRoot '..\tools.json'
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "the manifest $manifestName is missing, and -Mkvmerge or -Ffmpeg was not given"
+        }
+        try {
+            $manifest = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+        } catch {
+            throw "the manifest $manifestName cannot be read or is not JSON, and -Mkvmerge or -Ffmpeg was not given"
+        }
+    }
+    $mkvmergeFrom = 'the command line'
+    if ($Mkvmerge -eq '') {
+        if ($null -ne $manifest -and $null -ne $manifest.mkvtoolnix -and $manifest.mkvtoolnix.version -is [string]) {
+            $Mkvmerge = $manifest.mkvtoolnix.version
+        }
+        if ($Mkvmerge -eq '') { throw "the manifest $manifestName has no mkvtoolnix.version" }
+        $mkvmergeFrom = "the manifest $manifestName"
+    }
+    $ffmpegFrom = 'the command line'
+    if ($Ffmpeg -eq '') {
+        if ($null -ne $manifest -and $null -ne $manifest.ffmpeg -and $manifest.ffmpeg.version -is [string]) {
+            $Ffmpeg = $manifest.ffmpeg.version
+        }
+        if ($Ffmpeg -eq '') { throw "the manifest $manifestName has no ffmpeg.version" }
+        $ffmpegFrom = "the manifest $manifestName"
+    }
+    Write-Line "expected mkvmerge version $Mkvmerge (from $mkvmergeFrom)"
+    Write-Line "expected ffprobe and ffmpeg version $Ffmpeg (from $ffmpegFrom)"
 
     Expand-Archive -LiteralPath $Zip -DestinationPath $Root
     $entries = @(Get-ChildItem -LiteralPath $Root -Force)

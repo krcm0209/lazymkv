@@ -191,7 +191,7 @@ fn ctl_plan_over_a_folder_with_a_stale_copy_and_no_token_exits_3() {
     assert_eq!(local, dev(&ctx, &["plan", "recs/disc-a"]));
 }
 
-use super::licenses::{licenses_text, CRATE_NOTICES, MIT_TEXT, TMDB_ADDRESS, TMDB_NOTICE};
+use super::licenses::{licenses_text, models_text, CRATE_NOTICES, MIT_TEXT, TMDB_ADDRESS, TMDB_NOTICE};
 use super::models::export_models;
 use lazymkv_ocr_models::{
     ATTRIBUTION, DETECTION, DETECTION_LEN, DETECTION_NAME, DETECTION_SHA256, LICENCE_TEXT, RECOGNITION,
@@ -253,7 +253,8 @@ fn a_release_tree_prints_each_text_once() {
     let s = Scratch::new("ctl-licenses-release-tree");
     s.write("release/licenses/lazymkv-LICENSE.txt", MIT_TEXT);
     s.write("release/licenses/crate-notices.txt", CRATE_NOTICES);
-    // The models' part's body byte for byte, as release step 4 cuts it from licenses' output.
+    // The models' part's body byte for byte, as release step 4 writes it with licenses --models (the review of
+    // pull request #21 (X9)).
     s.write("release/licenses/ocrs-models.txt", ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
     s.write("release/licenses/zlib-LICENSE.txt", "made-up zlib licence\n");
     let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
@@ -273,6 +274,36 @@ fn a_licence_file_that_differs_from_the_embedded_text_by_one_byte_is_still_print
     let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
     let mut parts = four_parts();
     parts.push(format!("Bundled tool licence: lazymkv-LICENSE.txt\n\n{}", ended(&changed)));
+    assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
+}
+
+/// The review of pull request #21 (X9): `licenses --models` prints the body of the models' part, attribution then
+/// text, and nothing else, from the carried texts alone (no `licenses\` folder is read).
+#[test]
+fn licenses_models_prints_the_models_part_body_and_nothing_else() {
+    let s = Scratch::new("ctl-licenses-models");
+    let ctx = Ctx::for_test(&s.0);
+    let (code, out, err) = ctl(&ctx, &["licenses", "--models"]);
+    assert_eq!((code, err), (0, vec![]));
+    assert_eq!(String::from_utf8(out).unwrap(), ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
+    assert_eq!(models_text(), ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")));
+    let part = format!("The ocrs models: CC-BY-SA-4.0\n\n{}", models_text());
+    assert_eq!(four_parts()[1], part);
+}
+
+/// The review of pull request #21 (X9): a release tree whose `licenses\ocrs-models.txt` holds exactly what
+/// `licenses --models` prints has that file left out of the bundled tools' licences.
+#[test]
+fn a_models_file_written_from_licenses_models_is_not_printed_again() {
+    let s = Scratch::new("ctl-licenses-models-file");
+    let ctx = Ctx::for_test(&s.0);
+    let (code, out, _) = ctl(&ctx, &["licenses", "--models"]);
+    assert_eq!(code, 0);
+    s.write("release/licenses/ocrs-models.txt", String::from_utf8(out).unwrap());
+    s.write("release/licenses/zlib-LICENSE.txt", "made-up zlib licence\n");
+    let exe = s.0.join("release").join("bin").join("lazymkvctl.exe");
+    let mut parts = four_parts();
+    parts.push("Bundled tool licence: zlib-LICENSE.txt\n\nmade-up zlib licence\n".to_string());
     assert_eq!(licenses_text(Some(&exe)).unwrap(), parts.join("\n"));
 }
 
@@ -340,6 +371,8 @@ fn licenses_and_export_models_take_exactly_their_arguments() {
     let ctx = Ctx::for_test(&s.0);
     for (argv, message) in [
         (&["licenses", "extra"][..], "lazymkvctl licenses: error: unrecognized arguments: extra"),
+        (&["licenses", "--models", "extra"][..], "lazymkvctl licenses: error: unrecognized arguments: --models extra"),
+        (&["licenses", "--model"][..], "lazymkvctl licenses: error: unrecognized arguments: --model"),
         (&["export-models"][..], "lazymkvctl export-models: error: the following arguments are required: DIR"),
         (&["export-models", "a", "b", "c"][..], "lazymkvctl export-models: error: unrecognized arguments: b c"),
         (&["export-models", "--help"][..], "lazymkvctl export-models: error: unrecognized arguments: --help"),
@@ -361,7 +394,7 @@ fn help_lists_licenses_and_export_models_among_the_commands_run_here() {
     let help = String::from_utf8(out).unwrap();
     assert_eq!(code, 0);
     assert!(help.contains("\ncommands run here (design parts 9.5, 9.6):\n  plan "), "{help}");
-    assert!(help.contains("\n  licenses\n  export-models DIR\n\ncommands sent to the engine (design part 9.6):\n"), "{help}");
+    assert!(help.contains("\n  licenses [--models]\n  export-models DIR\n\ncommands sent to the engine (design part 9.6):\n"), "{help}");
 }
 
 #[test]

@@ -987,11 +987,46 @@ fn a_worker_that_exits_with_a_code_logs_the_memory_limit_in_force() {
     let id = held(&h);
     assert_eq!(unread_notes(&h, &id), [unread(3, "lazymkv-ocr exited with code 101")]);
     let log = job_log(&h, &id);
-    let line = "lazymkv-ocr s1 was started with a memory limit of 2147483648 bytes (design part 5.3)";
-    assert_eq!(log.matches(line).count(), 1, "{log}");
+    let line = memory_limit_line(1);
+    assert_eq!(log.matches(&line).count(), 1, "{log}");
     let ended = log.find("ended lazymkv-ocr s1: exit 101").unwrap_or_else(|| panic!("job.log lacks s1's end: {log}"));
-    assert!(ended < log.find(line).unwrap(), "{log}");
+    assert!(ended < log.find(&line).unwrap(), "{log}");
     assert!(!log.contains("lazymkv-ocr s0 was started with a memory limit"), "{log}");
+}
+
+/// T6-R3's job.log line for stream `n`, which says who enforces the limit (the review of pull request #21 (X2)).
+fn memory_limit_line(n: usize) -> String {
+    let limit = "a memory limit of 2147483648 bytes, which only Windows enforces (design part 5.3)";
+    format!("lazymkv-ocr s{n} was started with {limit}")
+}
+
+/// T6-R3, the review of pull request #21 (X2): a worker killed by its time cap may have met the memory limit and been
+/// held past the cap by Windows Error Reporting, so each such stream gets the line once, after its `ended` line.
+#[test]
+fn a_worker_killed_by_its_cap_logs_the_memory_limit_in_force() {
+    let h = two_subs(&CAP, json!({}));
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id), [unread(2, &cap_reason_of(3)), unread(3, &cap_reason_of(3))]);
+    let log = job_log(&h, &id);
+    for n in 0..2 {
+        let line = memory_limit_line(n);
+        assert_eq!(log.matches(&line).count(), 1, "{log}");
+        let end = format!("ended lazymkv-ocr s{n}: ");
+        let ended = log.find(&end).unwrap_or_else(|| panic!("job.log lacks s{n}'s end: {log}"));
+        assert!(ended < log.find(&line).unwrap(), "{log}");
+    }
+}
+
+/// T6-R3, the review of pull request #21 (X2): a stream the worker refused (exit 3 with its reason line) and a stream
+/// it read get no memory-limit line.
+#[test]
+fn a_refused_stream_and_a_read_stream_log_no_memory_limit() {
+    let h = two_subs(&["movie-direct-two-subs-refused"], json!({}));
+    let id = decided(&h);
+    assert_eq!(unread_notes(&h, &id), [unread(3, REFUSAL)]);
+    let log = job_log(&h, &id);
+    assert!(log.contains("ended lazymkv-ocr s1: exit 3 after "), "{log}");
+    assert!(!log.contains("was started with a memory limit"), "{log}");
 }
 
 /// Review Focus 2, design part 10.3: records the listing does not have leave the stream unread with numbers only.

@@ -3,6 +3,7 @@
 //! prints. Pure: no I/O (input and output). Def: T6-2. Use: T6-2.
 
 use crate::job::Tool;
+use crate::settings::version_part;
 
 /// The minimum MKVToolNix for a copy the user supplies (design part 11.1, Ruling K10): 65.0, whose spellings
 /// `--default-track-flag` and `--forced-display-flag` step 13 uses. A constant, not a setting (call 9).
@@ -32,17 +33,19 @@ pub fn minimum(tool: Tool) -> Option<&'static str> {
 /// optional leading `n`, then one to three runs of ASCII (American Standard Code for Information Interchange) digits
 /// joined by `.`, ending at the end of the word or at `-`, `+` or `~`; missing parts are 0. None for anything else: a
 /// first number above 999 (a dated git build), a fourth part, an empty part, a part above `u32::MAX`, or any other
-/// character. Def: T6-2. Use: T6-2.
+/// character. Each part is read by `settings::version_part`. `settings::version_triple` is a different grammar (exactly
+/// three parts, no prefix and no suffix), and the two readers are not to be merged (the review of pull request #21
+/// (X11)). Def: T6-2. Use: T6-2.
 pub fn release_number(version: &str) -> Option<(u32, u32, u32)> {
     let rest = version.strip_prefix('n').unwrap_or(version);
     let end = rest.find(|c: char| matches!(c, '-' | '+' | '~')).unwrap_or(rest.len());
     let mut parts = [0u32; 3];
     let mut count = 0;
     for part in rest[..end].split('.') {
-        if count == parts.len() || part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        if count == parts.len() {
             return None;
         }
-        parts[count] = part.parse().ok()?;
+        parts[count] = version_part(part)?;
         count += 1;
     }
     (parts[0] <= LAST_RELEASE).then_some((parts[0], parts[1], parts[2]))

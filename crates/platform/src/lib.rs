@@ -127,31 +127,36 @@ pub struct Spawn {
     /// worker only, through `MemoryLimited`, as `lazymkv-dev ocr-trial read` does (T6-R2). `win::JobProcessGuard`
     /// applies it as the Job Object's job-wide limit, `JOB_OBJECT_LIMIT_JOB_MEMORY`, so it covers the child's whole
     /// tree. A no-op where the platform has no such limit: `StdProcessGuard` ignores it, as it does `below_normal`.
+    /// `MemoryLimited` never raises a limit a spawn already carries (the review of pull request #21 (X10)).
     /// Def: T6-1. Use: T6-1.
     pub memory_limit: Option<u64>,
 }
 
-/// A process runner that starts every spawn through another with `Spawn::memory_limit` set to one limit, and changes
-/// no other field (design part 5.3; notes A1 and call 10; T6-R2). Step 10 and `lazymkv-dev ocr-trial read` wrap their
-/// runner in it for the OCR worker alone, through `lazymkv_tools::run_worker_limited`, so the frozen worker driver is
-/// untouched (T5-R54). Def: T6-1. Use: T6-1.
+/// A process runner that starts every spawn through another with `Spawn::memory_limit` held to one limit at most, and
+/// changes no other field: a spawn with no limit gets it, and a spawn that carries a lower one keeps it, since the
+/// wrapper never raises a limit (design part 5.3; notes A1 and call 10; T6-R2; the review of pull request #21 (X10)).
+/// Step 10 and `lazymkv-dev ocr-trial read` wrap their runner in it for the OCR worker alone, through
+/// `lazymkv_tools::run_worker_limited`, so the frozen worker driver is untouched (T5-R54). Def: T6-1. Use: T6-1.
 pub struct MemoryLimited<'a> {
     inner: &'a dyn ProcessGuard,
     limit: u64,
 }
 
 impl<'a> MemoryLimited<'a> {
-    /// `inner`, with `limit` bytes as the `memory_limit` of every spawn it is given (design part 5.3; notes A1 and
-    /// call 10; T6-R2). Def: T6-1. Use: T6-1.
+    /// `inner`, with `limit` bytes as the most `memory_limit` of every spawn it is given: a spawn with a lower limit of
+    /// its own keeps it (design part 5.3; notes A1 and call 10; T6-R2; the review of pull request #21 (X10)).
+    /// Def: T6-1. Use: T6-1.
     pub fn new(inner: &'a dyn ProcessGuard, limit: u64) -> MemoryLimited<'a> {
         MemoryLimited { inner, limit }
     }
 }
 
 impl ProcessGuard for MemoryLimited<'_> {
-    /// `inner`'s spawn of a copy of `spawn` whose `memory_limit` is `Some(limit)`.
+    /// `inner`'s spawn of a copy of `spawn` whose `memory_limit` is the smaller of its own, when it has one, and
+    /// `limit`; the wrapper never raises a lower limit (the review of pull request #21 (X10)).
     fn spawn(&self, spawn: &Spawn) -> io::Result<Box<dyn GuardedChild>> {
-        self.inner.spawn(&Spawn { memory_limit: Some(self.limit), ..spawn.clone() })
+        let limit = spawn.memory_limit.map_or(self.limit, |own| own.min(self.limit));
+        self.inner.spawn(&Spawn { memory_limit: Some(limit), ..spawn.clone() })
     }
 }
 
@@ -487,7 +492,8 @@ mod tests {
         }
     }
 
-    /// Notes A1 and call 10, T6-R2: the wrapper sets the limit on what it passes on and keeps every other field.
+    /// Notes A1 and call 10, T6-R2: the wrapper gives a spawn with no limit its own and keeps every other field. The
+    /// review of pull request #21 (X10): it never raises a lower limit a spawn already carries.
     #[test]
     fn a_memory_limited_guard_sets_the_limit_and_changes_nothing_else() {
         let seen = Seen(Mutex::new(Vec::new()));
@@ -499,6 +505,12 @@ mod tests {
         assert_eq!((got.program, got.args, got.env, got.below_normal, got.cwd),
                    (spawn.program, spawn.args, spawn.env, spawn.below_normal, spawn.cwd));
         assert_eq!(Spawn::default().memory_limit, None);
+        for (own, passed) in [(Some(1024), 1024), (Some(4096), 4096), (Some(8192), 4096)] {
+            let limited = Spawn { memory_limit: own, ..Spawn::default() };
+            assert!(MemoryLimited::new(&seen, 4096).spawn(&limited).is_err());
+            let got = seen.0.lock().unwrap().remove(0);
+            assert_eq!(got.memory_limit, Some(passed), "a spawn carrying {own:?} through a 4096 wrapper");
+        }
     }
 
     /// T5-R54: a literal that ends with `..Spawn::default()` adds nothing of its own.

@@ -115,7 +115,9 @@ impl Job {
     /// the job, not on the engine, the error mode covers only the tool trees, and a grandchild started with
     /// `CREATE_DEFAULT_ERROR_MODE` cannot escape it (review round 1 of pull request 3 (R1)). With `memory_limit`, a
     /// third: `JOB_OBJECT_LIMIT_JOB_MEMORY`, with that many bytes as `JobMemoryLimit`, the most memory the job's
-    /// processes may commit together, so an allocation past it fails (design part 5.3; T6-R1).
+    /// processes may commit together, so an allocation past it fails (design part 5.3; T6-R1). A limit above
+    /// `usize::MAX`, which only a 32-bit target can have, is set as `usize::MAX` instead of cut short (the review of
+    /// pull request #21 (X6)).
     fn new(memory_limit: Option<u64>) -> io::Result<Job> {
         // SAFETY: both pointers may be null: default security, so the handle is not inherited, and no name.
         let raw = unsafe { CreateJobObjectW(null(), null()) };
@@ -129,7 +131,7 @@ impl Job {
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
         if let Some(limit) = memory_limit {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
-            info.JobMemoryLimit = limit as usize;
+            info.JobMemoryLimit = usize::try_from(limit).unwrap_or(usize::MAX);
         }
         let length = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
         // SAFETY: the job handle is open; `info` is the structure JobObjectExtendedLimitInformation reads, it outlives

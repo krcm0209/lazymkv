@@ -341,10 +341,12 @@ fn read_into(
             .map_err(|error| UnitError::Failed(format!("lazymkv-ocr could not run: {error}")))?;
         let (exit, wall_ms) = exit_file(&capture).unwrap_or((None, 0));
         log(&format!("ended lazymkv-ocr s{n}: exit {} after {wall_ms} ms", code_text(exit)));
-        if matches!(end, WorkerEnd::Exited(_)) {
-            // T6-R3: what the engine asked for, true on every system; only Windows enforces it.
+        if matches!(end, WorkerEnd::Exited(_) | WorkerEnd::TimedOut) {
+            // T6-R3: what the engine asked for and who enforces it, so the line is true on every system. A run killed
+            // by its cap gets it too, since Windows Error Reporting can hold a worker that met its limit past a short
+            // cap (the review of pull request #21 (X2)).
             let started = format!("lazymkv-ocr s{n} was started with a memory limit of {WORKER_MEMORY_LIMIT} bytes");
-            log(&format!("{started} (design part 5.3)"));
+            log(&format!("{started}, which only Windows enforces (design part 5.3)"));
         }
 
         let outcome = match &end {

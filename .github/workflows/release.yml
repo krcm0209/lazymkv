@@ -21,12 +21,16 @@ name: Release
 # is verified (T6-R11), and only then creates a draft release, which only the owner can publish (D1). The workspace
 # version stays 0.0.0 in phase 2, so the job refuses every tag until the first real version (call 7).
 #
-# It runs on a pull request that changes packaging/ or either release workflow, by hand, and for a v* tag (T6-R10).
+# It runs on a pull request that changes packaging/, the crates, the workspace manifests and lock, the toolchain pin,
+# .cargo/, the licence or either release workflow, by hand, and for a v* tag (T6-R10, widened by the review of pull
+# request #21 (X5)): assemble.ps1 and smoke.ps1 depend on what the three programs print and do, so a change in the
+# crates can break the release and would otherwise first show on a tag push.
 # No step writes an event value into a script; values reach scripts through env.
 
 on:
   pull_request:
-    paths: ['packaging/**', '.github/workflows/release.yml', '.github/workflows/ffmpeg.yml']
+    paths: ['packaging/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'LICENSE',
+            '.github/workflows/release.yml', '.github/workflows/ffmpeg.yml']
   workflow_dispatch:
   push:
     tags: ['v*']

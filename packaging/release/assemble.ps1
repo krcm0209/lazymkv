@@ -7,13 +7,16 @@
 #   1. Fetches the MKVToolNix portable archive and the three source archives (MKVToolNix, FFmpeg, zlib) named in
 #      packaging/tools.json with curl.exe, and fails unless each SHA-256 (Secure Hash Algorithm 256) is the pinned one.
 #   2. Extracts mkvmerge.exe alone into resources\ with 7-Zip and runs mkvmerge --version from there: its first line
-#      must start "mkvmerge v<manifest version> ".
+#      must start "mkvmerge v<manifest version> ". Steps 1 and 2 use archive.ps1 beside this script, which ffmpeg.yml
+#      also uses: its Get-Mkvmerge fetches the portable archive and extracts mkvmerge.exe in one call, so step 2 runs
+#      before step 1 fetches the three source archives.
 #   3. Copies the minimal FFmpeg build's ffmpeg.exe and ffprobe.exe into resources\; the workflow checked their hashes.
-#   4. Copies the three programs into bin\ and writes licenses\ (call 8): lazymkv's LICENSE and the crate notices as
-#      bytes; the ocrs models' part cut as bytes from what lazymkvctl licenses writes to a file; MKVToolNix's COPYING
-#      from its checked source archive; FFmpeg's two licence files, zlib's LICENSE, the build settings and the
-#      mingw-w64 runtime notice from the FFmpeg artifact; and SOURCES.txt, one "<sha256>  <asset name>" line per
-#      source archive.
+#   4. Copies the three programs into bin\ and fails if any of them holds the name VCRUNTIME140 or MSVCP140, read as
+#      bytes, since the zip carries no Visual C++ runtime; then writes licenses\ (call 8): lazymkv's LICENSE and the
+#      crate notices as bytes; the ocrs models' part's body as lazymkvctl licenses --models writes it to a file;
+#      MKVToolNix's COPYING from its checked source archive; FFmpeg's two licence files, zlib's LICENSE, the build
+#      settings and the mingw-w64 runtime notice from the FFmpeg artifact; and SOURCES.txt, one
+#      "<sha256>  <asset name>" line per source archive.
 #   5. Call 8's check, on bytes read as UTF-8: lazymkvctl licenses run from the tree exits 0, prints the committed
 #      crates/ctl/crate-notices.txt exactly once, one "Bundled tool licence: <name>" heading for each file of
 #      licenses\ that is not one of the three repository texts, and none for those three (T6-R9).
@@ -53,10 +56,6 @@ function Get-FullPath([string]$Path) {
 
 function New-Folder([string]$Path) {
     [void][IO.Directory]::CreateDirectory($Path)
-}
-
-function Get-Sha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
 # Copies one file byte for byte; the source must exist and the target must not.
@@ -101,64 +100,9 @@ function Read-Utf8([string]$Path) {
     return $utf8.GetString([IO.File]::ReadAllBytes($Path))
 }
 
-# The last segment of a URL, the name its file is kept under.
-function Get-UrlLeaf([string]$Url) {
-    return $Url.Substring($Url.LastIndexOf('/') + 1)
-}
-
-# The entries of $Archive whose file name is exactly $Name, from 7-Zip's technical listing (7z l -slt): each entry is
-# a block of "Key = value" lines after the line "----------", starting with its Path. Folders ("Folder = +", or
-# "Attributes = " starting with D) are left out. Each result has Path, with / written \, and Size. A name filter with
-# -r matches that name in every folder.
-function Get-ArchiveEntries([string]$Archive, [string]$Name) {
-    $lines = @(& 7z l -slt $Archive $Name -r)
-    if ($LASTEXITCODE -ne 0) { throw "7z could not list $Archive (exit $LASTEXITCODE)" }
-    $start = [Array]::IndexOf([string[]]$lines, '----------')
-    if ($start -lt 0) { throw "7z l -slt printed no entry listing for $Archive" }
-    $entries = @()
-    $current = $null
-    for ($i = $start + 1; $i -lt $lines.Count; $i++) {
-        $line = [string]$lines[$i]
-        if ($line.StartsWith('Path = ')) {
-            $current = [pscustomobject]@{ Path = $line.Substring(7).Replace('/', '\'); Size = ''; Folder = $false }
-            $entries += $current
-        } elseif ($null -ne $current -and $line.StartsWith('Size = ')) {
-            $current.Size = $line.Substring(7)
-        } elseif ($null -ne $current -and $line -eq 'Folder = +') {
-            $current.Folder = $true
-        } elseif ($null -ne $current -and $line.StartsWith('Attributes = D')) {
-            $current.Folder = $true
-        }
-    }
-    return @($entries | Where-Object {
-            -not $_.Folder -and $_.Path.Substring($_.Path.LastIndexOf('\') + 1) -ceq $Name
-        })
-}
-
-# The one entry named $Name directly inside the archive's top folder, "<top>\<Name>", one path separator: every entry
-# named $Name is printed with its size first, and anything but exactly one such entry fails with the list.
-function Select-TopEntry([string]$Archive, [string]$Name) {
-    $named = @(Get-ArchiveEntries $Archive $Name)
-    Write-Host "$Archive holds $($named.Count) entries named $($Name):"
-    foreach ($entry in $named) { Write-Host "  $($entry.Path) ($($entry.Size) bytes)" }
-    $top = @($named | Where-Object { $_.Path.Split('\').Count -eq 2 })
-    if ($top.Count -ne 1) {
-        $list = ($named | ForEach-Object { $_.Path }) -join ', '
-        throw "$Archive has $($top.Count) entries <top folder>\$Name, not one; its entries named $($Name): $list"
-    }
-    Write-Host "  chosen: $($top[0].Path)"
-    return $top[0]
-}
-
-# fetch: downloads $Url to $File with curl.exe and fails unless its SHA-256 is $Sha256.
-function Get-Pinned([string]$Url, [string]$Sha256, [string]$File) {
-    Write-Host "fetching $Url"
-    & curl.exe --fail --location --silent --show-error --retry 3 --output $File $Url
-    if ($LASTEXITCODE -ne 0) { throw "curl.exe could not download $Url (exit $LASTEXITCODE)" }
-    $got = Get-Sha256 $File
-    if ($got -ne $Sha256) { throw "$Url has SHA-256 $got, not the pinned $Sha256" }
-    Write-Host "  SHA-256 $got, as pinned"
-}
+# The pinned archives' functions, shared with ffmpeg.yml's smoke job: Get-Sha256, Get-UrlLeaf, Get-Pinned,
+# Get-ArchiveEntries, Select-TopEntry and Get-Mkvmerge (the review of pull request #21 (X8)).
+. (Join-Path $PSScriptRoot 'archive.ps1')
 
 $Bin = Get-FullPath $Bin
 $Ffmpeg = Get-FullPath $Ffmpeg
@@ -202,10 +146,16 @@ $resources = Join-Path $tree 'resources'
 $licenses = Join-Path $tree 'licenses'
 foreach ($folder in @($downloads, $unpacked, $treeBin, $resources, $licenses)) { New-Folder $folder }
 
-# Step 1: the portable archive and the three source archives, each checked before anything reads it.
+# Steps 1 and 2 for the portable archive, by archive.ps1's Get-Mkvmerge (the review of pull request #21 (X8)): the
+# archive is fetched into downloads\ and checked before anything reads it, and mkvmerge.exe alone is extracted into
+# resources\, where its size and its --version line are checked, to run from there outside any installation (ARCH-19).
+$mkvmerge = Get-Mkvmerge $manifest $downloads $resources
+if (@($mkvmerge).Count -ne 1 -or -not (Test-Path -LiteralPath $mkvmerge -PathType Leaf)) {
+    throw "Get-Mkvmerge returned '$mkvmerge', not the one file resources\mkvmerge.exe"
+}
+
+# Step 1 for the three source archives, each checked before anything reads it.
 $mkvVersion = [string]$manifest.mkvtoolnix.version
-$portable = Join-Path $downloads (Get-UrlLeaf $manifest.mkvtoolnix.portable.url)
-Get-Pinned $manifest.mkvtoolnix.portable.url $manifest.mkvtoolnix.portable.sha256 $portable
 $sources = @(
     [pscustomobject]@{ Pin = $manifest.mkvtoolnix.source; Name = "mkvtoolnix-$mkvVersion.tar.xz" },
     [pscustomobject]@{ Pin = $manifest.ffmpeg.source; Name = "ffmpeg-$($manifest.ffmpeg.version).tar.xz" },
@@ -217,29 +167,6 @@ foreach ($source in $sources) {
     Get-Pinned $source.Pin.url $source.Pin.sha256 (Join-Path $downloads $source.Name)
 }
 
-# Step 2: mkvmerge.exe alone, run from resources\ outside any installation (ARCH-19). The portable archive holds
-# one file named mkvmerge.exe, at <top folder>\mkvmerge.exe; it is chosen by rule and extracted by its exact path,
-# without -r, so that a future archive layout with a second file of that name cannot change which one ships.
-$mkvmergeEntry = Select-TopEntry $portable 'mkvmerge.exe'
-& 7z e $portable "-o$resources" $mkvmergeEntry.Path -y
-if ($LASTEXITCODE -ne 0) { throw "7z could not extract $($mkvmergeEntry.Path) from $portable (exit $LASTEXITCODE)" }
-$extracted = @(Get-ChildItem -LiteralPath $resources -Force)
-if ($extracted.Count -ne 1 -or $extracted[0].Name -ne 'mkvmerge.exe') {
-    throw "7z extracted $($extracted.Count) entries into $resources, not mkvmerge.exe alone"
-}
-if ([string]$extracted[0].Length -ne $mkvmergeEntry.Size) {
-    throw "resources\mkvmerge.exe has $($extracted[0].Length) bytes, not the listed $($mkvmergeEntry.Size)"
-}
-$mkvmergeSha = Get-Sha256 $extracted[0].FullName
-Write-Host "resources\mkvmerge.exe from $($mkvmergeEntry.Path): SHA-256 $mkvmergeSha, $($extracted[0].Length) bytes"
-$mkvmergeLines = @(& (Join-Path $resources 'mkvmerge.exe') --version)
-if ($LASTEXITCODE -ne 0) { throw "mkvmerge --version exited $LASTEXITCODE" }
-if ($mkvmergeLines.Count -eq 0 -or -not ([string]$mkvmergeLines[0]).StartsWith("mkvmerge v$mkvVersion ")) {
-    $printedLines = $mkvmergeLines -join ' | '
-    throw "mkvmerge --version printed '$printedLines', not a first line starting 'mkvmerge v$mkvVersion '"
-}
-Write-Host $mkvmergeLines[0]
-
 # Step 3: the two FFmpeg programs.
 foreach ($program in @('ffmpeg.exe', 'ffprobe.exe')) {
     Copy-Bytes (Join-Path $Ffmpeg $program) (Join-Path $resources $program)
@@ -249,29 +176,33 @@ foreach ($program in @('ffmpeg.exe', 'ffprobe.exe')) {
 foreach ($program in $programs) {
     Copy-Bytes (Join-Path $Bin $program) (Join-Path $treeBin $program)
 }
+
+# None of the three programs may import the Visual C++ runtime, which the zip does not carry and Windows does not
+# ship; .cargo/config.toml links it statically (the review of pull request #21 (X1)). The check reads the import
+# names as bytes, each file decoded one character per byte (ISO 8859-1), since the runner has no dumpbin on PATH.
+$latin1 = [Text.Encoding]::GetEncoding(28591)
+foreach ($program in $programs) {
+    $programText = $latin1.GetString([IO.File]::ReadAllBytes((Join-Path $treeBin $program)))
+    foreach ($runtime in @('VCRUNTIME140', 'MSVCP140')) {
+        if ($programText.IndexOf($runtime, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "bin\$program holds the name $runtime, so it imports the Visual C++ runtime the zip does not carry"
+        }
+    }
+}
+Write-Host 'bin\: none of the three programs imports VCRUNTIME140 or MSVCP140'
+
 Copy-Bytes (Join-Path $repo 'LICENSE') (Join-Path $licenses 'lazymkv-LICENSE.txt')
 $noticesPath = Join-Path $repo 'crates\ctl\crate-notices.txt'
 Copy-Bytes $noticesPath (Join-Path $licenses 'crate-notices.txt')
 
-# The models' part as lazymkvctl licenses prints it, attribution then text. -Bin's folder is not named bin, so this
-# output has no bundled part. The markers are found in the strictly decoded text and the cut is made on the bytes.
-$printed = Join-Path $work 'licenses-printed.txt'
-Write-NativeOutput (Join-Path $Bin 'lazymkvctl.exe') 'licenses' $printed
-$printedBytes = [IO.File]::ReadAllBytes($printed)
-$printedText = $utf8.GetString($printedBytes)
-$startMarker = "The ocrs models: CC-BY-SA-4.0`n`n"
-$endMarker = "`nThe Movie Database (TMDB)`n"
-$start = $printedText.IndexOf($startMarker, [StringComparison]::Ordinal)
-if ($start -lt 0) { throw "lazymkvctl licenses printed no heading 'The ocrs models: CC-BY-SA-4.0'" }
-$bodyStart = $start + $startMarker.Length
-$end = $printedText.IndexOf($endMarker, $bodyStart, [StringComparison]::Ordinal)
-if ($end -lt 0) { throw "lazymkvctl licenses printed no 'The Movie Database (TMDB)' heading after the models' part" }
-$fromByte = $utf8.GetByteCount($printedText.Substring(0, $bodyStart))
-$toByte = $utf8.GetByteCount($printedText.Substring(0, $end))
-$models = New-Object byte[] ($toByte - $fromByte)
-[Array]::Copy($printedBytes, $fromByte, $models, 0, $toByte - $fromByte)
+# The models' part's body, attribution then text with its final newline: the file holds exactly the bytes lazymkvctl
+# licenses --models writes to its standard output, so it is the text that licenses prints under the part's heading and
+# compares a tree's licenses\ocrs-models.txt with (the review of pull request #21 (X9)).
 $modelsText = Join-Path $licenses 'ocrs-models.txt'
-[IO.File]::WriteAllBytes($modelsText, $models)
+Write-NativeOutput (Join-Path $Bin 'lazymkvctl.exe') 'licenses --models' $modelsText
+if ((Get-Item -LiteralPath $modelsText).Length -eq 0) {
+    throw "lazymkvctl licenses --models wrote an empty $modelsText"
+}
 
 # MKVToolNix's COPYING from its checked source archive: 7-Zip takes off the xz layer, then reads the tar, since
 # Windows' own tar reads no xz. The source tree holds more than one file named COPYING (bundled libraries carry their

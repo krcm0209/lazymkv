@@ -72,6 +72,15 @@ fn bundled(exe: Option<&Path>, printed: &[&str]) -> Result<Vec<String>, String> 
     Ok(parts)
 }
 
+/// The body of the ocrs models' part: `ATTRIBUTION`, a newline, then `LICENCE_TEXT`, with a final newline added when
+/// it has none. `lazymkvctl licenses --models` prints it, `licenses_text` prints it under the part's heading, and
+/// `bundled` compares a release tree's `licenses\ocrs-models.txt` with it, so the three cannot differ (the review of
+/// pull request #21 (X9); design parts 9.6, 11.4; T6-R9). Def: the review of pull request #21 (X9).
+/// Use: T5-23, T6-4.
+pub fn models_text() -> String {
+    ended(&format!("{ATTRIBUTION}\n{LICENCE_TEXT}")).into_owned()
+}
+
 /// The text `lazymkvctl licenses` prints: lazymkv's MIT License, the ocrs models' CC-BY-SA-4.0 attribution and text,
 /// TMDB's sentence and address, the crate notices, then the bundled tools' licences; the parts are joined by one blank
 /// line. `exe` is lazymkvctl's own path; the bundled tools' licences are added only when its folder is named `bin` and
@@ -79,7 +88,7 @@ fn bundled(exe: Option<&Path>, printed: &[&str]) -> Result<Vec<String>, String> 
 /// or the crate notices' body is not printed again (T6-R9, notes call 8). Err is `<path>: <io error>` for a file or
 /// the folder that cannot be read. Design parts 9.6, 11.4; E1, E2, call 15. Def: T5-23. Use: T5-23, T5-26, T6-4.
 pub fn licenses_text(exe: Option<&Path>) -> Result<String, String> {
-    let models = format!("{ATTRIBUTION}\n{LICENCE_TEXT}");
+    let models = models_text();
     let mut parts = vec![
         part("lazymkv: the MIT License", MIT_TEXT),
         part("The ocrs models: CC-BY-SA-4.0", &models),

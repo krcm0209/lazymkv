@@ -4,9 +4,12 @@
 # output (stdout and stderr together) or exit status differs from the expected one, printing both. The fixtures
 # hold made-up hashes only. The hashes cases use two made-up programs this script writes into a temporary folder
 # with fixed text; unverified.json records those two files' SHA-256 (Secure Hash Algorithm 256) values, so no
-# fixture changes at run time. Then packaging/ffmpeg/inputs-digest.sh runs twice over the real manifest and must
+# fixture changes at run time. Besides the matching and the mismatching cases, none.json (no program hash recorded:
+# the values are printed and the exit status is 0) and half.json (only one recorded: a mismatch, exit 1) are run
+# through the hashes branch too (the review of pull request #21 (X12)).
+# Then packaging/ffmpeg/inputs-digest.sh runs twice over the real manifest and must
 # print the same 64 hex digits both times.
-# Prints "gate self-test: 15 passed" and exits 0 when every case passes; exits 1 at the first failure.
+# Prints "gate self-test: 17 passed" and exits 0 when every case passes; exits 1 at the first failure.
 # Usage: bash packaging/release/gate-selftest.sh
 set -euo pipefail
 [ "$#" -eq 0 ] || { echo "usage: bash packaging/release/gate-selftest.sh" >&2; exit 2; }
@@ -66,6 +69,14 @@ check unverified.json "" 0 hashes "$work/ffmpeg.exe" "$work/ffprobe.exe"
 check verified.json "$(printf '%s\n%s' \
   "ffmpeg.exe: the file's SHA-256 is $made_up_ffmpeg, the manifest records $c64" \
   "ffprobe.exe: the file's SHA-256 is $made_up_ffprobe, the manifest records $d64")" 1 \
+  hashes "$work/ffmpeg.exe" "$work/ffprobe.exe"
+# The review of pull request #21 (X12): a manifest that records no program hash prints the two files' values.
+check none.json "$(printf '%s\n%s\n%s' "ffmpeg.exe $made_up_ffmpeg" "ffprobe.exe $made_up_ffprobe" \
+  "not recorded yet")" 0 hashes "$work/ffmpeg.exe" "$work/ffprobe.exe"
+# The review of pull request #21 (X12): a manifest that records only one program hash is a mismatch, not "not recorded".
+check half.json "$(printf '%s\n%s' \
+  "ffmpeg.exe: the file's SHA-256 is $made_up_ffmpeg, the manifest records $c64" \
+  "ffprobe.exe: the file's SHA-256 is $made_up_ffprobe, the manifest records null")" 1 \
   hashes "$work/ffmpeg.exe" "$work/ffprobe.exe"
 check rehashed.json "unverified: the recorded programs changed after they were verified" 0 status
 check rehashed.json "refused: unverified: the recorded programs changed after they were verified" 1 \
