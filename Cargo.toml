@@ -26,11 +26,11 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 # The OCR engine and the runtime of its two models, used by lazymkv-ocr only and pinned exactly: ocrs 0.13.1 needs
 # rten 0.26, and a second rten minor in the tree would be an incompatible copy (design parts 4.5, 4.7 and 10.7; notes
 # call 1, A1, A2).
-ocrs = { version = "=0.13.1", default-features = false, features = ["onnx"] }
-rten = { version = "=0.26.0", default-features = false }
+ocrs = { version = "=0.14.0", default-features = false, features = ["onnx"] }
+rten = { version = "=0.28.0", default-features = false }
 # The line rectangles ocrs's recognize_text takes, which ocrs does not re-export; pinned to the version rten 0.26.0
 # pulls in, so the lock keeps one entry (T5-R63).
-rten-imageproc = "=0.26.0"
+rten-imageproc = "=0.28.0"
 # The OCR evidence's 8-bit grey crops, used by lazymkv-ocr (design parts 4.7 and 10.12).
 png = "0.18"
 # The models' SHA-256 check, used by lazymkv-ocr-models (normal and build) and lazymkvctl's tests (design parts 4.7
