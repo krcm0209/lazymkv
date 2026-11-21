@@ -1,10 +1,13 @@
 //! Menu maps, `core::menu` (menu maps design 5.4): the types of a `lazymkv menu map v1` file, its reader and the
-//! writer's validator. The format, its rules and this increment's rulings M3-1 to M3-8 are `docs/menu-maps/format.md`.
+//! writer's validator; `scan.rs` ties a map to a scanned disc (stream numbers, identity, the check, decide's per-title
+//! block). The format, its rules and this increment's rulings M3-1 to M3-8 are `docs/menu-maps/format.md`.
 //! A map says only what the menu calls a choice and which playlist and streams choosing it selects; it is evidence and
 //! no decision reads it. No I/O: `read` takes the file's text.
 
+mod scan;
 mod validate;
 
+pub use scan::*;
 pub use validate::validate;
 
 /// The format name a v1 map's `format` holds (design 5.1).

@@ -208,7 +208,35 @@ writer's rules give, the format's first.
 
 ## Stream numbers
 
-The rule that ties a map's stream numbers to a scan's streams is added with `menu check`.
+A map numbers streams as the player does, from 1, per playlist. lazymkv ties them to a scan title whose source file
+is `<playlist>.mpls` (ASCII case ignored; every such title, when two share one source file, each on its own streams)
+by MakeMKV's observed order, not a spec, and parses no playlist (M3-1):
+- map audio n is the n-th audio stream of the scan title without flag 256 (`CORE_AUDIO`);
+- map subtitle n is the n-th subtitle stream of the scan title without flag 2048 (`DERIVED`).
+
+With subtitles off the subtitle number is a leftover and names no stream (M3-4). A playlist that is no title of the
+scan is `not in the scan`, and its streams are not checked (M3-2).
+
+## The check
+
+`menu check` prints the identity, then `listing_sig: not checked (lazymkv does not recompute it)`, then one line per
+entry (play first, then the choices in map order; one line per scan title of the entry's playlist) with ids,
+playlists and numbers only, never a label. Its last line is
+
+    CHECK ok entries=10 on_scan=8 not_in_scan=1 no_effect=1 warnings=0 failed=0; streams of not_in_scan entries were not checked
+
+`ok` when `failed` is 0, else `FAILED`. The counts:
+- `entries`: play and every choice.
+- `on_scan`: the entries whose playlist is a title of the scan; their streams are checked.
+- `not_in_scan`: the entries whose playlist is no title of the scan; their streams are not checked (M3-2), which the
+  line's last words say.
+- `no_effect`: the entries without an effect (`<id>: no effect recorded`).
+- `warnings`, each one on each title's line: a subtitle that is off with a leftover number below 1 or above the subtitle count (M3-4); an
+  audio choice with audio null, or a subtitle choice shown with subtitle null (M3-5). A null number on another kind
+  of entry is no warning.
+- `failed`, each one on each title's line: an audio number, or a shown subtitle number, below 1 or above the count of its kind
+  (`OUT OF RANGE (<k> audio streams)`, `OUT OF RANGE (<k> subtitle streams)`); plus 1 when the map's
+  `disc_id_sha1` differs from the disc's ID. An identity that is not checked is no failure (M3-6).
 
 ## Shown labels
 

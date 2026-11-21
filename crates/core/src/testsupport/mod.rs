@@ -522,6 +522,34 @@ pub fn scan_text_with_messages(
     out
 }
 
+/// The made-up scan the menu map tests share (menu maps design 5.4; the fixture map `menu::FIXTURE` is of this disc):
+/// a Blu-ray with title 0 on `00800.mpls` (stream 0 video; 1 audio eng; 2 audio eng flagged 256, the core of 1; 3 audio
+/// spa; 4 audio eng; 5 subtitle eng; 6 subtitle eng flagged 2048, derived from 5; 7 subtitle fra; 8 subtitle eng) and
+/// title 1 on `01001.mpls` (0 video, 1 audio eng). Written with `scan_text`, the kinds as MakeMKV spells them.
+pub fn menu_scan_text() -> String {
+    scan_text(
+        &[(1, "Blu-ray disc")],
+        &[
+            (
+                0,
+                &[(16, "00800.mpls")],
+                &[
+                    (0, &[(1, "Video")]),
+                    (1, &[(1, "Audio"), (3, "eng"), (22, "0")]),
+                    (2, &[(1, "Audio"), (3, "eng"), (22, "256")]),
+                    (3, &[(1, "Audio"), (3, "spa"), (22, "0")]),
+                    (4, &[(1, "Audio"), (3, "eng"), (22, "0")]),
+                    (5, &[(1, "Subtitles"), (3, "eng"), (22, "0")]),
+                    (6, &[(1, "Subtitles"), (3, "eng"), (22, "2048")]),
+                    (7, &[(1, "Subtitles"), (3, "fra"), (22, "0")]),
+                    (8, &[(1, "Subtitles"), (3, "eng"), (22, "0")]),
+                ],
+            ),
+            (1, &[(16, "01001.mpls")], &[(0, &[(1, "Video")]), (1, &[(1, "Audio"), (3, "eng"), (22, "0")])]),
+        ],
+    )
+}
+
 /// A movie's slim saved answer as a job folder keeps it (design part 8.4): id, title, original_title, release_date,
 /// original_language, runtime (None writes null), external_ids {imdb_id}, then `fetched_at` "2026-10-23", the fixed
 /// test date, so the copy is never stale (Ruling T4-R7). The IMDb ID is synthetic: `tt` and the TMDb ID in seven
