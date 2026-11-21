@@ -250,6 +250,32 @@ bare scan file, which carries no disc ID):
 A refusal prints `lazymkv-dev menu: error: <line>` on stderr, one line for each problem of the map, as
 `<path>: <problem>`.
 
+## How decide shows a map
+
+`lazymkv-dev decide ... --menu MAP` (`MAP` is a map folder or its `menu-map.json`) adds one last key, `menu`, to
+decide's document. It is evidence only: every other key is byte-identical to the document without `--menu`, and no
+verdict, role, plan or decision reads the map. Without `--menu` the key is absent; the engine never sets it, so its
+decide.json files are unchanged. The key is one of:
+
+- the block of the rip label's title (`core::menu::title_block`), its keys in this order: `map` (the map's slug),
+  `map_level`, `identity` (as `menu check`'s first line words it, `disc_id matches (<id>)` or `not checked:
+  <reason>`), `playlist` (the title's source file without `.mpls`), `starts` (play and the version, bonus and other
+  choices on that playlist, M3-3), `audio` and `subtitles` (per scan stream, the audio and shown subtitle choices whose
+  own number names it, by M3-1, each label with its `id`, `label`, `level` and `differs_from_play`), `subtitles_off`
+  (the subtitle choices that turn subtitles off, M3-4), `other_playlists` (every other playlist the map's effects
+  name, with how many entries name it and whether it is a title of the scan, M3-2), `out_of_range` (the ids of the
+  own-kind choices whose number names no stream, M3-5) and `no_effect` (the ids of the entries without an effect);
+- `{"skipped": "the map is for another disc: disc_id differs: the map's is <a>, the disc's is <b>"}` when the map's
+  `disc_id_sha1` differs from the recording's `meta.json` `disc_id` (M3-6);
+- `{"skipped": "<sentence>"}` when the scan cannot be typed, or `the scan lists no title <n>`.
+
+A block's `label` is `Choice::shown_label`, the whole section joined to the label (`SETUP > AUDIO: Language B 5.1`),
+not the measurement's text (innermost heading only, white space collapsed, `|` written `/`; design 5.4a).
+
+A map that cannot be read or does not pass the format's rules, or a `meta.json` that cannot be read, exits 2 with
+`lazymkv-dev decide: error: <line>`, one line for each problem. `lazymkvctl` relays a relative `--menu` made absolute
+against its own folder, as it does decide's other path flags (V10).
+
 ## Shown labels
 
 lazymkv shows a choice as `SECTION: label` (the whole section, or the label alone when the section is empty;

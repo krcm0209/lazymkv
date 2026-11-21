@@ -157,7 +157,8 @@ fn the_relay_reads_plans_and_decides_own_flag_lists() {
     );
     assert_eq!(
         lazymkv_dev::cmd::decide::FLAGS,
-        ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence"]
+        ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence",
+         "--menu"]
     );
 }
 

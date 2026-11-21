@@ -231,6 +231,7 @@ pub(crate) fn engine_decide_inputs(
         file,
         library,
         overrides: None,
+        menu: None,
     })
 }
 
