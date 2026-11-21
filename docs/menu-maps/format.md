@@ -330,3 +330,17 @@ Added on 2026-11-21:
 - `Choice::shown_label` is the whole section joined to the label (`SETUP > AUDIO: Language B 5.1`): what a person is
   shown. It is not the measurement's text (innermost heading only, white space collapsed, `|` written `/`; design
   5.4a).
+
+## Tests and acceptance
+
+Recorded on 2026-11-21 for the branch that adds the reader, `menu show`, `menu check` and `decide --menu`.
+
+- Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline` (CI's macOS command), run on macOS with
+  toolchain 1.100.0: 3374 passed, 0 failed, 5 ignored, in 57 result lines, with no warning. 48 tests print `skipped:`
+  because the evidence clone is absent, as in CI. `main` before the branch gave 3327 passed with the same command, so
+  the branch adds 47 tests: 22 in `core::menu`, 18 in the `menu` command, 6 in decide and 1 in lazymkvctl. Nothing has
+  run on Windows or Linux yet; that is CI's part once the branch is pushed.
+- Acceptance on the 13 real maps, each against its recording's scan and `meta.json` (counts only): `menu check` exits 0
+  on 13 of 13 and says `identity: disc_id matches` on 13 of 13; `menu show` exits 0 on 13 of 13. Summed over the maps:
+  entries 340, on_scan 244, not_in_scan 96 (on 7 maps), no_effect 0, warnings 0, failed 0.
+- The two shared fixtures are byte-identical to the writer's copies.
