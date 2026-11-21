@@ -43,6 +43,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("ocr-compare", cmd::ocr_compare::run as Command, "<tess> <ocrs> [--rec DIR] [--tag CODE]"),
     ("golden", cmd::golden::run as Command, "write|check [--evidence DIR] [--text DIR]"),
     ("census", cmd::census::run as Command, "[--evidence DIR]"),
+    ("menu", cmd::menu::run as Command, "show <map> | check <map> --scan <slug|recording dir|scan file> [--evidence DIR]"),
     #[cfg(feature = "ocr-trial")]
     ("ocr-trial", cmd::ocr_trial::run as Command, cmd::ocr_trial::SYNOPSIS),
 ];

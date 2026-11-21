@@ -238,6 +238,18 @@ playlists and numbers only, never a label. Its last line is
   (`OUT OF RANGE (<k> audio streams)`, `OUT OF RANGE (<k> subtitle streams)`); plus 1 when the map's
   `disc_id_sha1` differs from the disc's ID. An identity that is not checked is no failure (M3-6).
 
+## Exit codes
+
+`lazymkv-dev menu show <map>` and `lazymkv-dev menu check <map> --scan <slug|recording dir|scan file> [--evidence DIR]`
+(`<map>` is a map folder or its `menu-map.json`; `--scan` is a recording folder, a slug under the evidence clone, or a
+bare scan file, which carries no disc ID):
+- `menu show`: 0 when the map is printed, 2 for an argument or map problem.
+- `menu check`: 0 when nothing failed (`failed=0`), 1 otherwise, 2 for an argument, map or scan problem, 3 for a slug
+  without the evidence clone.
+
+A refusal prints `lazymkv-dev menu: error: <line>` on stderr, one line for each problem of the map, as
+`<path>: <problem>`.
+
 ## Shown labels
 
 lazymkv shows a choice as `SECTION: label` (the whole section, or the label alone when the section is empty;
