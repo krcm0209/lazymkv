@@ -3,7 +3,7 @@
 A menu map is one JSON file per disc that lists the choices of the disc's menu: what the menu calls each choice, and
 which playlist and streams choosing it selects. It is made outside lazymkv, by the map writer (`menumap`, Python) and
 its replay, and lazymkv reads it with `core::menu` (`read`, `validate`). This document is the format both sides keep
-to. The design behind it is the menu maps design (`docs/superpowers/specs/2026-11-17-menu-maps-design.md`), sections
+to. The design behind it is the menu maps design of 2026-11-17 (kept with the spike, not in this repository), sections
 3, 5.1, 5.3 and 5.4. Every example here is made up.
 
 ## What a map is and is not
@@ -39,7 +39,8 @@ them, and one trailing newline.
 - `slug` (string): the disc's slug, `^[a-z0-9][a-z0-9-]*$`.
 - `disc_id_sha1` (string or null): the capture's disc ID (see Identity).
 - `listing_sig` (string or null): the capture's listing signature (see Identity).
-- `format` (string or null): the disc format, `uhd`, `bd` or `dvd`.
+- `format` (string or null): the disc format, `uhd`, `bd` or `dvd` by the writer's convention (lazymkv does not check
+  the word).
 
 `made` (object, free-form for lazymkv): who made the map (`by`, for example `agent-explorer`), who checked it
 (`checked_by`), the `date`, the driver's hash (`driver_sha256`), the `libbluray` and `java` versions, and the player
@@ -61,14 +62,19 @@ may give another map.
 - `section` (string): the section the choice sits in, as printed, headings joined with ` > ` (may be empty).
 - `label` (string): the label as read.
 - `label_image` (relative path or null): the crop of the label as drawn.
-- `kind` (word), `surface` (word), `applies` (word): see the word lists.
+- `kind` (word), `surface` (word): see the word lists.
 - `script` (relative path): the key presses of the choice.
+- `applies` (word): see the word lists.
 - `effect` (effect or null).
-- `differs_from_play` (true, false or null): whether the effect differs from plain Play's (by `effects_equal`).
+- `differs_from_play` (true, false or null): whether the effect differs from plain Play's (by `effects_equal`). The
+  writer leaves it null when either effect is null; lazymkv checks it only when both effects are objects, so it does
+  not check that convention.
 - `check` (check).
 
 An effect (object):
-- `playlist` (string): the playlist as the disc names it, five digits (`00800`).
+- `playlist` (string): the playlist as the disc names it, five digits (`00800`) by the writer's convention; lazymkv
+  takes any string. A playlist that is not, ASCII case ignored, the stem of a scan title's source file
+  (`<playlist>.mpls`) is reported `not in the scan`.
 - `audio` (integer or null): the audio stream the player selects, counted from 1; null for no audio.
 - `subtitle` (integer or null): the subtitle stream, counted from 1; null for none.
 - `subtitle_shown` (true or false): whether that subtitle is shown. With subtitles off, `subtitle` is a leftover
@@ -114,66 +120,82 @@ A short made-up choice:
 - `surface`: `main` (the main menu), `popup` (the pop-up menu), `other` (anywhere else, such as a bonus section).
 - `level`, a ladder from low to high: `read` (one reader); `checked` (a second reader read the same label and its
   replay gave the same effect); `replayed` (checked, and the deterministic replay agreed at least 3 times,
-  `REPLAYS_NEEDED`). A choice whose two readings differ stays `read` however well it replays. A map's own level is the
-  lowest of play's and every choice's (`read` with no choices) and is only a summary.
+  `REPLAYS_NEEDED`). By the writer's convention a choice whose two readings differ stays `read` however well it
+  replays; lazymkv does not compare `label_reread` with the level. A map's own level is the lowest of play's and every
+  choice's (`read` with no choices), as the writer's `map_level` counts it (design 5.1 names the choices only), and is
+  only a summary.
 - `applies`: `at-play` (takes effect when Play is chosen afterwards), `immediately` (at once).
 
 ## The writer's rules
 
-`validate` gives every problem, in this order, as one sentence each (empty when the map is valid). A value is quoted
-as Python's `repr` quotes it (`'text'`, `None`, `True`). "A relative path" is a non-empty string that does not start
-with `/` or `\` or a drive letter (`C:`) and has no `..` part split on `/` and `\`; the check is on the string, the
-same on every system. "A label" is a non-empty string with no control character and no line or paragraph separator
-(U+2028, U+2029). "An integer" is never a float (`1.0`) and never true or false. Each rule names the shared case that
-pins it (the cases file, `crates/core/src/menu/fixtures/menu-map-v1-cases.json`, against the made-up map
-`menu-map-v1.json` beside it; both readers must give each case's list exactly).
+`validate` gives every problem as one sentence each, in the writer's order, which is the order below (empty when the
+map is valid). A value is quoted as Python's `repr` quotes it (`'text'`, `None`, `True`). "A relative path" is a
+non-empty string that does not start with `/` or `\` or a drive letter (`C:`) and has no `..` part split on `/` and
+`\`; the check is on the string, the same on every system. "A label" is a non-empty string with no control character
+and no line or paragraph separator (U+2028, U+2029). "An integer" is never a float (`1.0`) and never true or false.
+Each rule names the shared case that pins it (the cases file, `crates/core/src/menu/fixtures/menu-map-v1-cases.json`,
+against the made-up map `menu-map-v1.json` beside it). Both validators, the writer's `menumap.validate` and lazymkv's
+`core::menu::validate`, give each case's list exactly; lazymkv's `read` gives the same list on every case but
+`format_wrong`, which it answers with the version sentence instead (M3-8).
 
-- The map is a JSON object — `not_an_object`.
+Every key listed under Fields for `start`, `play` and a choice must be present: a missing one is `<place>: "<key>" is
+missing` (`<place>` is `start`, `play`, or `choices[<i>] (<id>)`, `choices[<i>]` while the choice has no valid id), at
+that key's rule below (`id_missing`, `play_check_missing`; the other keys have no shared case). An effect's four keys
+and a check's six have their own sentences (below). `disc`'s keys other than `slug` may be left out and are read as
+null; `made` is free-form.
+
+- The map is a JSON object — `not_an_object`; nothing more is said of a map that is not.
 - `format` is `lazymkv menu map v1` — `format_wrong`; a null or missing format prints `None` — `three_problems_listed`.
-- `disc`, `made`, `start`, `play`, `choices`, `not_mapped` and `quirks` are present — `section_missing`.
-- Each has its type: an object, or a list for `choices`, `not_mapped` and `quirks` — `section_wrong_type`,
-  `quirks_wrong_type`.
-- `disc.slug` is present — `slug_missing`.
-- `disc.slug` matches `^[a-z0-9][a-z0-9-]*$` — `slug_pattern`.
-- `start.script` is null or a relative path — `start_script_absolute`, `start_script_drive`, `start_script_dotdot`.
-- `start.passed` is a list of strings — `start_passed_not_strings`.
-- `start.seconds_to_menu` is a finite number or null, never true or false — `start_seconds_bool`.
-- `play.label` is a label — `play_label_empty`, `play_label_control`.
-- `play.check` is present — `play_check_missing`.
-- `play.script` is null only when `play.effect` is null too — `play_script_null_effect_not`.
-- `play.script` and `play.effect` are null together only at level `read` with a note — `play_both_null_not_read`.
-- `play.effect` is null only at level `read` with a note — `play_effect_null_not_read`.
-- An effect is an object — `effect_not_object`.
-- An effect has all four keys — `effect_key_missing`.
-- An effect's `playlist` is a string, `audio` and `subtitle` integers or null, `subtitle_shown` true or false —
-  `effect_types`, `effect_audio_float`, `effect_audio_bool`.
-- A check is an object — `check_not_object`.
-- A check has all six keys — `check_key_missing`.
-- A check's `level` is one of the ladder's words — `level_unknown`.
-- Level `replayed` needs `replays` an integer of at least 3 and `replays_equal` true — `replayed_few_replays`,
-  `replayed_replays_not_equal`.
-- A check's `player` is true or false — `player_not_bool`.
-- A check's `note` is a string — `note_not_string`.
-- A choice is an object — `choice_not_object`.
-- A choice's `id` is present — `id_missing`.
-- A choice's `id` is `c` and three digits — `id_pattern`.
-- No `id` is used twice (the later choice is named) — `id_twice`.
-- A choice's `section` is a string — `section_not_string`.
-- A choice's `label` is a label — `label_not_string`, `label_line_separator`.
-- A choice's `kind`, `surface` and `applies` are words of their lists — `kind_surface_applies_unknown`.
-- A choice's `label_image` is null only at level `read` — `label_image_null_above_read`.
-- A choice's `label_image`, when not null, is a relative path — `label_image_dotdot`.
-- A choice's `script` is a relative path, never null — `choice_script_null`, `script_backslash`,
-  `script_backslash_dotdot`, `script_empty`.
-- A choice's `effect` is null only at level `read` with a note — `choice_effect_null_not_read`.
-- When the choice's effect and play's are both objects, `differs_from_play` is true or false — `differs_not_bool`.
-- ... and it is the opposite of `effects_equal` of the two (compared as Python compares the raw values, so `1`,
-  `1.0` and `true` are equal and a missing key is null) — `differs_wrong`, and the second sentence of
-  `effect_key_missing` and `effect_types`.
+- Then the seven sections in this order: `disc`, `made`, `start`, `play`, `choices`, `not_mapped`, `quirks`. Each is
+  present and has its type, an object, or a list for `choices`, `not_mapped` and `quirks` — `section_missing`,
+  `section_wrong_type`, `quirks_wrong_type`. A section's own rules come right after its presence and type, before the
+  next section's.
+- `disc`: `slug` is present — `slug_missing`; and matches `^[a-z0-9][a-z0-9-]*$` — `slug_pattern`.
+- `start`, in this order: `script` is null or a relative path — `start_script_absolute`, `start_script_drive`,
+  `start_script_dotdot`; `passed` is a list of strings — `start_passed_not_strings`; `seconds_to_menu` is a finite
+  number or null, never true or false — `start_seconds_bool`.
+- `play`, in this order:
+  - `label` is a label — `play_label_empty`, `play_label_control`;
+  - `check` is present — `play_check_missing`; and passes the check rules (below);
+  - `script` and `effect` are present; `script`, when not null, is a relative path (no shared case);
+  - `script` is null only when `effect` is null too — `play_script_null_effect_not`; both are null together only at
+    level `read` with a note — `play_both_null_not_read`; `effect` is null only at level `read` with a note —
+    `play_effect_null_not_read`;
+  - an `effect` that is not null passes the effect rules (below).
+- Each choice of `choices` in turn, its rules in this order:
+  - it is an object — `choice_not_object`;
+  - `id` is present — `id_missing`; is `c` and three digits — `id_pattern`; and is not used twice (the later choice is
+    named) — `id_twice`;
+  - `section` is a string — `section_not_string`;
+  - `label` is a label — `label_not_string`, `label_line_separator`;
+  - `kind`, `surface` and `applies`, in that order, are words of their lists — `kind_surface_applies_unknown`;
+  - `check` is present and passes the check rules (below) — `check_not_object` and the other check cases;
+  - `label_image` is null only at level `read` — `label_image_null_above_read`; when not null it is a relative path
+    — `label_image_dotdot`;
+  - `script` is a relative path, never null — `choice_script_null`, `script_backslash`, `script_backslash_dotdot`,
+    `script_empty`;
+  - `effect` is null only at level `read` with a note — `choice_effect_null_not_read`; when not null it passes the
+    effect rules (below);
+  - `differs_from_play` is present; when the choice's effect and play's are both objects, it is true or false —
+    `differs_not_bool`; and it is the opposite of `effects_equal` of the two (compared as Python compares the raw
+    values, so `1`, `1.0` and `true` are equal and a missing key is null) — `differs_wrong`, and the last sentence of
+    `effect_key_missing` and `effect_types`.
 - `not_mapped` is a list of strings — `not_mapped_not_strings`.
+- `quirks` is a list (its items are free-form) — `quirks_wrong_type`.
 - Every problem is listed, not only the first — `three_problems_listed`.
-- The writer only: a value that cannot be saved as JSON (not finite, a lone surrogate) is one more sentence, `map
-  cannot be saved: ...`. No such value reaches lazymkv's reader (see Known reader differences).
+- The writer only, last: a value that cannot be saved as JSON (not finite, a lone surrogate) is one more sentence,
+  `map cannot be saved: ...`. No such value reaches lazymkv's reader (see Known reader differences).
+
+The check rules, for play's check and each choice's, in this order: the check is an object — `check_not_object`; it
+has all six keys (one sentence for each missing key) — `check_key_missing`; its `level` is one of the ladder's words —
+`level_unknown`; level `replayed` needs `replays` an integer of at least 3 and `replays_equal` true —
+`replayed_few_replays`, `replayed_replays_not_equal`; its `player` is true or false — `player_not_bool`; its `note` is
+a string — `note_not_string`.
+
+The effect rules, for play's effect and each choice's, in this order: the effect is an object — `effect_not_object`;
+it has all four keys (one sentence for each missing key) — `effect_key_missing`; its `playlist` is a string, `audio`
+and `subtitle` integers or null, and `subtitle_shown` true or false, in that order — `effect_types`,
+`effect_audio_float`, `effect_audio_bool`.
 
 ## The reader rules
 
@@ -221,7 +243,9 @@ scan is `not in the scan`, and its streams are not checked (M3-2).
 
 `menu check` prints the identity, then `listing_sig: not checked (lazymkv does not recompute it)`, then one line per
 entry (play first, then the choices in map order; one line per scan title of the entry's playlist) with ids,
-playlists and numbers only, never a label. Its last line is
+playlists and numbers only, never a label. A scan that lists no title (a file that is not a scan, or a `scan.txt`
+that is empty or holds no title) is refused before the check with `<scan path>: the scan lists no title`, exit 2, for
+a bare scan file and a recording's `scan.txt` alike. The check's last line is
 
     CHECK ok entries=10 on_scan=8 not_in_scan=1 no_effect=1 warnings=0 failed=0; streams of not_in_scan entries were not checked
 
@@ -231,40 +255,56 @@ playlists and numbers only, never a label. Its last line is
 - `not_in_scan`: the entries whose playlist is no title of the scan; their streams are not checked (M3-2), which the
   line's last words say.
 - `no_effect`: the entries without an effect (`<id>: no effect recorded`).
-- `warnings`, each one on each title's line: a subtitle that is off with a leftover number below 1 or above the subtitle count (M3-4); an
-  audio choice with audio null, or a subtitle choice shown with subtitle null (M3-5). A null number on another kind
-  of entry is no warning.
-- `failed`, each one on each title's line: an audio number, or a shown subtitle number, below 1 or above the count of its kind
-  (`OUT OF RANGE (<k> audio streams)`, `OUT OF RANGE (<k> subtitle streams)`); plus 1 when the map's
+- `warnings`, each one on each title's line: a subtitle that is off with a leftover number below 1 or above the
+  subtitle count (M3-4); an audio choice with audio null, or a subtitle choice shown with subtitle null (M3-5). A null
+  number on another kind of entry is no warning.
+- `failed`, each one on each title's line: an audio number, or a shown subtitle number, below 1 or above the count of
+  its kind (`OUT OF RANGE (<k> audio streams)`, `OUT OF RANGE (<k> subtitle streams)`); plus 1 when the map's
   `disc_id_sha1` differs from the disc's ID. An identity that is not checked is no failure (M3-6).
 
 ## Exit codes
 
-`lazymkv-dev menu show <map>` and `lazymkv-dev menu check <map> --scan <slug|recording dir|scan file> [--evidence DIR]`
-(`<map>` is a map folder or its `menu-map.json`; `--scan` is a recording folder, a slug under the evidence clone, or a
-bare scan file, which carries no disc ID):
+`lazymkv-dev menu show <map>` and `lazymkv-dev menu check <map> --scan <slug|recording dir|scan file>
+[--evidence DIR]` (`<map>` is a map folder or its `menu-map.json`; `--scan` is a recording folder, a slug under the
+evidence clone, or a bare scan file, which carries no disc ID):
 - `menu show`: 0 when the map is printed, 2 for an argument or map problem.
-- `menu check`: 0 when nothing failed (`failed=0`), 1 otherwise, 2 for an argument, map or scan problem, 3 for a slug
-  without the evidence clone.
+- `menu check`: 0 when nothing failed (`failed=0`), 1 otherwise, 2 for an argument, map or scan problem (a scan that
+  lists no title included), 3 for a slug without the evidence clone.
 
 A refusal prints `lazymkv-dev menu: error: <line>` on stderr, one line for each problem of the map, as
-`<path>: <problem>`.
+`<path>: <problem>`. A scan that cannot be typed or lists no title, or a `meta.json` that cannot be read, is one such
+line too; a scan file that cannot be read prints the system's error text, which names its path. A usage error (a
+missing, extra or unknown argument) prints a usage line first, then one line `lazymkv-dev menu: error: <message>`,
+`lazymkv-dev menu show: error: <message>` or `lazymkv-dev menu check: error: <message>`, as argparse words it.
 
 ## How decide shows a map
 
 `lazymkv-dev decide ... --menu MAP` (`MAP` is a map folder or its `menu-map.json`) adds one last key, `menu`, to
-decide's document. It is evidence only: every other key is byte-identical to the document without `--menu`, and no
+decide's document. It is evidence only: with a map that can be read, every other key and the exit code are those of
+the run without `--menu` (the other keys byte for byte), also when the recording's `meta.json` cannot be read, and no
 verdict, role, plan or decision reads the map. Without `--menu` the key is absent; the engine never sets it, so its
 decide.json files are unchanged. The key is one of:
 
-- the block of the rip label's title (`core::menu::title_block`), its keys in this order: `map` (the map's slug),
-  `map_level`, `identity` (as `menu check`'s first line words it, `disc_id matches (<id>)` or `not checked:
-  <reason>`), `playlist` (the title's source file without `.mpls`), `starts` (play and the version, bonus and other
-  choices on that playlist, M3-3), `audio` and `subtitles` (per scan stream, the audio and shown subtitle choices whose
-  own number names it, by M3-1, each label with its `id`, `label`, `level` and `differs_from_play`), `subtitles_off`
-  (the subtitle choices that turn subtitles off, M3-4), `other_playlists` (every other playlist the map's effects
-  name, with how many entries name it and whether it is a title of the scan, M3-2), `out_of_range` (the ids of the
-  own-kind choices whose number names no stream, M3-5) and `no_effect` (the ids of the entries without an effect);
+- the block of the rip label's title (`core::menu::title_block`), its keys in this order:
+  - `map` (the map's slug) and `map_level`;
+  - `identity`: the text after `identity: ` in `menu check`'s first line, `disc_id matches (<id>)` or `not checked:
+    <reason>`;
+  - `playlist`: the title's source file without `.mpls`, or null for a title without a source file;
+  - `starts`: play and the version, bonus and other choices on that playlist (M3-3), as labels;
+  - `audio`: a list of `{"stream", "labels"}`, one for each scan stream that an audio choice's own audio number names
+    (M3-1), sorted by `stream` (the scan stream number), the labels in map order;
+  - `subtitles`: the same for the shown subtitle choices and their subtitle numbers;
+  - `subtitles_off`: the subtitle choices that turn subtitles off (M3-4), as labels;
+  - `other_playlists`: every other playlist the map's effects name, as `{"playlist", "entries", "in_scan"}` (how many
+    entries name it, and whether it is a title of the scan, M3-2), in first-seen order, play first;
+  - `out_of_range`: the ids of the own-kind choices whose number names no stream (M3-5);
+  - `no_effect`: the ids of the entries without an effect.
+
+  A label is `{"id", "label", "level", "differs_from_play"}`, the same four keys in `starts`, in `subtitles_off` and in
+  each row's `labels`. Play's has the id `play`, play's label alone, its level and `differs_from_play` null; a
+  choice's has its id, its shown label, its level and its `differs_from_play` as the map says.
+- `{"skipped": "<path>: <problem>"}` when the recording's `meta.json` cannot be read, the line `menu check` would
+  refuse with;
 - `{"skipped": "the map is for another disc: disc_id differs: the map's is <a>, the disc's is <b>"}` when the map's
   `disc_id_sha1` differs from the recording's `meta.json` `disc_id` (M3-6);
 - `{"skipped": "<sentence>"}` when the scan cannot be typed, or `the scan lists no title <n>`.
@@ -272,9 +312,9 @@ decide.json files are unchanged. The key is one of:
 A block's `label` is `Choice::shown_label`, the whole section joined to the label (`SETUP > AUDIO: Language B 5.1`),
 not the measurement's text (innermost heading only, white space collapsed, `|` written `/`; design 5.4a).
 
-A map that cannot be read or does not pass the format's rules, or a `meta.json` that cannot be read, exits 2 with
-`lazymkv-dev decide: error: <line>`, one line for each problem. `lazymkvctl` relays a relative `--menu` made absolute
-against its own folder, as it does decide's other path flags (V10).
+A map that cannot be read or does not pass the format's rules exits 2 with `lazymkv-dev decide: error: <line>`, one
+line for each problem, and no document. `lazymkvctl` relays a relative `--menu` made absolute against its own folder,
+as it does decide's other path flags (V10).
 
 ## Shown labels
 
@@ -284,17 +324,23 @@ only the innermost heading, collapses white space and writes `|` as `/`.
 
 ## Known reader differences
 
-Both readers give the same list on every case of the shared file (M3-7). Outside it they differ here, as observed
-with lazymkv's reader:
+Both validators (`menumap.validate` and `core::menu::validate`) give the same list on every case of the shared file
+(M3-7); lazymkv's `read` gives it too, but for `format_wrong`, which it answers with the version sentence (M3-8).
+Outside the shared file the two readers differ here, as observed with lazymkv's reader:
 - A leading byte-order mark: the Python loader refuses the file; the Rust reader drops the mark and reads on.
 - A lone-surrogate escape (`"\ud800"`), `NaN` or `Infinity`: Python reads them and its validate reports them (`map
   cannot be saved`); the Rust reader gives `not JSON: ...`. A number too large for a float (`1e400`) is the same
   case: Python reads an infinity, the Rust reader gives `not JSON: number out of range ...`.
-- Integers. Within the signed 64-bit range both read them. Above it but within the unsigned 64-bit range
-  (`9223372036854775808` to `18446744073709551615`) the writer's rules pass in both, and the Rust reader then refuses
-  with its reader sentence (`invalid value: integer ..., expected i64`) where the field is typed, such as `audio`.
-  Beyond the unsigned 64-bit range, or below the signed one, the Rust JSON library reads the number as a float, so
-  validate reports a type error (`effect audio is not a number or null`); Python accepts it as an integer.
+- `-0`: Python reads the integer 0; the Rust JSON library reads the float -0.0. Where validate checks an integer it
+  then reports a type error (`effect audio is not a number or null` for an `audio` of `-0`); in a check's `replays`
+  it gives the replayed sentence at level `replayed`, and below that level the reader refuses it with its reader
+  sentence.
+- Integers. Within the signed 64-bit range both read them as integers, but for `-0` (above). Above it but within the
+  unsigned 64-bit range (`9223372036854775808` to `18446744073709551615`) the writer's rules pass in both, and the
+  Rust reader then refuses with its reader sentence (`invalid value: integer ..., expected i64`) where the field is
+  typed, such as `audio`. Beyond the unsigned 64-bit range, or below the signed one, the Rust JSON library reads the
+  number as a float, so validate reports a type error (`effect audio is not a number or null`); Python accepts it as
+  an integer.
 
 ## Rulings
 
@@ -335,11 +381,12 @@ Added on 2026-11-21:
 
 Recorded on 2026-11-21 for the branch that adds the reader, `menu show`, `menu check` and `decide --menu`.
 
-- Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline` (CI's macOS command), run on macOS with
-  toolchain 1.100.0: 3374 passed, 0 failed, 5 ignored, in 57 result lines, with no warning. 48 tests print `skipped:`
-  because the evidence clone is absent, as in CI. `main` before the branch gave 3327 passed with the same command, so
-  the branch adds 47 tests: 22 in `core::menu`, 18 in the `menu` command, 6 in decide and 1 in lazymkvctl. Nothing has
-  run on Windows or Linux yet; that is CI's part once the branch is pushed.
+- Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline` (CI's macOS command, run here with
+  `--offline`), run on this Mac with toolchain 1.100.0: 3381 passed, 0 failed, 5 ignored, in 57 result lines, with no
+  warning. 48 tests print `skipped:` on this Mac because the evidence clone is absent; CI's counts differ per system.
+  `main` before the branch gave 3327 passed with the same command, so the branch adds 54 tests: 26 in `core::menu`, 19
+  in the `menu` command, 8 in decide and 1 in lazymkvctl. Nothing has run on Windows or Linux yet; that is CI's part
+  once the branch is pushed.
 - Acceptance on the 13 real maps, each against its recording's scan and `meta.json` (counts only): `menu check` exits 0
   on 13 of 13 and says `identity: disc_id matches` on 13 of 13; `menu show` exits 0 on 13 of 13. Summed over the maps:
   entries 340, on_scan 244, not_in_scan 96 (on 7 maps), no_effect 0, warnings 0, failed 0.

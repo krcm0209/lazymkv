@@ -18,6 +18,9 @@ const CHECK_KEYS: [&str; 6] = ["label_reread", "level", "replays", "replays_equa
 /// The slug's pattern as the sentences spell it.
 const SLUG: &str = "^[a-z0-9][a-z0-9-]*$";
 
+/// The sentence of play and of a choice whose effect is null above level `read` or without a note.
+const EFFECT_NULL_UNLESS_READ: &str = "effect may be null only at level 'read' with a note";
+
 /// An integer, never a float or a bool (Python's `isinstance(v, int) and not isinstance(v, bool)`).
 fn is_int(value: &Value) -> bool {
     matches!(value, Value::Number(number) if number.is_i64() || number.is_u64())
@@ -203,7 +206,6 @@ fn validate_play(play: &Map<String, Value>, errors: &mut Vec<String>) {
             errors.push(format!("{place}: script {problem}"));
         }
     }
-    let effect_null_unless_read = "effect may be null only at level 'read' with a note";
     match (script, effect) {
         (Some(script), Some(effect)) => {
             if script.is_null() && effect.is_null() {
@@ -215,11 +217,11 @@ fn validate_play(play: &Map<String, Value>, errors: &mut Vec<String>) {
             } else if script.is_null() {
                 errors.push(format!("{place}: script is null but the effect is not"));
             } else if effect.is_null() && !read_with_note(level, note) {
-                errors.push(format!("{place}: {effect_null_unless_read}"));
+                errors.push(format!("{place}: {EFFECT_NULL_UNLESS_READ}"));
             }
         }
         (None, Some(effect)) if effect.is_null() && !read_with_note(level, note) => {
-            errors.push(format!("{place}: {effect_null_unless_read}"));
+            errors.push(format!("{place}: {EFFECT_NULL_UNLESS_READ}"));
         }
         _ => {}
     }
@@ -288,7 +290,7 @@ fn validate_choice(
     if let Some(effect) = effect {
         if effect.is_null() {
             if !read_with_note(level, note) {
-                errors.push(format!("{place}: effect may be null only at level 'read' with a note"));
+                errors.push(format!("{place}: {EFFECT_NULL_UNLESS_READ}"));
             }
         } else {
             check_effect(effect, &place, errors);

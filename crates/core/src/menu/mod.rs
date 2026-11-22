@@ -174,8 +174,8 @@ pub struct Play {
 
 /// One menu choice (design 5.1): its id (`c` and three digits), the section it sits in, the label as read and the
 /// crop of it as drawn (null only at level `read`), its kind, surface, key-press script and when it applies, its
-/// effect (null only at level `read` with a note), whether that effect differs from plain Play (null when either
-/// effect is null), and its check.
+/// effect (null only at level `read` with a note), whether that effect differs from plain Play (null when the writer
+/// could not compare; lazymkv checks it only when both effects are objects), and its check.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Choice {
     pub id: String,
@@ -251,8 +251,8 @@ pub fn effects_equal(a: &Effect, b: &Effect) -> bool {
         && (!a.subtitle_shown || a.subtitle == b.subtitle)
 }
 
-/// The map's own level, a summary only: the lowest of play's and every choice's; `Read` for a map with no choices.
-/// Design 5.1.
+/// The map's own level, a summary only: the lowest of play's and every choice's; `Read` for a map with no choices. As
+/// the writer's `map_level` counts it (design 5.1 names the choices only).
 pub fn map_level(map: &MenuMap) -> Level {
     if map.choices.is_empty() {
         return Level::Read;

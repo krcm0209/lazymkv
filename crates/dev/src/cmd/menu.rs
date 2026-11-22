@@ -1,8 +1,9 @@
 //! `lazymkv-dev menu show <map> | check <map> --scan <scan> [--evidence DIR]`: menu maps at the command line (menu maps
 //! design 5.4; the format and rulings M3-1 to M3-8 are docs/menu-maps/format.md). `show` prints a map, labels as they
-//! are; `check` ties it to a scanned disc and prints ids, playlists and numbers only, never a label. Exit: show 0, or 2;
-//! check 0 when nothing failed, 1 otherwise; 2 for an argument, map or scan problem; 3 for a slug without the evidence
-//! clone. Refusals print `lazymkv-dev menu: error: <line>`, one per problem. Evidence only: no decision reads a map.
+//! are; `check` ties it to a scanned disc and prints ids, playlists and numbers only, never a label. Exit: show 0, or
+//! 2; check 0 when nothing failed, 1 otherwise; 2 for an argument, map or scan problem; 3 for a slug without the
+//! evidence clone. Refusals print `lazymkv-dev menu: error: <line>`, one per problem. Evidence only: no decision reads
+//! a map.
 
 use crate::evidence::{read_file_text, resolve_recording, Ctx, Recording, Refused};
 use crate::{usage_error, Args};
@@ -14,7 +15,6 @@ use lazymkv_core::recording::files::Meta;
 use lazymkv_core::recording::{py_float_repr, py_repr_str, read_json, read_text, text_mode, Encoding, Errors, Tree};
 use lazymkv_core::robot::parse;
 use std::io::Write;
-use std::path::Path;
 
 /// The command's name as typed.
 const NAME: &str = "menu";
@@ -61,9 +61,9 @@ optional arguments:
                   or a bare scan file (which carries no disc ID, so the map's is not checked)
   --evidence DIR  the evidence clone (default: LAZYMKV_EVIDENCE, else corpus/owner)
 
-exit status: 0 when nothing failed; 1 when a stream the map names is not on the scanned disc or the map is of another
-disc; 2 for an argument error, or a map or scan that cannot be used; 3 when a slug is given and the evidence clone is
-absent.
+exit status: 0 when nothing failed; 1 when an audio or shown subtitle number is outside its scan title's streams, or
+the map is of another disc (a playlist the scan does not list is reported, not failed); 2 for an argument error, or a
+map or scan that cannot be used; 3 when a slug is given and the evidence clone is absent.
 ";
 
 /// A refusal with exit code 2.
@@ -72,13 +72,14 @@ fn refused(line: String) -> Refused {
 }
 
 /// The map at `given`: the file `<given>/menu-map.json` when `given` is a folder, else the file itself; the text of the
-/// map's path as it is shown (the path as given, joined to the file name for a folder) and the map. The file is UTF-8
-/// with an optional byte-order mark, read strictly. Every problem of `menu::read` becomes one line `<shown>: <problem>`
-/// in the refusal (code 2), the lines joined with '\n'.
+/// map's path as it is shown (the path as given; for a folder, the path as given without its trailing separators,
+/// `/` and the file name, `/` on every system as the crate's other shown paths) and the map. The file is UTF-8 with an
+/// optional byte-order mark, read strictly. Every problem of `menu::read` becomes one line `<shown>: <problem>` in the
+/// refusal (code 2), the lines joined with '\n'.
 pub(crate) fn read_map(ctx: &Ctx, given: &str) -> Result<(String, MenuMap), Refused> {
     let path = ctx.abs(given);
     let (path, shown) = if path.is_dir() {
-        (path.join(FILE_NAME), Path::new(given).join(FILE_NAME).to_string_lossy().into_owned())
+        (path.join(FILE_NAME), format!("{}/{FILE_NAME}", given.trim_end_matches(['/', '\\'])))
     } else {
         (path, given.to_string())
     };
@@ -101,7 +102,8 @@ pub(crate) fn disc_id_of(rec: &Recording) -> Result<DiscId, Refused> {
     if !rec.tree.is_file(&key) {
         return Ok(DiscId::Absent(NO_META.to_string()));
     }
-    let meta: Meta = read_json(&rec.tree, &key).map_err(|problem| refused(format!("{}: {problem}", rec.tree.display(&key))))?;
+    let meta: Meta =
+        read_json(&rec.tree, &key).map_err(|problem| refused(format!("{}: {problem}", rec.tree.display(&key))))?;
     Ok(match meta.disc_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
         Some(id) => DiscId::Known(id.to_string()),
         None => DiscId::Absent(META_WITHOUT_ID.to_string()),
@@ -109,8 +111,14 @@ pub(crate) fn disc_id_of(rec: &Recording) -> Result<DiscId, Refused> {
 }
 
 /// The typed disc of a scan's text (spec 9.4), read through text mode; `disc::disc`'s refusal is prefixed by `shown`.
+/// A disc with no title is refused too, `<shown>: the scan lists no title`: the robot reader skips every line it does
+/// not know, so a file that is not a scan, or an empty scan.txt, would otherwise pass with nothing checked.
 fn typed_disc(text: &str, shown: &str) -> Result<Disc, Refused> {
-    disc(&parse(&text_mode(text))).map_err(|sentence| refused(format!("{shown}: {sentence}")))
+    let typed = disc(&parse(&text_mode(text))).map_err(|sentence| refused(format!("{shown}: {sentence}")))?;
+    if typed.titles.is_empty() {
+        return Err(refused(format!("{shown}: the scan lists no title")));
+    }
+    Ok(typed)
 }
 
 /// The scanned disc `--scan` names and its ID: a bare scan file (`ctx.abs(scan).is_file()`; its ID is absent, with the
@@ -143,12 +151,13 @@ fn number(n: Option<i64>) -> String {
     n.map_or_else(|| "none".to_string(), |n| n.to_string())
 }
 
-/// What an entry selects: `playlist P, audio A, subtitle S shown|off`, or `no effect (<note>)`.
+/// What an entry selects: `playlist P, audio A, subtitle S shown|off` (P is `menu::playlist_text`), or `no effect
+/// (<note>)`.
 fn effect_text(effect: Option<&Effect>, note: &str) -> String {
     match effect {
         Some(e) => format!(
             "playlist {}, audio {}, subtitle {} {}",
-            e.playlist,
+            menu::playlist_text(&e.playlist),
             number(e.audio),
             number(e.subtitle),
             if e.subtitle_shown { "shown" } else { "off" }
@@ -157,7 +166,17 @@ fn effect_text(effect: Option<&Effect>, note: &str) -> String {
     }
 }
 
-/// The lines `menu show` prints, labels as they are.
+/// A choice's shown label as `menu show` prints it: as it is, or quoted and escaped (`py_repr_str`) when it holds a
+/// control character (the writer's rules keep them out of a label, not out of a section), so it cannot break a line.
+fn shown_label_text(shown: String) -> String {
+    if shown.chars().any(char::is_control) {
+        py_repr_str(&shown)
+    } else {
+        shown
+    }
+}
+
+/// The lines `menu show` prints, labels as they are (a shown label with a control character escaped).
 fn show_lines(map: &MenuMap) -> Vec<String> {
     let made = |key: &str| map.made.get(key).and_then(serde_json::Value::as_str).unwrap_or("unknown");
     let seconds = map.start.seconds_to_menu.map_or_else(|| "unknown".to_string(), py_float_repr);
@@ -193,7 +212,7 @@ fn show_lines(map: &MenuMap) -> Vec<String> {
             choice.kind.word(),
             choice.surface.word(),
             choice.applies.word(),
-            choice.shown_label(),
+            shown_label_text(choice.shown_label()),
             effect_text(choice.effect.as_ref(), &choice.check.note),
             same,
             choice.check.level.word()
@@ -213,7 +232,9 @@ fn run_show(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Write
     let given = match words.as_slice() {
         [] => return usage_error(err, "menu show", SHOW_USAGE, "the following arguments are required: map"),
         [given] => given,
-        [_, extra @ ..] => return usage_error(err, NAME, USAGE, &format!("unrecognized arguments: {}", extra.join(" "))),
+        [_, extra @ ..] => {
+            return usage_error(err, NAME, USAGE, &format!("unrecognized arguments: {}", extra.join(" ")));
+        }
     };
     match read_map(ctx, given) {
         Ok((_, map)) => {
@@ -280,7 +301,8 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         "show" => return run_show(ctx, rest, out, err),
         "check" => return run_check(ctx, rest, out, err),
         other => {
-            let message = format!("argument command: invalid choice: {} (choose from 'show', 'check')", py_repr_str(other));
+            let message =
+                format!("argument command: invalid choice: {} (choose from 'show', 'check')", py_repr_str(other));
             return usage_error(err, NAME, USAGE, &message);
         }
     };
@@ -294,9 +316,10 @@ mod tests {
     use super::{disc_id_of, read_map, run};
     use crate::evidence::{resolve_recording, Ctx, Refused};
     use crate::testutil::{call, printed, Scratch, ScratchExt};
+    use lazymkv_core::disc::disc;
     use lazymkv_core::menu::{self, DiscId, FILE_NAME, FIXTURE, META_WITHOUT_ID, NO_META};
+    use lazymkv_core::robot::parse;
     use lazymkv_core::testsupport::{menu_scan_text, scan_text};
-    use std::path::Path;
 
     /// The made-up map's `disc.disc_id_sha1`.
     const FIXTURE_ID: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
@@ -321,9 +344,9 @@ mod tests {
         call(run, &Ctx::for_test(&tmp.0), args)
     }
 
-    /// The path of the map file as `read_map` shows it for the folder `dir`.
+    /// The path of the map file as `read_map` shows it for the folder `dir`: joined with `/` on every system.
     fn shown(dir: &str) -> String {
-        Path::new(dir).join(FILE_NAME).to_string_lossy().into_owned()
+        format!("{dir}/{FILE_NAME}")
     }
 
     #[test]
@@ -360,7 +383,12 @@ mod tests {
         let tmp = world("menu-show-unknown", None);
         let whole = FIXTURE.replacen("\"seconds_to_menu\": 12.5", "\"seconds_to_menu\": 13", 1);
         let bare = whole.replacen("\"seconds_to_menu\": 13", "\"seconds_to_menu\": null", 1);
-        let bare = bare.replacen("\"format\": \"uhd\"", "\"format\": null", 1).replacen("\"script\": \"scripts/start.txt\"", "\"script\": null", 1);
+        let bare = bare
+            .replacen("\"format\": \"uhd\"", "\"format\": null", 1)
+            .replacen("\"script\": \"scripts/start.txt\"", "\"script\": null", 1);
+        let mut bare: serde_json::Value = serde_json::from_str(&bare).unwrap();
+        bare["made"] = serde_json::json!({});
+        let bare = bare.to_string();
         assert!(menu::read(&whole).is_ok() && menu::read(&bare).is_ok());
         tmp.write("whole.json", whole);
         tmp.write("bare.json", bare);
@@ -371,7 +399,33 @@ mod tests {
         assert_eq!(code, 0);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "map made-up-1: format unknown, level read, 9 choices");
+        assert_eq!(lines[1], "made by unknown, checked by unknown, unknown");
         assert_eq!(lines[4], "start: none, 1 passed, unknown s to the menu");
+    }
+
+    #[test]
+    fn menu_show_escapes_map_text_that_would_break_a_line() {
+        let tmp = world("menu-show-escaped", None);
+        let mut map: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        map["choices"][0]["section"] = "SETUP\nAUDIO".into();
+        map["choices"][7]["effect"]["playlist"] = "00801\nquirks: 0".into();
+        assert!(menu::read(&map.to_string()).is_ok());
+        tmp.write("odd.json", map.to_string());
+        let (code, out, err) = menu_run(&tmp, &["show", "odd.json"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 17, "{out}");
+        assert_eq!(
+            lines[6],
+            "c001 audio main at-play 'SETUP\\nAUDIO: Language A 5.1' -> playlist 00800, audio 1, subtitle 1 off, \
+             same as play [replayed]"
+        );
+        assert_eq!(
+            lines[13],
+            "c008 version main at-play PLAY > VERSIONS: Version 2 -> playlist '00801\\nquirks: 0', audio 1, subtitle 1 \
+             off [replayed]"
+        );
+        assert_eq!(out.lines().filter(|line| line.starts_with("quirks: ")).count(), 1, "{out}");
     }
 
     #[test]
@@ -440,15 +494,24 @@ mod tests {
         let tmp = world("menu-check-match", Some(FIXTURE_ID));
         let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", REC_DIR]);
         assert_eq!((code, err.as_str()), (0, ""));
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], format!("identity: disc_id matches ({FIXTURE_ID})"));
-        assert_eq!(lines[1], "listing_sig: not checked (lazymkv does not recompute it)");
         assert_eq!(
-            lines.last().copied(),
-            Some(
+            out,
+            printed(&[
+                &format!("identity: disc_id matches ({FIXTURE_ID})"),
+                "listing_sig: not checked (lazymkv does not recompute it)",
+                "play: playlist 00800, title 0: audio 1 = stream 1, subtitle 1 off",
+                "c001: playlist 00800, title 0: audio 1 = stream 1, subtitle 1 off",
+                "c002: playlist 00800, title 0: audio 2 = stream 3, subtitle 3 = stream 8",
+                "c003: playlist 00800, title 0: audio 3 = stream 4, subtitle 1 off",
+                "c004: playlist 00800, title 0: audio 1 = stream 1, subtitle 2 = stream 7",
+                "c005: playlist 00800, title 0: audio 1 = stream 1, subtitle 2 off",
+                "c006: playlist 00800, title 0: audio 1 = stream 1, subtitle 3 = stream 8",
+                "c007: playlist 01001, title 1: audio 1 = stream 1, subtitle none",
+                "c008: playlist 00801 not in the scan",
+                "c009: no effect recorded",
                 "CHECK ok entries=10 on_scan=8 not_in_scan=1 no_effect=1 warnings=0 failed=0; \
-                 streams of not_in_scan entries were not checked"
-            )
+                 streams of not_in_scan entries were not checked",
+            ])
         );
     }
 
@@ -525,20 +588,31 @@ mod tests {
     #[test]
     fn menu_check_refuses_a_map_or_a_scan_it_cannot_use_with_exit_2() {
         let tmp = world("menu-check-refused", Some(FIXTURE_ID));
-        tmp.write("scan-not-a-disc.txt", "this is not a robot log\n");
         let (code, out, err) = menu_run(&tmp, &["check", "nowhere", "--scan", REC_DIR]);
         assert_eq!((code, out.as_str()), (2, ""));
-        assert!(err.starts_with("lazymkv-dev menu: error: "), "{err}");
+        // The rest of the line is the operating system's.
+        assert!(err.starts_with("lazymkv-dev menu: error: nowhere: "), "{err}");
+        assert_eq!(err.lines().count(), 1, "{err}");
         let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "rec/nowhere"]);
         assert_eq!((code, out.as_str()), (2, ""));
         assert_eq!(err, "lazymkv-dev menu: error: rec/nowhere: no such folder\n");
         // A scan `disc::disc` refuses: an audio stream whose flags are not a number.
         let broken = scan_text(&[], &[(0, &[(16, "00800.mpls")], &[(1, &[(1, "Audio"), (22, "x")])])]);
+        let sentence = disc(&parse(&broken)).unwrap_err();
         tmp.write("rec/broken/scan.txt", broken);
         let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "rec/broken"]);
         assert_eq!((code, out.as_str()), (2, ""));
-        assert!(err.starts_with("lazymkv-dev menu: error: "), "{err}");
-        assert_eq!(err.lines().count(), 1, "{err}");
+        assert_eq!(err, format!("lazymkv-dev menu: error: rec/broken/scan.txt: {sentence}\n"));
+        // A file that is not a scan, and a recording whose scan.txt is empty, list no title: refused, not passed.
+        tmp.write("scan-not-a-disc.txt", "this is not a robot log\n");
+        let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "scan-not-a-disc.txt"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "lazymkv-dev menu: error: scan-not-a-disc.txt: the scan lists no title\n");
+        tmp.write("rec/empty/scan.txt", "");
+        tmp.write("rec/empty/meta.json", format!("{{\"disc_id\": \"{FIXTURE_ID}\"}}"));
+        let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "rec/empty"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "lazymkv-dev menu: error: rec/empty/scan.txt: the scan lists no title\n");
     }
 
     #[test]
@@ -556,6 +630,8 @@ mod tests {
         assert_eq!(of("d"), Ok(DiscId::Absent(META_WITHOUT_ID.to_string())));
         tmp.write("e/meta.json", "{\"disc_id\": \"ABCD\"}");
         assert_eq!(of("e"), Ok(DiscId::Known("ABCD".to_string())));
+        tmp.write("g/meta.json", "{\"disc_id\": \" ABCD \"}");
+        assert_eq!(of("g"), Ok(DiscId::Known("ABCD".to_string())));
         tmp.write("f/meta.json", "{\"disc_id\": ");
         let refusal: Refused = of("f").unwrap_err();
         assert_eq!(refusal.code, 2);
@@ -571,6 +647,9 @@ mod tests {
         assert_eq!(map, menu::read(FIXTURE).unwrap());
         let (at, _) = read_map(&ctx, &format!("{MAP_DIR}/{FILE_NAME}")).unwrap();
         assert_eq!(at, format!("{MAP_DIR}/{FILE_NAME}"));
+        // A folder given with trailing separators is shown without them, joined with one `/`.
+        let (at, _) = read_map(&ctx, &format!("{MAP_DIR}//")).unwrap();
+        assert_eq!(at, "maps/made-up-1/menu-map.json");
         // A leading byte-order mark is dropped.
         tmp.write("bom.json", format!("\u{feff}{FIXTURE}"));
         assert_eq!(read_map(&ctx, "bom.json").unwrap().1, map);

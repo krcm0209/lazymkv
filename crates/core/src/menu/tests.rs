@@ -118,7 +118,7 @@ fn text_that_is_not_json_is_refused() {
     let errors = read("{").unwrap_err();
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].starts_with("not JSON: "), "{errors:?}");
-    assert!(read(&format!("\u{feff}{FIXTURE}")).is_ok());
+    assert_eq!(read(&format!("\u{feff}{FIXTURE}")), read(FIXTURE));
 }
 
 #[test]
@@ -126,8 +126,8 @@ fn unknown_keys_read() {
     let mut map = fixture();
     map["later"] = json!({"added": "by a later writer"});
     map["choices"][0]["hint"] = json!(["not known here"]);
-    let read = read(&map.to_string()).unwrap();
-    assert_eq!(read.choices[0].id, "c001");
+    let got = read(&map.to_string()).unwrap();
+    assert_eq!(got.choices[0].id, "c001");
 }
 
 #[test]
@@ -138,6 +138,48 @@ fn a_reader_rule_breach_is_refused_with_the_reader_sentence() {
     let errors = read(&map.to_string()).unwrap_err();
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].starts_with("the map passes the format's rules but not this reader's: "), "{errors:?}");
+    // The writer's list wins: with a writer-rule breach too, only the writer's sentence is given.
+    map["choices"][0]["kind"] = json!("video");
+    let kind = "choices[0] (c001): kind 'video' is not one of audio, subtitle, version, bonus, other";
+    assert_eq!(read(&map.to_string()), Err(vec![kind.to_string()]));
+}
+
+#[test]
+fn every_word_is_spelled_as_serde_spells_it() {
+    let spelled = |value: serde_json::Value, word: &str| assert_eq!(value, json!(word));
+    for kind in Kind::ALL {
+        spelled(serde_json::to_value(kind).unwrap(), kind.word());
+    }
+    for surface in Surface::ALL {
+        spelled(serde_json::to_value(surface).unwrap(), surface.word());
+    }
+    for level in Level::ALL {
+        spelled(serde_json::to_value(level).unwrap(), level.word());
+    }
+    for applies in Applies::ALL {
+        spelled(serde_json::to_value(applies).unwrap(), applies.word());
+    }
+}
+
+#[test]
+fn the_typed_effects_equal_agrees_with_differs_from_play_on_the_fixture() {
+    let map = read(FIXTURE).unwrap();
+    let play = map.play.effect.as_ref().unwrap();
+    let mut compared = 0;
+    for choice in &map.choices {
+        if let Some(effect) = &choice.effect {
+            assert_eq!(choice.differs_from_play, Some(!effects_equal(effect, play)), "{}", choice.id);
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 8);
+}
+
+#[test]
+fn the_fixtures_are_kept_as_bytes_on_every_checkout() {
+    let attributes = include_str!("../../../../.gitattributes");
+    assert!(attributes.lines().any(|line| line == "crates/core/src/menu/fixtures/** -text"), "{attributes}");
+    assert!(!FIXTURE.contains('\r') && !CASES.contains('\r'));
 }
 
 #[test]
@@ -236,6 +278,11 @@ fn ids(labels: &[MenuLabel]) -> Vec<&str> {
     labels.iter().map(|label| label.id.as_str()).collect()
 }
 
+/// Each row's stream with the ids of its labels.
+fn rows(rows: &[StreamLabels]) -> Vec<(u32, Vec<&str>)> {
+    rows.iter().map(|row| (row.stream, ids(&row.labels))).collect()
+}
+
 fn title<'a>(disc: &'a Disc, number: u32) -> &'a Title {
     disc.title(number).unwrap()
 }
@@ -284,6 +331,24 @@ fn every_title_of_a_shared_source_file_is_checked() {
     assert!(report.lines.iter().any(|line| line == c002), "{:?}", report.lines);
     assert_eq!((report.on_scan, report.failed), (8, 1));
     assert_eq!(report.lines.last().unwrap(), &check_line("FAILED", [10, 8, 1, 1, 0, 1]));
+    // The block of title 2 is made on its own streams: c003's audio 3 names none of its two.
+    let block = title_block(&fixture_map(), &disc, title(&disc, 2), &matching());
+    assert_eq!(rows(&block.audio), [(1, vec!["c001"]), (3, vec!["c002"])]);
+    assert_eq!(rows(&block.subtitles), [(7, vec!["c004"]), (8, vec!["c006"])]);
+    assert_eq!(block.out_of_range, ["c003"]);
+    // A warning counts once on each title line: c005's leftover beyond the table, on titles 0 and 2.
+    let map = edited(|map| map["choices"][4]["effect"]["subtitle"] = json!(7));
+    let report = check(&map, &disc, matching());
+    let c005: Vec<&String> = report.lines.iter().filter(|line| line.starts_with("c005: ")).collect();
+    assert_eq!(
+        c005,
+        [
+            "c005: playlist 00800, title 0: audio 1 = stream 1, subtitle 7 off, leftover beyond 3 (warning)",
+            "c005: playlist 00800, title 2: audio 1 = stream 1, subtitle 7 off, leftover beyond 3 (warning)",
+        ]
+    );
+    assert_eq!((report.warnings, report.failed), (2, 1));
+    assert_eq!(report.lines.last().unwrap(), &check_line("FAILED", [10, 8, 1, 1, 2, 1]));
 }
 
 #[test]
@@ -325,10 +390,18 @@ fn an_out_of_range_audio_number_fails() {
     );
     assert_eq!((report.warnings, report.failed), (0, 1));
     assert_eq!(report.lines.last().unwrap(), &check_line("FAILED", [10, 8, 1, 1, 0, 1]));
+    let disc = menu_disc();
+    let block = title_block(&map, &disc, title(&disc, 0), &matching());
+    assert_eq!(block.out_of_range, ["c003"]);
+    assert_eq!(rows(&block.audio), [(1, vec!["c001"]), (3, vec!["c002"])]);
     let map = edited(|map| {
         map["choices"][2]["effect"]["audio"] = json!(0);
         map["choices"][5]["effect"]["subtitle"] = json!(4);
     });
+    let block = title_block(&map, &disc, title(&disc, 0), &matching());
+    assert_eq!(block.out_of_range, ["c003", "c006"]);
+    assert_eq!(rows(&block.audio), [(1, vec!["c001"]), (3, vec!["c002"])]);
+    assert_eq!(rows(&block.subtitles), [(7, vec!["c004"])]);
     let report = check(&map, &menu_disc(), matching());
     assert_eq!(
         report.lines[5],
@@ -398,6 +471,33 @@ fn identity_is_not_checked_without_both_ids() {
     let unknown = identity(&map, &DiscId::Known(ID.to_string()));
     assert_eq!(unknown, Identity::NotChecked(MAP_WITHOUT_ID.to_string()));
     assert_eq!(unknown.text(), "not checked: the map has no disc_id_sha1");
+    // The map's ID is read as the recording's is: trimmed, and an empty or blank one is no ID.
+    for blank in ["", "   "] {
+        let map = edited(|map| map["disc"]["disc_id_sha1"] = json!(blank));
+        assert_eq!(identity(&map, &DiscId::Known(ID.to_string())), Identity::NotChecked(MAP_WITHOUT_ID.to_string()));
+    }
+    let map = edited(|map| map["disc"]["disc_id_sha1"] = json!(format!(" {ID} ")));
+    assert_eq!(identity(&map, &DiscId::Known(ID.to_string())), Identity::Matches(ID.to_string()));
+    let theirs = identity(&map, &DiscId::Known("FFFF".to_string()));
+    assert_eq!(theirs, Identity::Differs { map: ID.to_string(), disc: "FFFF".to_string() });
+}
+
+#[test]
+fn map_text_cannot_break_or_forge_a_check_line() {
+    let forged = "00801\nCHECK ok entries=0 on_scan=0 not_in_scan=0 no_effect=0 warnings=0 failed=0";
+    let map = edited(|map| map["choices"][7]["effect"]["playlist"] = json!(forged));
+    let report = check(&map, &menu_disc(), matching());
+    assert_eq!(
+        report.lines[10],
+        "c008: playlist '00801\\nCHECK ok entries=0 on_scan=0 not_in_scan=0 no_effect=0 warnings=0 failed=0' not in \
+         the scan"
+    );
+    let printed = report.lines.join("\n");
+    assert_eq!(printed.lines().count(), 13, "{printed}");
+    assert_eq!(printed.lines().filter(|line| line.starts_with("CHECK ")).count(), 1, "{printed}");
+    // Five ASCII digits print as they are; anything else is quoted.
+    assert_eq!(playlist_text("00800"), "00800");
+    assert_eq!([playlist_text("800"), playlist_text("0080a"), playlist_text("")], ["'800'", "'0080a'", "''"]);
 }
 
 #[test]

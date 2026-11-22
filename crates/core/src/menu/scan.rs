@@ -49,6 +49,17 @@ fn plays(title: &Title, playlist: &str) -> bool {
     title.source_file.as_deref().map_or(false, |file| file.eq_ignore_ascii_case(&format!("{playlist}.mpls")))
 }
 
+/// A map's playlist as a printed line shows it: five ASCII digits as they are, any other text quoted and escaped as
+/// Python's `repr` does (`py_repr_str`), so that a map's playlist cannot break a line or forge one. Print side only:
+/// the writer's rules take any string.
+pub fn playlist_text(playlist: &str) -> String {
+    if playlist.len() == 5 && playlist.bytes().all(|byte| byte.is_ascii_digit()) {
+        playlist.to_string()
+    } else {
+        crate::recording::py_repr_str(playlist)
+    }
+}
+
 /// The titles whose source file is `<playlist>.mpls`, ASCII case ignored, in title order: every title an effect on
 /// `playlist` plays (two titles may share one source file). Empty for a playlist that is no title of the scan (M3-2).
 pub fn titles_for<'a>(disc: &'a Disc, playlist: &str) -> Vec<&'a Title> {
@@ -83,11 +94,12 @@ impl Identity {
     }
 }
 
-/// The map's `disc_id_sha1` against the disc's ID, ASCII case ignored (M3-6). A map without an ID is not checked
-/// whatever the disc's (`MAP_WITHOUT_ID`: no folder the person could give would let it be checked); otherwise a disc
-/// without a known ID is not checked for its own reason.
+/// The map's `disc_id_sha1` against the disc's ID, ASCII case ignored (M3-6). The map's ID is read as a recording's
+/// is: surrounding white space left off, and an empty one is no ID. A map without an ID is not checked whatever the
+/// disc's (`MAP_WITHOUT_ID`: no folder the person could give would let it be checked); otherwise a disc without a
+/// known ID is not checked for its own reason.
 pub fn identity(map: &MenuMap, disc: &DiscId) -> Identity {
-    let Some(ours) = map.disc.disc_id_sha1.as_deref() else {
+    let Some(ours) = map.disc.disc_id_sha1.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
         return Identity::NotChecked(MAP_WITHOUT_ID.to_string());
     };
     match disc {
@@ -163,10 +175,10 @@ fn subtitle_part(effect: &Effect, streams: &[u32], own_kind: bool) -> (String, M
 /// `menu check` of a map against a scanned disc (design 5.4, M3-2 to M3-6). The lines: `identity: <Identity::text>`;
 /// `listing_sig: not checked (lazymkv does not recompute it)`; per entry, play first and then the choices in map
 /// order, `<id>: no effect recorded`, `<id>: playlist <p> not in the scan`, or one line per title of the playlist
-/// (`titles_for`), `<id>: playlist <p>, title <n>: <audio part>, <subtitle part>`, each title checked on its own
-/// streams (`map_streams`); last `CHECK ok|FAILED entries=.. on_scan=.. not_in_scan=.. no_effect=.. warnings=..
-/// failed=..; streams of not_in_scan entries were not checked`, FAILED when `failed` is above 0. A missing number is a
-/// warning only on the choice's own kind (M3-5), never a failure.
+/// (`titles_for`), `<id>: playlist <p>, title <n>: <audio part>, <subtitle part>` (`<p>` is `playlist_text`), each
+/// title checked on its own streams (`map_streams`); last `CHECK ok|FAILED entries=.. on_scan=.. not_in_scan=..
+/// no_effect=.. warnings=.. failed=..; streams of not_in_scan entries were not checked`, FAILED when `failed` is above
+/// 0. A missing number is a warning only on the choice's own kind (M3-5), never a failure.
 pub fn check(map: &MenuMap, disc: &Disc, identity: Identity) -> CheckReport {
     let mut lines = vec![format!("identity: {}", identity.text())];
     let mut failed = usize::from(matches!(identity, Identity::Differs { .. }));
@@ -182,8 +194,9 @@ pub fn check(map: &MenuMap, disc: &Disc, identity: Identity) -> CheckReport {
             continue;
         };
         let titles = titles_for(disc, &effect.playlist);
+        let playlist = playlist_text(&effect.playlist);
         if titles.is_empty() {
-            lines.push(format!("{id}: playlist {} not in the scan", effect.playlist));
+            lines.push(format!("{id}: playlist {playlist} not in the scan"));
             not_in_scan += 1;
             continue;
         }
@@ -199,7 +212,7 @@ pub fn check(map: &MenuMap, disc: &Disc, identity: Identity) -> CheckReport {
                     Mark::Failure => failed += 1,
                 }
             }
-            let (playlist, number) = (&effect.playlist, title.number);
+            let number = title.number;
             lines.push(format!("{id}: playlist {playlist}, title {number}: {}, {}", audio.0, subtitle.0));
         }
     }
