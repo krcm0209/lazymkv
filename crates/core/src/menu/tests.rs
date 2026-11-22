@@ -501,6 +501,72 @@ fn map_text_cannot_break_or_forge_a_check_line() {
 }
 
 #[test]
+fn a_disc_id_cannot_break_or_forge_a_check_line() {
+    let forged = "FFFF\nCHECK ok entries=0 on_scan=0 not_in_scan=0 no_effect=0 warnings=0 failed=0";
+    let quoted = "'FFFF\\nCHECK ok entries=0 on_scan=0 not_in_scan=0 no_effect=0 warnings=0 failed=0'";
+    // The recording's ID (a meta.json `disc_id`) differs from the map's.
+    let map = fixture_map();
+    let report = check(&map, &menu_disc(), identity(&map, &DiscId::Known(forged.to_string())));
+    assert_eq!(report.lines[0], format!("identity: disc_id differs: the map's is {ID}, the disc's is {quoted}"));
+    let printed = report.lines.join("\n");
+    assert_eq!(printed.lines().count(), 13, "{printed}");
+    assert_eq!(printed.lines().filter(|line| line.starts_with("CHECK ")).count(), 1, "{printed}");
+    assert_eq!(report.lines.last().unwrap(), &check_line("FAILED", [10, 8, 1, 1, 0, 1]));
+    // The map's ID, matched by the same text in the recording's, and differing from another.
+    let map = edited(|map| map["disc"]["disc_id_sha1"] = json!(forged));
+    let ours = identity(&map, &DiscId::Known(forged.to_lowercase()));
+    assert_eq!(ours.text(), format!("disc_id matches ({quoted})"));
+    let report = check(&map, &menu_disc(), ours);
+    assert_eq!(report.lines.join("\n").lines().count(), 13);
+    let theirs = identity(&map, &DiscId::Known(ID.to_string()));
+    assert_eq!(theirs.text(), format!("disc_id differs: the map's is {quoted}, the disc's is {ID}"));
+    // Decide's block holds the same text.
+    let disc = menu_disc();
+    assert_eq!(title_block(&map, &disc, title(&disc, 0), &theirs).identity, theirs.text());
+}
+
+#[test]
+fn the_print_helpers_quote_only_text_that_could_break_a_line() {
+    // ASCII hex digits print as they are; any other ID is quoted.
+    assert_eq!([id_text(ID), id_text("ffff")], [ID, "ffff"]);
+    assert_eq!([id_text(""), id_text("AB CD"), id_text("ABCDEFG")], ["''", "'AB CD'", "'ABCDEFG'"]);
+    // Free text prints as it is unless it holds a control character, U+2028 or U+2029: what the writer keeps out of a
+    // label.
+    for plain in ["SETUP > AUDIO: Language A 5.1", "Langue C — ÉTÉ", "", "a 'quoted' \"word\""] {
+        assert_eq!(line_text(plain), plain);
+    }
+    let breaking = [
+        ("a\nb", "'a\\nb'"),
+        ("a\rb", "'a\\rb'"),
+        ("a\tb", "'a\\tb'"),
+        ("a\u{b}b", "'a\\x0bb'"),
+        ("a\u{85}b", "'a\\x85b'"),
+        ("a\u{2028}b", "'a\\u2028b'"),
+        ("a\u{2029}b", "'a\\u2029b'"),
+    ];
+    for (text, quoted) in breaking {
+        assert_eq!(line_text(text), quoted, "{text:?}");
+        // The writer refuses each of them in a label.
+        let mut map = fixture();
+        map["play"]["label"] = json!(text);
+        let problems = validate(&map);
+        let refused = "label has a tab, line break, control character or lone surrogate";
+        assert!(problems.iter().any(|problem| problem.ends_with(refused)), "{text:?}: {problems:?}");
+    }
+}
+
+#[test]
+fn other_playlists_that_differ_in_ascii_case_alone_share_one_row() {
+    let map = edited(|map| {
+        map["choices"][6]["effect"]["playlist"] = json!("Extra");
+        map["choices"][7]["effect"]["playlist"] = json!("EXTRA");
+    });
+    let disc = menu_disc();
+    let block = title_block(&map, &disc, title(&disc, 0), &matching());
+    assert_eq!(block.other_playlists, [other("Extra", 2, false)]);
+}
+
+#[test]
 fn the_title_block_labels_only_streams_of_the_choices_own_kind() {
     let (map, disc) = (fixture_map(), menu_disc());
     let streams = |stream: u32, labels: Vec<MenuLabel>| StreamLabels { stream, labels };

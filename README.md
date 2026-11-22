@@ -47,8 +47,9 @@ install.
   and the typed disc model, identification, the title planner, the audio and subtitle track rules, the namer, the
   verification of a rip, confidence and disposition, the job state reducer, the persisted job and drive records and the
   IPC messages, the `makemkvcon` line reader, and phase 0's track reconciler, audio content rule and subtitle text rule,
-  the subtitle bitmap decoders and row line finder, and step 10a's audio pass) and `dev`, the `lazymkv-dev` binary that
-  runs them over recordings (`plan` and `decide`, scan summaries, track comparison, the tuning-dataset harness `retune`
+  the subtitle bitmap decoders and row line finder, step 10a's audio pass, and the menu map reader, its rules and its
+  check against a scan) and `dev`, the `lazymkv-dev` binary that runs them over recordings (`plan` and `decide`, with
+  decide's `--menu`, `menu show` and `menu check`, scan summaries, track comparison, the tuning-dataset harness `retune`
   for audio and, with `--subtitles`, for subtitles, the audio and subtitle labels, the phase 0 readers, the goldens, the
   `ocr-trial` subcommands behind a cargo feature, the `census` report), and phase 2's `platform` (the operating-system
   traits, their Windows implementations and in-memory fakes), `tools` (the `makemkvcon`, `mkvmerge`, `ffprobe` and
@@ -80,8 +81,8 @@ install.
   user names and any path under `corpus/owner/` (`scripts/phase0/check-names.sh`), as
   [`corpus/README.md`](corpus/README.md) describes.
 - `docs/` - the design spec and the port's design, the implementation plans, the experiment reports, the environment
-  notes, the phase 1 notes (`docs/phase1/`: the port's test mapping and the decision core) and the phase 2 notes
-  (`docs/phase2/`: the engine).
+  notes, the phase 1 notes (`docs/phase1/`: the port's test mapping and the decision core), the phase 2 notes
+  (`docs/phase2/`: the engine) and the menu map format (`docs/menu-maps/format.md`).
 - `experiments/ocrs-trial/` - the trial that compared the ocrs OCR engine with Tesseract on subtitle frames.
 
 ## Credits

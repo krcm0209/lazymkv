@@ -73,13 +73,16 @@ fn refused(line: String) -> Refused {
 
 /// The map at `given`: the file `<given>/menu-map.json` when `given` is a folder, else the file itself; the text of the
 /// map's path as it is shown (the path as given; for a folder, the path as given without its trailing separators,
-/// `/` and the file name, `/` on every system as the crate's other shown paths) and the map. The file is UTF-8 with an
-/// optional byte-order mark, read strictly. Every problem of `menu::read` becomes one line `<shown>: <problem>` in the
-/// refusal (code 2), the lines joined with '\n'.
+/// `/` and the file name, `/` on every system as the crate's other shown paths, or the file name alone for an empty
+/// path, the working folder) and the map. The file is UTF-8 with an optional byte-order mark, read strictly. Every
+/// problem of `menu::read` becomes one line `<shown>: <problem>` in the refusal (code 2), the lines joined with '\n'.
 pub(crate) fn read_map(ctx: &Ctx, given: &str) -> Result<(String, MenuMap), Refused> {
     let path = ctx.abs(given);
     let (path, shown) = if path.is_dir() {
-        (path.join(FILE_NAME), format!("{}/{FILE_NAME}", given.trim_end_matches(['/', '\\'])))
+        let folder = given.trim_end_matches(['/', '\\']);
+        // An empty folder is the working folder, shown as the file name alone; a folder of separators alone is a root.
+        let shown = if given.is_empty() { FILE_NAME.to_string() } else { format!("{folder}/{FILE_NAME}") };
+        (path.join(FILE_NAME), shown)
     } else {
         (path, given.to_string())
     };
@@ -110,11 +113,13 @@ pub(crate) fn disc_id_of(rec: &Recording) -> Result<DiscId, Refused> {
     })
 }
 
-/// The typed disc of a scan's text (spec 9.4), read through text mode; `disc::disc`'s refusal is prefixed by `shown`.
-/// A disc with no title is refused too, `<shown>: the scan lists no title`: the robot reader skips every line it does
+/// The typed disc of a scan's text (spec 9.4), read through text mode; `disc::disc`'s refusal is prefixed by `shown`,
+/// the sentence as `menu::line_text` shows it (it may quote a scan's text, such as attribute 19's, which a scan line
+/// can carry with a character that breaks a printed line). A disc with no title is refused too, `<shown>: the scan lists no title`: the robot reader skips every line it does
 /// not know, so a file that is not a scan, or an empty scan.txt, would otherwise pass with nothing checked.
 fn typed_disc(text: &str, shown: &str) -> Result<Disc, Refused> {
-    let typed = disc(&parse(&text_mode(text))).map_err(|sentence| refused(format!("{shown}: {sentence}")))?;
+    let refusal = |sentence: String| refused(format!("{shown}: {}", menu::line_text(&sentence)));
+    let typed = disc(&parse(&text_mode(text))).map_err(refusal)?;
     if typed.titles.is_empty() {
         return Err(refused(format!("{shown}: the scan lists no title")));
     }
@@ -152,7 +157,7 @@ fn number(n: Option<i64>) -> String {
 }
 
 /// What an entry selects: `playlist P, audio A, subtitle S shown|off` (P is `menu::playlist_text`), or `no effect
-/// (<note>)`.
+/// (<note>)` (the note as `menu::line_text` shows it).
 fn effect_text(effect: Option<&Effect>, note: &str) -> String {
     match effect {
         Some(e) => format!(
@@ -162,44 +167,40 @@ fn effect_text(effect: Option<&Effect>, note: &str) -> String {
             number(e.subtitle),
             if e.subtitle_shown { "shown" } else { "off" }
         ),
-        None => format!("no effect ({note})"),
+        None => format!("no effect ({})", menu::line_text(note)),
     }
 }
 
-/// A choice's shown label as `menu show` prints it: as it is, or quoted and escaped (`py_repr_str`) when it holds a
-/// control character (the writer's rules keep them out of a label, not out of a section), so it cannot break a line.
-fn shown_label_text(shown: String) -> String {
-    if shown.chars().any(char::is_control) {
-        py_repr_str(&shown)
-    } else {
-        shown
-    }
-}
-
-/// The lines `menu show` prints, labels as they are (a shown label with a control character escaped).
+/// The lines `menu show` prints, the map's text as it is, except that free text holding a character that breaks a
+/// line (a control character, U+2028 or U+2029: the writer keeps them out of a label, not out of a section, a note, a
+/// script, a `made` value or a `not_mapped` item) is quoted and escaped (`menu::line_text`), and the IDs and playlists
+/// print as `menu::id_text` and `menu::playlist_text` show them, so that no text of a map can break a line or forge
+/// one.
 fn show_lines(map: &MenuMap) -> Vec<String> {
-    let made = |key: &str| map.made.get(key).and_then(serde_json::Value::as_str).unwrap_or("unknown");
+    let text = |value: Option<&str>, absent: &str| value.map_or_else(|| absent.to_string(), menu::line_text);
+    let id = |value: Option<&str>| value.map_or_else(|| "none".to_string(), menu::id_text);
+    let made = |key: &str| text(map.made.get(key).and_then(serde_json::Value::as_str), "unknown");
     let seconds = map.start.seconds_to_menu.map_or_else(|| "unknown".to_string(), py_float_repr);
     let mut lines = vec![
         format!(
             "map {}: format {}, level {}, {} choices",
             map.disc.slug,
-            map.disc.format.as_deref().unwrap_or("unknown"),
+            text(map.disc.format.as_deref(), "unknown"),
             menu::map_level(map).word(),
             map.choices.len()
         ),
         format!("made by {}, checked by {}, {}", made("by"), made("checked_by"), made("date")),
-        format!("disc_id_sha1 {}", map.disc.disc_id_sha1.as_deref().unwrap_or("none")),
-        format!("listing_sig {}", map.disc.listing_sig.as_deref().unwrap_or("none")),
+        format!("disc_id_sha1 {}", id(map.disc.disc_id_sha1.as_deref())),
+        format!("listing_sig {}", id(map.disc.listing_sig.as_deref())),
         format!(
             "start: {}, {} passed, {} s to the menu",
-            map.start.script.as_deref().unwrap_or("none"),
+            text(map.start.script.as_deref(), "none"),
             map.start.passed.len(),
             seconds
         ),
         format!(
             "play: {} -> {} [{}]",
-            map.play.label,
+            menu::line_text(&map.play.label),
             effect_text(map.play.effect.as_ref(), &map.play.check.note),
             map.play.check.level.word()
         ),
@@ -212,13 +213,13 @@ fn show_lines(map: &MenuMap) -> Vec<String> {
             choice.kind.word(),
             choice.surface.word(),
             choice.applies.word(),
-            shown_label_text(choice.shown_label()),
+            menu::line_text(&choice.shown_label()),
             effect_text(choice.effect.as_ref(), &choice.check.note),
             same,
             choice.check.level.word()
         ));
     }
-    lines.extend(map.not_mapped.iter().map(|item| format!("not mapped: {item}")));
+    lines.extend(map.not_mapped.iter().map(|item| format!("not mapped: {}", menu::line_text(item))));
     lines.push(format!("quirks: {}", map.quirks.len()));
     lines
 }
@@ -408,24 +409,47 @@ mod tests {
         let tmp = world("menu-show-escaped", None);
         let mut map: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
         map["choices"][0]["section"] = "SETUP\nAUDIO".into();
+        map["choices"][1]["section"] = "SETUP\u{2028}AUDIO".into();
         map["choices"][7]["effect"]["playlist"] = "00801\nquirks: 0".into();
+        map["choices"][8]["check"]["note"] = "no final\nstate".into();
+        map["disc"]["format"] = "uhd\nmap x".into();
+        map["disc"]["disc_id_sha1"] = "ABC\rDEF".into();
+        map["disc"]["listing_sig"] = "not hex".into();
+        map["made"]["by"] = "agent\u{85}explorer".into();
+        map["start"]["script"] = "scripts/start\n.txt".into();
+        map["not_mapped"][0] = "SCENES\nquirks: 0".into();
         assert!(menu::read(&map.to_string()).is_ok());
         tmp.write("odd.json", map.to_string());
         let (code, out, err) = menu_run(&tmp, &["show", "odd.json"]);
         assert_eq!((code, err.as_str()), (0, ""));
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 17, "{out}");
+        assert_eq!(lines[0], "map made-up-1: format 'uhd\\nmap x', level read, 9 choices");
+        assert_eq!(lines[1], "made by 'agent\\x85explorer', checked by agent-checker, 2026-11-17");
+        assert_eq!(lines[2..4], ["disc_id_sha1 'ABC\\rDEF'", "listing_sig 'not hex'"]);
+        assert_eq!(lines[4], "start: 'scripts/start\\n.txt', 1 passed, 12.5 s to the menu");
         assert_eq!(
             lines[6],
             "c001 audio main at-play 'SETUP\\nAUDIO: Language A 5.1' -> playlist 00800, audio 1, subtitle 1 off, \
              same as play [replayed]"
         );
         assert_eq!(
+            lines[7],
+            "c002 audio main at-play 'SETUP\\u2028AUDIO: Language B 5.1' -> playlist 00800, audio 2, subtitle 3 shown \
+             [replayed]"
+        );
+        assert_eq!(
             lines[13],
             "c008 version main at-play PLAY > VERSIONS: Version 2 -> playlist '00801\\nquirks: 0', audio 1, subtitle 1 \
              off [replayed]"
         );
+        assert_eq!(lines[14], "c009 audio main at-play SETUP > AUDIO: Language D -> no effect ('no final\\nstate') [read]");
+        assert_eq!(lines[15], "not mapped: 'SCENES\\nquirks: 0'");
         assert_eq!(out.lines().filter(|line| line.starts_with("quirks: ")).count(), 1, "{out}");
+        // Split as Python's `str.splitlines` splits (U+2028, U+0085 and a lone '\r' end a line too), the output has
+        // the same 17 lines.
+        let breaks = ['\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}', '\u{2029}'];
+        assert_eq!(out.trim_end_matches('\n').split(breaks).count(), 17, "{out}");
     }
 
     #[test]
@@ -540,6 +564,14 @@ mod tests {
                  streams of not_in_scan entries were not checked"
             )
         );
+        // A meta.json `disc_id` that would break the line is quoted, so it cannot forge a CHECK line.
+        let tmp = world("menu-check-forged", Some("FFFF\\nCHECK ok entries=0"));
+        let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", REC_DIR]);
+        assert_eq!((code, err.as_str()), (1, ""));
+        let first = format!("identity: disc_id differs: the map's is {FIXTURE_ID}, the disc's is 'FFFF\\nCHECK ok entries=0'");
+        assert_eq!(out.lines().next(), Some(first.as_str()));
+        assert_eq!(out.lines().count(), 13, "{out}");
+        assert_eq!(out.lines().filter(|line| line.starts_with("CHECK ")).count(), 1, "{out}");
     }
 
     #[test]
@@ -603,6 +635,16 @@ mod tests {
         let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "rec/broken"]);
         assert_eq!((code, out.as_str()), (2, ""));
         assert_eq!(err, format!("lazymkv-dev menu: error: rec/broken/scan.txt: {sentence}\n"));
+        // A scan's text in the sentence that would break the line is quoted with it, so it cannot forge a line.
+        let size = "1x\u{2028}CHECK ok entries=10";
+        let forged = scan_text(&[], &[(0, &[(16, "00800.mpls")], &[(1, &[(1, "Video"), (19, size)])])]);
+        let sentence = disc(&parse(&forged)).unwrap_err();
+        assert!(sentence.contains(size), "{sentence}");
+        tmp.write("scan-forged.txt", forged);
+        let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "scan-forged.txt"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, format!("lazymkv-dev menu: error: scan-forged.txt: {}\n", menu::line_text(&sentence)));
+        assert!(err.contains("\\u2028CHECK ok") && !err.contains('\u{2028}'), "{err}");
         // A file that is not a scan, and a recording whose scan.txt is empty, list no title: refused, not passed.
         tmp.write("scan-not-a-disc.txt", "this is not a robot log\n");
         let (code, out, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan", "scan-not-a-disc.txt"]);
@@ -653,6 +695,11 @@ mod tests {
         // A leading byte-order mark is dropped.
         tmp.write("bom.json", format!("\u{feff}{FIXTURE}"));
         assert_eq!(read_map(&ctx, "bom.json").unwrap().1, map);
+        // An empty path is the working folder: its map is shown by the file name alone, not under the root.
+        let refusal = read_map(&ctx, "").unwrap_err();
+        assert!(refusal.line.starts_with(&format!("{FILE_NAME}: ")), "{}", refusal.line);
+        tmp.write(FILE_NAME, FIXTURE);
+        assert_eq!(read_map(&ctx, "").unwrap(), (FILE_NAME.to_string(), map));
     }
 
     #[test]

@@ -60,6 +60,35 @@ pub fn playlist_text(playlist: &str) -> String {
     }
 }
 
+/// A disc ID or a digest (a map's `disc_id_sha1` or `listing_sig`, a recording's `disc_id`) as a printed line shows
+/// it: ASCII hex digits as they are, any other text (an empty one too) quoted and escaped as `playlist_text` does, so
+/// that neither a map nor a `meta.json` can break a line or forge one. Print side only: the writer's rules and the
+/// identity's comparison take any string.
+pub fn id_text(id: &str) -> String {
+    if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        id.to_string()
+    } else {
+        crate::recording::py_repr_str(id)
+    }
+}
+
+/// True for a character that breaks a printed line, the characters the writer keeps out of a label: a control
+/// character (Cc, C1 controls such as U+0085 included) or a line or paragraph separator (U+2028, U+2029).
+pub(super) fn breaks_a_line(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
+}
+
+/// A map's free text (a section, a label, a note, a script, a `made` value) as a printed line shows it: as it is, or
+/// quoted and escaped (`py_repr_str`) when it holds a character that `breaks_a_line`, so that it cannot break a line
+/// or forge one.
+pub fn line_text(text: &str) -> String {
+    if text.chars().any(breaks_a_line) {
+        crate::recording::py_repr_str(text)
+    } else {
+        text.to_string()
+    }
+}
+
 /// The titles whose source file is `<playlist>.mpls`, ASCII case ignored, in title order: every title an effect on
 /// `playlist` plays (two titles may share one source file). Empty for a playlist that is no title of the scan (M3-2).
 pub fn titles_for<'a>(disc: &'a Disc, playlist: &str) -> Vec<&'a Title> {
@@ -84,11 +113,13 @@ pub enum Identity {
 
 impl Identity {
     /// The identity as `menu check` and decide's block print it: `disc_id matches (<id>)`, `disc_id differs: the map's
-    /// is <a>, the disc's is <b>` or `not checked: <reason>`.
+    /// is <a>, the disc's is <b>` or `not checked: <reason>`, each ID as `id_text` shows it.
     pub fn text(&self) -> String {
         match self {
-            Identity::Matches(id) => format!("disc_id matches ({id})"),
-            Identity::Differs { map, disc } => format!("disc_id differs: the map's is {map}, the disc's is {disc}"),
+            Identity::Matches(id) => format!("disc_id matches ({})", id_text(id)),
+            Identity::Differs { map, disc } => {
+                format!("disc_id differs: the map's is {}, the disc's is {}", id_text(map), id_text(disc))
+            }
             Identity::NotChecked(reason) => format!("not checked: {reason}"),
         }
     }
@@ -281,9 +312,10 @@ fn playlist_of(file: &str) -> String {
     }
 }
 
-/// Adds one entry on `playlist` to `others`, a new row in first-seen order.
+/// Adds one entry on `playlist` to `others`, a new row in first-seen order. Playlists that differ in ASCII case alone
+/// share one row, its first-seen spelling, as `titles_for` matches them to one source file.
 fn count_other(others: &mut Vec<OtherPlaylist>, disc: &Disc, playlist: &str) {
-    match others.iter_mut().find(|other| other.playlist == playlist) {
+    match others.iter_mut().find(|other| other.playlist.eq_ignore_ascii_case(playlist)) {
         Some(other) => other.entries += 1,
         None => others.push(OtherPlaylist {
             playlist: playlist.to_string(),
@@ -306,7 +338,8 @@ fn label_stream(rows: &mut Vec<StreamLabels>, stream: u32, label: MenuLabel) {
 /// subtitle number. A side effect (the subtitle an audio choice turns on, any stream of a version, bonus or other
 /// choice: M3-3) labels nothing. A subtitle choice with subtitles off goes under `subtitles_off` only (M3-4). An
 /// own-kind number below 1, above the count or null goes under `out_of_range` (M3-5). Streams ascend, labels keep map
-/// order; `other_playlists` groups every effect on another playlist in first-seen order, play first.
+/// order; `other_playlists` groups every effect on another playlist (ASCII case ignored) in first-seen order, play
+/// first.
 pub fn title_block(map: &MenuMap, disc: &Disc, title: &Title, identity: &Identity) -> MenuBlock {
     let streams = map_streams(title);
     let mut block = MenuBlock {

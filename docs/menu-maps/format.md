@@ -243,9 +243,11 @@ scan is `not in the scan`, and its streams are not checked (M3-2).
 
 `menu check` prints the identity, then `listing_sig: not checked (lazymkv does not recompute it)`, then one line per
 entry (play first, then the choices in map order; one line per scan title of the entry's playlist) with ids,
-playlists and numbers only, never a label. A scan that lists no title (a file that is not a scan, or a `scan.txt`
-that is empty or holds no title) is refused before the check with `<scan path>: the scan lists no title`, exit 2, for
-a bare scan file and a recording's `scan.txt` alike. The check's last line is
+playlists and numbers only, never a label. A playlist other than five ASCII digits, and a disc ID other than ASCII
+hex digits (the map's or the recording's), is printed quoted and escaped as Python's `repr` writes it, so that no text
+of a map or a `meta.json` can break a line or forge one. A scan that lists no title (a file that is not a scan, or a
+`scan.txt` that is empty or holds no title) is refused before the check with `<scan path>: the scan lists no title`,
+exit 2, for a bare scan file and a recording's `scan.txt` alike. The check's last line is
 
     CHECK ok entries=10 on_scan=8 not_in_scan=1 no_effect=1 warnings=0 failed=0; streams of not_in_scan entries were not checked
 
@@ -267,13 +269,18 @@ a bare scan file and a recording's `scan.txt` alike. The check's last line is
 `lazymkv-dev menu show <map>` and `lazymkv-dev menu check <map> --scan <slug|recording dir|scan file>
 [--evidence DIR]` (`<map>` is a map folder or its `menu-map.json`; `--scan` is a recording folder, a slug under the
 evidence clone, or a bare scan file, which carries no disc ID):
-- `menu show`: 0 when the map is printed, 2 for an argument or map problem.
+- `menu show`: 0 when the map is printed, 2 for an argument or map problem. It prints the map's text as it is, except
+  that free text holding a control character or a line or paragraph separator (U+2028, U+2029), what the writer keeps
+  out of a label but not out of a section, a note, a script, a `made` value or a `not_mapped` item, is quoted and
+  escaped as Python's `repr` writes it, and the playlists, `disc_id_sha1` and `listing_sig` print as `menu check`
+  prints playlists and IDs.
 - `menu check`: 0 when nothing failed (`failed=0`), 1 otherwise, 2 for an argument, map or scan problem (a scan that
   lists no title included), 3 for a slug without the evidence clone.
 
 A refusal prints `lazymkv-dev menu: error: <line>` on stderr, one line for each problem of the map, as
 `<path>: <problem>`. A scan that cannot be typed or lists no title, or a `meta.json` that cannot be read, is one such
-line too; a scan file that cannot be read prints the system's error text, which names its path. A usage error (a
+line too (a scan's refusal quoted and escaped as Python's `repr` writes it when the scan text it names would break the
+line); a scan file that cannot be read prints the system's error text, which names its path. A usage error (a
 missing, extra or unknown argument) prints a usage line first, then one line `lazymkv-dev menu: error: <message>`,
 `lazymkv-dev menu show: error: <message>` or `lazymkv-dev menu check: error: <message>`, as argparse words it.
 
@@ -288,7 +295,7 @@ decide.json files are unchanged. The key is one of:
 - the block of the rip label's title (`core::menu::title_block`), its keys in this order:
   - `map` (the map's slug) and `map_level`;
   - `identity`: the text after `identity: ` in `menu check`'s first line, `disc_id matches (<id>)` or `not checked:
-    <reason>`;
+    <reason>` (an ID quoted as `menu check` quotes it);
   - `playlist`: the title's source file without `.mpls`, or null for a title without a source file;
   - `starts`: play and the version, bonus and other choices on that playlist (M3-3), as labels;
   - `audio`: a list of `{"stream", "labels"}`, one for each scan stream that an audio choice's own audio number names
@@ -296,7 +303,8 @@ decide.json files are unchanged. The key is one of:
   - `subtitles`: the same for the shown subtitle choices and their subtitle numbers;
   - `subtitles_off`: the subtitle choices that turn subtitles off (M3-4), as labels;
   - `other_playlists`: every other playlist the map's effects name, as `{"playlist", "entries", "in_scan"}` (how many
-    entries name it, and whether it is a title of the scan, M3-2), in first-seen order, play first;
+    entries name it, and whether it is a title of the scan, M3-2), in first-seen order, play first; playlists that
+    differ in ASCII case alone are one row, spelt as first seen, as they name one source file;
   - `out_of_range`: the ids of the own-kind choices whose number names no stream (M3-5);
   - `no_effect`: the ids of the entries without an effect.
 
@@ -379,12 +387,14 @@ Added on 2026-11-21:
 
 ## Tests and acceptance
 
-Recorded on 2026-11-21 for the branch that adds the reader, `menu show`, `menu check` and `decide --menu`.
+Recorded on 2026-11-21 for the branch that adds the reader, `menu show`, `menu check` and `decide --menu`; the test
+count again on 2026-11-22, after the pull request's review fixes (IDs and free text quoted where they would break a
+printed line, `other_playlists` grouped with ASCII case ignored, an empty map path shown as the file name).
 
 - Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline` (CI's macOS command, run here with
-  `--offline`), run on this Mac with toolchain 1.100.0: 3381 passed, 0 failed, 5 ignored, in 57 result lines, with no
+  `--offline`), run on this Mac with toolchain 1.100.0: 3384 passed, 0 failed, 5 ignored, in 57 result lines, with no
   warning. 48 tests print `skipped:` on this Mac because the evidence clone is absent; CI's counts differ per system.
-  `main` before the branch gave 3327 passed with the same command, so the branch adds 54 tests: 26 in `core::menu`, 19
+  `main` before the branch gave 3327 passed with the same command, so the branch adds 57 tests: 29 in `core::menu`, 19
   in the `menu` command, 8 in decide and 1 in lazymkvctl. Nothing has run on Windows or Linux yet; that is CI's part
   once the branch is pushed.
 - Acceptance on the 13 real maps, each against its recording's scan and `meta.json` (counts only): `menu check` exits 0

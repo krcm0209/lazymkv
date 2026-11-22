@@ -67,7 +67,7 @@ fn label_problem(value: &Value) -> Option<&'static str> {
     };
     if text.is_empty() {
         Some("is empty")
-    } else if text.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}') {
+    } else if text.chars().any(super::scan::breaks_a_line) {
         Some("has a tab, line break, control character or lone surrogate")
     } else {
         None
