@@ -69,11 +69,14 @@ fn set_root(root: Option<&str>) -> Option<&str> {
     root.filter(|root| !root.trim().is_empty())
 }
 
-/// A job the words may name (design part 9.5): its folder, its title keys, whether its dataset copy landed (T5-R14),
-/// and its own settings' `tuning_root`, where that copy landed (ENG-19, call 14). Def: T5-22. Use: T5-22.
+/// A job the words may name (design part 9.5): its folder, its title keys, the keys of the titles whose step 10 ran,
+/// whether its dataset copy landed (T5-R14), and its own settings' `tuning_root`, where that copy landed (ENG-19,
+/// call 14). `text_keys` are the titles whose subtitle text was read, the only ones a relayed `decide` gets `--text`
+/// for (pull request 7's notes, call 9). Def: T5-22. Use: T5-22.
 pub(crate) struct CommandJob {
     pub(crate) folder: PathBuf,
     pub(crate) keys: Vec<String>,
+    pub(crate) text_keys: Vec<String>,
     pub(crate) dataset_done: bool,
     pub(crate) tuning_root: Option<String>,
 }
@@ -86,7 +89,9 @@ pub(crate) struct CommandJob {
 /// --evidence <tuning_root>\recordings=<tuning_root>\dataset` and the client's words, refused with
 /// `RETUNE_NO_TUNING_ROOT` when the engine's settings hold no `tuning_root` (T5-R32); a `decide --job --title` of a
 /// job whose dataset copy landed (`tuning_copy` is `done`, T5-R14) gains `--text <tuning_root>\dataset` after the
-/// replay flags (call 14), over the job's own settings' `tuning_root` (ENG-19). lazymkvctl sends a relative path
+/// replay flags (call 14), over the job's own settings' `tuning_root` (ENG-19), but only for a title whose step 10 ran
+/// (`text_keys`; pull request 7's notes, call 9): the engine wrote any other title's subtitle section as "no OCR
+/// text", and `decide` with `--text` would skip it with another sentence. lazymkvctl sends a relative path
 /// flag's value again, made absolute (V10's ruling); the engine resolves nothing and passes the words unchanged.
 /// Def: T3-22, T5-22. Use: T3-22, T5-22.
 pub(crate) fn child_words(
@@ -113,12 +118,12 @@ pub(crate) fn child_words(
     let Some(id) = forms.job else {
         return Err(COMMAND_FORMS.to_string());
     };
-    let Some(CommandJob { folder, keys, dataset_done, tuning_root: job_root }) = job(&id) else {
+    let Some(CommandJob { folder, keys, text_keys, dataset_done, tuning_root: job_root }) = job(&id) else {
         return Err(no_job(&id));
     };
     // `read_forms` lets `--title` through only with `decide --job` and requires it there, and refuses `--job` with
     // `retune`, so a title is decide's and no title is plan's.
-    let decide = forms.title.is_some();
+        let text = forms.title.as_ref().is_some_and(|key| text_keys.contains(key));
     let mut child = match forms.title {
         Some(key) if !keys.contains(&key) => return Err(no_title(&id, &key)),
         Some(key) => vec!["decide".to_string(), "--rec".to_string(), word(&folder.join(key))],
@@ -136,8 +141,9 @@ pub(crate) fn child_words(
             child.extend([flag.to_string(), word(&path)]);
         }
     }
-    // Call 14 and T5-R14: the dataset copy landed under the job's own tuning_root, not the engine's (ENG-19).
-    if let Some(root) = set_root(job_root.as_deref()).filter(|_| decide && dataset_done) {
+    // Call 14 and T5-R14: the dataset copy landed under the job's own tuning_root, not the engine's (ENG-19). Call 9:
+    // only a title whose subtitle text was read has text there.
+    if let Some(root) = set_root(job_root.as_deref()).filter(|_| text && dataset_done) {
         child.extend(["--text".to_string(), word(&Path::new(root).join(DATASET))]);
     }
     child.extend(forms.words);
@@ -532,6 +538,7 @@ mod tests {
             (id == "a-1").then(|| CommandJob {
                 folder: s.0.join(id),
                 keys: vec!["t00-00800".to_string()],
+                text_keys: Vec::new(),
                 dataset_done: false,
                 tuning_root: None,
             })
@@ -554,6 +561,7 @@ mod tests {
             (id == "a-1").then(|| CommandJob {
                 folder: PathBuf::from("jobs").join(id),
                 keys: vec!["t00-00800".to_string()],
+                text_keys: Vec::new(),
                 dataset_done: false,
                 tuning_root: None,
             })
@@ -573,8 +581,8 @@ mod tests {
         }
     }
 
-    /// One job, `a-1` in `folder`, with the title t00-00800, its dataset copy `done` or not, and `tuning-root` as its
-    /// own settings' `tuning_root`.
+    /// One job, `a-1` in `folder`, with the title t00-00800 (its step 10 ran), its dataset copy `done` or not, and
+    /// `tuning-root` as its own settings' `tuning_root`.
     fn one_job(folder: PathBuf, done: bool) -> impl Fn(&str) -> Option<CommandJob> {
         rooted_job(folder, done, Some("tuning-root"))
     }
@@ -586,6 +594,7 @@ mod tests {
             (id == "a-1").then(|| CommandJob {
                 folder: folder.clone(),
                 keys: vec!["t00-00800".to_string()],
+                text_keys: vec!["t00-00800".to_string()],
                 dataset_done: done,
                 tuning_root: root.clone(),
             })
@@ -659,6 +668,40 @@ mod tests {
         plan.extend(replay);
         let given = words(&["plan", "--job", "a-1"]);
         assert_eq!(child_words(&given, &one_job(folder, true), Some("tuning-root")), Ok(plan));
+    }
+
+    /// Pull request 7's notes, call 9: `--text` goes only to a title whose step 10 ran (`text_keys`), and only once the
+    /// dataset copy is done.
+    #[test]
+    fn decide_job_gets_text_only_for_a_title_whose_step_10_ran() {
+        let s = Scratch::new("relay-text-keys");
+        s.write("a-1/settings.json", "{}");
+        let folder = s.0.join("a-1");
+        let job = |done: bool| {
+            let folder = folder.clone();
+            move |id: &str| {
+                (id == "a-1").then(|| CommandJob {
+                    folder: folder.clone(),
+                    keys: vec!["t00-00800".to_string(), "t01-00801".to_string()],
+                    text_keys: vec!["t01-00801".to_string()],
+                    dataset_done: done,
+                    tuning_root: Some("tuning-root".to_string()),
+                })
+            }
+        };
+        let decide = |key: &str, done: bool| {
+            child_words(&words(&["decide", "--job", "a-1", "--title", key]), &job(done), Some("tuning-root"))
+        };
+        let head = |key: &str| {
+            vec!["decide".to_string(), "--rec".to_string(), text(folder.join(key)), "--settings".to_string(),
+                 text(folder.join("settings.json"))]
+        };
+        let mut read = head("t01-00801");
+        read.extend(["--text".to_string(), text(Path::new("tuning-root").join("dataset"))]);
+        assert_eq!(decide("t01-00801", true), Ok(read));
+        assert_eq!(decide("t00-00800", true), Ok(head("t00-00800")));
+        assert_eq!(decide("t00-00800", false), Ok(head("t00-00800")));
+        assert_eq!(decide("t01-00801", false), Ok(head("t01-00801")));
     }
 
     /// The burst's line count.
