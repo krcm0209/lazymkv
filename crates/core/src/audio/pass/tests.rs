@@ -225,6 +225,65 @@ fn streamhash_with_a_missing_stream_is_refused_with_both_counts() {
     assert_eq!(parse_streamhash(&format!("0,A,md5={H0}\n"), 1), Ok(vec![(0, H0.to_string())]), "-match ignores case");
 }
 
+/// A made-up streamhash.txt in FFmpeg 9.1's default format_version 2 (libavformat/hashenc.c's streamhash_write_header
+/// and hash_write_trailer, as FFmpeg's FATE reference `dca-xll` shows it): the `#` header with `hash` and each
+/// stream's `media_type`, then `<k>, <size in 11 columns>, <digest>` per stream; `media` gives each stream's type and
+/// `hash` the header's hash name.
+fn streamhash_v2(hash: &str, media: &[&str], lines: &[String]) -> String {
+    let mut text = format!("#format: stream checksums\n#version: 2\n#hash: {hash}\n#extradata 0, {:>31}, {H2}\n", 2);
+    text.push_str("#software: Lavf62.12.100\n");
+    for (k, kind) in media.iter().enumerate() {
+        text.push_str(&format!("#tb {k}: 1/1000\n#media_type {k}: {kind}\n#codec_id {k}: ac3\n"));
+    }
+    text.push_str("#stream#, size, hash\n");
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
+#[test]
+fn streamhash_in_ffmpeg_9_1s_format_version_2_is_read() {
+    // The owner's ruling of 2026-11-22: the reader takes FFmpeg 9.1's format_version 2 beside phase 0's form.
+    let audio = ["audio", "audio", "audio"];
+    let lines = [format!("0,     1536000, {H0}"), format!("1,      512000, {H1}"), format!("2,    14401536, {H2}")];
+    let v2 = streamhash_v2("MD5", &audio, &lines);
+    let all = Ok(vec![(0, H0.to_string()), (1, H1.to_string()), (2, H2.to_string())]);
+    assert_eq!(parse_streamhash(&v2, 3), all);
+    assert_eq!(parse_streamhash(&v2.replace('\n', "\r\n"), 3), all, "CRLF line ends");
+    assert_eq!(parse_streamhash(&v2, 4), Err("streamhash.txt holds 3 of 4 stream hashes".to_string()));
+    // A stream with coded side data carries `, S=<n>` and a size and digest per element after its own digest.
+    let side = [lines[0].clone(), format!("{}, S=1,       12, {H0}", lines[1]), lines[2].clone()];
+    assert_eq!(parse_streamhash(&streamhash_v2("MD5", &audio, &side), 3), all);
+    // -match ignores case, in the header and the digest alike.
+    let upper = streamhash_v2("md5", &audio, &[format!("0,     1536000, {}", H0.to_uppercase())]);
+    assert_eq!(parse_streamhash(&upper, 1), Ok(vec![(0, H0.to_uppercase())]));
+}
+
+#[test]
+fn streamhash_v2_lines_count_only_under_an_md5_header_and_for_audio_streams() {
+    let audio = ["audio", "audio", "audio"];
+    let lines = [format!("0,     1536000, {H0}"), format!("1,      512000, {H1}"), format!("2,    14401536, {H2}")];
+    let sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let sha_lines = lines.iter().map(|l| format!("{}{}", &l[..l.len() - 32], sha)).collect::<Vec<_>>();
+    assert_eq!(parse_streamhash(&streamhash_v2("SHA256", &audio, &sha_lines), 3),
+        Err("streamhash.txt holds 0 of 3 stream hashes".to_string()), "a SHA-256 file is not the pass's MD5");
+    assert_eq!(parse_streamhash(&streamhash_v2("SHA256", &audio, &lines), 3),
+        Err("streamhash.txt holds 0 of 3 stream hashes".to_string()), "32 digits under another hash's header");
+    let bare = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+    assert_eq!(parse_streamhash(&bare, 3), Err("streamhash.txt holds 0 of 3 stream hashes".to_string()),
+        "v2 lines without the header");
+    // The media type stands where phase 0's `,a,` stood: a stream the header does not call audio is not counted.
+    let video = streamhash_v2("MD5", &["audio", "video", "audio"], &lines);
+    assert_eq!(parse_streamhash(&video, 3), Err("streamhash.txt holds 2 of 3 stream hashes".to_string()));
+    // As in phase 0's form: a short digest, an indented line and a k past the count are not counted.
+    let noisy = [format!("0,     1536000, {H0}"), "1,      512000, abc".to_string(), format!(" 2,    14401536, {H2}"),
+        format!("5,    14401536, {H2}")];
+    assert_eq!(parse_streamhash(&streamhash_v2("MD5", &audio, &noisy), 3),
+        Err("streamhash.txt holds 1 of 3 stream hashes".to_string()));
+}
+
 /// A made-up peak file of astats with reset=0: one running peak per second.
 fn peaks(values: &[&str]) -> String {
     values

@@ -10,11 +10,12 @@ name: CI
 # ignored here and run on the mini PC.
 #
 # Layer 2 (design part 12.1, G1): every runner installs MKVToolNix, pinned (P33, call 20), and an FFmpeg of 7.0 or
-# later (K11). Ubuntu takes MKVToolNix from apt at its pinned version and a static FFmpeg 7.x build pinned by its URL
-# and its SHA-256 (Secure Hash Algorithm 256) digest, which is checked before anything in it runs, since apt's FFmpeg
-# is 6.1; macOS takes both from Homebrew and checks mkvmerge's version against the pin; Windows takes FFmpeg from
-# Chocolatey and MKVToolNix by its installer, checked against its SHA-256. Homebrew's and Chocolatey's FFmpeg are the
-# package manager's current release, not pinned, and the layer 2 tests' version check holds K11's floor. Each job
+# later (K11). Ubuntu, pinned to ubuntu-24.04 (noble), takes MKVToolNix from apt at its pinned version and a static
+# FFmpeg 7.x build pinned by its URL and its SHA-256 (Secure Hash Algorithm 256) digest, which is checked before
+# anything in it runs, since apt's FFmpeg is 6.1; macOS takes both from Homebrew and checks mkvmerge's version against
+# the pin; Windows takes FFmpeg 9.0.2, the release packaging/tools.json builds for the installer, as gyan.dev's
+# essentials build, and MKVToolNix by its installer, each pinned by URL and checked against its SHA-256. Homebrew's
+# FFmpeg is its current release, not pinned, and the layer 2 tests' version check holds K11's floor. Each job
 # hands the three programs to the tests as LAZYMKV_TEST_MKVMERGE, LAZYMKV_TEST_FFPROBE and LAZYMKV_TEST_FFMPEG; the
 # layer 2 tests (crates/fake-tools/tests/layer2.rs) fail here, instead of skipping, when a program is missing or
 # older than 7.0, and the ffprobe size cross-check fails when ffprobe is missing (T5-R49, call 24).
@@ -106,7 +107,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-24.04, not ubuntu-latest: by 2026-11-16 ubuntu-latest had moved to 26.04 (resolute), whose apt has no
+        # MKVToolNix 82.0-1build2 (T5-R28's pin is noble's package), so the Linux leg stays on the release the pin was
+        # made for, as ffmpeg.yml's build job does; a newer release goes to the owner with a new pin (P33).
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -177,19 +181,37 @@ jobs:
           } >> "$GITHUB_ENV"
           "$prefix/bin/ffmpeg" -version | sed -n 1p
 
-      # Chocolatey's FFmpeg is above 7.0; MKVToolNix comes by its own installer, pinned by URL and SHA-256 and run
-      # silently (call 20 over design part 12.1's package managers, T5-R49).
+      # FFmpeg 9.0.2, the release packaging/tools.json builds for the installer, as gyan.dev's essentials build, pinned
+      # by URL and SHA-256 (the release asset's digest, equal to the .sha256 gyan.dev publishes) and checked before
+      # anything in it runs. Chocolatey's unpinned package had moved to 9.1 by 2026-11-22, whose streamhash muxer
+      # writes its format_version 2 by default; parse_streamhash reads both forms since then (the owner's ruling of
+      # 2026-11-22), and the pin keeps the runs reproducible and on the installer's release. MKVToolNix comes by its
+      # own installer, pinned by URL and SHA-256 and run silently (call 20 over design part 12.1's package managers,
+      # T5-R49).
       - name: Install FFmpeg and MKVToolNix (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
+          FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.7z
+          FFMPEG_SHA256: 4705843ccaaf54257c16ad90f3e952ece33c17df964ecf7bfdbb0f49c7171077
           MKVTOOLNIX_URL: https://mkvtoolnix.download/windows/releases/103.0/mkvtoolnix-64-bit-103.0-setup.exe
           MKVTOOLNIX_SHA256: 3bb4b6efe464c8b852a9813f6be4093fa61bb79229ea755b3a70c5fa42489421
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          choco install ffmpeg -y --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "choco install ffmpeg exited $LASTEXITCODE" }
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg.7z'
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile $archive
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:FFMPEG_SHA256) { throw "the FFmpeg archive has SHA-256 $hash, not $env:FFMPEG_SHA256" }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          & 7z x $archive "-o$unpacked" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z exited $LASTEXITCODE unpacking $archive" }
+          $found = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter ffmpeg.exe)
+          if ($found.Count -ne 1) { throw "the FFmpeg archive holds $($found.Count) ffmpeg.exe, not one" }
+          $bin = $found[0].DirectoryName
+          $ffmpeg = Join-Path $bin 'ffmpeg.exe'
+          $ffprobe = Join-Path $bin 'ffprobe.exe'
+          if (-not (Test-Path -LiteralPath $ffprobe)) { throw "$ffprobe is not there beside ffmpeg.exe" }
           $setup = Join-Path $env:RUNNER_TEMP 'mkvtoolnix-setup.exe'
           Invoke-WebRequest -Uri $env:MKVTOOLNIX_URL -OutFile $setup
           $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -199,9 +221,9 @@ jobs:
           $mkvmerge = Join-Path $env:ProgramFiles 'MKVToolNix\mkvmerge.exe'
           if (-not (Test-Path -LiteralPath $mkvmerge)) { throw "$mkvmerge is not there after the install" }
           & $mkvmerge --version
-          $ffmpeg = (Get-Command ffmpeg.exe).Source
-          $ffprobe = (Get-Command ffprobe.exe).Source
           & $ffmpeg -version | Select-Object -First 1
+          & $ffprobe -version | Select-Object -First 1
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           "LAZYMKV_TEST_MKVMERGE=$mkvmerge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "LAZYMKV_TEST_FFPROBE=$ffprobe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "LAZYMKV_TEST_FFMPEG=$ffmpeg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

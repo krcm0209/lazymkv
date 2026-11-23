@@ -355,7 +355,8 @@ fn real_ffmpeg_streamhash_pass_lists_every_audio_stream() {
     assert!(hashes.iter().all(|(_, h)| h.len() == 32 && h.bytes().all(|b| b.is_ascii_hexdigit())), "{hashes:?}");
     assert_eq!(hashes.iter().map(|(_, h)| h).collect::<BTreeSet<_>>().len(), 3, "three streams, three digests");
     assert_eq!(parse_streamhash(&text, 4), Err("streamhash.txt holds 3 of 4 stream hashes".to_string()));
-    assert!(!text.contains(",v,"), "only the audio streams are hashed: {text}");
+    // Phase 0's form names each stream's type in its line, FFmpeg 9.1's format_version 2 in its `#media_type` header.
+    assert!(!text.contains(",v,") && !text.contains(": video"), "only the audio streams are hashed: {text}");
 }
 
 #[test]
