@@ -644,7 +644,7 @@ fn the_extraction_returns_the_one_lazymkv_folder_and_replaces_an_earlier_tree() 
          }}",
         folder = quoted(&folder),
     );
-    let output = define_and_call(&path, &["Expand-ReleaseTree"], &[], &call);
+    let output = define_and_call(&path, &["Expand-ReleaseTree", "Remove-Earlier", "Get-LinkBelow"], &[], &call);
     let lines = output.lines().map(str::trim).collect::<Vec<_>>();
     let refusal = "top-level entries, not one folder lazymkv-<version>";
     assert_eq!(
@@ -705,6 +705,93 @@ fn the_tree_check_names_the_first_file_a_tree_lacks() {
         "{}",
         redacted(&output)
     );
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
+}
+
+/// The review of Task 4 of pull request 7 (finding 1): `Get-PlantedProblem` passes a run folder holding the three
+/// programs, a real `release` folder and a `release.zip` file, and refuses one whose `release` is a junction, one with
+/// an unknown name, a `release` that is a file and a `release.zip` that is a folder; and `Remove-Earlier` refuses a
+/// junction, or a folder holding one, and removes a real folder. The junctions' target keeps its file throughout. The
+/// stand-ins and junctions (`cmd /c mklink /J`) are made inside the PowerShell call in a fresh temp folder; the
+/// junctions are removed alone with `rmdir` before the folder is.
+#[cfg(windows)]
+#[test]
+fn the_planted_check_and_the_removal_refuse_a_link_and_leave_its_target_whole() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-planted"));
+    let call = format!(
+        "$root = '{folder}'\r\n\
+         New-Item -ItemType Directory -Path $root | Out-Null\r\n\
+         $junction = Join-Path $root 'junction\\release'\r\n\
+         $inner = Join-Path $root 'nested\\release\\inner'\r\n\
+         try {{\r\n\
+             $target = Join-Path $root 'target'\r\n\
+             New-Item -ItemType Directory -Path $target | Out-Null\r\n\
+             $kept = Join-Path $target 'kept.txt'\r\n\
+             Set-Content -LiteralPath $kept -Value 'a'\r\n\
+             foreach ($name in 'good', 'junction', 'unknown', 'file', 'folder', 'nested') {{\r\n\
+                 $run = Join-Path $root $name\r\n\
+                 New-Item -ItemType Directory -Path $run | Out-Null\r\n\
+                 foreach ($program in $required) {{ Set-Content -LiteralPath (Join-Path $run $program) -Value '' }}\r\n\
+             }}\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $root 'good\\release') | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'good\\release\\a.txt') -Value 'a'\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'good\\release.zip') -Value ''\r\n\
+             cmd /c mklink /J $junction $target | Out-Null\r\n\
+             if ($LASTEXITCODE -ne 0) {{ throw \"mklink /J exited $LASTEXITCODE\" }}\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'unknown\\other.txt') -Value ''\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'file\\release') -Value ''\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $root 'folder\\release.zip') | Out-Null\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $root 'nested\\release') | Out-Null\r\n\
+             cmd /c mklink /J $inner $target | Out-Null\r\n\
+             if ($LASTEXITCODE -ne 0) {{ throw \"mklink /J exited $LASTEXITCODE\" }}\r\n\
+             foreach ($name in 'good', 'junction', 'unknown', 'file', 'folder', 'nested') {{\r\n\
+                 $name + ': ' + (Get-PlantedProblem (Join-Path $root $name) $required)\r\n\
+             }}\r\n\
+             foreach ($earlier in $junction, (Join-Path $root 'nested\\release')) {{\r\n\
+                 try {{ Remove-Earlier $earlier; 'remove: returned' }} catch {{ 'remove: threw ' + $_.Exception.Message }}\r\n\
+             }}\r\n\
+             'kept: ' + (Test-Path -LiteralPath $kept -PathType Leaf)\r\n\
+             'inner: ' + (Test-Path -LiteralPath $inner)\r\n\
+             Remove-Earlier (Join-Path $root 'good\\release')\r\n\
+             'good release: ' + (Test-Path -LiteralPath (Join-Path $root 'good\\release'))\r\n\
+         }} finally {{\r\n\
+             foreach ($link in $junction, $inner) {{ if (Test-Path -LiteralPath $link) {{ cmd /c rmdir $link }} }}\r\n\
+             Remove-Item -LiteralPath $root -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(
+        &path,
+        &["Get-PlantedProblem", "Get-LinkBelow", "Remove-Earlier"],
+        &["required"],
+        &call,
+    );
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 11, "{}", redacted(&output));
+    let expected = [
+        ("good:", None),
+        ("junction: ", Some(r"\junction holds the link release, which this script never makes")),
+        ("unknown: ", Some(r"\unknown holds other.txt, which this script did not put there")),
+        ("file: ", Some(r"\file\release is a file, not the folder")),
+        ("folder: ", Some(r"\folder\release.zip is a folder, not the zip's copy")),
+        // The planted check reads the run folder's own entries; a link deeper down is Remove-Earlier's to refuse.
+        ("nested:", None),
+        ("remove: threw ", Some(r"\junction\release is a link, which this script never makes")),
+        ("remove: threw ", Some(r"\nested\release\inner is a link, which this script never makes")),
+        ("kept: True", None),
+        ("inner: True", None),
+        ("good release: False", None),
+    ];
+    for (line, (label, needle)) in lines.iter().zip(expected) {
+        match needle {
+            Some(needle) => {
+                let text = line.strip_prefix(label).unwrap_or_else(|| panic!("{} is not {label}", redacted(line)));
+                assert!(text.contains(needle), "{label}{} lacks {needle}", redacted(text));
+            }
+            None => assert_eq!(*line, label, "{}", redacted(line)),
+        }
+    }
     assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
 }
 

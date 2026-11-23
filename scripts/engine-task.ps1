@@ -156,8 +156,9 @@ function Get-ZipProblem([string]$zip, [string]$sha256) {
 # Extracts $zip into the fresh folder $into, an earlier one removed first, and returns the tree's path: the zip's one
 # top-level folder, lazymkv-<version>-windows-x64, as packaging/release/smoke.ps1 checks it (pull request 7's notes,
 # call 10). It throws for any other top level, so the task never runs from a zip the release workflow did not make.
+# The earlier folder goes through Remove-Earlier, which refuses a link (the review of Task 4 of pull request 7).
 function Expand-ReleaseTree([string]$zip, [string]$into) {
-    if (Test-Path -LiteralPath $into) { Remove-Item -LiteralPath $into -Recurse -Force }
+    Remove-Earlier $into
     Expand-Archive -LiteralPath $zip -DestinationPath $into
     $entries = @(Get-ChildItem -LiteralPath $into -Force)
     if ($entries.Count -ne 1 -or -not $entries[0].PSIsContainer -or -not $entries[0].Name.StartsWith('lazymkv-')) {
@@ -175,12 +176,58 @@ function Get-TreeProblem([string]$tree) {
     ''
 }
 
+# The full path of the first link (a junction or a symbolic link) at or below $item, or '' when there is none. It
+# never enters a link, only lists what each real folder holds, so a link to a large or protected folder costs nothing
+# (the review of Task 4 of pull request 7, finding 1).
+function Get-LinkBelow([System.IO.FileSystemInfo]$item) {
+    if ($item.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) { return $item.FullName }
+    if ($item -is [System.IO.DirectoryInfo]) {
+        foreach ($child in $item.GetFileSystemInfos()) {
+            $found = Get-LinkBelow $child
+            if ($found) { return $found }
+        }
+    }
+    ''
+}
+
 # Removes the earlier file or folder $path, if any, so what the script puts there is new and inherits the protected
-# list (Ruling T3-24-c); a program still running from it keeps it, and the text says what to do then.
+# list (Ruling T3-24-c); a program still running from it keeps it, and the text says what to do then. It refuses a
+# path that is or holds a link, since Windows PowerShell 5.1's Remove-Item -Recurse can follow a link and empty the
+# folder it points to, which this elevated script must never do; it checks this itself, so no caller's check is
+# relied on (the review of Task 4 of pull request 7, finding 1).
 function Remove-Earlier([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return }
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    $link = Get-LinkBelow $item
+    if ($link) {
+        throw "cannot remove the earlier ${path}: $link is a link, which this script never makes, and removing it with what holds it could empty the folder it points to; remove the link alone by hand (rmdir removes a junction and leaves what it points to) and run the script again (design part 3.5)"
+    }
     try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
     catch { throw "cannot remove the earlier $path ($($_.Exception.Message)); stop any engine running from it with lazymkvctl stop, or remove it by hand, and run the script again (design part 3.5)" }
+}
+
+# '' when the run folder $folder holds only what this script puts there: the programs $programs, the folder release
+# and the file release.zip, none of them a link; else the refusal's text (design part 3.5; T7-R4). A writer of the run
+# folder's parent could put its own run folder in place of the protected one, with release a link to any folder, which
+# Remove-Earlier would then empty (the review of Task 4 of pull request 7, finding 1).
+function Get-PlantedProblem([string]$folder, [string[]]$programs) {
+    $entries = @(Get-ChildItem -LiteralPath $folder -Force)
+    $links = @($entries | Where-Object { $_.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint) })
+    if ($links.Count -gt 0) {
+        return "$folder holds the link $($links.Name -join ', '), which this script never makes; remove the link alone by hand (rmdir removes a junction and leaves what it points to) and run the script again (design part 3.5)"
+    }
+    $known = @($programs) + @('release', 'release.zip')
+    $planted = @($entries | Where-Object { $known -notcontains $_.Name })
+    if ($planted.Count -gt 0) {
+        return "$folder holds $($planted.Name -join ', '), which this script did not put there; remove it by hand and run the script again (design part 3.5)"
+    }
+    if (@($entries | Where-Object { $_.Name -eq 'release' -and -not $_.PSIsContainer }).Count -gt 0) {
+        return "$folder\release is a file, not the folder this script extracts a zip's tree into; remove it by hand and run the script again (design part 3.5)"
+    }
+    if (@($entries | Where-Object { $_.Name -eq 'release.zip' -and $_.PSIsContainer }).Count -gt 0) {
+        return "$folder\release.zip is a folder, not the zip's copy this script makes; remove it by hand and run the script again (design part 3.5)"
+    }
+    ''
 }
 
 $status = 'error'
@@ -244,11 +291,8 @@ try {
     }
     # The run folder holds either the three programs or a zip's tree, release, and, while it is checked and extracted,
     # the zip's copy, release.zip; either deploy removes what the other left (T7-R4; pull request 7's notes, call 10).
-    $known = @($required) + @('release', 'release.zip')
-    $planted = @(Get-ChildItem -LiteralPath $run -Force | Where-Object { $known -notcontains $_.Name })
-    if ($planted.Count -gt 0) {
-        throw "$run holds $($planted.Name -join ', '), which this script did not put there; remove it by hand and run the script again (design part 3.5)"
-    }
+    $problem = Get-PlantedProblem $run $required
+    if ($problem) { throw $problem }
     if ($Zip) {
         # The zip is copied first and only the copy is hashed and extracted, so nothing can change it between the check
         # and the extraction; a copy that fails the check is removed before anything earlier is, so a wrong hash leaves
@@ -264,25 +308,37 @@ try {
             throw $problem
         }
         foreach ($program in $required) { Remove-Earlier (Join-Path $run $program) }
-        Remove-Earlier $into
-        try { $tree = Expand-ReleaseTree $copy $into }
-        finally { Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue }
-        # Every extracted item owned by Administrators, as packaging/release/smoke.ps1 sets it, since the engine counts
-        # any other owner of its tools as a writer and refuses them (pull request 7's notes, call 10).
-        & icacls.exe $into /setowner '*S-1-5-32-544' /T /C /Q
-        if ($LASTEXITCODE -ne 0) { throw "icacls /setowner on $into exited $LASTEXITCODE" }
-        $problem = Get-TreeProblem $tree
-        if ($problem) { throw $problem }
-        # The tree's folders and files must let no one but SYSTEM and Administrators write, the run folder's protected
-        # list inherited; -AcceptWritableBuild never accepts a writer here, since nothing is built (call 10). The two
-        # folders above bin are checked too, since a writer of either could rename bin away and put its own in place.
-        $bin = Join-Path $tree 'bin'
-        $installed = @($into, $tree, $bin, (Join-Path $tree 'resources')) + @($treeFiles | ForEach-Object { Join-Path $tree $_ })
-        foreach ($path in $installed) {
-            $writers = @(Get-Writers $path)
-            if ($writers.Count -gt 0) {
-                throw "$path lets $($writers -join ', ') write after the extraction, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program or a tool the engine runs (pull request 7's notes, call 10)"
+        # A tree this script refused, or extracted only in part, must not stay where the task registered by an earlier
+        # deploy of the same version would start it, so any failure from here removes release before the refusal goes
+        # on; the refusal is what the owner reads, and a failed removal is said after it (the review of Task 4 of pull
+        # request 7, finding 2).
+        try {
+            Remove-Earlier $into
+            try { $tree = Expand-ReleaseTree $copy $into }
+            finally { Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue }
+            # Every extracted item owned by Administrators, as packaging/release/smoke.ps1 sets it, since the engine
+            # counts any other owner of its tools as a writer and refuses them (pull request 7's notes, call 10).
+            & icacls.exe $into /setowner '*S-1-5-32-544' /T /C /Q
+            if ($LASTEXITCODE -ne 0) { throw "icacls /setowner on $into exited $LASTEXITCODE" }
+            $problem = Get-TreeProblem $tree
+            if ($problem) { throw $problem }
+            # The tree's folders and files must let no one but SYSTEM and Administrators write, the run folder's
+            # protected list inherited; -AcceptWritableBuild never accepts a writer here, since nothing is built (call
+            # 10). The two folders above bin are checked too, since a writer of either could rename bin away and put
+            # its own in place.
+            $bin = Join-Path $tree 'bin'
+            $installed = @($into, $tree, $bin, (Join-Path $tree 'resources')) + @($treeFiles | ForEach-Object { Join-Path $tree $_ })
+            foreach ($path in $installed) {
+                $writers = @(Get-Writers $path)
+                if ($writers.Count -gt 0) {
+                    throw "$path lets $($writers -join ', ') write after the extraction, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program or a tool the engine runs (pull request 7's notes, call 10)"
+                }
             }
+        } catch {
+            $refusal = $_.Exception.Message
+            try { Remove-Earlier $into }
+            catch { throw "$refusal; and the refused tree $into could not be removed, so remove it by hand before the task starts again: $($_.Exception.Message)" }
+            throw $refusal
         }
     } else {
         foreach ($earlier in 'release', 'release.zip') { Remove-Earlier (Join-Path $run $earlier) }
