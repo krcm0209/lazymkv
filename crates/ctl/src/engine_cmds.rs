@@ -799,6 +799,20 @@ mod tests {
         assert_eq!(relayed_words(&argv, &scratch), (json!(expected), 5));
     }
 
+    /// V10's ruling for decide's `--menu` (menu maps increment 3): a map folder or file is a path, so a relative one goes
+    /// again made absolute, after decide's other path flags.
+    #[test]
+    fn a_relayed_decide_sends_a_relative_menu_path_made_absolute() {
+        let scratch = Scratch::new("ctl-relay-decide-menu");
+        let argv = ["decide", "--job", "a-1", "--title", "t00-00800", "--menu", "made-up-map", "--text", "ocr"];
+        let mut expected: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+        expected.extend([
+            "--text".to_string(), under(&scratch, "ocr"),
+            "--menu".to_string(), under(&scratch, "made-up-map"),
+        ]);
+        assert_eq!(relayed_words(&argv, &scratch), (json!(expected), 5));
+    }
+
     /// V10 for retune (call 13): `--snapshot`, `--compare` and `--text` go again made absolute, in that order, after
     /// the words as typed; `--spec` follows, as `retune_spec` sends it (K7).
     #[test]

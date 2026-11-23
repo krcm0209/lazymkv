@@ -1,0 +1,277 @@
+{
+ "format": "lazymkv menu map v1",
+ "disc": {
+  "slug": "made-up-1",
+  "disc_id_sha1": "0123456789ABCDEF0123456789ABCDEF01234567",
+  "listing_sig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "format": "uhd"
+ },
+ "made": {
+  "by": "agent-explorer",
+  "checked_by": "agent-checker",
+  "date": "2026-11-17",
+  "driver_sha256": "ef56",
+  "libbluray": "1.5.0",
+  "java": "17.0.21",
+  "profile": {
+   "region": "A",
+   "country": "us",
+   "menu_lang": "eng",
+   "audio_lang": "eng",
+   "pg_lang": "eng"
+  }
+ },
+ "start": {
+  "script": "scripts/start.txt",
+  "passed": [
+   "made-up chooser: ENGLISH"
+  ],
+  "seconds_to_menu": 12.5
+ },
+ "play": {
+  "label": "PLAY",
+  "script": "scripts/play.txt",
+  "effect": {
+   "playlist": "00800",
+   "audio": 1,
+   "subtitle": 1,
+   "subtitle_shown": false
+  },
+  "check": {
+   "label_reread": "same",
+   "level": "replayed",
+   "replays": 3,
+   "replays_equal": true,
+   "player": false,
+   "note": ""
+  }
+ },
+ "choices": [
+  {
+   "id": "c001",
+   "section": "SETUP > AUDIO",
+   "label": "Language A 5.1",
+   "label_image": "img/c001.png",
+   "kind": "audio",
+   "surface": "main",
+   "script": "scripts/c001.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "00800",
+    "audio": 1,
+    "subtitle": 1,
+    "subtitle_shown": false
+   },
+   "differs_from_play": false,
+   "check": {
+    "label_reread": "same",
+    "level": "replayed",
+    "replays": 3,
+    "replays_equal": true,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c002",
+   "section": "SETUP > AUDIO",
+   "label": "Language B 5.1",
+   "label_image": "img/c002.png",
+   "kind": "audio",
+   "surface": "main",
+   "script": "scripts/c002.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "00800",
+    "audio": 2,
+    "subtitle": 3,
+    "subtitle_shown": true
+   },
+   "differs_from_play": true,
+   "check": {
+    "label_reread": "same",
+    "level": "replayed",
+    "replays": 3,
+    "replays_equal": true,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c003",
+   "section": "SETUP > AUDIO",
+   "label": "COMMENTARY 1",
+   "label_image": "img/c003.png",
+   "kind": "audio",
+   "surface": "main",
+   "script": "scripts/c003.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "00800",
+    "audio": 3,
+    "subtitle": 1,
+    "subtitle_shown": false
+   },
+   "differs_from_play": true,
+   "check": {
+    "label_reread": "same",
+    "level": "checked",
+    "replays": 0,
+    "replays_equal": null,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c004",
+   "section": "SETUP > SUBTITLES",
+   "label": "Language A",
+   "label_image": "img/c004.png",
+   "kind": "subtitle",
+   "surface": "main",
+   "script": "scripts/c004.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "00800",
+    "audio": 1,
+    "subtitle": 2,
+    "subtitle_shown": true
+   },
+   "differs_from_play": true,
+   "check": {
+    "label_reread": "same",
+    "level": "replayed",
+    "replays": 3,
+    "replays_equal": true,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c005",
+   "section": "SETUP > SUBTITLES",
+   "label": "OFF",
+   "label_image": "img/c005.png",
+   "kind": "subtitle",
+   "surface": "main",
+   "script": "scripts/c005.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "00800",
+    "audio": 1,
+    "subtitle": 2,
+    "subtitle_shown": false
+   },
+   "differs_from_play": false,
+   "check": {
+    "label_reread": "same",
+    "level": "replayed",
+    "replays": 3,
+    "replays_equal": true,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c006",
+   "section": "POP-UP > SUBTITLES",
+   "label": "Langue C — ÉTÉ",
+   "label_image": "img/c006.png",
+   "kind": "subtitle",
+   "surface": "popup",
+   "script": "scripts/c006.txt",
+   "applies": "immediately",
+   "effect": {
+    "playlist": "00800",
+    "audio": 1,
+    "subtitle": 3,
+    "subtitle_shown": true
+   },
+   "differs_from_play": true,
+   "check": {
+    "label_reread": "Langue G — ÉTÉ",
+    "level": "read",
+    "replays": 0,
+    "replays_equal": null,
+    "player": false,
+    "note": "two readings differ"
+   }
+  },
+  {
+   "id": "c007",
+   "section": "EXTRAS",
+   "label": "Bonus 1",
+   "label_image": "img/c007.png",
+   "kind": "bonus",
+   "surface": "main",
+   "script": "scripts/c007.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "01001",
+    "audio": 1,
+    "subtitle": null,
+    "subtitle_shown": false
+   },
+   "differs_from_play": true,
+   "check": {
+    "label_reread": "same",
+    "level": "replayed",
+    "replays": 3,
+    "replays_equal": true,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c008",
+   "section": "PLAY > VERSIONS",
+   "label": "Version 2",
+   "label_image": "img/c008.png",
+   "kind": "version",
+   "surface": "main",
+   "script": "scripts/c008.txt",
+   "applies": "at-play",
+   "effect": {
+    "playlist": "00801",
+    "audio": 1,
+    "subtitle": 1,
+    "subtitle_shown": false
+   },
+   "differs_from_play": true,
+   "check": {
+    "label_reread": "same",
+    "level": "replayed",
+    "replays": 3,
+    "replays_equal": true,
+    "player": false,
+    "note": ""
+   }
+  },
+  {
+   "id": "c009",
+   "section": "SETUP > AUDIO",
+   "label": "Language D",
+   "label_image": null,
+   "kind": "audio",
+   "surface": "main",
+   "script": "scripts/c009.txt",
+   "applies": "at-play",
+   "effect": null,
+   "differs_from_play": null,
+   "check": {
+    "label_reread": "same",
+    "level": "read",
+    "replays": 0,
+    "replays_equal": null,
+    "player": false,
+    "note": "no final state"
+   }
+  }
+ ],
+ "not_mapped": [
+  "SCENES"
+ ],
+ "quirks": [
+  "made-up quirk"
+ ]
+}

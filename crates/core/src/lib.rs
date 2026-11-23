@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod job;
 pub mod lang;
 pub mod lookup;
+pub mod menu;
 pub mod naming;
 pub mod plan;
 pub mod profile;
