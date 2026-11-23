@@ -10,14 +10,18 @@ use serde_json::{json, Map, Value};
 /// the plan and the two audio parts of each decide document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
+    /// The plan and every decide document.
     Whole,
+    /// The plan and the two audio parts of each decide document.
     PlanAndAudio,
 }
 
 /// The output lines in order, and how many of them are differences.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
+    /// The output lines, the last being the verdict.
     pub lines: Vec<String>,
+    /// How many of the lines are differences (the prefixed `plan: ` and `decide <key>: ` lines).
     pub differences: usize,
 }
 
@@ -37,7 +41,7 @@ fn exact() -> Tolerance {
 /// Compares the engine's files with the saved CLI output (pull request 7's notes, calls 3 to 5). `state`: state.json.
 /// `own`: (title key, decide.json) for every title that has one, in key order. `saved_plan`: lazymkvctl plan's output.
 /// `saved`: (title key, lazymkvctl decide's output). Err is an argument-level problem's text (exit 2); Ok is the
-/// report (exit 0 or 1).
+/// report (exit 0 or 1). The caller passes each title key at most once in `own` and in `saved`.
 pub fn compare(
     state: &Value,
     own: &[(String, Value)],
@@ -242,6 +246,7 @@ mod tests {
     #[test]
     fn the_two_extra_keys_are_dropped_and_required() {
         let report = whole(&state(plan()), &doc(), &plan(), &doc()).unwrap();
+        assert_eq!(report.lines, vec!["compare-job: no difference"]);
         assert_eq!(report.differences, 0);
         for name in EXTRA_KEYS {
             let mut own = engine_doc(doc());
@@ -257,11 +262,14 @@ mod tests {
         let (mut left, mut right) = (doc(), doc());
         left["label"] = a;
         right["label"] = b;
-        assert_eq!(whole(&state(plan()), &left, &plan(), &right).unwrap().differences, 0);
+        let report = whole(&state(plan()), &left, &plan(), &right).unwrap();
+        assert_eq!(report.lines, vec!["compare-job: no difference"]);
+        assert_eq!(report.differences, 0);
         left["label"] = serde_json::from_str("1").unwrap();
         right["label"] = serde_json::from_str("1.0").unwrap();
         let report = whole(&state(plan()), &left, &plan(), &right).unwrap();
         assert_eq!(report.lines, vec!["decide t00-00800: /label: 1 != 1.0", "compare-job: 1 difference(s)"]);
+        assert_eq!(report.differences, 1);
     }
 
     #[test]
@@ -296,6 +304,8 @@ mod tests {
         let mut own = doc();
         own["slug"] = json!("own");
         own["label"] = json!("own");
+        own["subtitles"] = json!(["own"]);
+        own["plan"]["slug"] = json!("own");
         own["decision"]["decision"]["other"] = json!(2);
         let run = |own: &Value| {
             compare(&state(plan()), &pair(engine_doc(own.clone())), &json!({"plan": plan()}), &pair(doc()), Mode::PlanAndAudio)
@@ -310,11 +320,54 @@ mod tests {
             report.lines,
             vec!["decide t00-00800: /audio/0/x: 2 != 1".to_string(), AUDIO_ONLY_LINE.to_string(), "compare-job: 1 difference(s)".to_string()]
         );
+        assert_eq!(report.differences, 1);
         own["audio"][0]["x"] = json!(1);
         own["decision"]["decision"]["audio"]["y"] = json!(2);
         let report = run(&own).unwrap();
-        assert_eq!(report.lines[0], "decide t00-00800: /decision/decision/audio/y: 2 != 1");
+        assert_eq!(
+            report.lines,
+            vec![
+                "decide t00-00800: /decision/decision/audio/y: 2 != 1".to_string(),
+                AUDIO_ONLY_LINE.to_string(),
+                "compare-job: 1 difference(s)".to_string(),
+            ]
+        );
         assert_eq!(report.differences, 1);
+    }
+
+    #[test]
+    fn plan_and_audio_compares_the_plan_too() {
+        let mut saved_plan = plan();
+        saved_plan["mode"] = json!("copy");
+        let report = compare(
+            &state(plan()),
+            &pair(engine_doc(doc())),
+            &json!({"plan": saved_plan}),
+            &pair(doc()),
+            Mode::PlanAndAudio,
+        )
+        .unwrap();
+        assert_eq!(
+            report.lines,
+            vec!["plan: /mode: \"direct\" != \"copy\"".to_string(), AUDIO_ONLY_LINE.to_string(), "compare-job: 1 difference(s)".to_string()]
+        );
+        assert_eq!(report.differences, 1);
+    }
+
+    #[test]
+    fn plan_and_audio_on_a_refreshed_plan_says_so_and_compares_its_identity_only() {
+        let mut saved_plan = plan();
+        saved_plan["titles"] = json!([2]);
+        let report = compare(
+            &state(refreshed()),
+            &pair(engine_doc(doc())),
+            &json!({"plan": saved_plan}),
+            &pair(doc()),
+            Mode::PlanAndAudio,
+        )
+        .unwrap();
+        assert_eq!(report.lines, vec![PENDING_LINE, AUDIO_ONLY_LINE, "compare-job: no difference"]);
+        assert_eq!(report.differences, 0);
     }
 
     #[test]
@@ -329,6 +382,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.lines, vec![AUDIO_ONLY_LINE, "not compared: title t01-00801", "compare-job: no difference"]);
+        assert_eq!(report.differences, 0);
     }
 
     #[test]
@@ -361,10 +415,12 @@ mod tests {
         let state = json!({"plan": plan(), "titles": [{"key": KEY}, {"key": "t05-00805"}]});
         let whole = compare(&state, &pair(engine_doc(doc())), &json!({"plan": plan()}), &pair(doc()), Mode::Whole).unwrap();
         assert_eq!(whole.lines, vec!["not compared: title t05-00805 has no decide.json", "compare-job: no difference"]);
+        assert_eq!(whole.differences, 0);
         let audio = compare(&state, &pair(engine_doc(doc())), &json!({"plan": plan()}), &pair(doc()), Mode::PlanAndAudio).unwrap();
         assert_eq!(
             audio.lines,
             vec![AUDIO_ONLY_LINE, "not compared: title t05-00805 has no decide.json", "compare-job: no difference"]
         );
+        assert_eq!(audio.differences, 0);
     }
 }
