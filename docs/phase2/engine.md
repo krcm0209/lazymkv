@@ -200,7 +200,12 @@ yes of 2026-11-07 pin MKVToolNix
 installer on windows, under P33 and design part 12.1, so a formula that moves on fails the job and goes to the owner
 for a new pin, as `ci.yml`'s comment on the macos step says, and an `ubuntu-latest` that moves to the next release
 fails the apt pin the same way, which no comment says; nothing changed, and on 2026-11-10 the owner left the runner
-image at `ubuntu-latest`. The marker names (reuse): the level folder's
+image at `ubuntu-latest`. On 2026-11-22, with `ubuntu-latest` on 26.04 (resolute), whose apt has no 82.0-1build2,
+the test job's Linux leg moved to `ubuntu-24.04`, keeping T5-R28's pins, and windows' FFmpeg, by then Chocolatey's
+unpinned 9.1, was pinned to gyan.dev's 9.0.2 essentials build by URL and SHA-256, the release `packaging/tools.json`
+ships. FFmpeg 9.1's streamhash muxer writes its format_version 2 by default (`#` header lines, then `<k>, <size>,
+<digest>`), and the owner ruled the same day that `parse_streamhash` reads it beside phase 0's form, a stream line
+counting only under `#hash: MD5` and for a stream its `#media_type` line calls audio. The marker names (reuse): the level folder's
 name prefix is core's `audio::pass::LEVEL_PREFIX`, which `level_folder` writes and `staged.rs` and `tuning.rs` read,
 and `PROXY_JSON` is step 10a's alone, which `staged_state` and `tuning.rs` read (T5-R68, below). The exit file's
 readers (simplification): `steps::exit_file` is the one reader of a run's `<out>.exit.json` for job.log's `ended` lines

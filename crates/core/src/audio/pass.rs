@@ -36,6 +36,17 @@ static SPELLED: LazyLock<Regex> =
 /// One line of streamhash.txt (audio-levels.ps1 line 345, `-match`).
 static HASH_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^([0-9]+),a,MD5=([0-9a-f]{32})$").expect("the streamhash pattern is valid"));
+/// One stream's line of streamhash.txt in FFmpeg 9.1's default format_version 2 (libavformat/hashenc.c's
+/// hash_write_trailer): `<k>, <size>, <digest>`, then `, S=<n>` and a size and digest per coded side data element.
+static HASH_LINE_V2: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^([0-9]+), +[0-9]+, ([0-9a-f]{32})(, S=[0-9]+(, +[0-9]+, [0-9a-f]{32})*)?$")
+        .expect("the version 2 streamhash pattern is valid")
+});
+/// The version 2 header's hash (streamhash_write_header) and each stream's media type (ff_framehash_write_header).
+static HASH_HEADER_V2: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^#hash: (.+)$").expect("the streamhash hash header pattern is valid"));
+static MEDIA_HEADER_V2: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^#media_type ([0-9]+): (.+)$").expect("the streamhash media pattern is valid"));
 /// A Matroska DURATION tag (audio-levels.ps1 line 152).
 static DURATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([0-9]+):([0-9]{2}):([0-9]{2}(\.[0-9]+)?)$").expect("the duration pattern is valid"));
@@ -404,11 +415,27 @@ pub fn net_fixed1(value: &str) -> String {
 }
 
 /// `streamhash.txt`'s (k, MD5) pairs by ascending k, k the position in the `-map 0:<n>` order (audio-levels.ps1 lines
-/// 342 to 347; R1-evidence-9, R6-phase0-53, 77). Def: T5-16. Use: T5-17.
+/// 342 to 347; R1-evidence-9, R6-phase0-53, 77). FFmpeg 9.1's format_version 2 is read beside phase 0's form (the
+/// owner's ruling of 2026-11-22): its stream lines count only under a `#hash: MD5` header, and only for a stream its
+/// `#media_type <k>: audio` line names, the header standing where phase 0's `,a,MD5=` stands. Def: T5-16. Use: T5-17.
 pub fn parse_streamhash(text: &str, audio_streams: usize) -> Result<Vec<(i64, String)>, String> {
+    let lines = universal_lines(text);
+    let md5 = lines.iter().any(|line| HASH_HEADER_V2.captures(line).is_some_and(|c| c[1].eq_ignore_ascii_case("md5")));
+    let audio: BTreeSet<&str> = lines
+        .iter()
+        .filter_map(|line| MEDIA_HEADER_V2.captures(line))
+        .filter(|c| c[2].eq_ignore_ascii_case("audio"))
+        .filter_map(|c| c.get(1).map(|k| k.as_str()))
+        .collect();
     let mut hashes: BTreeMap<i64, String> = BTreeMap::new();
-    for line in universal_lines(text) {
-        let Some(caps) = HASH_LINE.captures(line) else { continue };
+    for line in lines {
+        let caps = match HASH_LINE.captures(line) {
+            Some(caps) => caps,
+            None => match HASH_LINE_V2.captures(line) {
+                Some(caps) if md5 && audio.contains(&caps[1]) => caps,
+                _ => continue,
+            },
+        };
         let Ok(k) = caps[1].parse::<i64>() else { continue };
         if k < audio_streams as i64 {
             hashes.insert(k, caps[2].to_string());
