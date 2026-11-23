@@ -3,15 +3,17 @@
 #   scripts/box.sh cargo build --workspace --locked --release
 #   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 [-Data DIR] [-AcceptWritableBuild]'
 # or, to run a release zip's own tree rather than the build's three programs (pull request 7's notes, call 10):
-#   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 -Zip FILE -Sha256 HEX [-Data DIR] [-AcceptWritableBuild]'
+#   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 -Zip FILE -Sha256 HEX
+#     [-Data DIR] [-AcceptWritableBuild]'
 # where FILE is the release workflow's lazymkv-<version>-windows-x64.zip and HEX the zip's line in the SHA256SUMS the
 # same run published. The zip is copied into C:\lazymkv\run, its copy checked against HEX and extracted into
 # C:\lazymkv\run\release, and the task runs the tree's bin\lazymkv-engine.exe, which finds its tools in the tree's
-# resources folder. It registers a task and sets an access list, which are standing changes: run it only after the owner's yes. DIR is a
-# full local folder path below a drive's root, such as D:\lazymkv-data, with no space, quote or percent sign, outside
-# C:\lazymkv (neither in the run folder or a build tree nor holding one) and in a folder that exists; the script refuses
-# any other before it changes anything. The last line is "ENGINE-TASK-DONE status=ok|error" and the exit code 0 or 1. It
-# writes no account name, so it never prints -Zip's own path, which may lie in the owner's profile.
+# resources folder. It registers a task and sets an access list, which are standing changes: run it only after the
+# owner's yes. DIR is a full local folder path below a drive's root, such as D:\lazymkv-data, with no space, quote or
+# percent sign, outside C:\lazymkv (neither in the run folder or a build tree nor holding one) and in a folder that
+# exists; the script refuses any other before it changes anything. The last line is "ENGINE-TASK-DONE status=ok|error"
+# and the exit code 0 or 1. It writes no account name, so it never prints -Zip's own path, which may lie in the owner's
+# profile.
 param(
     [string]$Data = '',
     [switch]$AcceptWritableBuild,
@@ -307,13 +309,16 @@ try {
             Remove-Item -LiteralPath $copy -Force
             throw $problem
         }
-        foreach ($program in $required) { Remove-Earlier (Join-Path $run $program) }
-        # A tree this script refused, or extracted only in part, must not stay where the task registered by an earlier
-        # deploy of the same version would start it, so any failure from here removes release before the refusal goes
-        # on; the refusal is what the owner reads, and a failed removal is said after it (the review of Task 4 of pull
-        # request 7, finding 2).
+        # An earlier tree, left by an earlier -Zip deploy, is removed before the new one is extracted into the same
+        # folder, so if the new tree is then refused no engine is left; with one fixed folder name (T7-R4) that cannot
+        # be avoided. Earlier loose programs are kept until the new tree has passed every check, below, so a refused
+        # zip leaves a loose deploy and its task whole (the whole-branch review of pull request 7, item A).
+        Remove-Earlier $into
+        # A tree this run extracted, whole or in part, and then refused must not stay where the task registered by an
+        # earlier deploy of the same version would start it, so any failure from here removes release before the
+        # refusal goes on; the refusal is what the owner reads, and a failed removal is said after it (the review of
+        # Task 4 of pull request 7, finding 2). A failure to remove the earlier tree, above, is not retried here.
         try {
-            Remove-Earlier $into
             try { $tree = Expand-ReleaseTree $copy $into }
             finally { Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue }
             # Every extracted item owned by Administrators, as packaging/release/smoke.ps1 sets it, since the engine
@@ -337,9 +342,10 @@ try {
         } catch {
             $refusal = $_.Exception.Message
             try { Remove-Earlier $into }
-            catch { throw "$refusal; and the refused tree $into could not be removed, so remove it by hand before the task starts again: $($_.Exception.Message)" }
+            catch { throw "$refusal; and the tree this run extracted into $into could not be removed, so remove it by hand before the task starts again: $($_.Exception.Message)" }
             throw $refusal
         }
+        # Earlier loose programs stay until the task is registered at the tree's bin, below (item A).
     } else {
         foreach ($earlier in 'release', 'release.zip') { Remove-Earlier (Join-Path $run $earlier) }
         foreach ($program in $required) {
@@ -356,7 +362,9 @@ try {
         }
         $bin = $run
     }
-    # The folder the task's programs run from: the run folder, or the tree's bin with -Zip (call 10).
+    # The folder the task's programs run from: the run folder, or the tree's bin with -Zip (call 10). The check below is
+    # asked of those programs in both forms; with -Zip it runs while the earlier loose programs are still in place, so
+    # this refusal too leaves a loose deploy and its task whole (the whole-branch review of pull request 7, item A).
     $ctl = Join-Path $bin 'lazymkvctl.exe'
     cmd /c "$ctl status >nul 2>&1"
     if ($LASTEXITCODE -eq 0) {
@@ -373,6 +381,14 @@ try {
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 7 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType Interactive -RunLevel Highest
     Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+    if ($Zip) {
+        # Only now, with the new tree accepted and the task registered at its bin, do the earlier loose programs go, so
+        # no refusal or failure before this point leaves the task without its programs, and a successful run leaves
+        # the tree alone in the run folder. A loose program that cannot be removed stops the run here, with both the
+        # tree and that program in the run folder and the task already at the tree, which can run; the next run
+        # removes what is left (item A).
+        foreach ($program in $required) { Remove-Earlier (Join-Path $run $program) }
+    }
     Start-ScheduledTask -TaskName $name -ErrorAction Stop
     $answered = $false
     for ($try = 1; $try -le 30 -and -not $answered; $try++) {

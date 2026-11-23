@@ -121,9 +121,9 @@ pub(crate) fn child_words(
     let Some(CommandJob { folder, keys, text_keys, dataset_done, tuning_root: job_root }) = job(&id) else {
         return Err(no_job(&id));
     };
-    // `read_forms` lets `--title` through only with `decide --job` and requires it there, and refuses `--job` with
-    // `retune`, so a title is decide's and no title is plan's.
-        let text = forms.title.as_ref().is_some_and(|key| text_keys.contains(key));
+    // A title is decide's and no title is plan's: `read_forms` lets `--title` through only with `decide --job`, requires
+    // it there, and refuses `--job` with `retune`. Only a title listed in `text_keys` gets `--text` (call 9).
+    let text = forms.title.as_ref().is_some_and(|key| text_keys.contains(key));
     let mut child = match forms.title {
         Some(key) if !keys.contains(&key) => return Err(no_title(&id, &key)),
         Some(key) => vec!["decide".to_string(), "--rec".to_string(), word(&folder.join(key))],

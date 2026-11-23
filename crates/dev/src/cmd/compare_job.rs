@@ -57,6 +57,7 @@ pub fn compare(
         Some(plan) if !plan.is_null() => plan,
         _ => return Err("the job has no plan".to_string()),
     };
+    let titles = title_keys(state)?;
     let saved_plan = saved_plan.get("plan").ok_or_else(|| "the saved plan output has no plan key".to_string())?;
     for (key, document) in own {
         for name in EXTRA_KEYS {
@@ -121,15 +122,24 @@ pub fn compare(
             }
         }
     }
-    if let Some(titles) = state.get("titles").and_then(Value::as_array) {
-        for key in titles.iter().filter_map(|title| title.get("key").and_then(Value::as_str)) {
-            if find(own, key).is_none() {
-                lines.push(format!("not compared: title {} has no decide.json", key));
-            }
+    for key in titles {
+        if find(own, key).is_none() {
+            lines.push(format!("not compared: title {} has no decide.json", key));
         }
     }
     lines.push(if count == 0 { "compare-job: no difference".to_string() } else { format!("compare-job: {} difference(s)", count) });
     Ok(Report { lines, differences: count })
+}
+
+/// The title keys of state.json's `titles`, in order; Err when the list is absent or not an array, or a title has no
+/// string `key`, since a job compared without its titles would leave every decide document out unsaid (the whole-branch
+/// review of pull request 7, item C). An empty list is valid.
+fn title_keys(state: &Value) -> Result<Vec<&str>, String> {
+    let titles = state.get("titles").and_then(Value::as_array).ok_or_else(|| "the job's state has no titles array".to_string())?;
+    titles
+        .iter()
+        .map(|title| title.get("key").and_then(Value::as_str).ok_or_else(|| "a title of the job's state has no key".to_string()))
+        .collect()
 }
 
 /// The document of the title `key`, if the list has one.
@@ -263,15 +273,15 @@ fn parse(rest: &[String]) -> Result<Request, String> {
 fn compare_request(ctx: &Ctx, request: &Request) -> Result<Report, String> {
     let state = read_json_file(ctx, &format!("{}/state.json", request.job))?;
     let mut own = Vec::new();
-    if let Some(titles) = state.get("titles").and_then(Value::as_array) {
-        for key in titles.iter().filter_map(|title| title.get("key").and_then(Value::as_str)) {
-            if own.iter().any(|(seen, _): &(String, Value)| seen == key) {
-                continue;
-            }
-            let given = format!("{}/{}/decide.json", request.job, key);
-            if ctx.abs(&given).exists() {
-                own.push((key.to_string(), read_json_file(ctx, &given)?));
-            }
+    // A state without a usable titles list reads no decide.json here, and `compare` then returns its refusal, after
+    // the job's own "no plan" one, as the rules order them (item C).
+    for key in title_keys(&state).unwrap_or_default() {
+        if own.iter().any(|(seen, _): &(String, Value)| seen == key) {
+            continue;
+        }
+        let given = format!("{}/{}/decide.json", request.job, key);
+        if ctx.abs(&given).exists() {
+            own.push((key.to_string(), read_json_file(ctx, &given)?));
         }
     }
     let saved_plan = read_json_file(ctx, &request.plan)?;
@@ -547,6 +557,28 @@ mod tests {
         assert_eq!(result, Err("no --decide for t00-00800".to_string()));
     }
 
+    /// Item C of the whole-branch review: a state whose titles list is absent or not an array is refused, not compared
+    /// with every decide document left out; an empty list is still valid.
+    #[test]
+    fn a_state_without_a_titles_array_is_an_error() {
+        let run = |state: Value| compare(&state, &[], &json!({"plan": plan()}), &[], Mode::Whole);
+        for state in [json!({"plan": plan()}), json!({"plan": plan(), "titles": {"key": KEY}}), json!({"plan": plan(), "titles": null})] {
+            assert_eq!(run(state.clone()), Err("the job's state has no titles array".to_string()), "{state}");
+        }
+        let report = run(json!({"plan": plan(), "titles": []})).unwrap();
+        assert_eq!(report.lines, vec!["compare-job: no difference"]);
+    }
+
+    /// Item C of the whole-branch review: a title without a string `key` is refused, wherever it is in the list.
+    #[test]
+    fn a_title_without_a_key_is_an_error() {
+        for titles in [json!([{}]), json!([{"key": KEY}, {"key": 1}]), json!([{"key": KEY}, "t01-00801"])] {
+            let state = json!({"plan": plan(), "titles": titles});
+            let result = compare(&state, &pair(engine_doc(doc())), &json!({"plan": plan()}), &pair(doc()), Mode::Whole);
+            assert_eq!(result, Err("a title of the job's state has no key".to_string()), "{state}");
+        }
+    }
+
     #[test]
     fn a_title_of_state_json_without_a_document_gets_its_not_compared_line_in_both_modes() {
         let state = json!({"plan": plan(), "titles": [{"key": KEY}, {"key": "t05-00805"}]});
@@ -631,24 +663,29 @@ mod tests {
         }
     }
 
+    /// Each case with the message it must give, so a case refused for another reason fails (item D of the whole-branch
+    /// review).
     #[test]
     fn each_argument_error_exits_2() {
         let tmp = job("cj-usage", false);
-        for args in [
-            &[][..],
-            &["--plan", "plan.json"][..],
-            &["job", "other", "--plan", "plan.json"][..],
-            &["job"][..],
-            &["job", "--plan", "plan.json", "--plan", "plan.json"][..],
-            &["job", "--plan", "plan.json", "--decide", "t00-00800"][..],
-            &["job", "--plan", "plan.json", "--decide", "=f.json"][..],
-            &["job", "--plan", "plan.json", "--decide", "t00-00800="][..],
-            &["job", "--plan", "plan.json", "--decide", "t00-00800=a.json", "--decide", "t00-00800=b.json"][..],
-            &["job", "--plan", "plan.json", "--bogus"][..],
+        for (args, message) in [
+            (&[][..], "the following arguments are required: job, --plan"),
+            (&["--plan", "plan.json"][..], "the following arguments are required: job"),
+            (&["job", "other", "--plan", "plan.json"][..], "unrecognized arguments: other"),
+            (&["job"][..], "the following arguments are required: --plan"),
+            (&["job", "--plan", "plan.json", "--plan", "plan.json"][..], "argument --plan: given more than once"),
+            (&["job", "--plan", "plan.json", "--decide", "t00-00800"][..], "argument --decide: expected KEY=FILE, got t00-00800"),
+            (&["job", "--plan", "plan.json", "--decide", "=f.json"][..], "argument --decide: expected KEY=FILE, got =f.json"),
+            (&["job", "--plan", "plan.json", "--decide", "t00-00800="][..], "argument --decide: expected KEY=FILE, got t00-00800="),
+            (
+                &["job", "--plan", "plan.json", "--decide", "t00-00800=a.json", "--decide", "t00-00800=b.json"][..],
+                "argument --decide: t00-00800 is given more than once",
+            ),
+            (&["job", "--plan", "plan.json", "--bogus"][..], "unrecognized arguments: --bogus"),
         ] {
             let (code, out, err) = compare_run(&tmp, args);
             assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
-            assert!(err.starts_with(&format!("usage: lazymkv-dev {USAGE}\nlazymkv-dev compare-job: error: ")), "{args:?}: {err}");
+            assert_eq!(err, format!("usage: lazymkv-dev {USAGE}\nlazymkv-dev compare-job: error: {message}\n"), "{args:?}");
         }
     }
 
@@ -670,12 +707,17 @@ mod tests {
         assert!(err.starts_with("compare-job: plan.json: not JSON: "), "{err}");
         tmp.write("plan.json", "");
         assert_eq!(go(&tmp).2, "compare-job: plan.json: empty\n");
+        let hint = "compare-job: plan.json: not UTF-8 JSON (it looks like UTF-16; save the output as bytes, not through PowerShell's >)\n";
         let utf16: Vec<u8> = [0xFFu8, 0xFE].into_iter().chain("{}".encode_utf16().flat_map(u16::to_le_bytes)).collect();
         tmp.write("plan.json", utf16);
-        assert_eq!(
-            go(&tmp).2,
-            "compare-job: plan.json: not UTF-8 JSON (it looks like UTF-16; save the output as bytes, not through PowerShell's >)\n"
-        );
+        assert_eq!(go(&tmp).2, hint);
+        // Item E of the whole-branch review: the big-endian mark, and NUL bytes without a mark.
+        let big_endian: Vec<u8> = [0xFEu8, 0xFF].into_iter().chain("{}".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        tmp.write("plan.json", big_endian);
+        assert_eq!(go(&tmp).2, hint);
+        let unmarked: Vec<u8> = "{}".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        tmp.write("plan.json", unmarked);
+        assert_eq!(go(&tmp).2, hint);
         tmp.write("plan.json", json!({"plan": plan()}).to_string());
         std::fs::remove_file(tmp.0.join("t00-00800.json")).unwrap();
         let (code, _, err) = go(&tmp);
@@ -693,6 +735,26 @@ mod tests {
         tmp.write("job/state.json", json!({"titles": []}).to_string());
         let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json"]);
         assert_eq!((code, out.as_str(), err.as_str()), (2, "", "compare-job: the job has no plan\n"));
+    }
+
+    /// Item C of the whole-branch review: the command does not swallow a state without a usable titles list; it exits
+    /// 2 with the rules' text under the command's prefix.
+    #[test]
+    fn a_state_without_usable_titles_exits_2() {
+        let tmp = job("cj-titles", false);
+        for (titles, text) in [
+            (None, "the job's state has no titles array"),
+            (Some(json!("t00-00800")), "the job's state has no titles array"),
+            (Some(json!([{"name": KEY}])), "a title of the job's state has no key"),
+        ] {
+            let mut state = json!({"plan": plan()});
+            if let Some(titles) = titles {
+                state["titles"] = titles;
+            }
+            tmp.write("job/state.json", state.to_string());
+            let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+            assert_eq!((code, out.as_str(), err), (2, "", format!("compare-job: {text}\n")), "{state}");
+        }
     }
 
     #[test]

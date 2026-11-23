@@ -30,16 +30,17 @@ fn harness(variants: &[&str]) -> Harness {
     Harness::new(Path::new(env!("CARGO_BIN_EXE_fake-tool")), &scenarios, settings)
 }
 
-/// A harness whose movie-direct job stopped at Filed or, as the two-stream job does, at NeedsReview (its stand-in file
-/// cannot be verified, so it is not approved), whose tuning copy is Done and whose engine was restarted, so no step
-/// runs, with the job's id.
-fn filed_with_copy(variants: &[&str]) -> (Harness, String) {
+/// A harness whose movie-direct job stopped at `stop`, `Filed` or, as the two-stream job does, `NeedsReview` (its
+/// stand-in file cannot be verified, so it is not approved), whose tuning copy is Done and whose engine was restarted,
+/// so no step runs, with the job's id. A job that stops anywhere else fails the test (item G of the whole-branch
+/// review), so a single-stream job that is held is caught.
+fn filed_with_copy(variants: &[&str], stop: &str) -> (Harness, String) {
     let h = harness(variants);
     h.insert("tok0", "movie-direct");
     let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
     let stops = ["Filed", "NeedsReview", "Failed"];
     h.wait("the job stops", |h| stops.contains(&h.state_of(&id).as_str()));
-    assert_ne!(h.state_of(&id), "Failed", "{:?}", h.record(&id).message);
+    assert_eq!(h.state_of(&id), stop, "{:?}", h.record(&id).message);
     h.wait("the copy's state", |h| h.record(&id).tuning_copy == Some(TuningCopy::Done));
     h.restart();
     (h, id)
@@ -98,7 +99,7 @@ fn outputs(h: &Harness, id: &str) -> (PathBuf, PathBuf, Vec<String>) {
 /// the engine's own decide.json (pull request 7's notes, call 9).
 #[test]
 fn a_single_stream_job_compares_equal_through_the_relays_words() {
-    let (h, id) = filed_with_copy(&[]);
+    let (h, id) = filed_with_copy(&[], "Filed");
     let (plan, decide, words) = outputs(&h, &id);
     assert_eq!(compared(&h, &id, &plan, &decide), (0, "compare-job: no difference\n".to_string(), String::new()));
     assert!(!words.iter().any(|word| word == TEXT), "{words:?}");
@@ -108,7 +109,7 @@ fn a_single_stream_job_compares_equal_through_the_relays_words() {
 /// agrees with the engine's own decide.json (pull request 7's notes, call 9).
 #[test]
 fn a_two_stream_job_compares_equal_through_the_relays_words() {
-    let (h, id) = filed_with_copy(&["movie-direct-two-subs"]);
+    let (h, id) = filed_with_copy(&["movie-direct-two-subs"], "NeedsReview");
     let (plan, decide, words) = outputs(&h, &id);
     let at = words.iter().position(|word| word == TEXT).unwrap_or_else(|| panic!("no --text in {words:?}"));
     assert_eq!(words[at + 1], h.tuning().join("dataset").display().to_string());
@@ -118,13 +119,13 @@ fn a_two_stream_job_compares_equal_through_the_relays_words() {
 /// A saved plan whose title confidence was changed is a difference: exit 1 and one line about that value.
 #[test]
 fn a_changed_saved_value_is_a_difference() {
-    let (h, id) = filed_with_copy(&[]);
+    let (h, id) = filed_with_copy(&[], "Filed");
     let (plan, decide, _) = outputs(&h, &id);
     let mut value: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
     value["plan"]["title_confidence"] = json!(0.0);
     fs::write(&plan, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     let (code, out, err) = compared(&h, &id, &plan, &decide);
     assert_eq!((code, err.as_str()), (1, ""));
-    let differences: Vec<&str> = out.lines().filter(|line| line.starts_with("plan: /title_confidence: ")).collect();
-    assert_eq!(differences.len(), 1, "{out}");
+    // The whole output: the one line about that value, then the verdict (item F of the whole-branch review).
+    assert_eq!(out, "plan: /title_confidence: 0.85 != 0.0\ncompare-job: 1 difference(s)\n");
 }
