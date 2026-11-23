@@ -149,10 +149,15 @@ fn the_task_script_names_the_task_the_run_folder_and_no_trigger() {
         r"$release = 'C:\lazymkv\target\release'",
         "-LogonType Interactive -RunLevel Highest",
         "-ExecutionTimeLimit ([TimeSpan]::Zero)",
-        "-WorkingDirectory $run",
+        // Pull request 7's notes, call 10: the run folder without -Zip, the tree's bin with it.
+        "-WorkingDirectory $bin",
+        "$bin = $run",
+        r"$bin = Join-Path $tree 'bin'",
         "ENGINE-TASK-DONE status=",
-        // Review round 1 of pull request 3 (G1): Owner decision 13's check meets the release folder and each program.
-        "foreach ($path in @($trees) + @($release) + $programs)",
+        // Review round 1 of pull request 3 (G1): Owner decision 13's check meets the release folder and each program
+        // (without -Zip, call 10).
+        "$checked = @($trees) + @($release) + $programs",
+        "foreach ($path in $checked)",
     ] {
         assert!(text.contains(needle), "the script lacks {needle}");
     }
@@ -178,6 +183,50 @@ fn the_task_script_requires_lazymkv_ocr() {
     let (_, text) = script();
     assert!(text.contains("$required = 'lazymkv-engine.exe', 'lazymkvctl.exe', 'lazymkv-ocr.exe'"));
     assert!(!text.contains("$optional"), "the script still lists an optional program");
+}
+
+/// Pull request 7's notes, call 10 (T7-R4): `-Zip` and `-Sha256` are declared empty and refused one without the other,
+/// and the zip is hashed only as its copy in the run folder: `Get-FileHash` appears only in `Get-ZipProblem`'s body,
+/// whose one call is on `$copy`, the run folder's `release.zip`, and the line that names `-Zip`'s own file copies it
+/// there or checks that it is one, never hashes or extracts it. Textual, on every system.
+#[test]
+fn the_task_script_takes_a_zip_only_with_its_hash() {
+    let (_, text) = script();
+    let code = code_lines(&text);
+    let start = code.iter().position(|line| *line == "param(").expect("a param block");
+    let end = start + code[start..].iter().position(|line| *line == ")").expect("the param block ends");
+    for declared in ["[string]$Zip = ''", "[string]$Sha256 = ''"] {
+        assert!(code[start..end].iter().any(|line| line.trim_end_matches(',') == declared), "param lacks {declared}");
+    }
+    let refusal = "-Zip and -Sha256 go together: the hash is the zip's line in the release workflow's SHA256SUMS";
+    assert!(text.contains(refusal), "the script lacks the refusal: {refusal}");
+
+    let lines: Vec<&str> = text.lines().collect();
+    let definition = lines
+        .iter()
+        .position(|line| line.starts_with("function Get-ZipProblem("))
+        .expect("the script defines Get-ZipProblem");
+    let close = definition + lines[definition..].iter().position(|line| *line == "}").expect("its definition ends");
+    let hashing: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with('#') && line.contains("Get-FileHash"))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(!hashing.is_empty(), "the script hashes nothing");
+    for at in hashing {
+        assert!(at > definition && at < close, "Get-FileHash outside Get-ZipProblem: {}", lines[at]);
+    }
+    let calls: Vec<&str> =
+        code.iter().copied().filter(|line| line.contains("Get-ZipProblem") && !line.starts_with("function ")).collect();
+    assert_eq!(calls, ["$problem = Get-ZipProblem $copy $Sha256"], "Get-ZipProblem is asked about the copy alone");
+    assert!(code.contains(&r"$copy = Join-Path $run 'release.zip'"), "the copy is not the run folder's release.zip");
+    assert!(text.contains("Copy-Item -LiteralPath $Zip -Destination $copy -Force"), "the zip is not copied to $copy");
+    for line in code.iter().filter(|line| line.contains("$Zip")) {
+        for reader in ["Get-FileHash", "Get-ZipProblem", "Expand-ReleaseTree", "Expand-Archive"] {
+            assert!(!line.contains(reader), "-Zip's own file reaches {reader}: {line}");
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -477,6 +526,186 @@ fn the_writers_check_sees_an_entry_a_program_file_alone_carries() {
     let program = lines[1].strip_prefix("program:").expect("the program's line");
     assert!(!folder.trim().split(',').any(|sid| sid == authenticated), "the folder's writers hold {authenticated}");
     assert!(program.trim().split(',').any(|sid| sid == authenticated), "the program's writers lack {authenticated}");
+}
+
+/// `path` as a single-quoted PowerShell string's content.
+#[cfg(windows)]
+fn quoted(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
+}
+
+/// Pull request 7's notes, call 10: `Get-ZipProblem` refuses a file that is not there, a hash that is not 64 hex
+/// digits (short, long, not hex, empty, or ending in a newline) and one that is not the file's, and passes the file's
+/// own in either case. The zip is made inside the PowerShell call by `Compress-Archive` in a fresh temp folder that is
+/// removed afterwards; a refusal's text is printed on one line.
+#[cfg(windows)]
+#[test]
+fn the_zip_check_refuses_a_missing_file_a_malformed_hash_and_a_wrong_hash_and_passes_the_right_one() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-zip-check"));
+    let call = format!(
+        "$ProgressPreference = 'SilentlyContinue'\r\n\
+         $folder = '{folder}'\r\n\
+         New-Item -ItemType Directory -Path $folder | Out-Null\r\n\
+         try {{\r\n\
+             $file = Join-Path $folder 'a.txt'\r\n\
+             Set-Content -LiteralPath $file -Value 'a'\r\n\
+             $zip = Join-Path $folder 'a.zip'\r\n\
+             Compress-Archive -LiteralPath $file -DestinationPath $zip\r\n\
+             $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash\r\n\
+             $cases = @(\r\n\
+                 @('missing', (Join-Path $folder 'none.zip'), $hash),\r\n\
+                 @('short', $zip, ($hash.Substring(1))),\r\n\
+                 @('long', $zip, ($hash + '0')),\r\n\
+                 @('not hex', $zip, ('g' * 64)),\r\n\
+                 @('empty', $zip, ''),\r\n\
+                 @('newline', $zip, ($hash + [char]10)),\r\n\
+                 @('wrong', $zip, ('0' * 64)),\r\n\
+                 @('upper', $zip, ($hash.ToUpperInvariant())),\r\n\
+                 @('lower', $zip, ($hash.ToLowerInvariant()))\r\n\
+             )\r\n\
+             foreach ($case in $cases) {{\r\n\
+                 $case[0] + ': ' + ((Get-ZipProblem $case[1] $case[2]) -replace '\\r?\\n', '<newline>')\r\n\
+             }}\r\n\
+         }} finally {{\r\n\
+             Remove-Item -LiteralPath $folder -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(&path, &["Get-ZipProblem"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 9, "{}", redacted(&output));
+    let malformed = "is not 64 hexadecimal digits; the hash is the zip's line in the release workflow's SHA256SUMS";
+    let expected = [
+        ("missing: ", Some(r"\none.zip is not a file")),
+        ("short: ", Some(malformed)),
+        ("long: ", Some(malformed)),
+        ("not hex: ", Some(malformed)),
+        ("empty: ", Some(malformed)),
+        ("newline: ", Some(malformed)),
+        ("wrong: ", Some("'s SHA-256 is ")),
+        ("upper:", None),
+        ("lower:", None),
+    ];
+    for (line, (label, needle)) in lines.iter().zip(expected) {
+        match needle {
+            Some(needle) => {
+                let refusal = line.strip_prefix(label).unwrap_or_else(|| panic!("{} is not {label}", redacted(line)));
+                assert!(refusal.contains(needle), "{label}{} lacks {needle}", redacted(refusal));
+            }
+            None => assert_eq!(*line, label, "{}", redacted(line)),
+        }
+    }
+    assert!(lines[6].contains(&format!("not -Sha256's {}", "0".repeat(64))), "{}", redacted(lines[6]));
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
+}
+
+/// Pull request 7's notes, call 10: `Expand-ReleaseTree` removes an earlier `$into`, extracts the zip there and returns
+/// its one top-level folder named `lazymkv-*`; a zip with two top-level entries, with one folder of another name, or
+/// with one file named `lazymkv-*`, throws. The zips are made inside the PowerShell call by `Compress-Archive` in a
+/// fresh temp folder that is removed afterwards.
+#[cfg(windows)]
+#[test]
+fn the_extraction_returns_the_one_lazymkv_folder_and_replaces_an_earlier_tree() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-zip-tree"));
+    let call = format!(
+        "$ProgressPreference = 'SilentlyContinue'\r\n\
+         $folder = '{folder}'\r\n\
+         New-Item -ItemType Directory -Path $folder | Out-Null\r\n\
+         try {{\r\n\
+             $src = Join-Path $folder 'src'\r\n\
+             $good = Join-Path $src 'lazymkv-1.2.3-windows-x64'\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $good 'bin') | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $good 'bin\\a.txt') -Value 'a'\r\n\
+             $other = Join-Path $src 'other-1.2.3'\r\n\
+             New-Item -ItemType Directory -Path $other | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $other 'a.txt') -Value 'a'\r\n\
+             $loose = Join-Path $src 'lazymkv-loose.txt'\r\n\
+             Set-Content -LiteralPath $loose -Value 'a'\r\n\
+             Compress-Archive -LiteralPath $good -DestinationPath (Join-Path $folder 'good.zip')\r\n\
+             Compress-Archive -LiteralPath $good, $loose -DestinationPath (Join-Path $folder 'two.zip')\r\n\
+             Compress-Archive -LiteralPath $other -DestinationPath (Join-Path $folder 'other.zip')\r\n\
+             Compress-Archive -LiteralPath $loose -DestinationPath (Join-Path $folder 'file.zip')\r\n\
+             $into = Join-Path $folder 'into'\r\n\
+             New-Item -ItemType Directory -Path $into | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $into 'stray.txt') -Value 'a'\r\n\
+             $tree = Expand-ReleaseTree (Join-Path $folder 'good.zip') $into\r\n\
+             'tree: ' + (Split-Path $tree -Leaf)\r\n\
+             'file: ' + (Test-Path -LiteralPath (Join-Path $tree 'bin\\a.txt') -PathType Leaf)\r\n\
+             'stray: ' + (Test-Path -LiteralPath (Join-Path $into 'stray.txt'))\r\n\
+             'entries: ' + @(Get-ChildItem -LiteralPath $into -Force).Count\r\n\
+             foreach ($bad in 'two', 'other', 'file') {{\r\n\
+                 try {{ Expand-ReleaseTree (Join-Path $folder ($bad + '.zip')) $into | Out-Null; $bad + ': returned' }}\r\n\
+                 catch {{ $bad + ': threw ' + $_.Exception.Message }}\r\n\
+             }}\r\n\
+         }} finally {{\r\n\
+             Remove-Item -LiteralPath $folder -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(&path, &["Expand-ReleaseTree"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    let refusal = "top-level entries, not one folder lazymkv-<version>";
+    assert_eq!(
+        lines,
+        [
+            "tree: lazymkv-1.2.3-windows-x64".to_owned(),
+            "file: True".to_owned(),
+            "stray: False".to_owned(),
+            "entries: 1".to_owned(),
+            format!("two: threw the zip holds 2 {refusal}"),
+            format!("other: threw the zip holds 1 {refusal}"),
+            format!("file: threw the zip holds 1 {refusal}"),
+        ],
+        "{}",
+        redacted(&output)
+    );
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
+}
+
+/// Pull request 7's notes, call 10: `Get-TreeProblem` passes a tree with the six files of `$treeFiles` and otherwise
+/// names the first one missing, in their order; a folder in a file's place, or no tree at all, lacks it too. The tree
+/// is made inside the PowerShell call in a fresh temp folder that is removed afterwards.
+#[cfg(windows)]
+#[test]
+fn the_tree_check_names_the_first_file_a_tree_lacks() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-tree-check"));
+    let call = format!(
+        "$tree = '{folder}'\r\n\
+         foreach ($sub in 'bin', 'resources') {{ New-Item -ItemType Directory -Path (Join-Path $tree $sub) -Force | Out-Null }}\r\n\
+         try {{\r\n\
+             foreach ($file in $treeFiles) {{ Set-Content -LiteralPath (Join-Path $tree $file) -Value '' }}\r\n\
+             'full: ' + (Get-TreeProblem $tree)\r\n\
+             Remove-Item -LiteralPath (Join-Path $tree 'resources\\ffprobe.exe')\r\n\
+             'no ffprobe: ' + (Get-TreeProblem $tree)\r\n\
+             Remove-Item -LiteralPath (Join-Path $tree 'bin\\lazymkvctl.exe')\r\n\
+             'no ctl: ' + (Get-TreeProblem $tree)\r\n\
+             Remove-Item -LiteralPath (Join-Path $tree 'bin\\lazymkv-engine.exe')\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $tree 'bin\\lazymkv-engine.exe') | Out-Null\r\n\
+             'engine folder: ' + (Get-TreeProblem $tree)\r\n\
+             'no tree: ' + (Get-TreeProblem (Join-Path $tree 'none'))\r\n\
+         }} finally {{\r\n\
+             Remove-Item -LiteralPath $tree -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(&path, &["Get-TreeProblem"], &["treeFiles"], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "full:",
+            r"no ffprobe: the release tree lacks resources\ffprobe.exe",
+            r"no ctl: the release tree lacks bin\lazymkvctl.exe",
+            r"engine folder: the release tree lacks bin\lazymkv-engine.exe",
+            r"no tree: the release tree lacks bin\lazymkv-engine.exe",
+        ],
+        "{}",
+        redacted(&output)
+    );
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
 }
 
 /// Pull request 5's Task 11 (design part 10.4; notes calls 7 and 24; T5-R45): the desktop-session run of the decoder

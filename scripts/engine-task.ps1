@@ -2,16 +2,25 @@
 # through scripts/box.sh, after a release build:
 #   scripts/box.sh cargo build --workspace --locked --release
 #   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 [-Data DIR] [-AcceptWritableBuild]'
-# It registers a task and sets an access list, which are standing changes: run it only after the owner's yes. DIR is a
+# or, to run a release zip's own tree rather than the build's three programs (pull request 7's notes, call 10):
+#   scripts/box.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\engine-task.ps1 -Zip FILE -Sha256 HEX [-Data DIR] [-AcceptWritableBuild]'
+# where FILE is the release workflow's lazymkv-<version>-windows-x64.zip and HEX the zip's line in the SHA256SUMS the
+# same run published. The zip is copied into C:\lazymkv\run, its copy checked against HEX and extracted into
+# C:\lazymkv\run\release, and the task runs the tree's bin\lazymkv-engine.exe, which finds its tools in the tree's
+# resources folder. It registers a task and sets an access list, which are standing changes: run it only after the owner's yes. DIR is a
 # full local folder path below a drive's root, such as D:\lazymkv-data, with no space, quote or percent sign, outside
 # C:\lazymkv (neither in the run folder or a build tree nor holding one) and in a folder that exists; the script refuses
 # any other before it changes anything. The last line is "ENGINE-TASK-DONE status=ok|error" and the exit code 0 or 1. It
-# writes no account name.
+# writes no account name, so it never prints -Zip's own path, which may lie in the owner's profile.
 param(
     [string]$Data = '',
-    [switch]$AcceptWritableBuild
+    [switch]$AcceptWritableBuild,
+    [string]$Zip = '',
+    [string]$Sha256 = ''
 )
 $ErrorActionPreference = 'Stop'
+# Expand-Archive's progress bar would only clutter an SSH session's output.
+$ProgressPreference = 'SilentlyContinue'
 # Windows PowerShell's own modules first: started from a PowerShell 7 session, 5.1 would find PowerShell 7's edition of
 # Microsoft.PowerShell.Security first on PSModulePath and Get-Acl would fail to load it (the CI run of review round 1 of
 # pull request 3's head).
@@ -29,6 +38,9 @@ $trusted = 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0'
 # Ruling W17's write rights (add a file or write data, add a folder or append, delete a child, delete, change the
 # access list, take ownership), with GENERIC_WRITE and GENERIC_ALL, which entries for what is created below carry.
 $writeMask = 0x500D0046
+# A release tree's six files, in the order Get-TreeProblem names the first one missing: the three programs, and the
+# three tools the engine finds in <its exe's folder>\..\resources (pull request 7's notes, call 10).
+$treeFiles = 'bin\lazymkv-engine.exe', 'bin\lazymkvctl.exe', 'bin\lazymkv-ocr.exe', 'resources\mkvmerge.exe', 'resources\ffprobe.exe', 'resources\ffmpeg.exe'
 
 # The SIDs other than $trusted that own $path, or that its access list lets write it or, for a folder, anything in it.
 function Get-Writers([string]$path) {
@@ -124,8 +136,60 @@ function Get-WrittenAces([string]$dacl) {
     $written.Substring($written.IndexOf('('))
 }
 
+# '' when $zip is a file whose SHA-256 is $sha256 (64 hex digits, either case, since -ne ignores case), else the
+# refusal's text (pull request 7's notes, call 10). The script asks it only about the zip's copy in the run folder, so
+# nothing can change the file between this check and its extraction, and $zip is never a path in the owner's profile.
+function Get-ZipProblem([string]$zip, [string]$sha256) {
+    if ($sha256 -notmatch '^[0-9A-Fa-f]{64}\z') {
+        return "-Sha256 $sha256 is not 64 hexadecimal digits; the hash is the zip's line in the release workflow's SHA256SUMS"
+    }
+    if (-not $zip -or -not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+        return "$zip is not a file"
+    }
+    $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+    if ($actual -ne $sha256) {
+        return "$zip's SHA-256 is $actual, not -Sha256's $sha256; the hash is the zip's line in the release workflow's SHA256SUMS, and a different one means a different or damaged zip"
+    }
+    ''
+}
+
+# Extracts $zip into the fresh folder $into, an earlier one removed first, and returns the tree's path: the zip's one
+# top-level folder, lazymkv-<version>-windows-x64, as packaging/release/smoke.ps1 checks it (pull request 7's notes,
+# call 10). It throws for any other top level, so the task never runs from a zip the release workflow did not make.
+function Expand-ReleaseTree([string]$zip, [string]$into) {
+    if (Test-Path -LiteralPath $into) { Remove-Item -LiteralPath $into -Recurse -Force }
+    Expand-Archive -LiteralPath $zip -DestinationPath $into
+    $entries = @(Get-ChildItem -LiteralPath $into -Force)
+    if ($entries.Count -ne 1 -or -not $entries[0].PSIsContainer -or -not $entries[0].Name.StartsWith('lazymkv-')) {
+        throw "the zip holds $($entries.Count) top-level entries, not one folder lazymkv-<version>"
+    }
+    $entries[0].FullName
+}
+
+# '' when $tree holds every one of $treeFiles, else "the release tree lacks" and the first one missing, in their order
+# (pull request 7's notes, call 10): the task's programs and the engine's tools must all come from the one zip.
+function Get-TreeProblem([string]$tree) {
+    foreach ($file in $treeFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $tree $file) -PathType Leaf)) { return "the release tree lacks $file" }
+    }
+    ''
+}
+
+# Removes the earlier file or folder $path, if any, so what the script puts there is new and inherits the protected
+# list (Ruling T3-24-c); a program still running from it keeps it, and the text says what to do then.
+function Remove-Earlier([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
+    catch { throw "cannot remove the earlier $path ($($_.Exception.Message)); stop any engine running from it with lazymkvctl stop, or remove it by hand, and run the script again (design part 3.5)" }
+}
+
 $status = 'error'
 try {
+    # The zip without its hash would be run unchecked, and the hash without the zip means a deploy the owner did not
+    # mean (pull request 7's notes, call 10).
+    if (($Zip -eq '') -ne ($Sha256 -eq '')) {
+        throw "-Zip and -Sha256 go together: the hash is the zip's line in the release workflow's SHA256SUMS"
+    }
     if ($Data) { $problem = Get-DataProblem $Data $run $trees; if ($problem) { throw $problem } }
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $administrator = [System.Security.Principal.WindowsBuiltInRole]::Administrator
@@ -136,15 +200,24 @@ try {
     if ($task -and $task.State -in 'Running', 'Queued') {
         throw "the task $name is $($task.State); stop its engine with lazymkvctl stop before deploying again (design part 3.1)"
     }
-    foreach ($program in $required) {
-        if (-not (Test-Path -LiteralPath (Join-Path $release $program) -PathType Leaf)) {
-            throw "$release\$program is missing; build it first with scripts/box.sh cargo build --workspace --locked --release"
+    if ($Zip) {
+        # With -Zip nothing is copied out of the build folders, so their checks are skipped; the run folder's parent
+        # is still checked, since a writer of it could put its own run folder in place of the protected one (Ruling
+        # T3-24-c; pull request 7's notes, call 10). The message names no path: -Zip's may lie in the owner's profile.
+        if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { throw '-Zip names no file; give the release zip itself' }
+        $checked = @(Split-Path $run)
+    } else {
+        foreach ($program in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $release $program) -PathType Leaf)) {
+                throw "$release\$program is missing; build it first with scripts/box.sh cargo build --workspace --locked --release"
+            }
         }
+        # Owner decision 13's check meets the trees, the release folder and each program copied from it, since an entry
+        # set on the folder or on a program alone never shows in a tree's own list (review round 1 of pull request 3, G1).
+        $programs = @($required | ForEach-Object { Join-Path $release $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+        $checked = @($trees) + @($release) + $programs
     }
-    # Owner decision 13's check meets the trees, the release folder and each program copied from it, since an entry set
-    # on the folder or on a program alone never shows in a tree's own list (review round 1 of pull request 3, G1).
-    $programs = @($required | ForEach-Object { Join-Path $release $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
-    foreach ($path in @($trees) + @($release) + $programs) {
+    foreach ($path in $checked) {
         $writers = @(Get-Writers $path)
         if ($writers.Count -eq 0) { continue }
         $list = $writers -join ', '
@@ -169,33 +242,75 @@ try {
     if (-not ($read.StartsWith('O:BA') -and ($read.EndsWith("D:PAI$aces") -or $read.EndsWith("D:P$aces")))) {
         throw "$run's access list did not read back as the protected list of design part 3.5"
     }
-    $known = $required
+    # The run folder holds either the three programs or a zip's tree, release, and, while it is checked and extracted,
+    # the zip's copy, release.zip; either deploy removes what the other left (T7-R4; pull request 7's notes, call 10).
+    $known = @($required) + @('release', 'release.zip')
     $planted = @(Get-ChildItem -LiteralPath $run -Force | Where-Object { $known -notcontains $_.Name })
     if ($planted.Count -gt 0) {
         throw "$run holds $($planted.Name -join ', '), which this script did not put there; remove it by hand and run the script again (design part 3.5)"
     }
-    foreach ($program in $known) {
-        $from = Join-Path $release $program
-        if (Test-Path -LiteralPath $from -PathType Leaf) {
-            # A new file each time, so it inherits the protected list and keeps no earlier file's owner (Ruling T3-24-c).
-            $to = Join-Path $run $program
-            if (Test-Path -LiteralPath $to) {
-                try { Remove-Item -LiteralPath $to -Force -ErrorAction Stop }
-                catch { throw "cannot remove the earlier $to ($($_.Exception.Message)); stop any engine running from it with lazymkvctl stop, or remove it by hand, and run the script again (design part 3.5)" }
-            }
-            Copy-Item -LiteralPath $from -Destination $run -Force
+    if ($Zip) {
+        # The zip is copied first and only the copy is hashed and extracted, so nothing can change it between the check
+        # and the extraction; a copy that fails the check is removed before anything earlier is, so a wrong hash leaves
+        # the earlier deploy in place (pull request 7's notes, call 10).
+        $copy = Join-Path $run 'release.zip'
+        $into = Join-Path $run 'release'
+        Remove-Earlier $copy
+        try { Copy-Item -LiteralPath $Zip -Destination $copy -Force }
+        catch { throw "cannot copy the -Zip file to $copy; check that it can be read, and run the script again" }
+        $problem = Get-ZipProblem $copy $Sha256
+        if ($problem) {
+            Remove-Item -LiteralPath $copy -Force
+            throw $problem
         }
+        foreach ($program in $required) { Remove-Earlier (Join-Path $run $program) }
+        Remove-Earlier $into
+        try { $tree = Expand-ReleaseTree $copy $into }
+        finally { Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue }
+        # Every extracted item owned by Administrators, as packaging/release/smoke.ps1 sets it, since the engine counts
+        # any other owner of its tools as a writer and refuses them (pull request 7's notes, call 10).
+        & icacls.exe $into /setowner '*S-1-5-32-544' /T /C /Q
+        if ($LASTEXITCODE -ne 0) { throw "icacls /setowner on $into exited $LASTEXITCODE" }
+        $problem = Get-TreeProblem $tree
+        if ($problem) { throw $problem }
+        # The tree's folders and files must let no one but SYSTEM and Administrators write, the run folder's protected
+        # list inherited; -AcceptWritableBuild never accepts a writer here, since nothing is built (call 10). The two
+        # folders above bin are checked too, since a writer of either could rename bin away and put its own in place.
+        $bin = Join-Path $tree 'bin'
+        $installed = @($into, $tree, $bin, (Join-Path $tree 'resources')) + @($treeFiles | ForEach-Object { Join-Path $tree $_ })
+        foreach ($path in $installed) {
+            $writers = @(Get-Writers $path)
+            if ($writers.Count -gt 0) {
+                throw "$path lets $($writers -join ', ') write after the extraction, and none of them is SYSTEM or Administrators, so a non-elevated process could change a program or a tool the engine runs (pull request 7's notes, call 10)"
+            }
+        }
+    } else {
+        foreach ($earlier in 'release', 'release.zip') { Remove-Earlier (Join-Path $run $earlier) }
+        foreach ($program in $required) {
+            $from = Join-Path $release $program
+            if (Test-Path -LiteralPath $from -PathType Leaf) {
+                # A new file each time, so it inherits the protected list and keeps no earlier file's owner (Ruling T3-24-c).
+                $to = Join-Path $run $program
+                if (Test-Path -LiteralPath $to) {
+                    try { Remove-Item -LiteralPath $to -Force -ErrorAction Stop }
+                    catch { throw "cannot remove the earlier $to ($($_.Exception.Message)); stop any engine running from it with lazymkvctl stop, or remove it by hand, and run the script again (design part 3.5)" }
+                }
+                Copy-Item -LiteralPath $from -Destination $run -Force
+            }
+        }
+        $bin = $run
     }
-    $ctl = Join-Path $run 'lazymkvctl.exe'
+    # The folder the task's programs run from: the run folder, or the tree's bin with -Zip (call 10).
+    $ctl = Join-Path $bin 'lazymkvctl.exe'
     cmd /c "$ctl status >nul 2>&1"
     if ($LASTEXITCODE -eq 0) {
         throw 'an engine already answers on the pipe, such as a console run; stop it with lazymkvctl stop first (design part 3.3)'
     }
-    $engine = Join-Path $run 'lazymkv-engine.exe'
+    $engine = Join-Path $bin 'lazymkv-engine.exe'
     if ($Data) {
-        $action = New-ScheduledTaskAction -Execute $engine -Argument "--data $Data" -WorkingDirectory $run
+        $action = New-ScheduledTaskAction -Execute $engine -Argument "--data $Data" -WorkingDirectory $bin
     } else {
-        $action = New-ScheduledTaskAction -Execute $engine -WorkingDirectory $run
+        $action = New-ScheduledTaskAction -Execute $engine -WorkingDirectory $bin
     }
     # Owner decision 4: no time limit, task priority 7 as phase 0's recordings had, no battery conditions. The engine's
     # console window shows; closing it is a forced shutdown (design part 3.8).
