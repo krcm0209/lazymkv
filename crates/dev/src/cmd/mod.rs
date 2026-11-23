@@ -23,5 +23,6 @@ pub mod golden;
 pub mod plan;
 pub mod census;
 pub mod menu;
+pub mod compare_job;
 #[cfg(feature = "ocr-trial")]
 pub mod ocr_trial;

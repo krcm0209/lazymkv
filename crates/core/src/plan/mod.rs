@@ -503,6 +503,10 @@ pub fn plan(inputs: &PlanInputs<'_>) -> Result<Plan, String> {
     })
 }
 
+/// The start of the evidence sentence `refresh_identity` adds; a plan whose sentences hold one was planned with a lookup
+/// pending (8.1). `lazymkv-dev compare-job` reads it for that (pull request 7's notes, call 4).
+pub const REFRESHED_IDENTITY: &str = "the identity was made again with the answered lookups (8.1): ";
+
 /// Spec 8.1 after AwaitingLookup ("If TheDiscDB or TMDb cannot be reached, ... planning proceeds on structure alone and
 /// the lookup is recorded as pending. After eject the job waits in AwaitingLookup, retrying hourly, before the file
 /// phase decides anything"): the plan with its identity made again from the answered lookups. `identify` runs again over
@@ -526,7 +530,8 @@ pub fn refresh_identity(plan: &Plan, lookups: &LookupInputs<'_>, settings: &Sett
     let identity = identify(&lookups, plan.kind, &plan.evidence.runtime, settings);
     let mut sentences = plan.evidence.sentences.clone();
     sentences.push(format!(
-        "the identity was made again with the answered lookups (8.1): step {}, confidence {:.2}",
+        "{}step {}, confidence {:.2}",
+        REFRESHED_IDENTITY,
         identity.step.as_str(),
         identity.confidence
     ));
