@@ -784,13 +784,35 @@ fn record_to_fetch_fetches_nothing_for_several_plausible_results_a_generic_name_
     let name = label("EXAMPLE_FILM");
     let both = search(&[
         ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
-        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
+        ("movie", 1002, "Example Film", "Example Film", "2021-03-01"),
     ]);
-    // identify shows the movie for a movie-shaped disc, but the step stays 5 (8.1 row 5): nothing to fetch.
+    // Two films of the name: no result is the one film among TV entries (ruling A2), so nothing is fetched.
     assert_eq!(record_to_fetch(&LookupInputs { name: Some(&name), search: Some(&both), ..LookupInputs::default() }), None);
     let generic = label("LOGICAL_VOLUME_ID");
     assert_eq!(record_to_fetch(&LookupInputs { name: Some(&generic), search: Some(&both), ..LookupInputs::default() }), None);
     assert_eq!(record_to_fetch(&LookupInputs { name: Some(&name), ..LookupInputs::default() }), None);
+}
+
+#[test]
+fn record_to_fetch_takes_the_one_film_among_tv_entries_and_nothing_else_of_several() {
+    // Ruling A2 of 2026-11-23: the lookups run before the scan, so the fetch cannot prefer the structural kind; it
+    // takes the one film when every other plausible result is TV, and otherwise only a single plausible result.
+    let name = label("EXAMPLE_FILM");
+    let film_a = ("movie", 1001, "Example Film", "Example Film", "1986-05-09");
+    let film_b = ("movie", 1002, "Example Film", "Example Film", "2021-03-01");
+    let show_a = ("tv", 1003, "Example Film", "Example Film", "2020-01-24");
+    let show_b = ("tv", 1004, "Example Film", "Example Film", "1999-09-09");
+    let fetched = |results: &[(&str, i64, &str, &str, &str)]| {
+        let answer = search(results);
+        record_to_fetch(&LookupInputs { name: Some(&name), search: Some(&answer), ..LookupInputs::default() })
+    };
+    assert_eq!(fetched(&[film_a, show_a]), Some(movie(1001)));
+    assert_eq!(fetched(&[show_a, film_a, show_b]), Some(movie(1001)));
+    assert_eq!(fetched(&[film_a, film_b]), None);
+    assert_eq!(fetched(&[show_a, show_b]), None);
+    assert_eq!(fetched(&[film_a, film_b, show_a]), None);
+    assert_eq!(fetched(&[film_a]), Some(movie(1001)));
+    assert_eq!(fetched(&[show_a]), Some(tv(1003)));
 }
 
 #[test]
@@ -1012,7 +1034,7 @@ fn several_plausible_results_give_0_50_with_identity_ambiguous() {
 }
 
 #[test]
-fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5() {
+fn the_structural_kind_picks_the_one_show_among_films_but_two_shows_stay_step_5() {
     let name = label("EXAMPLE SHOW S3D3");
     let record = tv_record(2316, "Example Show", &[(3, &OFFICE_SEASON_3[..])]);
     let two = search(&[
@@ -1021,13 +1043,13 @@ fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5(
     ]);
     let inputs = LookupInputs { name: Some(&name), search: Some(&two), record: Some(&record), ..LookupInputs::default() };
     let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
-    // Spec 8.1 row 5 "TMDb search with several plausible results": preferring the structural kind picks the show
-    // shown for review, and its runtime check runs and passes, but two plausible results are never step 4.
+    // Spec 8.1 row 4 (ruling A2 of 2026-11-23): preferring the structural kind leaves the one show, every other
+    // plausible result is a film, and the show's runtime check passes.
     assert_eq!(
         (identity.step, identity.confidence, identity.tmdb, identity.runtime_check),
-        (IdentityStep::TmdbSeveral, 0.50, Some(tv(2316)), Some(true))
+        (IdentityStep::TmdbOne, 0.90, Some(tv(2316)), Some(true))
     );
-    assert_eq!(identity.review, Some(ReviewReason::IdentityAmbiguous));
+    assert_eq!(identity.review, None);
     assert_eq!(identity.plausible, vec![tv(2316), movie(3003)]);
     assert_eq!(
         identity.evidence,
@@ -1038,6 +1060,7 @@ fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5(
             "2 of 2 search results are plausible: tv 2316, movie 3003",
             "preferring tv results leaves tv 2316",
             "the runtime check passes",
+            "the only plausible tv result passes the runtime check: step 4 (8.1 row 4, ruling A2 of 2026-11-23)",
         ])
     );
     // Two shows of that name stay two: step 5 with no result picked, and every plausible result listed.
@@ -1052,6 +1075,145 @@ fn the_structural_kind_picks_the_result_shown_but_several_plausible_stay_step_5(
         (identity.step, identity.tmdb, identity.plausible),
         (IdentityStep::TmdbSeveral, None, vec![tv(2316), movie(3003), tv(2996)])
     );
+}
+
+/// A film and a TV entry of the same name, the film first.
+fn film_and_show() -> TmdbSearch {
+    search(&[
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
+    ])
+}
+
+#[test]
+fn a_film_whose_name_a_tv_entry_shares_passes_step_4_on_its_runtime_check() {
+    // Ruling A2 of 2026-11-23: the structure says movie, preferring movie results leaves the one film, every other
+    // plausible result is TV, and the film's 100 minutes are within 3% of the 6000 s feature.
+    let name = label("EXAMPLE_FILM");
+    let results = film_and_show();
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    assert_eq!(
+        identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default()),
+        Identity {
+            step: IdentityStep::TmdbOne,
+            confidence: 0.90,
+            tmdb: Some(movie(1001)),
+            title: Some("Example Film".to_string()),
+            year: Some(1986),
+            original_language: Some("en".to_string()),
+            review: None,
+            plausible: vec![movie(1001), tv(1003)],
+            runtime_check: Some(true),
+            lookup_pending: false,
+            evidence: sentences(&[
+                "name 'EXAMPLE_FILM' cleaned to 'EXAMPLE FILM'",
+                "2 of 2 search results are plausible: movie 1001, tv 1003",
+                "preferring movie results leaves movie 1001",
+                "the runtime check passes",
+                "the only plausible movie result passes the runtime check: step 4 (8.1 row 4, ruling A2 of 2026-11-23)",
+            ]),
+        }
+    );
+}
+
+#[test]
+fn a_film_whose_name_a_tv_entry_shares_stays_step_5_when_its_runtime_check_fails_or_cannot_run() {
+    let name = label("EXAMPLE_FILM");
+    let results = film_and_show();
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let failed = identify(&inputs, Kind::Movie, &features(&[5400]), &Settings::default());
+    assert_eq!(
+        (failed.step, failed.confidence, failed.review, failed.tmdb, failed.runtime_check),
+        (IdentityStep::TmdbSeveral, 0.50, Some(ReviewReason::IdentityAmbiguous), Some(movie(1001)), Some(false))
+    );
+    assert_eq!(failed.plausible, vec![movie(1001), tv(1003)]);
+    assert_eq!(failed.evidence.last().map(String::as_str), Some("the runtime check fails"));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), ..LookupInputs::default() };
+    let unchecked = identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default());
+    assert_eq!(
+        (unchecked.step, unchecked.confidence, unchecked.review, unchecked.tmdb, unchecked.runtime_check),
+        (IdentityStep::TmdbSeveral, 0.50, Some(ReviewReason::IdentityAmbiguous), Some(movie(1001)), None)
+    );
+    assert_eq!(unchecked.evidence.last().map(String::as_str), Some("no runtime check: no TMDb record for movie 1001"));
+}
+
+#[test]
+fn two_films_and_a_tv_entry_stay_step_5_on_a_film_disc() {
+    let name = label("EXAMPLE_FILM");
+    let results = search(&[
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("movie", 1002, "Example Film", "Example Film", "2021-03-01"),
+        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
+    ]);
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default());
+    assert_eq!(
+        (identity.step, identity.confidence, identity.review, identity.tmdb, identity.runtime_check),
+        (IdentityStep::TmdbSeveral, 0.50, Some(ReviewReason::IdentityAmbiguous), None, None)
+    );
+    assert_eq!(identity.plausible, vec![movie(1001), movie(1002), tv(1003)]);
+}
+
+#[test]
+fn a_tv_disc_whose_name_a_film_shares_stays_step_5_with_only_the_films_record() {
+    // The chain fetched the film's record (record_to_fetch is film-only); the structure says TV, so the TV entry is
+    // picked, and no record of it is in hand for its runtime check.
+    let name = label("EXAMPLE_FILM");
+    let results = film_and_show();
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Tv, &features(&[6000]), &Settings::default());
+    assert_eq!(
+        (identity.step, identity.confidence, identity.review, identity.tmdb, identity.runtime_check),
+        (IdentityStep::TmdbSeveral, 0.50, Some(ReviewReason::IdentityAmbiguous), Some(tv(1003)), None)
+    );
+    assert_eq!(identity.evidence.last().map(String::as_str), Some("no runtime check: no TMDb record for tv 1003"));
+}
+
+#[test]
+fn a_tv_disc_whose_name_a_film_shares_passes_step_4_with_the_shows_own_record() {
+    // The core rule is symmetric (ruling A2); only the fetch is film-only.
+    let name = label("EXAMPLE SHOW S3D3");
+    let results = search(&[
+        ("movie", 3003, "Example Show", "Example Show", "2010-01-01"),
+        ("tv", 2316, "Example Show", "Example Show", "2005-03-24"),
+    ]);
+    let record = tv_record(2316, "Example Show", &[(3, &OFFICE_SEASON_3[..])]);
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Tv, &episode_groups(&OFFICE_GROUPS_S), &Settings::default());
+    assert_eq!(
+        (identity.step, identity.confidence, identity.review, identity.tmdb, identity.runtime_check),
+        (IdentityStep::TmdbOne, 0.90, None, Some(tv(2316)), Some(true))
+    );
+    assert_eq!(identity.plausible, vec![movie(3003), tv(2316)]);
+    assert_eq!(
+        identity.evidence.last().map(String::as_str),
+        Some("the only plausible tv result passes the runtime check: step 4 (8.1 row 4, ruling A2 of 2026-11-23)")
+    );
+}
+
+#[test]
+fn with_tmdb_only_autofile_off_a_film_whose_name_a_tv_entry_shares_is_capped_at_0_84() {
+    let name = label("EXAMPLE_FILM");
+    let results = film_and_show();
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6000]), &tmdb_only_autofile_off());
+    assert_eq!(
+        (identity.step, identity.confidence, identity.review, identity.tmdb),
+        (IdentityStep::TmdbOne, 0.84, Some(ReviewReason::IdentityAmbiguous), Some(movie(1001)))
+    );
+}
+
+#[test]
+fn record_to_fetch_and_identify_agree_on_a_film_whose_name_a_tv_entry_shares() {
+    let name = label("EXAMPLE_FILM");
+    let results = film_and_show();
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), ..LookupInputs::default() };
+    assert_eq!(record_to_fetch(&inputs), identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default()).tmdb);
 }
 
 #[test]

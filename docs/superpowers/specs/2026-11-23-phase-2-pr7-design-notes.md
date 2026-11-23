@@ -31,6 +31,7 @@ In:
 - `lazymkv-dev compare-job` (design part 12.7; G1);
 - a way to put the release zip's tree behind the desktop task (decision A1, below);
 - a fault in the relayed `decide` that reading the code for these notes turned up (call 9);
+- the identification rule of ruling A2 (section 3);
 - a rehearsal of the comparison without a disc, on the jobs the mini PC already holds (call 16);
 - choosing the second disc (P10, P27);
 - the sitting on the mini PC: design part 12.7's checklist on both discs;
@@ -71,6 +72,13 @@ A1 amends, for the acceptance run only:
   zip's tools;
 - design part 12.7, "Before the first disc": "The built binaries are in the run folder" becomes "The release zip's
   tree is in the run folder, and its SHA-256 (Secure Hash Algorithm 256) is the workflow's".
+
+- **A2 (2026-11-23, during the sitting). A film whose name a TV entry shares.** Both shortlisted second discs were
+  identified at step 5 because TMDb lists a TV entry with the film's exact name. The owner ruled: when preferring the
+  disc's structural kind leaves exactly one result, that result's record is fetched, and if the runtime check passes
+  it is step 4. Built in this pull request before the second disc runs (spec 8.1 rows 4 and 5; `core::lookup`). The
+  fetch is the one film among TV entries, since the lookups run before the scan; a TV disc of that shape keeps step 5
+  until TV is built (phase 4).
 
 ## 4. What the code does today
 
