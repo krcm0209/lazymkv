@@ -44,6 +44,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("golden", cmd::golden::run as Command, "write|check [--evidence DIR] [--text DIR]"),
     ("census", cmd::census::run as Command, "[--evidence DIR]"),
     ("menu", cmd::menu::run as Command, "show <map> | check <map> --scan <slug|recording dir|scan file> [--evidence DIR]"),
+    ("compare-job", cmd::compare_job::run as Command, "<job folder> --plan FILE [--decide KEY=FILE ...] [--plan-and-audio]"),
     #[cfg(feature = "ocr-trial")]
     ("ocr-trial", cmd::ocr_trial::run as Command, cmd::ocr_trial::SYNOPSIS),
 ];

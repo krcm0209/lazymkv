@@ -1,10 +1,14 @@
 //! `lazymkv-dev compare-job`, the comparison rules (pull request 7's notes, calls 3 to 5). The engine's job folder
 //! (state.json and one decide.json per title) is compared with the saved output of `lazymkvctl plan` and `lazymkvctl
-//! decide` for the same job. This file holds the pure function; reading the files and the arguments come later.
+//! decide` for the same job. This file holds the pure function `compare` and the command's `run`: arguments, file
+//! reading, output and exit codes (calls 2 and 7).
 
+use crate::evidence::Ctx;
 use crate::pyjson::{structural_diff, Tolerance};
+use crate::{usage_error, Args};
 use lazymkv_core::plan::REFRESHED_IDENTITY;
 use serde_json::{json, Map, Value};
+use std::io::Write;
 
 /// What is compared (pull request 7's notes, calls 3 to 5): `Whole` the plan and every decide document; `PlanAndAudio`
 /// the plan and the two audio parts of each decide document.
@@ -173,6 +177,138 @@ fn audio_parts(document: &Value) -> Value {
     Value::Object(out)
 }
 
+/// The command's name as typed.
+const NAME: &str = "compare-job";
+/// The usage line, under the command's name.
+const USAGE: &str = "compare-job [-h] job --plan FILE [--decide KEY=FILE ...] [--plan-and-audio]";
+/// What -h prints after the usage line.
+const HELP: &str = "
+Compares an engine job folder with the saved output of lazymkvctl plan and lazymkvctl decide.
+
+positional arguments:
+  job                the job folder (its state.json and <title key>/decide.json are read)
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --plan FILE        the saved output of lazymkvctl plan
+  --decide KEY=FILE  the saved output of lazymkvctl decide for the title KEY (any number; each key once)
+  --plan-and-audio   compare the plan and the two audio parts of each decide document only
+
+exit status: 0 when nothing differs; 1 when something does; 2 for an argument error or a file that cannot be used.
+";
+/// The reason for a file that looks like UTF-16 (PowerShell's `>` writes it).
+const UTF16_REASON: &str = "not UTF-8 JSON (it looks like UTF-16; save the output as bytes, not through PowerShell's >)";
+
+/// The JSON file at `given` (relative to the context), or the line `compare-job: <given>: <reason>` (pull request 7's
+/// notes, call 7).
+fn read_json_file(ctx: &Ctx, given: &str) -> Result<Value, String> {
+    let fail = |reason: String| format!("{NAME}: {given}: {reason}");
+    let bytes = std::fs::read(ctx.abs(given)).map_err(|problem| fail(problem.to_string()))?;
+    if bytes.is_empty() {
+        return Err(fail("empty".to_string()));
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bytes.contains(&0) {
+        return Err(fail(UTF16_REASON.to_string()));
+    }
+    serde_json::from_slice(&bytes).map_err(|problem| fail(format!("not JSON: {problem}")))
+}
+
+/// What the command line asks for.
+struct Request {
+    job: String,
+    plan: String,
+    decide: Vec<(String, String)>,
+    mode: Mode,
+}
+
+/// Reads the arguments (call 2); Err is the usage message.
+fn parse(rest: &[String]) -> Result<Request, String> {
+    let mut args = Args::new(rest, &["--plan", "--decide", "--plan-and-audio"]);
+    let plans = args.flags("--plan")?;
+    let decides = args.flags("--decide")?;
+    let mode = if args.switch("--plan-and-audio") { Mode::PlanAndAudio } else { Mode::Whole };
+    let words = args.positionals()?;
+    let mut missing = Vec::new();
+    if words.is_empty() {
+        missing.push("job");
+    }
+    if plans.is_empty() {
+        missing.push("--plan");
+    }
+    if !missing.is_empty() {
+        return Err(format!("the following arguments are required: {}", missing.join(", ")));
+    }
+    if words.len() > 1 {
+        return Err(format!("unrecognized arguments: {}", words[1..].join(" ")));
+    }
+    if plans.len() > 1 {
+        return Err("argument --plan: given more than once".to_string());
+    }
+    let mut decide: Vec<(String, String)> = Vec::new();
+    for text in decides {
+        match text.split_once('=') {
+            Some((key, file)) if !key.is_empty() && !file.is_empty() => {
+                if decide.iter().any(|(seen, _)| seen == key) {
+                    return Err(format!("argument --decide: {key} is given more than once"));
+                }
+                decide.push((key.to_string(), file.to_string()));
+            }
+            _ => return Err(format!("argument --decide: expected KEY=FILE, got {text}")),
+        }
+    }
+    Ok(Request { job: words[0].clone(), plan: plans[0].clone(), decide, mode })
+}
+
+/// Reads every file the request names and compares them; Err is the whole line for stderr.
+fn compare_request(ctx: &Ctx, request: &Request) -> Result<Report, String> {
+    let state = read_json_file(ctx, &format!("{}/state.json", request.job))?;
+    let mut own = Vec::new();
+    if let Some(titles) = state.get("titles").and_then(Value::as_array) {
+        for key in titles.iter().filter_map(|title| title.get("key").and_then(Value::as_str)) {
+            if own.iter().any(|(seen, _): &(String, Value)| seen == key) {
+                continue;
+            }
+            let given = format!("{}/{}/decide.json", request.job, key);
+            if ctx.abs(&given).exists() {
+                own.push((key.to_string(), read_json_file(ctx, &given)?));
+            }
+        }
+    }
+    let saved_plan = read_json_file(ctx, &request.plan)?;
+    let mut saved = Vec::new();
+    for (key, file) in &request.decide {
+        saved.push((key.clone(), read_json_file(ctx, file)?));
+    }
+    compare(&state, &own, &saved_plan, &saved, request.mode).map_err(|text| format!("{NAME}: {text}"))
+}
+
+/// `lazymkv-dev compare-job <job folder> --plan FILE [--decide KEY=FILE ...] [--plan-and-audio]` (pull request 7's
+/// notes, calls 2 and 7): the report on `out`; exit 0 for no difference, 1 for any, 2 for an argument or file problem
+/// (its line on `err`).
+pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    if args.iter().take_while(|word| word.as_str() != "--").any(|word| word == "-h" || word == "--help") {
+        let _ = writeln!(out, "usage: lazymkv-dev {USAGE}");
+        let _ = write!(out, "{HELP}");
+        return 0;
+    }
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
+    match compare_request(ctx, &request) {
+        Ok(report) => {
+            for line in &report.lines {
+                let _ = writeln!(out, "{line}");
+            }
+            i32::from(report.differences != 0)
+        }
+        Err(line) => {
+            let _ = writeln!(err, "{line}");
+            2
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +433,7 @@ mod tests {
                 "compare-job: 2 difference(s)".to_string(),
             ]
         );
+        assert_eq!(report.differences, 2);
     }
 
     #[test]
@@ -422,5 +559,154 @@ mod tests {
             vec![AUDIO_ONLY_LINE, "not compared: title t05-00805 has no decide.json", "compare-job: no difference"]
         );
         assert_eq!(audio.differences, 0);
+    }
+
+    // The command (pull request 7's notes, calls 2 and 7).
+    use crate::testutil::{call, Scratch, ScratchExt};
+
+    const KEY2: &str = "t01-00801";
+
+    fn compare_run(tmp: &Scratch, args: &[&str]) -> (i32, String, String) {
+        call(run, &Ctx::for_test(&tmp.0), args)
+    }
+
+    /// A job folder `job` with two titles, KEY (a decide.json) and, when `second`, KEY2 too; the saved files `plan.json`
+    /// and `KEY.json` (and `KEY2.json`).
+    fn job(tag: &str, second: bool) -> Scratch {
+        let tmp = Scratch::new(tag);
+        let titles = if second { json!([{"key": KEY}, {"key": KEY2}]) } else { json!([{"key": KEY}]) };
+        tmp.write("job/state.json", json!({"plan": plan(), "titles": titles}).to_string());
+        tmp.write("plan.json", json!({"plan": plan()}).to_string());
+        tmp.write(&format!("job/{KEY}/decide.json"), engine_doc(doc()).to_string());
+        tmp.write(&format!("{KEY}.json"), doc().to_string());
+        if second {
+            tmp.write(&format!("job/{KEY2}/decide.json"), engine_doc(doc()).to_string());
+            tmp.write(&format!("{KEY2}.json"), doc().to_string());
+        }
+        tmp
+    }
+
+    #[test]
+    fn an_equal_job_exits_0_and_prints_no_difference() {
+        let tmp = job("cj-equal", false);
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "compare-job: no difference\n", ""));
+    }
+
+    #[test]
+    fn a_difference_exits_1_with_its_line_on_stdout() {
+        let tmp = job("cj-differ", false);
+        let mut saved = doc();
+        saved["label"] = json!("y");
+        tmp.write(&format!("{KEY}.json"), saved.to_string());
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+        assert_eq!(code, 1);
+        assert_eq!(out, "decide t00-00800: /label: \"x\" != \"y\"\ncompare-job: 1 difference(s)\n");
+        assert_eq!(err, "");
+    }
+
+    #[test]
+    fn plan_and_audio_is_chosen_by_its_flag() {
+        let tmp = job("cj-audio", false);
+        let mut saved = doc();
+        saved["label"] = json!("y");
+        tmp.write(&format!("{KEY}.json"), saved.to_string());
+        let (code, out, _) =
+            compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json", "--plan-and-audio"]);
+        assert_eq!(code, 0);
+        assert_eq!(out, format!("{AUDIO_ONLY_LINE}\ncompare-job: no difference\n"));
+        // Without any --decide the plan-and-audio mode names the title it has no pair for.
+        let (code, out, _) = compare_run(&tmp, &["job", "--plan", "plan.json", "--plan-and-audio"]);
+        assert_eq!(code, 0);
+        assert_eq!(out, format!("{AUDIO_ONLY_LINE}\nnot compared: title t00-00800\ncompare-job: no difference\n"));
+    }
+
+    #[test]
+    fn help_prints_the_usage_and_exits_0() {
+        let tmp = Scratch::new("cj-help");
+        for args in [&["-h"][..], &["--help"][..], &["job", "--plan", "p", "-h"][..]] {
+            let (code, out, err) = compare_run(&tmp, args);
+            assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+            assert!(out.starts_with(&format!("usage: lazymkv-dev {USAGE}\n")), "{out}");
+        }
+    }
+
+    #[test]
+    fn each_argument_error_exits_2() {
+        let tmp = job("cj-usage", false);
+        for args in [
+            &[][..],
+            &["--plan", "plan.json"][..],
+            &["job", "other", "--plan", "plan.json"][..],
+            &["job"][..],
+            &["job", "--plan", "plan.json", "--plan", "plan.json"][..],
+            &["job", "--plan", "plan.json", "--decide", "t00-00800"][..],
+            &["job", "--plan", "plan.json", "--decide", "=f.json"][..],
+            &["job", "--plan", "plan.json", "--decide", "t00-00800="][..],
+            &["job", "--plan", "plan.json", "--decide", "t00-00800=a.json", "--decide", "t00-00800=b.json"][..],
+            &["job", "--plan", "plan.json", "--bogus"][..],
+        ] {
+            let (code, out, err) = compare_run(&tmp, args);
+            assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
+            assert!(err.starts_with(&format!("usage: lazymkv-dev {USAGE}\nlazymkv-dev compare-job: error: ")), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn decide_splits_at_the_first_equals_sign() {
+        let tmp = job("cj-equals", false);
+        tmp.write("dir/a=b.json", doc().to_string());
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=dir/a=b.json"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "compare-job: no difference\n", ""));
+    }
+
+    #[test]
+    fn an_unreadable_or_non_json_file_exits_2_and_names_it() {
+        let tmp = job("cj-files", false);
+        let go = |tmp: &Scratch| compare_run(tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+        tmp.write("plan.json", "no job x-1\n");
+        let (code, out, err) = go(&tmp);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.starts_with("compare-job: plan.json: not JSON: "), "{err}");
+        tmp.write("plan.json", "");
+        assert_eq!(go(&tmp).2, "compare-job: plan.json: empty\n");
+        let utf16: Vec<u8> = [0xFFu8, 0xFE].into_iter().chain("{}".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        tmp.write("plan.json", utf16);
+        assert_eq!(
+            go(&tmp).2,
+            "compare-job: plan.json: not UTF-8 JSON (it looks like UTF-16; save the output as bytes, not through PowerShell's >)\n"
+        );
+        tmp.write("plan.json", json!({"plan": plan()}).to_string());
+        std::fs::remove_file(tmp.0.join("t00-00800.json")).unwrap();
+        let (code, _, err) = go(&tmp);
+        assert_eq!(code, 2);
+        assert!(err.starts_with("compare-job: t00-00800.json: "), "{err}");
+        std::fs::remove_file(tmp.0.join("job/state.json")).unwrap();
+        let (code, _, err) = go(&tmp);
+        assert_eq!(code, 2);
+        assert!(err.starts_with("compare-job: job/state.json: "), "{err}");
+    }
+
+    #[test]
+    fn a_job_without_a_plan_exits_2() {
+        let tmp = job("cj-noplan", false);
+        tmp.write("job/state.json", json!({"titles": []}).to_string());
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (2, "", "compare-job: the job has no plan\n"));
+    }
+
+    #[test]
+    fn a_title_without_decide_json_is_left_out_and_a_pair_for_it_is_an_error() {
+        let tmp = job("cj-nodecide", true);
+        std::fs::remove_file(tmp.0.join(format!("job/{KEY2}/decide.json"))).unwrap();
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out, "not compared: title t01-00801 has no decide.json\ncompare-job: no difference\n");
+        let (code, out, err) = compare_run(
+            &tmp,
+            &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json", "--decide", "t01-00801=t01-00801.json"],
+        );
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "compare-job: the job has no decide.json for t01-00801\n");
     }
 }
