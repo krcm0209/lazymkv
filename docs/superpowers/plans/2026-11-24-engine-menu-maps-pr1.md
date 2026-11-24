@@ -366,7 +366,9 @@ fn a_keep_override_on_the_reference_disputes_nothing() {
     too, so the guard is reached (EP-7); a comment says the wiring never gives such a confirmation.
   - `without_confirmations_the_decision_is_todays` must pass unchanged.
 
-- [ ] **Step 2: Run** `$CARGO test -p lazymkv-core --locked --offline tracks::audio review` and see the new ones fail.
+- [ ] **Step 2: Run** `$CARGO test -p lazymkv-core --locked --offline tracks::audio` and
+  `$CARGO test -p lazymkv-core --locked --offline review::` (cargo takes one filter before `--`) and see the new
+  ones fail.
 
 - [ ] **Step 3: Implement** in `review.rs` and `audio.rs` as the Interfaces block says. Keep `arrange` as it is;
   the second arrangement is made only when rules 1 and 2 did not refuse. The doc comments of `decide_audio`,
