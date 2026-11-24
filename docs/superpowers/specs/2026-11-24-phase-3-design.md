@@ -1,7 +1,7 @@
 # lazymkv phase 3: unsure discs and failures
 
 Date: 2026-11-24.
-Status: the owner answered five questions in the design conversation of 2026-11-24 (Y1 to Y5, part 2); the rest is the designer's, with every call listed in part 16 for the owner to check. The owner approved this document on 2026-11-24. The spec's amendments (part 15) are not yet applied; they come with pull request 1.
+Status: the owner answered five questions in the design conversation of 2026-11-24 (Y1 to Y5, part 2); the rest is the designer's, with every call listed in part 16 for the owner to check. The owner approved this document on 2026-11-24. The spec's amendments (part 15) are applied with pull request 1.
 
 "The spec" is `docs/superpowers/specs/2026-10-04-lazymkv-design.md`; "the phase 2 design" is `docs/superpowers/specs/2026-10-21-phase-2-engine-design.md`; "the notes" are `docs/phase2/engine.md`. Y1 to Y5 are the owner's answers of 2026-11-24 and Z1 to Z28 the designer's calls, both recorded here.
 
