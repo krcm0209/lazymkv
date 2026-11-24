@@ -17,8 +17,8 @@ sections 3, 5.1, 5.3, 5.4 and 5.4a. Every example here is made up.
 - Making a map never needs the owner to type or photograph a menu.
 - A map changes one decision of lazymkv, and only where `lazymkv-dev decide --menu` gives it (the engine gives no
   map): an audio track the menu calls a commentary or an audio description, with a strong tie, on a map whose identity
-  matches, is dropped where the content rule kept it (The rule; design 5.4a). Every other label is evidence shown
-  beside the decisions.
+  matches, is dropped, whatever the content rule says of it and also without a verdict (The rule; design 5.4a). Every
+  other label is evidence shown beside the decisions.
 
 ## The folder and the file
 
@@ -371,12 +371,13 @@ before:
 - `decision.facts.menu_streams`: the scan streams the block confirms as a commentary or an audio description (the
   ones the decision is given; `FactsSummary.menu_streams`), ascending;
 - `decision.decision.audio.menu`: every confirmation the decision was given, ascending stream, with what became of it
-  (`AudioDecision.menu`, MR-11), as `{"stream", "role", "choices", "outcome"}`, and `verdict`, the content rule's
-  verdict, only with the outcome `content_not_keep` (The rule).
+  (`AudioDecision.menu`, MR-11), as `{"stream", "role", "choices", "outcome"}` (`MenuApplied`); it carries no content
+  verdict, which no longer decides the outcome (MA-3; The rule).
 
 A stream the menu drops is listed under `decision.decision.audio.dropped` as
 `[<stream>, {"why": "menu", "role": "<role>"}]` (`AudioDrop::Menu`), in scan order with the other drops. Made up, for
-the block above with the content rule's verdict `keep` on stream 3:
+the block above, where stream 3 is kept, has no Keep override and is not the reference, and the reference stays when
+it is dropped, whatever the content rule's verdict on it:
 
 ```json
 "dropped": [[3, {"why": "menu", "role": "commentary"}]],
@@ -545,9 +546,9 @@ replayed commentary choice on audio 3 gives stream `tie-conflict` with why `lang
 
 ## The rule
 
-A menu map's commentary or audio-description role with a strong tie outranks the content rule's keep and counts as a
-confirmation: the track is dropped (owner, 2026-11-21 and 2026-11-24; MR-1; design 5.4a). It is built into
-`core::tracks::audio::decide_audio`; `decide --menu` gives it the confirmations.
+A menu map's commentary or audio-description role with a strong tie counts as a confirmation: the track is dropped,
+whatever the content rule says of it and also without a verdict (owner, 2026-11-21 and 2026-11-24; MR-1, MA-1;
+design 5.4a). It is built into `core::tracks::audio::decide_audio`; `decide --menu` gives it the confirmations.
 
 **The confirmations** are the rows of the `roles` key, when it acts (MR-5, MR-8), whose role is `commentary` or
 `audio_description`, whose tie is strong and that are not the stream plain Play itself selects (`play`, MR-17;
@@ -556,31 +557,36 @@ stream, one with a plain label that holds no role word and one that names a comm
 commentary (the measurement's reading: a text without a role word is skipped). Without `--menu`, or with a block
 that does not act or a `menu` key that is skipped, the decision is given none and is the one without the map.
 
-**The drop.** After step 1 and steps 2 to 6 and "Content" as without the menu, each confirmation gets the first
-outcome that holds, tested in this order (`MenuOutcome`):
+**The drop.** After step 1 and steps 2 to 6 and "Content" as without the menu, each confirmation gets one of six
+outcomes (`MenuOutcome`, MA-3). The first that holds of these three, tested in this order:
 
 1. `not_kept`: the stream is not among the kept tracks (step 1 dropped it, or the title has no such audio stream);
 2. `overridden`: a remembered or owner's Keep override wins over the menu (MR-3);
-3. `no_language`: the stream is kept in the no-language group, which the content rule does not judge;
-4. `reference`: the stream is the decision's programme reference, which is never dropped (MR-2);
-5. `no_verdict`: the verdicts were not measured (no reference they were measured against);
-6. `verdicts_not_applied`: the verdicts were measured against another reference than the decision's, or D21's veto
-   holds (MR-2);
-7. `no_verdict`: no verdict names the stream;
-8. `content_not_keep`: the content rule's verdict on the stream is not `keep` (MR-2, MR-12), written under `verdict`;
-9. else the stream is a candidate. The kept streams without the candidates are arranged again by the same steps 2 to 6
-   and "Content". When that keeps the programme reference, it is the decision and every candidate is `dropped` (as
-   `AudioDrop::Menu`); otherwise none is dropped and every candidate is `reference_would_change` (MR-4).
+3. `reference`: the stream is the decision's programme reference, which is never dropped.
+
+A confirmation none of them holds for is a candidate, whatever its language group (a stream without a language code
+included). The content rule's verdict is not asked (MA-1): keep, commentary, cross-language commentary, a noted
+commentary or audio description, the audio-description pattern, not judged, reference unclear, D21's veto holding,
+verdicts measured against another reference than the decision's, or no verdict at all; none of them keeps a candidate.
+The kept streams without the candidates are arranged again by the same steps 2 to 6 and "Content". Then every
+candidate gets the same outcome, the first that holds of these three, tested in this order:
+
+4. `would_leave_none`: that arrangement keeps no track, so none is dropped (MA-2);
+5. `reference_would_change`: its programme reference differs from the first arrangement's, so none is dropped (MR-4);
+6. `dropped`: else that arrangement is the decision, and every candidate is dropped as `AudioDrop::Menu`.
 
 A menu drop raises no note and no review, as a flag or a description raises none; the decision lists every
-confirmation it was given with its outcome (MR-11). Step 1, D13's duplicates and the confidence are not changed by the
-menu (MR-14). A track that the menu and the content rule both call a commentary or an audio description is unruled
-and stays as today: a commentary verdict still sends the job to review, and nothing is dropped (`content_not_keep`,
-MR-12). Audio only: subtitles are not touched.
+confirmation it was given with its outcome (MR-11), as `{"stream", "role", "choices", "outcome"}` and no content
+verdict (MA-3). The content rule's verdicts apply to the tracks that remain as they do on any title: a dropped stream's
+own verdict raises nothing, and a commentary verdict on another kept track still sends the job to review. When none is
+dropped, the decision is the one without the menu, the confirmations listed. Step 1, D13's duplicates and the
+confidence are not changed by the menu (MR-14). Audio only: subtitles are not touched.
 
-Made up: stream 3 is confirmed as a commentary and the content rule's verdict on it, measured against the decision's
-reference stream 1, is `keep`; stream 3 is dropped. With the verdict `commentary` it is kept and listed as
-`{"stream": 3, "role": "commentary", "choices": ["c002"], "outcome": "content_not_keep", "verdict": "commentary"}`.
+Made up: stream 3 is confirmed as a commentary, is kept, has no Keep override and is not the decision's reference,
+stream 1. Whether the content rule's verdict on stream 3 is `keep`, `commentary` or missing, stream 3 is dropped and
+listed as `{"stream": 3, "role": "commentary", "choices": ["c002"], "outcome": "dropped"}`. On a title whose only
+kept audio streams have no language code (so no reference), with both confirmed, neither is dropped and both are
+listed with the outcome `would_leave_none`.
 
 ## Known reader differences
 
@@ -703,6 +709,38 @@ Added on 2026-11-24 at the final review of the branch (a ruling the owner can co
   When Play has no effect, names no audio number, is on another playlist or cannot be translated, Play's stream is
   not known and this ruling excludes nothing. The ties stay the measurement's.
 
+Added on 2026-11-24, after pull request #35 merged: the owner's rulings after pull request #35, quoted:
+- Asked "The menu says a track is a commentary (strong tie) and lazymkv's content check ALSO says commentary. Today
+  that track is kept: 6 send the job to review, 6 only get a note. Should the menu's word drop it?", the owner chose
+  "Yes, drop it".
+- Asked "The menu says a track is a commentary or audio description (strong tie) and lazymkv's content check has NO
+  verdict on it (not measured, or the measurement could not be used). Should the menu's word alone drop it?", the
+  owner chose "Yes, menu alone".
+- Asked whether to keep the six guards (the map's disc ID must match; the title's own playlist must be read and agree
+  with the scan; an "off" wording with no recorded decision gives no role; never the stream plain Play selects; never
+  the programme reference, and nothing is dropped if a drop would move it; a Keep override wins), with a track that
+  has no language code treated like any other, the owner chose "Keep all six".
+
+The menu-alone plan's rulings (the plan of 2026-11-24, `docs/superpowers/plans/2026-11-24-menu-alone.md`), verbatim;
+they are rulings of the plan that the owner can correct:
+
+- MA-1: the two answers together mean the content rule's verdict does not gate the menu's drop in any state: keep,
+  commentary, cross-language commentary, a noted commentary or audio description, the audio-description pattern,
+  not judged, reference unclear, D21's veto holding, another reference than the measured one, or no verdict at all.
+  This replaces MR-2's verdict conditions and MR-12.
+- MA-2: a drop that would leave the title with no kept audio track is not made: none of the title's confirmed streams
+  is dropped (outcome `would_leave_none`). Now that a track with no language code can be dropped, a title without a
+  programme reference could otherwise lose its only audio.
+- MA-3: the decision's list of confirmations no longer carries a content verdict; the outcomes are `dropped`,
+  `not_kept`, `overridden`, `reference`, `reference_would_change`, `would_leave_none`.
+- MA-4: the six sentences that pull request #35 added to the main design are replaced by ones that say the rule as it
+  now is; they stay dated 2026-11-24.
+
+MA-1 replaces MR-2's verdict conditions and MR-12, and MR-11's list of outcomes is now MA-3's. MR-2's condition that
+the stream be in the Original or English group falls with the owner's third answer (a track with no language code is
+treated like any other); its other conditions, that the stream is kept and is not the reference, stand, and so do the
+other rulings as written above.
+
 ## Tests and acceptance
 
 Recorded on 2026-11-21 for the branch that adds the reader, `menu show`, `menu check` and `decide --menu`; the test
@@ -723,7 +761,9 @@ printed line, `other_playlists` grouped with ASCII case ignored, an empty map pa
 ### The menu-role increment (2026-11-24)
 
 Recorded on 2026-11-24 for the branch that adds the playlist reader, the roles, the off-decisions, the ties and the
-rule, and gives `decide --menu` the `roles` key and the decision's confirmations.
+rule, and gives `decide --menu` the `roles` key and the decision's confirmations. Its counts, and its outcome words
+(`content_not_keep`, `no_verdict`), are of the rule as pull request #35 built it, before the owner's rulings after
+that merge widened it (Rulings, MA-1 to MA-4).
 
 - Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline --no-fail-fast`, run on this Mac with
   toolchain 1.100.0: 3506 tests in 58 result lines, 3505 passed, 1 failed, 5 ignored, with no warning. The one failure
@@ -751,3 +791,7 @@ rule, and gives `decide --menu` the `roles` key and the decision's confirmations
   measurement's 14 disagreeing rows 10 drop. The other 4 are on three maps whose rip fails the verify report's track
   match, so decide takes no content verdict on any stream there; the rule was not changed to make them drop (design
   5.4a).
+
+### Menu alone (2026-11-24)
+
+<!-- controller: test counts and acceptance on the 13 real maps go here -->
