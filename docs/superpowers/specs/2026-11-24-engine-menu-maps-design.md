@@ -357,8 +357,9 @@ written into the job folder, fails the step, as each already does for the librar
 | The copy cannot be written into the job folder | Decide fails | the failure's message |
 
 A share that does not answer, in today's engine and in phase 3's:
-- **Today.** A share lost during Decide fails the job as `Unknown` (V7), and `retry` decides again. The maps folder's
-  share does the same. The job is not in `AwaitingShare`, so nothing cycles.
+- **Today.** A library share lost during Decide fails the job as `Unknown` (V7), and `retry` decides again. The maps
+  folder's share does the same. The job is not in `AwaitingShare`, so nothing cycles. (One Decide failure already
+  waits there: the staging share of a title whose subtitle text was read.)
 - **Once phase 3's failures pull request is built** (phase 3 design, parts 9.3 and 9.4), a step that finds a root it
   needs unreachable waits in `AwaitingShare` and returns by itself. The maps folder is then one of the roots a
   file-phase return needs, in the step's own check and in the waiting job's re-check (`share_back` reads staging and
@@ -540,8 +541,9 @@ Every test uses made-up maps, playlists, scans and jobs. No test reads the owner
   candidates); the off file's three-field form, a stale line, the refusals; the setting's checks; the summary's notes.
 - **`dev`:** `decide --menu` documents with the notes and the new keys; `menu publish` on temporary folders (a good
   pair, each refusal, an old off file removed, another disc's folder untouched); the off listing.
-- **Whole jobs on the stand-in tools,** on all three systems. The stand-in disc gains a unit key file, and a made-up
-  playlist that agrees with its scan. Scenarios:
+- **Whole jobs on the stand-in tools,** on all three systems. The stand-in disc already has a unit key file; its
+  playlist is eight bytes that no reader parses, so a scenario of its own gets a made-up playlist that agrees with its
+  scan, and the scenarios other tests build on stay as they are. Scenarios:
   - a map present: the confirmed track is not in the filed file's plan, the note is in the record and the summary, the
     two copies are in the job folder, and `compare-job` finds no difference;
   - no maps folder set, and no map for the disc: every document byte-identical to a run of today's code;
