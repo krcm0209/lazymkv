@@ -1951,6 +1951,65 @@ fn discard_preview_counts_the_staging_folder() {
     assert!(staged.join("rip/t00-00800/title_t00.mkv").is_file());
 }
 
+/// Fix round 1 (phase 3 design, part 6.8): a job held right after DecisionDone whose dataset copy still runs is
+/// discarded. No pass deletes its staging folder while the copy reads it; once the copy ends, the record keeps
+/// `dropped` and a pass deletes the folder.
+#[test]
+fn a_discard_while_the_dataset_copy_runs_keeps_the_staging_folder_until_the_copy_ends() {
+    let keeping = json!({"keep_tuning_evidence": true, "drive_settle_s": 0, "drive_ready_timeout_s": 1});
+    let h = stand_in(&["movie-direct"], keeping);
+    // The colliding file at the final path holds the job for review.
+    let film = h.library().join(FINAL);
+    fs::create_dir_all(film.parent().unwrap()).unwrap();
+    fs::write(&film, b"owner's").unwrap();
+    // The copy's first file waits for `released`, at most two minutes so a failing test cannot hang its stop.
+    let gate = std::sync::Arc::new((std::sync::Mutex::new((false, false)), std::sync::Condvar::new()));
+    let step = std::sync::Arc::clone(&gate);
+    h.copy_with(move |from: &Path, to: &Path| -> std::io::Result<u64> {
+        let (lock, signal) = &*step;
+        let mut state = lock.lock().unwrap();
+        state.0 = true; // entered
+        signal.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !state.1 && Instant::now() < deadline {
+            state = signal.wait_timeout(state, Duration::from_millis(50)).unwrap().0;
+        }
+        drop(state);
+        fs::copy(from, to)
+    });
+    let release = |gate: &std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>| {
+        gate.0.lock().unwrap().1 = true;
+        gate.1.notify_all();
+    };
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    h.wait("the copy runs", |_| gate.0.lock().unwrap().0);
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Pending));
+    let staged = h.staging().join(&id);
+    assert!(staged.is_dir());
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    let record = h.record(&id);
+    assert_eq!((record.state, record.tuning_copy), (State::Discarded, Some(TuningCopy::Dropped)));
+    // The discard's pass, and one more, end while the copy runs: neither deletes the staging folder.
+    h.run_cleanup();
+    h.run_cleanup();
+    let deleted = format!("cleanup: {id}: deleted its staging folder");
+    let kept = staged.is_dir() && !h.engine_log().contains(&deleted);
+    release(&gate);
+    assert!(kept, "a pass deleted the staging folder under the running copy: {}", h.engine_log());
+    assert_eq!(h.wait_copy(), id);
+    h.wait(&deleted, |h| h.engine_log().contains(&deleted));
+    h.wait("the pass's end", |h| !h.busy());
+    assert!(!staged.exists());
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Dropped), "the copy's end keeps dropped");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains("tuning copy: ended after the discard, so the record keeps dropped"), "{log}");
+    assert_eq!(fs::read(&film).unwrap(), b"owner's");
+}
+
 /// A job that waits in a state entered during its file phase holds the file-phase slot (design part 5.7); its discard
 /// frees the slot, and the next job in the queue gets it.
 #[test]

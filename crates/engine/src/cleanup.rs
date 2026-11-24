@@ -76,6 +76,14 @@ pub(crate) fn discard_due(job: &CleanupJob) -> bool {
     job.record.state == State::Discarded
 }
 
+/// The roots a pass may use for `job` (phase 3 design, part 6.8; fix round 1): its staging root and its library roots,
+/// each through `configured_root`, so an absent, blank or whitespace root and `/` are none and nothing is ever asked or
+/// deleted under them. Def: P3-T10. Use: P3-T15, P3-T16.
+pub(crate) fn pass_roots(job: &CleanupJob) -> (Option<&str>, Vec<&str>) {
+    let staging = configured_root(job.staging_root.as_deref());
+    (staging, job.library_roots.iter().filter_map(|root| configured_root(Some(root))).collect())
+}
+
 /// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each
 /// job the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
 /// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book
@@ -84,7 +92,7 @@ pub(crate) fn discard_due(job: &CleanupJob) -> bool {
 /// `<data>/jobs/<id>/` whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy without
 /// one is left to the refetch, Ruling T4-R7); and when `retention_due` or `discard_due` holds, the job's staging folder
 /// is deleted once its share answers, without following any link inside it (a root that is absent or blank, `/`
-/// included, is none: `configured_root`). When `discard_due` holds, the job's partial files in each of its library
+/// included, is none: `pass_roots`). When `discard_due` holds, the job's partial files in each of its library
 /// roots are deleted once that root's share answers (`delete_partial_files`; phase 3 design, part 6.8). The share of
 /// each root is asked once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives
 /// `log` one engine.log line, and each root not reached gives one line at the pass's end with the count of jobs it
@@ -128,7 +136,8 @@ pub(crate) fn run_pass(
         if !discarded && !retention_due(&job, now_unix) {
             continue;
         }
-        if let Some(root) = configured_root(job.staging_root.as_deref()) {
+        let (staging_root, library_roots) = pass_roots(&job);
+        if let Some(root) = staging_root {
             if reached(&mut roots, root, STAGING_ROOT, shares) {
                 delete_staging_folder(root, id, log);
             }
@@ -136,7 +145,7 @@ pub(crate) fn run_pass(
         if !discarded {
             continue;
         }
-        for root in job.library_roots.iter().filter_map(|root| configured_root(Some(root))) {
+        for root in library_roots {
             if reached(&mut roots, root, LIBRARY_ROOT, shares) {
                 delete_partial_files(root, id, log);
             }
@@ -416,6 +425,55 @@ mod tests {
                 format!("cleanup: the staging root {staging_root} was not reached: {UNANSWERED}; 1 job(s) skipped"),
             ]
         );
+    }
+
+    /// The roots a pass may use (phase 3 design, part 6.8; fix round 1): an absent, blank or whitespace root and `/`
+    /// are none, for a staging root and for a library root. This checks the guard at a level that deletes nothing, since
+    /// a literal `/` cannot be placed inside the scratch folder.
+    #[test]
+    fn a_blank_or_slash_root_is_no_root_a_pass_may_use() {
+        let mut job = discarded(1);
+        for root in ["", "  ", "/", " / ", "//"] {
+            job.staging_root = Some(root.to_string());
+            job.library_roots = vec![root.to_string(), "/srv/media/Movies".to_string()];
+            assert_eq!(pass_roots(&job), (None, vec!["/srv/media/Movies"]), "{root:?}");
+        }
+        job.staging_root = None;
+        job.library_roots = vec![];
+        assert_eq!(pass_roots(&job), (None, vec![]));
+        job.staging_root = Some("/srv/staging".to_string());
+        assert_eq!(pass_roots(&job), (Some("/srv/staging"), vec![]));
+    }
+
+    /// Fix round 1: a pass never asks or deletes under a blank, whitespace or `/` root, for a discarded job's staging
+    /// and library roots or a filed job's staging root past its retention. Each such root is set unreachable in the
+    /// fake, so a missing guard would show as a "was not reached" line and a reach, never as a deletion: a pass whose
+    /// share does not answer deletes nothing, so the test cannot act on the real `/` or the working folder even then.
+    #[test]
+    fn a_pass_never_uses_a_blank_or_slash_root() {
+        let folders = Scratch::new("cleanup-blank-roots");
+        let shares = FakeShares::new();
+        let roots = ["", "  ", "/"];
+        for root in roots {
+            shares.set_reach(root, Reach::Unreachable("the guard is missing".into()));
+        }
+        let mut jobs = Vec::new();
+        for (n, root) in (1..).zip(roots) {
+            let mut staging = discarded(n);
+            staging.staging_root = Some(root.to_string());
+            let mut filed = job(n + 10, State::Filed, Some(NOW - 30 * DAY));
+            filed.staging_root = Some(root.to_string());
+            let mut library = discarded(n + 20);
+            library.library_roots = vec![root.to_string()];
+            jobs.extend([staging, filed, library]);
+        }
+        let lines = RefCell::new(Vec::new());
+        let stop = AtomicBool::new(false);
+        run_pass(jobs, &folders.0.join("data"), &shares, TODAY, NOW, &stop, &|line| lines.borrow_mut().push(line));
+        for root in roots {
+            assert_eq!(shares.reaches(root), 0, "{root:?} was asked");
+        }
+        assert_eq!(lines.into_inner(), Vec::<String>::new());
     }
 
     /// Phase 3 design, part 6.8: only the regular files `<job id>-*.mkv.partial` directly inside `.lazymkv-partial`
