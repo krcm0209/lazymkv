@@ -37,10 +37,14 @@
 //!
 //! Menu maps increment 3 (menu maps design 5.4) adds `--menu MAP` (a map folder or its menu-map.json, read by
 //! `cmd::menu::read_map`): one last key, `menu`, the map's block for the label's title (`menu::title_block`) or why it
-//! was skipped. It is evidence only: every other key is byte-identical with a map or without one, no verdict, role,
-//! plan or decision reads it, and without `--menu` the key is absent. A map `read_map` refuses exits 2 with one error
-//! line per problem; a meta.json `disc_id_of` cannot read only skips the key, with the refusal's line, so the exit
-//! code and every other key stay those of the run without a map.
+//! was skipped; without `--menu` the key is absent. A map `read_map` refuses exits 2 with one error line per problem;
+//! a meta.json `disc_id_of` cannot read only skips the key, with the refusal's line, so the exit code and every other
+//! key stay those of the run without a map. The menu-role increment (design 5.4a) also reads the off-decisions beside
+//! the map (`cmd::menu::read_off`, MR-6; a file it refuses exits 2 as a refused map does) and the recording's
+//! playlists (`cmd::menu::read_playlists`, MR-8, MR-13), and gives the block the title's roles (`menu::audio_roles`).
+//! The roles a block that acts confirms (a commentary or an audio description with a strong tie, MR-5) reach the
+//! decision, which drops such a track where the content rule kept it: with a map, the `decision` key and the `menu`
+//! key are the only keys that can differ.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -56,7 +60,7 @@ use lazymkv_core::decision::{decide as file_decision, same_path_reviews, Decisio
 use lazymkv_core::disc::{self, Disc, Title};
 use lazymkv_core::lookup::discdb::{match_titles, DiscDbRecord, DiscDbTitle};
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbRecord};
-use lazymkv_core::menu::{self, DiscId, Identity, MenuBlock, MenuMap};
+use lazymkv_core::menu::{self, DiscId, Identity, MenuBlock, MenuMap, OffDecisions, Playlist, RolesBlock};
 use lazymkv_core::plan::movie::LibraryFacts;
 use lazymkv_core::plan::{Plan, PlannedTitle};
 use lazymkv_core::recording::files::{rip_label, FfprobeStreams, MkvmergeIdent, OcrSummary, Selection, SubsIndexEntry};
@@ -67,14 +71,14 @@ use lazymkv_core::robot::Scan;
 use lazymkv_core::settings::{is_absolute_root, Settings};
 use lazymkv_core::subtitle::labels::{READING, TEXT_HINT};
 use lazymkv_core::subtitle::text::{subs_json, subs_run, Decision as TextDecision, Rule as TextRule, SubsJson};
-use lazymkv_core::tracks::audio::AudioFacts;
+use lazymkv_core::tracks::audio::{AudioFacts, MenuConfirmation};
 use lazymkv_core::tracks::subtitle::{step10_runs, SubtitleFacts};
 use lazymkv_core::verify::{
     by_scan_stream, failure_reviews, read_packets_file, rip_title, selected_streams, stream_of_track, subs_index,
     subs_streams, subtitle_events_of, verify_rip, PacketsFile, VerifyReport,
 };
 
-use crate::cmd::menu::{disc_id_of, read_map};
+use crate::cmd::menu::{disc_id_of, read_map, read_off, read_playlists};
 use crate::cmd::plan::{
     option_text, parse_record, plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource, RecordedAnswers,
 };
@@ -119,17 +123,18 @@ arguments:
                         section and names the decision's file
   --remembered FILE     a remembered decision for the disc's fingerprint, for the plan section and the
                         decision's track overrides (spec 5)
-  --menu MAP            a menu map, its folder or its menu-map.json: adds the menu key, evidence only
+  --menu MAP            a menu map, its folder or its menu-map.json: adds the menu key, and a commentary or
+                        audio description it confirms is dropped where the content rule kept it
                         (docs/menu-maps/format.md)
   --evidence DIR        the evidence clone (default: LAZYMKV_EVIDENCE, else corpus/owner)
 
 exit status: 0; 1 when a reconcile verdict is no; 2 for an argument error, an unreadable scan.txt or
 mkvmerge.json, a label that is not a rip label, a menu map that cannot be read or does not pass the format's
-rules, or a library root in the settings file that is not absolute (a map never changes the exit code otherwise: with
-a meta.json that cannot be read the menu key says so and decide exits as without a map); 3 when the evidence clone is
-not there; 3 when a TMDb copy of the folder is more than six months old and cannot
-be fetched again (TMDB_TOKEN unset, or the fetch failed; design part 8.4, K15); an engine job folder is read as
-it is.
+rules, a menu-off.tsv beside it that cannot be read or parsed, or a library root in the settings file that is not
+absolute (a map never changes the exit code otherwise: with a meta.json that cannot be read the menu key says so and
+decide exits as without a map); 3 when the evidence clone is not there; 3 when a TMDb copy of the folder is more
+than six months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch failed; design part 8.4, K15); an
+engine job folder is read as it is.
 ";
 /// The level folders of a label: the folders the tuning harness measures. Py: audio_dataset.find_folders' glob.
 const LEVEL_FOLDERS: &str = "audio-levels-20ms-*";
@@ -162,9 +167,10 @@ pub struct DecideDoc {
     pub plan: PlanEntry,
     /// The file phase of the label's title, or why it was skipped (RP14, spec 6.4 step 11).
     pub decision: DecisionEntry,
-    /// The menu map of `--menu` for the label's title, or why it was skipped (menu maps design 5.4): evidence only, as
-    /// the last key and absent without a map (RP14's append-only precedent), so every other key is the same with a map
-    /// or without one. The engine never sets it, so in decide.json it would sit before `EngineDecideDoc`'s two keys.
+    /// The menu map of `--menu` for the label's title, or why it was skipped (menu maps design 5.4, 5.4a): the last key
+    /// and absent without a map (RP14's append-only precedent). Its confirmed roles change the `decision` key only;
+    /// every other key is the same with a map or without one. The engine never sets it, so in decide.json it would sit
+    /// before `EngineDecideDoc`'s two keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu: Option<MenuEntry>,
 }
@@ -209,8 +215,8 @@ pub enum DecisionEntry {
 
 /// The menu section (menu maps design 5.3, 5.4): `menu::title_block` of the map for the label's title, or why it was
 /// skipped (`<path>: <problem>` for a meta.json that cannot be read, `the map is for another disc: <Identity::text()>`,
-/// the scan's typing error, or `the scan lists no title <n>`). Evidence only: no verdict, role, plan or decision reads
-/// it.
+/// the scan's typing error, or `the scan lists no title <n>`). Its `roles` are the ones the decision reads
+/// (`title_menu`): what the block confirms changes the `decision` key and nothing else (design 5.4a).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum MenuEntry {
@@ -218,13 +224,18 @@ pub enum MenuEntry {
     Skipped { skipped: String },
 }
 
-/// The map of `--menu` with the recording's disc ID (`cmd::menu::disc_id_of`, M3-6), as `decide_doc` renders it.
-/// `disc_id` is Err with the refusal's line when the recording's meta.json cannot be read: the menu key is then
-/// skipped with that line, and decide runs and exits as it does without a map.
+/// The map of `--menu` with the recording's disc ID (`cmd::menu::disc_id_of`, M3-6), the off-decisions beside the map
+/// and the recording's playlists, as `decide_doc` renders it and the decision reads it (design 5.4a). `disc_id` is Err
+/// with the refusal's line when the recording's meta.json cannot be read: the menu key is then skipped with that line,
+/// and decide runs and exits as it does without a map.
 #[derive(Clone, Debug)]
 pub struct MenuInput {
     pub map: MenuMap,
     pub disc_id: Result<DiscId, String>,
+    /// `cmd::menu::read_off` of the map (MR-6); no decision when the file is absent.
+    pub off: OffDecisions,
+    /// `cmd::menu::read_playlists` of `playlist_names` (MR-8, MR-13), keyed by name without `.mpls`.
+    pub playlists: BTreeMap<String, Result<Playlist, String>>,
 }
 
 /// The file phase for one rip label (RP14, spec 6.4 step 11): the verify report that maps the file onto the scan (spec
@@ -259,6 +270,10 @@ pub struct FactsSummary {
     pub text_streams: Vec<u32>,
     /// Selected streams MakeMKV removed from the file (`MSG:4047`, 6.2 step 7).
     pub removed: Vec<u32>,
+    /// Streams a menu map confirms as a commentary or an audio description, the ones `AudioFacts.menu` holds (design
+    /// 5.4a, MR-5): empty, and not written, without a map or when the map's roles may not act.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub menu_streams: Vec<u32>,
 }
 
 /// Review reasons of one folder, sorted and unique: "audio_reference_unclear" for a reference-unclear verdict (the
@@ -359,8 +374,9 @@ pub struct DecideInputs {
     pub library: LibraryFacts,
     /// The readers' are None.
     pub overrides: Option<remembered::Overrides>,
-    /// The map of `--menu` with the recording's disc ID (menu maps design 5.4, evidence only): `read_decide_inputs` and
-    /// the engine give None and `run` fills it, so R-B1 keeps one renderer and the engine's documents stay as they are.
+    /// The map of `--menu` with the recording's disc ID, its off-decisions and the recording's playlists (menu maps
+    /// design 5.4, 5.4a): `read_decide_inputs` and the engine give None and `run` fills it, so R-B1 keeps one renderer
+    /// and the engine's documents stay as they are.
     pub menu: Option<MenuInput>,
 }
 
@@ -513,8 +529,8 @@ fn check_library_roots(ctx: &Ctx, options: &PlanOptions) -> Result<(), Refused> 
 
 /// decide's pure renderer (K5, R-B1). It reads no file and takes no Ctx or Tree. The reviews come from `inputs.audio`
 /// and `inputs.subtitles`. The decision is the private `decision_section` when the plan is in `Results`, else
-/// "no plan: <reason>". The menu section is `menu_section` of `inputs.menu`, None without a map; it is rendered last
-/// and nothing else reads the map. Def: T19. Use: T19, T24, T25, T29.
+/// "no plan: <reason>". The menu section is `menu_section` of `inputs.menu`, None without a map, rendered last; the
+/// decision reads the same map's confirmed roles (`title_menu`, design 5.4a). Def: T19. Use: T19, T24, T25, T29.
 pub fn decide_doc(inputs: &DecideInputs) -> DecideDoc {
     let mut reviews: BTreeSet<&'static str> = BTreeSet::new();
     for entry in &inputs.audio {
@@ -548,31 +564,64 @@ pub fn decide_doc(inputs: &DecideInputs) -> DecideDoc {
     doc
 }
 
-/// The menu section of one rip label (menu maps design 5.3, 5.4, M3-6): Skipped with the refusal's line
-/// (`<path>: <problem>`) when the recording's meta.json cannot be read; Skipped `the map is for another disc:
-/// <Identity::text()>` when the map's `disc_id_sha1` differs from the recording's disc ID; Skipped with `disc::disc`'s
-/// sentence when the scan cannot be typed, or `the scan lists no title <n>` for `inputs.title`; else
-/// `menu::title_block` of that title, with an identity that matches or was not checked. Evidence only.
+/// The menu section of one rip label (menu maps design 5.3, 5.4, 5.4a): `title_menu`'s block with its roles, or
+/// Skipped with `title_menu`'s reason.
 fn menu_section(given: &MenuInput, inputs: &DecideInputs) -> MenuEntry {
-    let disc_id = match &given.disc_id {
-        Ok(disc_id) => disc_id,
-        Err(line) => return MenuEntry::Skipped { skipped: line.clone() },
-    };
+    match title_menu(given, inputs) {
+        Ok((mut block, roles)) => {
+            block.roles = Some(roles);
+            MenuEntry::Results(block)
+        }
+        Err(skipped) => MenuEntry::Skipped { skipped },
+    }
+}
+
+/// The map's reading of the label's title (menu maps design 5.3, 5.4, 5.4a, M3-6): the one function both the menu
+/// section and the decision read, so the block shown and the decision cannot disagree. Err with the refusal's line
+/// (`<path>: <problem>`) when the recording's meta.json cannot be read; `the map is for another disc:
+/// <Identity::text()>` when the map's `disc_id_sha1` differs from the recording's disc ID; `disc::disc`'s sentence
+/// when the scan cannot be typed, or `the scan lists no title <n>` for `inputs.title`. Else `menu::title_block` of
+/// the scan's title, with an identity that matches or was not checked, and its roles (`menu::audio_roles` over the
+/// map's off-decisions and the recording's playlists, `RolesReport::block`): they act only when the identity matches
+/// (MR-5) and the title's own playlist was read (MR-8). The block's `other_playlists` still counts a twin playlist's
+/// choices, and `roles` holds them translated (MR-15).
+fn title_menu(given: &MenuInput, inputs: &DecideInputs) -> Result<(MenuBlock, RolesBlock), String> {
+    let disc_id = given.disc_id.as_ref().map_err(Clone::clone)?;
     let identity = menu::identity(&given.map, disc_id);
     if let Identity::Differs { .. } = identity {
-        return MenuEntry::Skipped { skipped: format!("the map is for another disc: {}", identity.text()) };
+        return Err(format!("the map is for another disc: {}", identity.text()));
     }
-    let typed = match disc::disc(&inputs.scan) {
-        Ok(typed) => typed,
-        Err(sentence) => return MenuEntry::Skipped { skipped: sentence },
-    };
-    let title = u32::try_from(inputs.title)
-        .map_err(|_| format!("{}{}", NO_SUCH_TITLE, inputs.title))
-        .and_then(|number| typed.title(number));
-    match title {
-        Ok(title) => MenuEntry::Results(menu::title_block(&given.map, &typed, title, &identity)),
-        Err(sentence) => MenuEntry::Skipped { skipped: sentence },
+    let typed = disc::disc(&inputs.scan)?;
+    let number = u32::try_from(inputs.title).map_err(|_| format!("{}{}", NO_SUCH_TITLE, inputs.title))?;
+    let title = typed.title(number)?;
+    let block = menu::title_block(&given.map, &typed, title, &identity);
+    let roles = menu::audio_roles(&given.map, &given.off, title, &given.playlists).block(&identity);
+    Ok((block, roles))
+}
+
+/// The playlists `run` reads for `--menu` (MR-8, MR-13): the label's title's own (its scan source file without
+/// `.mpls`, when the scan can be typed and lists the title) and the playlist of Play's effect and of every audio
+/// choice's effect, as the map spells them. Nothing else: `menu::audio_roles` reads the title's playlist and the
+/// twins an audio choice names.
+fn playlist_names(map: &MenuMap, inputs: &DecideInputs) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let typed = disc::disc(&inputs.scan).ok();
+    let title = typed.as_ref().zip(u32::try_from(inputs.title).ok()).and_then(|(typed, n)| typed.title(n).ok());
+    if let Some(file) = title.and_then(|title| title.source_file.as_deref()) {
+        names.insert(menu::playlist_of(file));
     }
+    let audio = map.choices.iter().filter(|choice| choice.kind == menu::Kind::Audio);
+    let effects = map.play.effect.iter().chain(audio.filter_map(|choice| choice.effect.as_ref()));
+    names.extend(effects.map(|effect| effect.playlist.clone()));
+    names
+}
+
+/// `--menu`'s input for the recording `run` read (design 5.4a): the map and its off-decisions, the recording's disc ID
+/// (a meta.json `disc_id_of` cannot read is held back as its refusal's line, M3-6) and the playlists `playlist_names`
+/// names, read from the recording's tree (`read_playlists`, which reads only five-digit names, MR-13).
+fn menu_input(rec: &Recording, map: MenuMap, off: OffDecisions, inputs: &DecideInputs) -> MenuInput {
+    let playlists = read_playlists(rec, &playlist_names(&map, inputs));
+    MenuInput { disc_id: disc_id_of(rec).map_err(|refused| refused.line), map, off, playlists }
 }
 
 /// mkvmerge.json: Err is the read or decode text, or "<shown>: <serde_json's message>" when it is not the JSON
@@ -777,12 +826,13 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
     if let Err(code) = crate::stale::gate_recording(ctx, &rec, NAME, err) {
         return code;
     }
-    // `--menu`: the map, a refusal printed one line per problem (exit 2), and the recording's disc ID. A meta.json
-    // that cannot be read only skips the menu key: plan reports it as it does without a map.
-    let menu_input = match menu_map {
+    // `--menu`: the map and the off-decisions beside it (MR-6), a refusal of either printed one line per problem
+    // (exit 2). The disc ID and the playlists are read with the recording's inputs below; a meta.json that cannot be
+    // read only skips the menu key: plan reports it as it does without a map.
+    let menu_given = match menu_map {
         None => None,
-        Some(given) => match read_map(ctx, &given) {
-            Ok((_, map)) => Some(MenuInput { map, disc_id: disc_id_of(&rec).map_err(|refused| refused.line) }),
+        Some(given) => match read_map(ctx, &given).and_then(|(_, map)| Ok((map, read_off(ctx, &given)?))) {
+            Ok(found) => Some(found),
             Err(refused) => {
                 for line in refused.line.split('\n') {
                     let _ = writeln!(err, "lazymkv-dev {}: error: {}", NAME, line);
@@ -805,7 +855,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
             return refused.code;
         }
     };
-    inputs.menu = menu_input;
+    inputs.menu = menu_given.map(|(map, off)| menu_input(&rec, map, off, &inputs));
     let doc = decide_doc(&inputs);
     let value = match serde_json::to_value(&doc) {
         Ok(value) => value,
@@ -854,8 +904,10 @@ struct ContentVerdicts {
 /// remembered title matched to the label's title, re-keyed to the narrowed title (`remembered_overrides`; spec 5, F10,
 /// the PR #6 review's V14); without one, or with no matched title, the facts carry none, as before. `decision::decide`
 /// then gives the FileDecision, and `decision::same_path_reviews` runs over the job's decisions as phase 2's engine
-/// runs it (decide holds one title, so it adds nothing here). Err with the sentence of an input that could not be
-/// read, or decide's.
+/// runs it (decide holds one title, so it adds nothing here). With `--menu`, the roles of the menu section's block
+/// (`title_menu`) that the block confirms when it acts give `AudioFacts.menu` and `FactsSummary.menu_streams` (design
+/// 5.4a, MR-5, MR-8); without a map, or where the block does not act or is skipped, both are empty and the decision
+/// is the one without a map. Err with the sentence of an input that could not be read, or decide's.
 fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> Result<DecisionDoc, String> {
     let number = doc.reconcile.title;
     let planned = planned_title(&plan.plan, number)?;
@@ -890,6 +942,19 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
         .as_ref()
         .or_else(|| answers.by_disc_id.iter().find(|record| !record.titles.is_empty()))
         .and_then(|record| discdb_title(record, &typed, number));
+    // Design 5.4a: the roles the menu section shows (`title_menu`, read against the scan's title, not the narrowed
+    // one); a block that does not act (MR-5, MR-8) and a skipped one confirm nothing, so the decision is the one
+    // without a map.
+    let roles = inputs.menu.as_ref().and_then(|given| title_menu(given, inputs).ok()).map(|(_, roles)| roles);
+    let menu: BTreeMap<u32, MenuConfirmation> = roles
+        .iter()
+        .filter(|roles| roles.acts)
+        .flat_map(|roles| &roles.audio)
+        .filter_map(|row| {
+            let role = row.confirms()?;
+            Some((row.stream, MenuConfirmation { role, choices: row.choices.clone() }))
+        })
+        .collect();
     let facts = FactsSummary {
         md5_streams: md5.keys().copied().collect(),
         profile_streams: profiles.keys().copied().collect(),
@@ -902,6 +967,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
             Vec::new()
         },
         removed: removed.iter().copied().collect(),
+        menu_streams: menu.keys().copied().collect(),
     };
     let decision_inputs = DecisionInputs {
         plan: &plan.plan,
@@ -917,6 +983,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
             verdict_reference: verdicts.reference,
             remembered: remembered_audio.as_deref(),
             reviewed: None,
+            menu,
         },
         subtitles: SubtitleFacts {
             events,
@@ -2268,6 +2335,7 @@ SINFO:0,4,6,0,"PGS"
                 verdict_reference: None,
                 text_streams: Vec::new(),
                 removed: vec![6],
+                menu_streams: Vec::new(),
             }
         );
         // The eng profile left the cores out: file tracks 1, 2 and 3 are scan streams 1, 3 and 5, and MSG:4047's index
@@ -2286,6 +2354,7 @@ SINFO:0,4,6,0,"PGS"
                 verdict_reference: None,
                 text_streams: Vec::new(),
                 removed: vec![6],
+                menu_streams: Vec::new(),
             }
         );
     }
@@ -3611,30 +3680,138 @@ SINFO:0,4,6,0,"PGS"
         write(&root.join(MAP_DIR).join(menu::FILE_NAME), menu::FIXTURE);
     }
 
-    /// The made-up map with the disc ID it names, as `run` gives it to the renderer.
+    /// The made-up map with the disc ID it names, no off-decision and no playlist read.
     fn fixture_input() -> MenuInput {
-        MenuInput { map: menu::read(menu::FIXTURE).unwrap(), disc_id: Ok(DiscId::Known(MAP_ID.into())) }
+        MenuInput {
+            map: menu::read(menu::FIXTURE).unwrap(),
+            disc_id: Ok(DiscId::Known(MAP_ID.into())),
+            off: menu::OffDecisions::default(),
+            playlists: BTreeMap::new(),
+        }
     }
 
-    /// The with-map document `out` without its last key, which must be `menu`, printed as decide prints a document.
-    fn without_the_menu_key(out: &str) -> String {
-        let mut value: Value = serde_json::from_str(out).unwrap();
-        let object = value.as_object_mut().unwrap();
-        assert_eq!(object.keys().last().map(String::as_str), Some("menu"), "{out}");
-        object.shift_remove("menu");
-        format!("{}\n", dumps(&value, Style::INDENT1_ASCII))
+    /// 00800.mpls of recs/disc-b's title 0, made up: one play item whose audio table has one DTS-HD MA (0x86) English
+    /// entry per audio stream of the title without the core flag (streams 1 and 3), so no tie is a conflict (MR-9).
+    fn playlist_b() -> Vec<u8> {
+        menu::made_up_playlist(&[menu::MadeUpItem {
+            clip: "00055",
+            in_time: 0,
+            out_time: 135_000_000,
+            audio: vec![(0x1100, 0x86, "eng"), (0x1101, 0x86, "eng")],
+            subtitles: vec![(0x1200, "eng")],
+        }])
+    }
+
+    /// Writes `playlist_b` as recs/disc-b's nav/BDMV/PLAYLIST/00800.mpls.
+    fn with_playlist_b(root: &Path) {
+        write(&root.join("recs/disc-b/nav/BDMV/PLAYLIST/00800.mpls"), playlist_b());
+    }
+
+    /// The made-up map with c002 (audio 2 of 00800, stream 3 of disc_b, level replayed, its audio unlike Play's, so
+    /// its tie is `replay`) labelled `label`, built here so the shared fixture stays as it is.
+    fn map_labelling_c002(label: &str) -> String {
+        let mut map: Value = serde_json::from_str(menu::FIXTURE).unwrap();
+        map["choices"][1]["label"] = json!(label);
+        assert!(menu::read(&map.to_string()).is_ok());
+        map.to_string()
+    }
+
+    /// recs/disc-b with the map of `map_labelling_c002(label)` in MAP_DIR, a meta.json naming `disc_id` when given, and
+    /// 00800.mpls when `playlist`. Without the MD5s of all-tracks' manifest nothing says stream 3 is a copy of stream
+    /// 1, so the content rule keeps it (as the verdict tests set it up).
+    fn role_world(root: &Path, disc_id: Option<&str>, playlist: bool, label: &str) {
+        disc_b(root);
+        if let Some(disc_id) = disc_id {
+            write(&root.join("recs/disc-b/meta.json"), json!({"disc_id": disc_id}).to_string());
+        }
+        write(&root.join(MAP_DIR).join(menu::FILE_NAME), map_labelling_c002(label));
+        if playlist {
+            with_playlist_b(root);
+        }
+        fs::remove_file(root.join("recs/disc-b/all-tracks/audio-levels-20ms-1-2-3-4/manifest.txt")).unwrap();
+    }
+
+    /// The renderer's inputs of recs/disc-b's all-tracks with the audio section measured against stream 1 and a keep
+    /// verdict on stream 3, as the verdict tests set them up, and the same inputs with MAP_DIR's map, read as `run`
+    /// reads it: (without the map, with it).
+    fn keep_inputs(root: &Path) -> (DecideInputs, DecideInputs) {
+        let ctx = Ctx::for_test(root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let mut plain = read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &PlanOptions::default()).unwrap();
+        plain.audio = vec![AudioEntry::Results(measured("1", &[("3", Verdict::Keep)], Some(false)))];
+        let (_, map) = read_map(&ctx, MAP_DIR).unwrap();
+        let off = read_off(&ctx, MAP_DIR).unwrap();
+        let mut mapped = plain.clone();
+        mapped.menu = Some(menu_input(&rec, map, off, &plain));
+        (plain, mapped)
+    }
+
+    /// The rendered document as decide prints it, as a JSON value.
+    fn printed_value(inputs: &DecideInputs) -> Value {
+        serde_json::to_value(decide_doc(inputs)).unwrap()
     }
 
     #[test]
-    fn a_map_adds_only_the_menu_key_and_changes_no_decision() {
+    fn a_confirmed_role_drops_the_stream_and_changes_only_the_decision_and_menu_keys() {
+        let tmp = Scratch::new("menu-role-drops");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), true, "Commentary");
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        for key in ["slug", "label", "reconcile", "audio", "subtitles", "reviews", "plan"] {
+            let shown = |value: &Value| dumps(&value[key], Style::INDENT1_ASCII);
+            assert_eq!(shown(&with), shown(&without), "{key}");
+        }
+        assert!(without.get("menu").is_none());
+        let decided = &with["decision"];
+        let audio = &decided["decision"]["audio"];
+        assert!(
+            audio["dropped"].as_array().unwrap().contains(&json!([3, {"why": "menu", "role": "commentary"}])),
+            "{}",
+            audio["dropped"]
+        );
+        assert_eq!(audio["menu"][0]["stream"], json!(3));
+        assert_eq!(audio["menu"][0]["choices"], json!(["c002"]));
+        assert_eq!(audio["menu"][0]["outcome"], json!("dropped"));
+        assert_eq!(decided["facts"]["menu_streams"], json!([3]));
+        // Without the map, stream 3 is kept and nothing lists the menu.
+        let plain_audio = &without["decision"]["decision"]["audio"];
+        assert!(plain_audio["kept"].as_array().unwrap().iter().any(|track| track["stream"] == json!(3)));
+        assert!(plain_audio.get("menu").is_none() && without["decision"]["facts"].get("menu_streams").is_none());
+        let roles = &with["menu"]["roles"];
+        assert_eq!((&roles["acts"], &roles["why"]), (&json!(true), &json!("")));
+        let row = roles["audio"].as_array().unwrap().iter().find(|row| row["stream"] == json!(3)).unwrap();
+        assert_eq!(
+            row,
+            &json!({"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "play": false, "why": ""})
+        );
+        // `run` reads the same map, off-decisions and playlists: its menu key is the renderer's, and its decision lists
+        // the confirmation (run's audio section has no verdict, so nothing is dropped there).
+        let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let ran: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(ran["menu"], with["menu"]);
+        assert_eq!(ran["decision"]["decision"]["audio"]["menu"][0]["outcome"], json!("no_verdict"));
+        assert_eq!(ran["decision"]["facts"]["menu_streams"], json!([3]));
+    }
+
+    #[test]
+    fn a_map_whose_roles_confirm_nothing_changes_only_the_menu_key() {
         let tmp = Scratch::new("menu-only-key");
         let root = tmp.0.clone();
         disc_b_with_map(&root, MAP_ID);
+        with_playlist_b(&root);
         let without = run_in(&root, &["recs/disc-b", "all-tracks"]);
         let with = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
         assert_eq!((with.0, with.2.as_str(), without.2.as_str()), (without.0, "", ""));
         let value: Value = serde_json::from_str(&with.1).unwrap();
         assert!(value["menu"]["playlist"].is_string(), "the map gave no block: {}", value["menu"]);
+        // The roles may act, and none confirms anything: the fixture's choices on streams 1 and 3 carry no role word.
+        let roles = &value["menu"]["roles"];
+        assert_eq!(roles["acts"], json!(true), "{roles}");
+        let rows: Vec<(&Value, &Value)> =
+            roles["audio"].as_array().unwrap().iter().map(|row| (&row["stream"], &row["why"])).collect();
+        assert_eq!(rows, [(&json!(1), &json!("no role word")), (&json!(3), &json!("no role word"))]);
         // Every other key, its value and the key order: the printed text is the document without the map.
         assert_eq!(without_the_menu_key(&with.1), without.1);
         // The renderer: the same inputs with the map give the same document but for `menu`.
@@ -3648,6 +3825,141 @@ SINFO:0,4,6,0,"PGS"
         assert!(matches!(doc.menu, Some(MenuEntry::Results(_))), "{:?}", doc.menu);
         doc.menu = None;
         assert_eq!(doc, decide_doc(&plain));
+    }
+
+    #[test]
+    fn an_identity_that_is_not_checked_confirms_nothing() {
+        let tmp = Scratch::new("menu-role-not-checked");
+        let root = tmp.0.clone();
+        role_world(&root, None, true, "Commentary");
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        let roles = &with["menu"]["roles"];
+        assert_eq!(roles["acts"], json!(false));
+        assert_eq!(roles["why"], json!("the map's identity is not checked: the recording has no meta.json"));
+        // The role is shown, with its strong tie, and confirms nothing (MR-5).
+        assert_eq!(roles["audio"][1]["role"], json!("commentary"));
+        assert_eq!(roles["audio"][1]["tie"], json!("replay"));
+        assert_eq!(with["decision"], without["decision"]);
+    }
+
+    #[test]
+    fn a_map_for_another_disc_is_skipped_and_drops_nothing() {
+        let tmp = Scratch::new("menu-role-other-disc");
+        let root = tmp.0.clone();
+        role_world(&root, Some("FFFF"), true, "Commentary");
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        let skipped =
+            format!("the map is for another disc: disc_id differs: the map's is {MAP_ID}, the disc's is FFFF");
+        assert_eq!(with["menu"], json!({"skipped": skipped}));
+        assert_eq!(with["decision"], without["decision"]);
+    }
+
+    #[test]
+    fn without_the_recordings_playlist_nothing_is_confirmed() {
+        let tmp = Scratch::new("menu-role-no-playlist");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), false, "Commentary");
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        let roles = &with["menu"]["roles"];
+        assert_eq!(roles["acts"], json!(false));
+        assert_eq!(roles["why"], json!("playlist 00800: no such file"));
+        assert_eq!(roles["audio"], json!([]));
+        assert_eq!(with["decision"], without["decision"]);
+    }
+
+    #[test]
+    fn a_role_on_plays_own_stream_confirms_nothing() {
+        let tmp = Scratch::new("menu-role-plays-own");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), true, "Commentary");
+        // Play on the twin 00801, whose audio 1 is 00800's audio 2 by PID: c002's stream 3 is the stream plain Play
+        // selects, so its commentary confirms nothing although its tie is `replay` (MR-17).
+        let mut map: Value = serde_json::from_str(&map_labelling_c002("Commentary")).unwrap();
+        map["play"]["effect"]["playlist"] = json!("00801");
+        // Every choice's differs_from_play follows the effects again, as the format requires.
+        let play = map["play"]["effect"].clone();
+        for choice in map["choices"].as_array_mut().unwrap() {
+            if choice["effect"].is_object() {
+                choice["differs_from_play"] = json!(choice["effect"] != play);
+            }
+        }
+        assert!(menu::read(&map.to_string()).is_ok());
+        write(&root.join(MAP_DIR).join(menu::FILE_NAME), map.to_string());
+        let twin = menu::made_up_playlist(&[menu::MadeUpItem {
+            clip: "00055",
+            in_time: 0,
+            out_time: 135_000_000,
+            audio: vec![(0x1101, 0x86, "eng")],
+            subtitles: vec![],
+        }]);
+        write(&root.join("recs/disc-b/nav/BDMV/PLAYLIST/00801.mpls"), twin);
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        let roles = &with["menu"]["roles"];
+        assert_eq!(roles["acts"], json!(true), "{roles}");
+        let row = roles["audio"].as_array().unwrap().iter().find(|row| row["stream"] == json!(3)).unwrap();
+        let shown = json!({"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "play": true,
+                           "why": "the stream plain Play selects"});
+        assert_eq!(row, &shown);
+        assert_eq!(with["decision"], without["decision"]);
+    }
+
+    #[test]
+    fn a_malformed_off_file_exits_2_with_its_lines() {
+        let tmp = Scratch::new("menu-role-bad-off");
+        let root = tmp.0.clone();
+        disc_b_with_map(&root, MAP_ID);
+        let bad = "of\tc003\noff\tx1\n";
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), bad);
+        let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        let at = format!("{MAP_DIR}/{}", menu::OFF_FILE_NAME);
+        let expected: Vec<String> = menu::parse_off(bad)
+            .unwrap_err()
+            .iter()
+            .map(|problem| format!("lazymkv-dev decide: error: {at}: {problem}"))
+            .collect();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(err.lines().collect::<Vec<_>>(), expected);
+        assert!(err.starts_with(&format!("lazymkv-dev decide: error: {at}: line 1: ")), "{err}");
+    }
+
+    #[test]
+    fn an_off_decision_reaches_the_roles() {
+        let tmp = Scratch::new("menu-role-off");
+        let root = tmp.0.clone();
+        // The net catches "Off" beside a role word: without a decision the stream has no role (MR-6).
+        role_world(&root, Some(MAP_ID), true, "Commentary Off");
+        let row_of = |root: &Path| -> (Value, Value) {
+            let (code, out, err) = run_in(root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
+            assert_eq!((code, err.as_str()), (0, ""));
+            let value: Value = serde_json::from_str(&out).unwrap();
+            let row = value["menu"]["roles"]["audio"].as_array().unwrap().iter().find(|row| row["stream"] == json!(3));
+            (row.unwrap().clone(), value["decision"]["facts"]["menu_streams"].clone())
+        };
+        let (row, streams) = row_of(&root);
+        let undecided = json!("undecided: c002 (menu-off.tsv)");
+        assert_eq!((&row["role"], &row["why"], &streams), (&Value::Null, &undecided, &Value::Null));
+        // Decided `role`: its words are read, and the decision has the confirmation.
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "role\tc002\n");
+        let (row, streams) = row_of(&root);
+        assert_eq!((&row["role"], &row["why"], &streams), (&json!("commentary"), &json!(""), &json!([3])));
+        // Decided `off`: its words are not read.
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "off\tc002\n");
+        let (row, streams) = row_of(&root);
+        assert_eq!((&row["role"], &row["why"], &streams), (&Value::Null, &json!("no role word"), &Value::Null));
+    }
+
+    /// The with-map document `out` without its last key, which must be `menu`, printed as decide prints a document.
+    fn without_the_menu_key(out: &str) -> String {
+        let mut value: Value = serde_json::from_str(out).unwrap();
+        let object = value.as_object_mut().unwrap();
+        assert_eq!(object.keys().last().map(String::as_str), Some("menu"), "{out}");
+        object.shift_remove("menu");
+        format!("{}\n", dumps(&value, Style::INDENT1_ASCII))
     }
 
     #[test]
@@ -3672,8 +3984,12 @@ SINFO:0,4,6,0,"PGS"
         let map = menu::read(menu::FIXTURE).unwrap();
         let typed = disc::disc(&parse(&disc_b_scan())).unwrap();
         let identity = menu::identity(&map, &DiscId::Known(MAP_ID.to_string()));
-        let block = menu::title_block(&map, &typed, typed.title(0).unwrap(), &identity);
-        // decide adds nothing to the block and takes nothing from it.
+        let mut block = menu::title_block(&map, &typed, typed.title(0).unwrap(), &identity);
+        // decide adds the title's roles (`menu::audio_roles`; disc_b has no nav folder, so no stream is tied, MR-8) and
+        // takes nothing from the block.
+        let playlists = BTreeMap::from([("00800".to_string(), Err("no such file".to_string()))]);
+        let roles = menu::audio_roles(&map, &menu::OffDecisions::default(), typed.title(0).unwrap(), &playlists);
+        block.roles = Some(roles.block(&identity));
         assert_eq!(doc["menu"], serde_json::to_value(&block).unwrap());
         assert_eq!(doc["menu"]["playlist"], json!("00800"));
         assert_eq!(doc["menu"]["identity"], json!(format!("disc_id matches ({MAP_ID})")));

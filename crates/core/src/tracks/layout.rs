@@ -247,6 +247,7 @@ mod tests {
             reviews: Vec::new(),
             confidence: 0.95,
             description_alignment: None,
+            menu: Vec::new(),
         }
     }
 

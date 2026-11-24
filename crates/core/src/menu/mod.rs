@@ -1,13 +1,24 @@
 //! Menu maps, `core::menu` (menu maps design 5.4): the types of a `lazymkv menu map v1` file, its reader and the
 //! writer's validator; `scan.rs` ties a map to a scanned disc (stream numbers, identity, the check, decide's per-title
-//! block). The format, its rules and this increment's rulings M3-1 to M3-8 are `docs/menu-maps/format.md`.
-//! A map says only what the menu calls a choice and which playlist and streams choosing it selects; it is evidence and
-//! no decision reads it. No I/O: `read` takes the file's text.
+//! block); `mpls.rs` reads a Blu-ray playlist's play items and stream tables; `role.rs` reads the role words of a
+//! choice's label and the per-choice off-decisions file (design 5.4a); `tie.rs` ties a map's audio choices to a title's
+//! scan streams through the title's playlist and reads each stream's role (design 5.4a). The format, its rules and this
+//! increment's rulings M3-1 to M3-8 are `docs/menu-maps/format.md`.
+//! A map says only what the menu calls a choice and which playlist and streams choosing it selects. The decision reads
+//! only the confirmed roles of `tie.rs` (a commentary or an audio description with a strong tie, on a map whose
+//! identity matches), and only when `decide --menu` gives a map (design 5.4a); nothing else here changes a verdict,
+//! plan or decision. No I/O: `read` takes the file's text.
 
+mod mpls;
+mod role;
 mod scan;
+mod tie;
 mod validate;
 
+pub use mpls::*;
+pub use role::*;
 pub use scan::*;
+pub use tie::*;
 pub use validate::validate;
 
 /// The format name a v1 map's `format` holds (design 5.1).
@@ -22,6 +33,10 @@ pub const REPLAYS_NEEDED: i64 = 3;
 /// The made-up map both readers test against (`fixtures/menu-map-v1.json`, a byte copy of the writer's fixture).
 #[cfg(any(test, feature = "testsupport"))]
 pub const FIXTURE: &str = include_str!("fixtures/menu-map-v1.json");
+
+/// The shared role-word cases (`fixtures/menu-role-cases.json`, made-up texts with the measurement's own answers).
+#[cfg(any(test, feature = "testsupport"))]
+pub const ROLE_CASES: &str = include_str!("fixtures/menu-role-cases.json");
 
 /// What a choice is for: a choice's `kind` (design 5.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

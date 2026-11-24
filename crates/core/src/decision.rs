@@ -716,6 +716,7 @@ mod tests {
             reviews: Vec::new(),
             confidence,
             description_alignment: None,
+            menu: Vec::new(),
         }
     }
 

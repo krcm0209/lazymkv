@@ -591,6 +591,7 @@ fn the_title_block_labels_only_streams_of_the_choices_own_kind() {
         other_playlists: vec![other("01001", 1, true), other("00801", 1, false)],
         out_of_range: vec![],
         no_effect: vec!["c009".to_string()],
+        roles: None,
     };
     assert_eq!(block, want);
     assert_eq!(block.audio[1].labels[0].label, "SETUP > AUDIO: Language B 5.1");

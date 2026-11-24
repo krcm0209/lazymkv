@@ -1034,6 +1034,7 @@ fn title_decision(disposition: Disposition, reviews: Vec<ReviewReason>, path: bo
             reviews: Vec::new(),
             confidence: 0.95,
             description_alignment: None,
+            menu: Vec::new(),
         },
         subtitles: SubtitleDecision {
             kept: Vec::new(),
