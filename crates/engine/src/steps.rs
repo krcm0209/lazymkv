@@ -18,9 +18,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::audio::rule::RULE_VERSION;
-use lazymkv_core::decision::{same_path_reviews, FileDecision};
+use lazymkv_core::decision::{same_path_reviews, Disposition, FileDecision};
 use lazymkv_core::disc::{disc, same_scan_title, Disc, Title};
-use lazymkv_core::ipc::{OutputStream, CANCELLED};
+use lazymkv_core::ipc::{job_summary, OutputStream, CANCELLED};
 use lazymkv_core::job::{classify_title_failure, decision_done, Action, Event, Failure, FailureClass, State, Tool};
 use lazymkv_core::naming::NamedPath;
 use lazymkv_core::plan::movie::LibraryFacts;
@@ -30,7 +30,8 @@ use lazymkv_core::profile::{
 };
 use lazymkv_core::record::{FiledFile, JobRecord, TitleRecord};
 use lazymkv_core::recording::files::{FfprobeStreams, MkvmergeIdent, Selection};
-use lazymkv_core::review::{Note, ReviewReason};
+use lazymkv_core::remembered::Collision;
+use lazymkv_core::review::{sorted_unique, Note, ReviewReason};
 use lazymkv_core::robot::lines::RunSummary;
 use lazymkv_core::robot::{parse, Scan};
 use lazymkv_core::settings::version_triple;
@@ -56,11 +57,12 @@ use serde_json::{json, Value};
 
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
-    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
-    staged_text, OwedCheck, Refetched,
+    engine_decide_inputs, library_facts, lookup_word, move_aside, partial_path, read_back_inputs, refetch_stale,
+    refreshed_plan, replaced_dir, staged_text, OwedCheck, Refetched,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
+use crate::review_store;
 use crate::selftest::MakeMkv;
 use crate::space::{
     library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
@@ -172,6 +174,21 @@ fn add_collision(record: &mut JobRecord, path: String) {
         record.collisions.push(path);
         record.collisions.sort();
     }
+}
+
+/// The record edit of a collision found at filing (phase 3 design, part 6.7): `path_collision` added to the title
+/// `key`'s decision reviews, kept sorted and unique, its disposition NeedsReview as `same_path_reviews` makes it for a
+/// shared path, and `path` added to the record's collisions [ENG-22]. Every other field, a `filed` record included,
+/// is left as it is. Def: P3-T11. Use: P3-T16.
+fn hold_for_collision(record: &mut JobRecord, key: &str, path: String) {
+    let decision = record.titles.iter_mut().find(|title| title.key == key).and_then(|title| title.decision.as_mut());
+    if let Some(decision) = decision {
+        let mut reviews = std::mem::take(&mut decision.reviews);
+        reviews.push(ReviewReason::PathCollision);
+        decision.reviews = sorted_unique(reviews);
+        decision.disposition = Disposition::NeedsReview;
+    }
+    add_collision(record, path);
 }
 
 /// Whether `a` and `b` name one file, as both names of a rename stopped between its hard link and its remove do: both
@@ -1694,13 +1711,24 @@ impl Step<'_> {
             }
         };
         let mut seen = vec![inputs.library.clone()];
+        let mut read_at: Option<String> = None; // the path whose facts `inputs.library` holds
         loop {
             let doc = decide_doc(&inputs);
             let path = match &doc.decision {
                 DecisionEntry::Results(found) => found.decision.path.clone(),
                 DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
             };
+            // Phase 3 design, part 6.7 (P3-T11): a keep-both answer for the colliding path whose facts were read gives
+            // the copy-labelled path, which is no new edition, so those facts stand; reading the copy's own facts
+            // would decide the plain path again and never settle.
+            let answered = |read: &String| inputs.overrides.as_ref().and_then(|given| given.collision_for(read));
+            let kept_both =
+                inputs.library.path_collision && read_at.as_ref().and_then(answered) == Some(Collision::KeepBoth);
+            if kept_both && path.as_ref().map(|named| &named.path) != read_at.as_ref() {
+                return Ok(doc);
+            }
             let style = self.job.settings.edition_style;
+            read_at = path.as_ref().map(|named| named.path.clone());
             let facts = path.map(|path| library_facts(&path, style)).transpose()?.unwrap_or_default();
             if seen.contains(&facts) {
                 return Ok(doc);
@@ -2008,22 +2036,30 @@ impl Step<'_> {
 
     /// File (design parts 5.7 step 14, 6.5): for each planned title in plan order, the final path's missing folders
     /// made, then the partial file renamed into it with `rename_no_replace`, and the filed file's path, size and
-    /// modification time recorded. A file already at the final path gives FileFailed { Unknown } with `<final> already
-    /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22]. An earlier
+    /// modification time recorded. A file already at the final path (LIB-8: it appeared between the decision and the
+    /// rename) holds the job with `collided` (phase 3 design, part 6.7; Def: P3-T11. Use: P3-T16): FileCollided, whose
+    /// row deletes the partial file, and the record keeps the colliding path [ENG-22]. An earlier
     /// rename is taken as done, as design part 6.5 says after a restart in Verified, when the partial file is gone and
-    /// the final path holds a file of the verified size (the title's `filed` size, RP-7); a partial file that is gone
-    /// otherwise gives FileFailed { Unknown }. Off Windows, where `rename_no_replace` is a hard link then a remove
-    /// (S13), a rename stopped between the two leaves both names on one file (`one_file`): its partial name is then
+    /// the final path holds a file of the verified size (the title's `filed` size, RP-7). A partial file that is gone
+    /// with any other file at the final path (another size, or no verified size recorded) is a collision and holds the
+    /// job with `collided` (Ruling T32-E8: the row deletes the partial file anyway and the approval remuxes again); a
+    /// partial file that is gone with nothing at the final path gives FileFailed { Unknown }. Off Windows, where
+    /// `rename_no_replace` is a hard link then a remove (S13), a rename stopped between the two leaves both names on one file (`one_file`): its partial name is then
     /// removed and the rename taken as done, and a remove that fails after the link gives FileFailed { Unknown } with a
     /// message saying the final path holds the file. On Windows `MoveFileExW` renames in one step, so that half state
     /// cannot arise and those branches are not compiled (Ruling T3-4-b).
     ///
     /// L7 (design part 6.5, Ruling W28): once `create_dir_all` of the final path's folder returns Ok or
     /// `AlreadyExists`, that folder is opened with `fs::read_dir` before the rename. A folder that is present but
-    /// cannot be opened, as phase 0's experiment 9 met on the share, gives FileFailed { Unknown } with `<folder> is
-    /// present but cannot be opened (<error>); the partial file stays at <partial>, and a retry tries again`, records
-    /// no collision, and renames nothing. The folder opened is the title's own, never the library root, so LIB-7
-    /// stands. Any other `create_dir_all` error gives FileFailed { Unknown } with `<folder>: <error>`.
+    /// cannot be opened, as phase 0's experiment 9 met on the share, holds the job with `collided` (phase 3 design,
+    /// part 6.7: it clears by itself within minutes, and the approval remuxes again), and renames nothing. The folder
+    /// opened is the title's own, never the library root, so LIB-7 stands. Any other `create_dir_all` error gives
+    /// FileFailed { Unknown } with `<folder>: <error>`.
+    ///
+    /// Replace (phase 3 design, part 6.7; Def: P3-T11. Use: P3-T16): for a title whose final path has a `Replace`
+    /// answer in the job's review.json, and only then, `replace_existing` moves the file found at exactly that path
+    /// into the job's `replaced` folder just before the rename; a rename that still finds a file is a collision. A
+    /// review.json that cannot be read gives FileFailed { Unknown } with its error, before anything is renamed.
     ///
     /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
     /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
@@ -2034,6 +2070,8 @@ impl Step<'_> {
     fn file(&self) -> Outcome {
         let failed = |failure| Event::FileFailed { failure };
         let plan = self.job_plan(failed)?;
+        let answers = review_store::read(&self.job.job_dir).map_err(|error| unknown(failed, error))?;
+        let answers = answers.map(|file| file.overrides).unwrap_or_default();
         for planned in &plan.titles {
             let key = planned.key.as_str();
             let (_, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
@@ -2082,16 +2120,13 @@ impl Step<'_> {
                         continue;
                     }
                     (Some(_), _) => {
-                        let collision = path.path.clone();
-                        if !self.post_edit(move |record| add_collision(record, collision)) {
-                            return Err(cancelled());
-                        }
-                        let message = format!(
-                            "{} already exists and is not the verified file; the partial file {} is gone",
+                        // Ruling T32-E8: a file at the final path that is not the job's is a collision, partial or not.
+                        let sentence = format!(
+                            "{} already exists and is not the verified file, and the partial file {} is gone",
                             path.path,
                             partial.display()
                         );
-                        return Ok(unknown(failed, message));
+                        return self.collided(key, &path.path, &sentence);
                     }
                     (None, _) => {
                         // A share that stopped answering since the first `reach` reports a missing path as NotFound.
@@ -2112,17 +2147,17 @@ impl Step<'_> {
                 }
                 // L7 (Ruling W28): a folder that is present but cannot be opened stops the rename.
                 if let Err(error) = fs::read_dir(folder) {
-                    let (shown, stays) = (folder.display(), partial.display());
-                    return Ok(unknown(
-                        failed,
-                        format!(
-                            "{shown} is present but cannot be opened ({error}); the partial file stays at {stays}, \
-                             and a retry tries again"
-                        ),
-                    ));
+                    let sentence = format!(
+                        "{} is present but cannot be opened ({error}); this clears by itself within minutes",
+                        folder.display()
+                    );
+                    return self.collided(key, &path.path, &sentence);
                 }
             }
             self.check_cancel()?;
+            if answers.collision_for(&path.path) == Some(Collision::Replace) {
+                self.replace_existing(key, &path.root, target, &partial)?;
+            }
             match rename_no_replace(&partial, target) {
                 Ok(()) => {}
                 #[cfg(not(windows))]
@@ -2135,12 +2170,7 @@ impl Step<'_> {
                     self.log(&format!("{key}: {shown} already held the partial file, so the rename was finished"));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let collision = path.path.clone();
-                    if !self.post_edit(move |record| add_collision(record, collision)) {
-                        return Err(cancelled());
-                    }
-                    let (shown, stays) = (&path.path, partial.display());
-                    return Ok(unknown(failed, format!("{shown} already exists; the partial file stays at {stays}")));
+                    return self.collided(key, &path.path, &format!("{} already exists", path.path));
                 }
                 #[cfg(not(windows))]
                 Err(error) if one_file(&partial, target) => {
@@ -2155,6 +2185,71 @@ impl Step<'_> {
             self.record_filed(key, &path.path)?;
         }
         Ok(event(Event::FileDone))
+    }
+
+    /// A collision found at filing for the title `key` at `path` (phase 3 design, part 6.7; LIB-8 and L7): the job.log
+    /// line `<key>: <sentence>; the job is held for review with path_collision and its partial file is deleted`, then
+    /// `hold_for_collision`'s record edit posted with FileCollided, whose reasons are the job summary's review reasons
+    /// after that edit (the job's reasons with `path_collision`), sorted and unique. Titles renamed earlier in this run
+    /// keep their `filed` record. Err is the cancelled result. Def: P3-T11. Use: P3-T16.
+    fn collided(&self, key: &str, path: &str, sentence: &str) -> Outcome {
+        self.log(&format!(
+            "{key}: {sentence}; the job is held for review with path_collision and its partial file is deleted"
+        ));
+        let mut after = self.job.record.clone();
+        hold_for_collision(&mut after, key, path.to_string());
+        let mut reasons = job_summary(&after).review_reasons;
+        reasons.push(ReviewReason::PathCollision);
+        let reasons = sorted_unique(reasons);
+        let (key, path) = (key.to_string(), path.to_string());
+        if !self.post_edit(move |record| hold_for_collision(record, &key, path)) {
+            return Err(cancelled());
+        }
+        Ok(event(Event::FileCollided { reasons }))
+    }
+
+    /// Replace (phase 3 design, part 6.7): the file at exactly `target`, the title `key`'s final path under the library
+    /// root `root`, moved by `move_aside` into `<staging root>\<job id>\replaced\`, before the partial file `partial`
+    /// is renamed in. Only a regular file is moved: nothing at `target` (a NotFound on a library share that still
+    /// answers `reach`) moves nothing and makes no folder, and anything else there is left for the rename to meet as a
+    /// collision. The staging share is asked `reach` first, as `file` asks the library's. Every failure is FileFailed
+    /// { Unknown } naming the paths, and leaves the library file and the partial file as they were (`move_aside`'s
+    /// errors). The moved file is never deleted here. Def: P3-T11. Use: P3-T16.
+    fn replace_existing(&self, key: &str, root: &str, target: &Path, partial: &Path) -> Result<(), StepResult> {
+        let failed = |failure| Event::FileFailed { failure };
+        let (shown, stays) = (target.display(), partial.display());
+        let tail = format!("{shown} was not moved and the partial file {stays} was not renamed");
+        match fs::symlink_metadata(target) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // A share that stopped answering reports a missing path as NotFound.
+                if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                    let head = library_unanswered(root, &why);
+                    let message = format!("{key}: {head}; {tail}, and a retry once the share answers files it");
+                    return Err(unknown(failed, message));
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(unknown(failed, format!("{key}: {shown}: {error}; {tail}"))),
+        }
+        let Some(staging) = self.job.settings.staging_root.as_deref() else {
+            return Err(unknown(failed, format!("{key}: staging_root is unset; {tail}")));
+        };
+        if let Reach::Unreachable(why) = self.steps.shares.reach(staging) {
+            let message = format!(
+                "{key}: the staging share holding {staging} does not answer ({why}); {tail}, and a retry once the \
+                 share answers files it"
+            );
+            return Err(unknown(failed, message));
+        }
+        match move_aside(target, &replaced_dir(staging, self.id)) {
+            Ok(moved) => {
+                self.log(&format!("{key}: {shown} was moved to {} before filing (replace)", moved.display()));
+                Ok(())
+            }
+            Err(error) => Err(unknown(failed, format!("{key}: {error}; the partial file {stays} was not renamed"))),
+        }
     }
 
     /// Records the file at `path` as the title `key`'s filed file: its path, size and modification time (design part

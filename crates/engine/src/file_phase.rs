@@ -144,6 +144,105 @@ pub(crate) fn partial_path(library_root: &str, job_id: &str, key: &str) -> PathB
     Path::new(library_root).join(PARTIAL_FOLDER).join(format!("{job_id}-{key}.mkv.partial"))
 }
 
+/// The folder under a job's staging folder, `<staging>\<job id>\replaced\`, that holds each library file a "replace"
+/// answer moved aside before filing (phase 3 design, part 6.7; Z27: kept, never deleted for space). Def: P3-T11.
+/// Use: P3-T16.
+pub(crate) const REPLACED_FOLDER: &str = "replaced";
+
+/// `<staging root>/<job id>/replaced` (phase 3 design, part 6.7). Def: P3-T11. Use: P3-T16.
+pub(crate) fn replaced_dir(staging_root: &str, job_id: &str) -> PathBuf {
+    Path::new(staging_root).join(job_id).join(REPLACED_FOLDER)
+}
+
+/// The first free name in `folder` for a file named `name` (phase 3 design, part 6.7): `name` itself, then ` 2`, ` 3`
+/// and so on before its extension (`Film - 1080p 2.mkv`; a name without an extension gets the number at its end). A
+/// name is free when neither it nor its `copy_checked` partial name (`<name>.partial`) is there. Err is a read error
+/// other than NotFound. Def: P3-T11. Use: P3-T16.
+fn free_name(folder: &Path, name: &str) -> io::Result<PathBuf> {
+    let taken = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
+        _ => (name, ""),
+    };
+    for n in 1u32.. {
+        let candidate = if n == 1 { name.to_string() } else { format!("{stem} {n}{extension}") };
+        let path = folder.join(&candidate);
+        if !taken(&path)? && !taken(&folder.join(format!("{candidate}{}", crate::staged::PARTIAL)))? {
+            return Ok(path);
+        }
+    }
+    unreachable!("a u32 of names is never all taken")
+}
+
+/// Whether `a` and `b` are one file, as both names of a `rename_no_replace` stopped between its hard link and its
+/// remove are (design part 6.5). Def: P3-T11. Use: P3-T16.
+#[cfg(not(windows))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// `move_aside` with its rename and its copy given, the fault seam of the tests. Def: P3-T11. Use: P3-T16.
+pub(crate) fn move_aside_with(
+    source: &Path,
+    folder: &Path,
+    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    copy: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<PathBuf, String> {
+    let shown = source.display();
+    let refused =
+        |to: &Path, error: &dyn std::fmt::Display| format!("{shown} could not be moved to {}: {error}", to.display());
+    let name = source.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    fs::create_dir_all(folder).map_err(|error| refused(folder, &error))?;
+    let to = free_name(folder, &name).map_err(|error| refused(folder, &error))?;
+    match rename(source, &to) {
+        Ok(()) => Ok(to),
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            if let Err(error) = copy(source, &to) {
+                let mut partial = to.as_os_str().to_os_string();
+                partial.push(crate::staged::PARTIAL);
+                let _ = fs::remove_file(PathBuf::from(partial));
+                return Err(refused(&to, &error));
+            }
+            match fs::remove_file(source) {
+                Ok(()) => Ok(to),
+                Err(error) => Err(format!(
+                    "{shown} was copied to {} but could not be removed: {error}; the copy is kept",
+                    to.display()
+                )),
+            }
+        }
+        Err(error) => {
+            // Off Windows the rename is a hard link then a remove: a link left by a failed remove is undone.
+            #[cfg(not(windows))]
+            if error.kind() != io::ErrorKind::AlreadyExists && same_file(source, &to) {
+                let _ = fs::remove_file(&to);
+            }
+            Err(refused(&to, &error))
+        }
+    }
+}
+
+/// The file at `source` moved into `folder` under its own name, or the first free name `free_name` gives (phase 3
+/// design, part 6.7): `folder` made when absent, then `rename_no_replace`, which never replaces a file in `folder`. A
+/// rename refused because `folder` is on another volume (`CrossesDevices`) copies with `copy_checked` instead and
+/// removes `source` only after the copy succeeded. Gives the moved file's path. Every Err names `source` and the
+/// destination: a failed copy removes its partial copy, a failed remove after the copy keeps the copy (so `source`
+/// and a whole copy both remain), and every other failure leaves `source` where it was and nothing new in `folder`
+/// but the folder itself. Def: P3-T11. Use: P3-T16.
+pub(crate) fn move_aside(source: &Path, folder: &Path) -> Result<PathBuf, String> {
+    move_aside_with(source, folder, &|from, to| lazymkv_platform::rename_no_replace(from, to), &|from, to| {
+        crate::staged::copy_checked(from, to)
+    })
+}
+
 /// The five replay files of a job folder as `lazymkv-dev plan` and `decide` take them (design part 7.1):
 /// `settings.json`, `tmdb-search.json`, `tmdb-record.json`, `remembered.json` and the owner's answers `review.json`
 /// (`REVIEW_FILE`, as `--overrides`; phase 3 design, part 6.4), each its absolute path in the job folder, given only
@@ -867,6 +966,92 @@ mod tests {
         std::fs::write(&folder, b"").unwrap();
         let error = library_facts(&path, EditionStyle::Jellyfin).unwrap_err();
         assert!(error.starts_with(&format!("the library folder {} could not be read: ", folder.display())), "{error}");
+    }
+
+    /// A library file `Film - 1080p.mkv` holding `bytes` in `<scratch>/library`, and the job's `replaced` folder
+    /// (not made) in `<scratch>/staging`.
+    fn aside(s: &Scratch, bytes: &[u8]) -> (PathBuf, PathBuf) {
+        let library = s.0.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let source = library.join("Film - 1080p.mkv");
+        std::fs::write(&source, bytes).unwrap();
+        (source, replaced_dir(s.0.join("staging").to_str().unwrap(), "job-1"))
+    }
+
+    /// Phase 3 design, part 6.7: the file is moved into `<staging>/<job>/replaced`, made for it, under its own name.
+    #[test]
+    fn a_replaced_file_is_moved_under_its_own_name_into_the_folder_made_for_it() {
+        let s = Scratch::new("aside-own-name");
+        let (source, folder) = aside(&s, b"owner's");
+        assert!(folder.ends_with(Path::new("staging").join("job-1").join(REPLACED_FOLDER)));
+        let moved = move_aside(&source, &folder).unwrap();
+        assert_eq!(moved, folder.join("Film - 1080p.mkv"));
+        assert_eq!(std::fs::read(&moved).unwrap(), b"owner's");
+        assert!(!source.exists());
+    }
+
+    /// Phase 3 design, part 6.7: a name already taken in `replaced` gets ` 2`, ` 3` before the extension.
+    #[test]
+    fn a_name_taken_in_the_folder_gets_2_then_3_before_the_extension() {
+        let s = Scratch::new("aside-taken");
+        let (source, folder) = aside(&s, b"third");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Film - 1080p.mkv"), b"first").unwrap();
+        std::fs::write(folder.join("Film - 1080p 2.mkv"), b"second").unwrap();
+        let moved = move_aside(&source, &folder).unwrap();
+        assert_eq!(moved, folder.join("Film - 1080p 3.mkv"));
+        assert_eq!(std::fs::read(folder.join("Film - 1080p.mkv")).unwrap(), b"first");
+        assert_eq!(std::fs::read(folder.join("Film - 1080p 2.mkv")).unwrap(), b"second");
+        assert_eq!(std::fs::read(&moved).unwrap(), b"third");
+    }
+
+    fn across_volumes(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::CrossesDevices))
+    }
+
+    /// Phase 3 design, part 6.7: a rename refused across volumes copies with `copy_checked`, then removes the source.
+    #[test]
+    fn across_volumes_the_file_is_copied_and_then_removed() {
+        let s = Scratch::new("aside-volumes");
+        let (source, folder) = aside(&s, b"owner's");
+        let copy = |from: &Path, to: &Path| crate::staged::copy_checked(from, to);
+        let moved = move_aside_with(&source, &folder, &across_volumes, &copy).unwrap();
+        assert_eq!(std::fs::read(&moved).unwrap(), b"owner's");
+        assert!(!source.exists());
+    }
+
+    /// Phase 3 design, part 6.7: a copy that fails leaves the source as it was and no partial copy in `replaced`, and
+    /// its error names both paths.
+    #[test]
+    fn a_failed_copy_across_volumes_removes_its_partial_and_keeps_the_source() {
+        let s = Scratch::new("aside-copy-fails");
+        let (source, folder) = aside(&s, b"owner's");
+        let copy = |_: &Path, to: &Path| -> io::Result<()> {
+            let mut partial = to.as_os_str().to_os_string();
+            partial.push(crate::staged::PARTIAL);
+            std::fs::write(PathBuf::from(partial), b"own")?;
+            Err(io::Error::other("disk full"))
+        };
+        let error = move_aside_with(&source, &folder, &across_volumes, &copy).unwrap_err();
+        let to = folder.join("Film - 1080p.mkv");
+        assert_eq!(error, format!("{} could not be moved to {}: disk full", source.display(), to.display()));
+        assert_eq!(std::fs::read(&source).unwrap(), b"owner's");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+    }
+
+    /// Phase 3 design, part 6.7: any other rename error leaves the source as it was and names both paths; nothing is
+    /// copied.
+    #[test]
+    fn another_rename_error_leaves_the_source_and_copies_nothing() {
+        let s = Scratch::new("aside-refused");
+        let (source, folder) = aside(&s, b"owner's");
+        let refused = |_: &Path, _: &Path| -> io::Result<()> { Err(io::Error::other("access denied")) };
+        let copy = |_: &Path, _: &Path| -> io::Result<()> { panic!("no copy after another error") };
+        let error = move_aside_with(&source, &folder, &refused, &copy).unwrap_err();
+        let to = folder.join("Film - 1080p.mkv");
+        assert_eq!(error, format!("{} could not be moved to {}: access denied", source.display(), to.display()));
+        assert_eq!(std::fs::read(&source).unwrap(), b"owner's");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
     }
 
     #[test]
