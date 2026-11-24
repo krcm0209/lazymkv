@@ -397,23 +397,27 @@ pub fn channel_layout(channels: u32) -> String {
     }
 }
 
-/// ffprobe's profile string to the object-based extension (6.4 step 9; EXP-06 not run, so provisional): a profile
-/// containing "Atmos" gives Atmos, one containing "DTS:X" gives DtsX, else None (Open point 8).
+/// ffprobe's profile string to the object-based extension (6.4 step 9): a profile containing "Atmos" gives Atmos, one
+/// containing "DTS:X" gives DtsX, else None (Open point 8). On one rip (pull request 7's second acceptance disc)
+/// `ffprobe` gave the profile `Dolby TrueHD + Dolby Atmos`; the spellings stay provisional under ruling OR7 until
+/// experiment 6 (EXP-06) runs, and a DTS:X profile is still unseen.
 pub fn object_audio(ffprobe_profile: Option<&str>) -> Option<ObjectAudio> {
     ffprobe_profile.and_then(object_in)
 }
 
 /// The codec names `mkvmerge -J` may write for a stream of this codec, as 6.2 step 7 records them; `verify_rip`
 /// accepts any of them. Hevc ["HEVC/H.265/MPEG-H"], Avc ["AVC/H.264/MPEG-4p10"], Mpeg2 ["MPEG-1/2"], TrueHd
-/// ["TrueHD", "TrueHD Atmos"] (the second provisional: an Atmos stream's spelling is not yet seen), DtsHdMa
+/// ["TrueHD", "TrueHD Atmos"] (the second seen on one rip, pull request 7's second acceptance disc, where `mkvmerge -J`
+/// named the Atmos track `TrueHD Atmos`; provisional under ruling OR7 until experiment 6 runs), DtsHdMa
 /// ["DTS-HD Master Audio"], DtsHdHr ["DTS-HD High Resolution Audio"], Dts ["DTS", "DTS-ES", "DTS 96/24"] (a DTS-ES or
 /// DTS 96/24 stream is a DTS stream to MakeMKV and has its own name in mkvmerge), DtsExpress ["DTS Express"], Ac3
 /// ["AC-3"], Eac3 ["E-AC-3"], Lpcm
 /// ["PCM"], Flac ["FLAC"], MpegAudio ["MP2"], Aac ["AAC"], Pgs ["HDMV PGS"], VobSub ["VobSub"], ClosedCaptions
 /// ["SubRip/SRT"] (converted through attribute 41 "Text"), Vc1 ["VC-1"] (ruling RP26), Unknown [] (`verify` then
 /// compares no codec name for the track and says so in its report). The names seen in
-/// the recordings are HEVC, DTS-HD Master Audio, DTS, AC-3, HDMV PGS, MPEG-1/2, VobSub, SubRip/SRT and AVC; the
-/// others are mkvmerge's documented spellings, not yet seen. Spec 6.2 step 7.
+/// the recordings are HEVC, DTS-HD Master Audio, DTS, AC-3, HDMV PGS, MPEG-1/2, VobSub, SubRip/SRT and AVC, and
+/// TrueHD Atmos on that one rip; the others are mkvmerge's documented spellings, not yet seen. DTS:X, which rides on
+/// DTS-HD MA, is still unseen. Spec 6.2 step 7.
 pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str] {
     match codec.family {
         Family::Hevc => &["HEVC/H.265/MPEG-H"],

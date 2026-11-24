@@ -149,10 +149,15 @@ fn the_task_script_names_the_task_the_run_folder_and_no_trigger() {
         r"$release = 'C:\lazymkv\target\release'",
         "-LogonType Interactive -RunLevel Highest",
         "-ExecutionTimeLimit ([TimeSpan]::Zero)",
-        "-WorkingDirectory $run",
+        // Pull request 7's notes, call 10: the run folder without -Zip, the tree's bin with it.
+        "-WorkingDirectory $bin",
+        "$bin = $run",
+        r"$bin = Join-Path $tree 'bin'",
         "ENGINE-TASK-DONE status=",
-        // Review round 1 of pull request 3 (G1): Owner decision 13's check meets the release folder and each program.
-        "foreach ($path in @($trees) + @($release) + $programs)",
+        // Review round 1 of pull request 3 (G1): Owner decision 13's check meets the release folder and each program
+        // (without -Zip, call 10).
+        "$checked = @($trees) + @($release) + $programs",
+        "foreach ($path in $checked)",
     ] {
         assert!(text.contains(needle), "the script lacks {needle}");
     }
@@ -178,6 +183,148 @@ fn the_task_script_requires_lazymkv_ocr() {
     let (_, text) = script();
     assert!(text.contains("$required = 'lazymkv-engine.exe', 'lazymkvctl.exe', 'lazymkv-ocr.exe'"));
     assert!(!text.contains("$optional"), "the script still lists an optional program");
+}
+
+/// Pull request 7's notes, call 10 (T7-R4): `-Zip` and `-Sha256` are declared empty and refused one without the other,
+/// and the zip is hashed only as its copy in the run folder: `Get-FileHash` appears only in `Get-ZipProblem`'s body,
+/// whose one call is on `$copy`, the run folder's `release.zip`, and the line that names `-Zip`'s own file copies it
+/// there or checks that it is one, never hashes or extracts it. Textual, on every system.
+#[test]
+fn the_task_script_takes_a_zip_only_with_its_hash() {
+    let (_, text) = script();
+    let code = code_lines(&text);
+    let start = code.iter().position(|line| *line == "param(").expect("a param block");
+    let end = start + code[start..].iter().position(|line| *line == ")").expect("the param block ends");
+    for declared in ["[string]$Zip = ''", "[string]$Sha256 = ''"] {
+        assert!(code[start..end].iter().any(|line| line.trim_end_matches(',') == declared), "param lacks {declared}");
+    }
+    let refusal = "-Zip and -Sha256 go together: the hash is the zip's line in the release workflow's SHA256SUMS";
+    assert!(text.contains(refusal), "the script lacks the refusal: {refusal}");
+
+    let lines: Vec<&str> = text.lines().collect();
+    let definition = lines
+        .iter()
+        .position(|line| line.starts_with("function Get-ZipProblem("))
+        .expect("the script defines Get-ZipProblem");
+    let close = definition + lines[definition..].iter().position(|line| *line == "}").expect("its definition ends");
+    let hashing: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with('#') && line.contains("Get-FileHash"))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(!hashing.is_empty(), "the script hashes nothing");
+    for at in hashing {
+        assert!(at > definition && at < close, "Get-FileHash outside Get-ZipProblem: {}", lines[at]);
+    }
+    let calls: Vec<&str> =
+        code.iter().copied().filter(|line| line.contains("Get-ZipProblem") && !line.starts_with("function ")).collect();
+    assert_eq!(calls, ["$problem = Get-ZipProblem $copy $Sha256"], "Get-ZipProblem is asked about the copy alone");
+    assert!(code.contains(&r"$copy = Join-Path $run 'release.zip'"), "the copy is not the run folder's release.zip");
+    assert!(text.contains("Copy-Item -LiteralPath $Zip -Destination $copy -Force"), "the zip is not copied to $copy");
+    // The final review of pull request 7 (IS-3): PowerShell's variable names ignore case, so `$zip`, `$ZIP` and
+    // `${Zip}` at script scope are `-Zip` too; inside a function, `$zip` is that function's own parameter.
+    let zip_lines: Vec<&str> = script_scope_lines(&text).into_iter().filter(|line| names_zip(line)).collect();
+    assert!(zip_lines.contains(&"try { Copy-Item -LiteralPath $Zip -Destination $copy -Force }"), "{zip_lines:?}");
+    for line in zip_lines {
+        for reader in ["Get-FileHash", "Get-ZipProblem", "Expand-ReleaseTree", "Expand-Archive"] {
+            assert!(!line.to_ascii_lowercase().contains(&reader.to_ascii_lowercase()), "-Zip's own file reaches {reader}: {line}");
+        }
+    }
+    let extractions: Vec<&str> =
+        code.iter().copied().filter(|line| line.contains("Expand-ReleaseTree") && !line.starts_with("function ")).collect();
+    assert_eq!(extractions, ["try { $tree = Expand-ReleaseTree $copy $into }"], "Expand-ReleaseTree is called on the copy alone");
+}
+
+/// The code lines of a PowerShell script outside its functions' bodies (a function begins with `function ` and ends
+/// with `}`, both at the start of a line, as the scripts here write them): trimmed, neither empty nor a comment.
+fn script_scope_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.starts_with("function ") {
+            inside = true;
+        } else if inside {
+            inside = line != "}";
+        } else {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                lines.push(line);
+            }
+        }
+    }
+    lines
+}
+
+/// Whether `line` names the variable Zip in any ASCII case: `$zip`, `${zip}` or `$script:zip`, not followed by a
+/// further letter, digit or underscore (so `$zipped` is another variable).
+fn names_zip(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("${zip}") || lower.contains("${script:zip}") {
+        return true;
+    }
+    ["$zip", "$script:zip"].iter().any(|name| {
+        lower.match_indices(name).any(|(at, _)| {
+            lower[at + name.len()..].chars().next().map_or(true, |next| !(next.is_ascii_alphanumeric() || next == '_'))
+        })
+    })
+}
+
+/// The final review of pull request 7 (IS-4): the order of the script's safety steps, read from its code lines. The
+/// planted-file check comes before any removal; with -Zip, the zip's check, the removal of the earlier tree, the
+/// extraction, the owner change, the tree's check, the writers check over the installed files, the task's
+/// registration, the removal of the loose programs and the task's start come in that order; and the writers check over
+/// the installed files never consults -AcceptWritableBuild. Textual, on every system.
+#[test]
+fn the_task_script_takes_its_safety_steps_in_order() {
+    let (_, text) = script();
+    let code = code_lines(&text);
+    let main = code.iter().position(|line| *line == "$status = 'error'").expect("the script's main flow");
+    let flow = &code[main..];
+    // The one line of the main flow that `matches`.
+    let at = |what: &str, matches: &dyn Fn(&str) -> bool| -> usize {
+        let found: Vec<usize> = flow.iter().enumerate().filter(|(_, line)| matches(line)).map(|(at, _)| at).collect();
+        assert_eq!(found.len(), 1, "{what}: {:?}", found.iter().map(|at| flow[*at]).collect::<Vec<_>>());
+        found[0]
+    };
+    let planted = at("the planted-file check", &|line| line == "$problem = Get-PlantedProblem $run $required");
+    let first_removal = flow
+        .iter()
+        .position(|line| line.contains("Remove-Earlier") || line.contains("Remove-Item"))
+        .expect("the main flow removes something");
+    assert!(planted < first_removal, "a removal comes before the planted-file check: {}", flow[first_removal]);
+    let steps = [
+        ("the zip's check", at("the zip's check", &|line| line == "$problem = Get-ZipProblem $copy $Sha256")),
+        ("the earlier tree's removal", at("the earlier tree's removal", &|line| line == "Remove-Earlier $into")),
+        ("the extraction", at("the extraction", &|line| line == "try { $tree = Expand-ReleaseTree $copy $into }")),
+        ("the owner change", at("the owner change", &|line| line.starts_with("& icacls.exe $into /setowner "))),
+        ("the tree's check", at("the tree's check", &|line| line == "$problem = Get-TreeProblem $tree")),
+        ("the installed files' writers", at("the installed files' writers", &|line| line == "foreach ($path in $installed) {")),
+        ("the registration", at("the registration", &|line| line.starts_with("Register-ScheduledTask "))),
+        (
+            "the loose programs' removal",
+            at("the loose programs' removal", &|line| line == "foreach ($program in $required) { Remove-Earlier (Join-Path $run $program) }"),
+        ),
+        ("the start", at("the start", &|line| line.starts_with("Start-ScheduledTask "))),
+    ];
+    for pair in steps.windows(2) {
+        assert!(pair[0].1 < pair[1].1, "{} does not come before {}", pair[0].0, pair[1].0);
+    }
+    // The installed files' loop, to the brace that closes it.
+    let start = steps[5].1;
+    let mut depth = 0i32;
+    let mut end = start;
+    for (offset, line) in flow[start..].iter().enumerate() {
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth <= 0 {
+            end = start + offset;
+            break;
+        }
+    }
+    assert!(end > start, "the installed files' loop does not close");
+    for line in &flow[start..=end] {
+        assert!(!line.to_ascii_lowercase().contains("acceptwritablebuild"), "the installed files' check consults it: {line}");
+    }
 }
 
 #[cfg(windows)]
@@ -477,6 +624,273 @@ fn the_writers_check_sees_an_entry_a_program_file_alone_carries() {
     let program = lines[1].strip_prefix("program:").expect("the program's line");
     assert!(!folder.trim().split(',').any(|sid| sid == authenticated), "the folder's writers hold {authenticated}");
     assert!(program.trim().split(',').any(|sid| sid == authenticated), "the program's writers lack {authenticated}");
+}
+
+/// `path` as a single-quoted PowerShell string's content.
+#[cfg(windows)]
+fn quoted(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
+}
+
+/// Pull request 7's notes, call 10: `Get-ZipProblem` refuses a file that is not there, a hash that is not 64 hex
+/// digits (short, long, not hex, empty, or ending in a newline) and one that is not the file's, and passes the file's
+/// own in either case. The zip is made inside the PowerShell call by `Compress-Archive` in a fresh temp folder that is
+/// removed afterwards; a refusal's text is printed on one line.
+#[cfg(windows)]
+#[test]
+fn the_zip_check_refuses_a_missing_file_a_malformed_hash_and_a_wrong_hash_and_passes_the_right_one() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-zip-check"));
+    let call = format!(
+        "$ProgressPreference = 'SilentlyContinue'\r\n\
+         $folder = '{folder}'\r\n\
+         New-Item -ItemType Directory -Path $folder | Out-Null\r\n\
+         try {{\r\n\
+             $file = Join-Path $folder 'a.txt'\r\n\
+             Set-Content -LiteralPath $file -Value 'a'\r\n\
+             $zip = Join-Path $folder 'a.zip'\r\n\
+             Compress-Archive -LiteralPath $file -DestinationPath $zip\r\n\
+             $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash\r\n\
+             $cases = @(\r\n\
+                 @('missing', (Join-Path $folder 'none.zip'), $hash),\r\n\
+                 @('short', $zip, ($hash.Substring(1))),\r\n\
+                 @('long', $zip, ($hash + '0')),\r\n\
+                 @('not hex', $zip, ('g' * 64)),\r\n\
+                 @('empty', $zip, ''),\r\n\
+                 @('newline', $zip, ($hash + [char]10)),\r\n\
+                 @('wrong', $zip, ('0' * 64)),\r\n\
+                 @('upper', $zip, ($hash.ToUpperInvariant())),\r\n\
+                 @('lower', $zip, ($hash.ToLowerInvariant()))\r\n\
+             )\r\n\
+             foreach ($case in $cases) {{\r\n\
+                 $case[0] + ': ' + ((Get-ZipProblem $case[1] $case[2]) -replace '\\r?\\n', '<newline>')\r\n\
+             }}\r\n\
+         }} finally {{\r\n\
+             Remove-Item -LiteralPath $folder -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(&path, &["Get-ZipProblem"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 9, "{}", redacted(&output));
+    let malformed = "is not 64 hexadecimal digits; the hash is the zip's line in the release workflow's SHA256SUMS";
+    let expected = [
+        ("missing: ", Some(r"\none.zip is not a file")),
+        ("short: ", Some(malformed)),
+        ("long: ", Some(malformed)),
+        ("not hex: ", Some(malformed)),
+        ("empty: ", Some(malformed)),
+        ("newline: ", Some(malformed)),
+        ("wrong: ", Some("'s SHA-256 is ")),
+        ("upper:", None),
+        ("lower:", None),
+    ];
+    for (line, (label, needle)) in lines.iter().zip(expected) {
+        match needle {
+            Some(needle) => {
+                let refusal = line.strip_prefix(label).unwrap_or_else(|| panic!("{} is not {label}", redacted(line)));
+                assert!(refusal.contains(needle), "{label}{} lacks {needle}", redacted(refusal));
+            }
+            None => assert_eq!(*line, label, "{}", redacted(line)),
+        }
+    }
+    assert!(lines[6].contains(&format!("not -Sha256's {}", "0".repeat(64))), "{}", redacted(lines[6]));
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
+}
+
+/// Pull request 7's notes, call 10: `Expand-ReleaseTree` removes an earlier `$into`, extracts the zip there and returns
+/// its one top-level folder named `lazymkv-*`; a zip with two top-level entries, with one folder of another name, or
+/// with one file named `lazymkv-*`, throws. The zips are made inside the PowerShell call by `Compress-Archive` in a
+/// fresh temp folder that is removed afterwards.
+#[cfg(windows)]
+#[test]
+fn the_extraction_returns_the_one_lazymkv_folder_and_replaces_an_earlier_tree() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-zip-tree"));
+    let call = format!(
+        "$ProgressPreference = 'SilentlyContinue'\r\n\
+         $folder = '{folder}'\r\n\
+         New-Item -ItemType Directory -Path $folder | Out-Null\r\n\
+         try {{\r\n\
+             $src = Join-Path $folder 'src'\r\n\
+             $good = Join-Path $src 'lazymkv-1.2.3-windows-x64'\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $good 'bin') | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $good 'bin\\a.txt') -Value 'a'\r\n\
+             $other = Join-Path $src 'other-1.2.3'\r\n\
+             New-Item -ItemType Directory -Path $other | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $other 'a.txt') -Value 'a'\r\n\
+             $loose = Join-Path $src 'lazymkv-loose.txt'\r\n\
+             Set-Content -LiteralPath $loose -Value 'a'\r\n\
+             Compress-Archive -LiteralPath $good -DestinationPath (Join-Path $folder 'good.zip')\r\n\
+             Compress-Archive -LiteralPath $good, $loose -DestinationPath (Join-Path $folder 'two.zip')\r\n\
+             Compress-Archive -LiteralPath $other -DestinationPath (Join-Path $folder 'other.zip')\r\n\
+             Compress-Archive -LiteralPath $loose -DestinationPath (Join-Path $folder 'file.zip')\r\n\
+             $into = Join-Path $folder 'into'\r\n\
+             New-Item -ItemType Directory -Path $into | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $into 'stray.txt') -Value 'a'\r\n\
+             $tree = Expand-ReleaseTree (Join-Path $folder 'good.zip') $into\r\n\
+             'tree: ' + (Split-Path $tree -Leaf)\r\n\
+             'file: ' + (Test-Path -LiteralPath (Join-Path $tree 'bin\\a.txt') -PathType Leaf)\r\n\
+             'stray: ' + (Test-Path -LiteralPath (Join-Path $into 'stray.txt'))\r\n\
+             'entries: ' + @(Get-ChildItem -LiteralPath $into -Force).Count\r\n\
+             foreach ($bad in 'two', 'other', 'file') {{\r\n\
+                 try {{ Expand-ReleaseTree (Join-Path $folder ($bad + '.zip')) $into | Out-Null; $bad + ': returned' }}\r\n\
+                 catch {{ $bad + ': threw ' + $_.Exception.Message }}\r\n\
+             }}\r\n\
+         }} finally {{\r\n\
+             Remove-Item -LiteralPath $folder -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(&path, &["Expand-ReleaseTree", "Remove-Earlier", "Get-LinkBelow"], &[], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    let refusal = "top-level entries, not one folder lazymkv-<version>";
+    assert_eq!(
+        lines,
+        [
+            "tree: lazymkv-1.2.3-windows-x64".to_owned(),
+            "file: True".to_owned(),
+            "stray: False".to_owned(),
+            "entries: 1".to_owned(),
+            format!("two: threw the zip holds 2 {refusal}"),
+            format!("other: threw the zip holds 1 {refusal}"),
+            format!("file: threw the zip holds 1 {refusal}"),
+        ],
+        "{}",
+        redacted(&output)
+    );
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
+}
+
+/// Pull request 7's notes, call 10: `Get-TreeProblem` passes a tree with the six files of `$treeFiles` and otherwise
+/// names the first one missing, in their order; a folder in a file's place, or no tree at all, lacks it too. The tree
+/// is made inside the PowerShell call in a fresh temp folder that is removed afterwards.
+#[cfg(windows)]
+#[test]
+fn the_tree_check_names_the_first_file_a_tree_lacks() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-tree-check"));
+    let call = format!(
+        "$tree = '{folder}'\r\n\
+         foreach ($sub in 'bin', 'resources') {{ New-Item -ItemType Directory -Path (Join-Path $tree $sub) -Force | Out-Null }}\r\n\
+         try {{\r\n\
+             foreach ($file in $treeFiles) {{ Set-Content -LiteralPath (Join-Path $tree $file) -Value '' }}\r\n\
+             'full: ' + (Get-TreeProblem $tree)\r\n\
+             Remove-Item -LiteralPath (Join-Path $tree 'resources\\ffprobe.exe')\r\n\
+             'no ffprobe: ' + (Get-TreeProblem $tree)\r\n\
+             Remove-Item -LiteralPath (Join-Path $tree 'bin\\lazymkvctl.exe')\r\n\
+             'no ctl: ' + (Get-TreeProblem $tree)\r\n\
+             Remove-Item -LiteralPath (Join-Path $tree 'bin\\lazymkv-engine.exe')\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $tree 'bin\\lazymkv-engine.exe') | Out-Null\r\n\
+             'engine folder: ' + (Get-TreeProblem $tree)\r\n\
+             'no tree: ' + (Get-TreeProblem (Join-Path $tree 'none'))\r\n\
+         }} finally {{\r\n\
+             Remove-Item -LiteralPath $tree -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(&path, &["Get-TreeProblem"], &["treeFiles"], &call);
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "full:",
+            r"no ffprobe: the release tree lacks resources\ffprobe.exe",
+            r"no ctl: the release tree lacks bin\lazymkvctl.exe",
+            r"engine folder: the release tree lacks bin\lazymkv-engine.exe",
+            r"no tree: the release tree lacks bin\lazymkv-engine.exe",
+        ],
+        "{}",
+        redacted(&output)
+    );
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
+}
+
+/// The review of Task 4 of pull request 7 (finding 1): `Get-PlantedProblem` passes a run folder holding the three
+/// programs, a real `release` folder and a `release.zip` file, and refuses one whose `release` is a junction, one with
+/// an unknown name, a `release` that is a file and a `release.zip` that is a folder; and `Remove-Earlier` refuses a
+/// junction, or a folder holding one, and removes a real folder. The junctions' target keeps its file throughout. The
+/// stand-ins and junctions (`cmd /c mklink /J`) are made inside the PowerShell call in a fresh temp folder; the
+/// junctions are removed alone with `rmdir` before the folder is.
+#[cfg(windows)]
+#[test]
+fn the_planted_check_and_the_removal_refuse_a_link_and_leave_its_target_whole() {
+    let (path, _) = script();
+    let folder = std::env::temp_dir().join(unique("lazymkv-planted"));
+    let call = format!(
+        "$root = '{folder}'\r\n\
+         New-Item -ItemType Directory -Path $root | Out-Null\r\n\
+         $junction = Join-Path $root 'junction\\release'\r\n\
+         $inner = Join-Path $root 'nested\\release\\inner'\r\n\
+         try {{\r\n\
+             $target = Join-Path $root 'target'\r\n\
+             New-Item -ItemType Directory -Path $target | Out-Null\r\n\
+             $kept = Join-Path $target 'kept.txt'\r\n\
+             Set-Content -LiteralPath $kept -Value 'a'\r\n\
+             foreach ($name in 'good', 'junction', 'unknown', 'file', 'folder', 'nested') {{\r\n\
+                 $run = Join-Path $root $name\r\n\
+                 New-Item -ItemType Directory -Path $run | Out-Null\r\n\
+                 foreach ($program in $required) {{ Set-Content -LiteralPath (Join-Path $run $program) -Value '' }}\r\n\
+             }}\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $root 'good\\release') | Out-Null\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'good\\release\\a.txt') -Value 'a'\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'good\\release.zip') -Value ''\r\n\
+             cmd /c mklink /J $junction $target | Out-Null\r\n\
+             if ($LASTEXITCODE -ne 0) {{ throw \"mklink /J exited $LASTEXITCODE\" }}\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'unknown\\other.txt') -Value ''\r\n\
+             Set-Content -LiteralPath (Join-Path $root 'file\\release') -Value ''\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $root 'folder\\release.zip') | Out-Null\r\n\
+             New-Item -ItemType Directory -Path (Join-Path $root 'nested\\release') | Out-Null\r\n\
+             cmd /c mklink /J $inner $target | Out-Null\r\n\
+             if ($LASTEXITCODE -ne 0) {{ throw \"mklink /J exited $LASTEXITCODE\" }}\r\n\
+             foreach ($name in 'good', 'junction', 'unknown', 'file', 'folder', 'nested') {{\r\n\
+                 $name + ': ' + (Get-PlantedProblem (Join-Path $root $name) $required)\r\n\
+             }}\r\n\
+             foreach ($earlier in $junction, (Join-Path $root 'nested\\release')) {{\r\n\
+                 try {{ Remove-Earlier $earlier; 'remove: returned' }} catch {{ 'remove: threw ' + $_.Exception.Message }}\r\n\
+             }}\r\n\
+             'kept: ' + (Test-Path -LiteralPath $kept -PathType Leaf)\r\n\
+             'inner: ' + (Test-Path -LiteralPath $inner)\r\n\
+             Remove-Earlier (Join-Path $root 'good\\release')\r\n\
+             'good release: ' + (Test-Path -LiteralPath (Join-Path $root 'good\\release'))\r\n\
+         }} finally {{\r\n\
+             foreach ($link in $junction, $inner) {{ if (Test-Path -LiteralPath $link) {{ cmd /c rmdir $link }} }}\r\n\
+             Remove-Item -LiteralPath $root -Recurse -Force\r\n\
+         }}",
+        folder = quoted(&folder),
+    );
+    let output = define_and_call(
+        &path,
+        &["Get-PlantedProblem", "Get-LinkBelow", "Remove-Earlier"],
+        &["required"],
+        &call,
+    );
+    let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+    assert_eq!(lines.len(), 11, "{}", redacted(&output));
+    let expected = [
+        ("good:", None),
+        ("junction: ", Some(r"\junction holds the link release, which this script never makes")),
+        ("unknown: ", Some(r"\unknown holds other.txt, which this script did not put there")),
+        ("file: ", Some(r"\file\release is a file, not the folder")),
+        ("folder: ", Some(r"\folder\release.zip is a folder, not the zip's copy")),
+        // The planted check reads the run folder's own entries; a link deeper down is Remove-Earlier's to refuse.
+        ("nested:", None),
+        ("remove: threw ", Some(r"\junction\release is a link, which this script never makes")),
+        ("remove: threw ", Some(r"\nested\release\inner is a link, which this script never makes")),
+        ("kept: True", None),
+        ("inner: True", None),
+        ("good release: False", None),
+    ];
+    for (line, (label, needle)) in lines.iter().zip(expected) {
+        match needle {
+            Some(needle) => {
+                let text = line.strip_prefix(label).unwrap_or_else(|| panic!("{} is not {label}", redacted(line)));
+                assert!(text.contains(needle), "{label}{} lacks {needle}", redacted(text));
+            }
+            None => assert_eq!(*line, label, "{}", redacted(line)),
+        }
+    }
+    assert!(!folder.exists(), "the call left {}", redacted(&folder.display().to_string()));
 }
 
 /// Pull request 5's Task 11 (design part 10.4; notes calls 7 and 24; T5-R45): the desktop-session run of the decoder

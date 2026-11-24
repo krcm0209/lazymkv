@@ -87,6 +87,18 @@ fn another_dev_command_name_is_refused_with_exit_2() {
 }
 
 #[test]
+fn compare_job_is_a_lazymkv_dev_command_only() {
+    let s = Scratch::new("ctl-compare-job");
+    let ctx = Ctx::for_test(&s.0);
+    let (code, out, err) = ctl(&ctx, &["compare-job", "x"]);
+    assert_eq!((code, out), (2, vec![]));
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        "lazymkvctl: compare-job is a lazymkv-dev command, not a lazymkvctl command\n"
+    );
+}
+
+#[test]
 fn title_without_job_is_an_argument_error() {
     let s = Scratch::new("ctl-title");
     recording(&s);

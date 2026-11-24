@@ -4,4 +4,4 @@
  {"args_contain":["--relay-exit-3"],"stdout":"relay-plan-out.txt","stderr":"relay-plan-err.txt","exit_code":3},
  {"args_contain":["retune","--evidence"],"stdout":"relay-retune-out.txt"},
  {"args_contain":["decide","--rec"],"stdout":"relay-decide-out.txt"},
- {"args_contain":["plan"],"stdout":"relay-plan-out.txt","stderr":"relay-plan-err.txt"}]}
+ {"args_contain":["plan","--settings"],"stdout":"relay-plan-out.txt","stderr":"relay-plan-err.txt"}]}

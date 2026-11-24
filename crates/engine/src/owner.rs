@@ -32,6 +32,7 @@ use lazymkv_core::remembered::Overrides;
 use lazymkv_core::review::{Note, Noted};
 use lazymkv_core::settings::{configured_root, Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
+use lazymkv_core::subtitle::text::READING;
 use lazymkv_platform::{
     DriveEvent, DriveWatcher, Ejector, Host, IpcStream, IpcTransport, KeepAwake, Platform, Reach, SecretStore,
     ShareConnector, Spawn,
@@ -3037,16 +3038,21 @@ impl Owner {
         spawn_retune_refetch(work, client, id, words, self.sender.clone());
     }
 
-    /// `child_words` over the jobs the owner holds, each with its own settings' `tuning_root` for decide's `--text`,
-    /// and the engine's `tuning_root` for `retune --jobs` (design part 9.5; ENG-19; T5-R14).
+    /// `child_words` over the jobs the owner holds, each with its own settings' `tuning_root` for decide's `--text`
+    /// (given only to the titles whose step 10 ran), and the engine's `tuning_root` for `retune --jobs` (design part
+    /// 9.5; ENG-19; T5-R14).
     fn command_words(&self, words: &[String]) -> Result<Vec<String>, String> {
         let (settings, _) = self.store.settings();
         let job = |job_id: &str| {
             let job = self.jobs.get(job_id)?;
             let keys: Vec<String> = job.record.titles.iter().map(|title| title.key.clone()).collect();
+            // Pull request 7's notes, call 9: step 10 ran for a title whose subtitle reading left its summary.
+            let folder = self.store.job_dir(job_id);
+            let text_keys: Vec<String> =
+                keys.iter().filter(|key| folder.join(key).join(READING).join("summary.json").is_file()).cloned().collect();
             let dataset_done = job.record.tuning_copy == Some(TuningCopy::Done);
             let tuning_root = job.settings.tuning_root.clone();
-            Some(CommandJob { folder: self.store.job_dir(job_id), keys, dataset_done, tuning_root })
+            Some(CommandJob { folder, keys, text_keys, dataset_done, tuning_root })
         };
         child_words(words, &job, settings.tuning_root.as_deref())
     }

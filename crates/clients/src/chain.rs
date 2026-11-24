@@ -679,6 +679,25 @@ mod tests {
     }
 
     #[test]
+    fn the_record_is_the_one_film_when_every_other_plausible_result_is_tv() {
+        // Ruling A2 of 2026-11-23: a film and a TV entry of the disc's name; the film's record is fetched.
+        let t = RecordedTransport::new();
+        let inputs = chain(Some(DISC_ID), Some("JOHN_WICK"));
+        misses(&t);
+        let page = json!({"page": 1, "total_pages": 1, "total_results": 2, "results": [
+            {"media_type": "tv", "id": 900006, "name": "John Wick", "original_name": "John Wick", "first_air_date": "2099-01-01"},
+            {"media_type": "movie", "id": 900005, "title": "John Wick", "original_title": "John Wick", "release_date": "2014-10-22"},
+        ]});
+        t.answer(&search_of(&inputs), 200, page.to_string().as_bytes());
+        t.answer(&record_url(movie(900005)), 200, &movie_body(900005, "John Wick", "2014-10-22"));
+        let mut book = LookupBook::default();
+        round(&t, &mut book, &inputs);
+        assert_eq!(urls(&t).last(), Some(&record_url(movie(900005))));
+        assert_eq!(book.answers.record.as_ref().map(|record| record.identity), Some(movie(900005)));
+        assert_eq!(book.pending(), (false, false));
+    }
+
+    #[test]
     fn a_round_restarts_at_the_first_unanswered_step() {
         let t = RecordedTransport::new();
         let inputs = chain(Some(DISC_ID), Some("JOHN_WICK"));

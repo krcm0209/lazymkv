@@ -31,8 +31,15 @@ pipe and the Job Object runner. Its fourth asks TheDiscDB and TMDb live over its
 answers slim and fetches a TMDb copy again after six months, cleans old copies and staging data, and posts every
 notification to the owner's Home Assistant webhook. Its fifth reads a title's English bitmap subtitle streams with OCR
 in a worker process when it has two or more, measures each title's audio with ffmpeg into a compact proxy, keeps both in
-the owner's tuning dataset, and runs `retune` over that dataset beside phase 0's recordings;
-[`docs/phase2/engine.md`](docs/phase2/engine.md) says how to run them and how many tests there are.
+the owner's tuning dataset, and runs `retune` over that dataset beside phase 0's recordings. Its sixth builds the
+release: a zip whose `resources` folder carries mkvmerge and a minimal, reproducible FFmpeg build's ffprobe and ffmpeg,
+from a release workflow that runs as a dry run on pull requests and has published nothing. Its seventh ran the
+acceptance on the mini PC from that workflow's zips, two of them, the second holding the identification ruling A2, on
+two real discs, Pan's Labyrinth and a film TheDiscDB does not know: each was filed once its one allowed hold was
+approved unchanged, and `lazymkv-dev compare-job` found the engine's plan and decisions equal to what
+`lazymkvctl plan` and `decide` print for each job;
+[`docs/phase2/engine.md`](docs/phase2/engine.md) says how to run them, what the acceptance found and how many tests
+there are.
 
 Installing (planned; decision D17): one installer carries every tool the app needs except MakeMKV: mkvmerge and
 ffmpeg/ffprobe, and the ocrs OCR engine compiled in with its models (decision D22); nothing is downloaded at run time.
@@ -51,7 +58,8 @@ install.
   check against a scan) and `dev`, the `lazymkv-dev` binary that runs them over recordings (`plan` and `decide`, with
   decide's `--menu`, `menu show` and `menu check`, scan summaries, track comparison, the tuning-dataset harness `retune`
   for audio and, with `--subtitles`, for subtitles, the audio and subtitle labels, the phase 0 readers, the goldens, the
-  `ocr-trial` subcommands behind a cargo feature, the `census` report), and phase 2's `platform` (the operating-system
+  `ocr-trial` subcommands behind a cargo feature, the `census` report, and `compare-job`, which compares an engine job
+  folder with the saved output of `lazymkvctl plan` and `decide`), and phase 2's `platform` (the operating-system
   traits, their Windows implementations and in-memory fakes), `tools` (the `makemkvcon`, `mkvmerge`, `ffprobe` and
   `ffmpeg` drivers and the OCR worker's driver, their recorded runs and the disc snapshot's file input and output),
   `clients` (TheDiscDB and TMDb behind an HTTP transport: live over ureq and rustls, replayed from recorded answers in
@@ -68,10 +76,11 @@ install.
   many tests there are, are in [`docs/phase1/decision-core.md`](docs/phase1/decision-core.md), and phase 2's in
   [`docs/phase2/engine.md`](docs/phase2/engine.md).
 - `scripts/` - `box.sh`, which mirrors the working tree to the mini PC and runs one command there; `engine-task.ps1`,
-  which copies the engine, `lazymkvctl` and the OCR worker into `C:\lazymkv\run` and starts it as the desktop task
-  `lazymkv-engine`; and `phase0/`, the PowerShell jobs that run on the ripping machine (`platform-ignored.ps1` among
-  them, the desktop-session run of the platform's ignored tests) and the Mac's shell helpers that sync, start and wait
-  for them and pull their recordings. Phase 0's Python analyses are now `crates/core` and `lazymkv-dev`;
+  which copies the engine, `lazymkvctl` and the OCR worker into `C:\lazymkv\run`, or with `-Zip` and `-Sha256`
+  installs a checked release zip's tree there, and starts it as the desktop task `lazymkv-engine`; and `phase0/`, the
+  PowerShell jobs that run on the ripping machine (`platform-ignored.ps1` among them, the desktop-session run of the
+  platform's ignored tests) and the Mac's shell helpers that sync, start and wait for them and pull their recordings.
+  Phase 0's Python analyses are now `crates/core` and `lazymkv-dev`;
   [`docs/phase1/rust-port-tests.md`](docs/phase1/rust-port-tests.md) maps each of their tests to its Rust port.
 - `corpus/` - recordings: pinned public scan logs, TheDiscDB's API answers and replay scenarios. The owner's recordings
   (MakeMKV scans and rip logs of the owner's discs, probe output, TheDiscDB and TMDb answers) are the private evidence

@@ -1530,6 +1530,34 @@ mod tests {
     }
 
     #[test]
+    fn a_film_whose_name_a_tv_entry_shares_is_identified_at_step_4_by_its_record() {
+        // Ruling A2 of 2026-11-23: the search holds the film and a TV entry of the disc's name; the structure says
+        // movie, so the film is the only plausible result of that kind, and its record's runtime check passes.
+        let tmp = Scratch::new("plan-search-film-and-show");
+        scan_only(&tmp, "rec");
+        tmp.write(
+            "search.json",
+            search_json(&[
+                ("tv", 6538, "Made Up Film", "Made Up Film", "2015-02-01"),
+                ("movie", 6537, "Made Up Film", "Pelicula Inventada", "2007-05-20"),
+            ]),
+        );
+        tmp.write("movie.json", tmdb_movie_json(6537, "Made Up Film", "Pelicula Inventada", "2007-05-20", "es", Some(100)));
+        let options = PlanOptions {
+            tmdb_search: Some(PathBuf::from("search.json")),
+            tmdb_record: Some(PathBuf::from("movie.json")),
+            ..PlanOptions::default()
+        };
+        let plan = planned(&tmp, &options).plan;
+        assert_eq!(
+            (plan.identity.step, plan.identity_confidence, plan.identity.tmdb, plan.identity.runtime_check),
+            (IdentityStep::TmdbOne, 0.90, Some(film_identity()), Some(true))
+        );
+        assert_eq!(plan.identity.plausible, vec![TmdbIdentity { kind: TmdbKind::Tv, id: 6538 }, film_identity()]);
+        assert!(!plan.reviews.contains(&ReviewReason::IdentityAmbiguous), "{:?}", plan.reviews);
+    }
+
+    #[test]
     fn a_tmdb_record_file_is_read_as_a_movie_when_it_has_a_title_else_as_a_show() {
         let movie = tmdb_movie_json(6537, "Made Up Film", "Pelicula Inventada", "2007-05-20", "es", Some(100));
         let record = parse_record(&movie, "movie.json").unwrap();
