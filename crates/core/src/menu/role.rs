@@ -121,16 +121,25 @@ impl OffDecision {
     }
 }
 
-/// The decisions of one map's `menu-off.tsv`, by choice id. `Default` is no decision.
+/// The decisions of one map's `menu-off.tsv`, by choice id, each with the text its line was made from. `Default` is
+/// no decision.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OffDecisions {
-    by_id: BTreeMap<String, OffDecision>,
+    by_id: BTreeMap<String, (OffDecision, String)>,
 }
 
 impl OffDecisions {
-    /// The decision on choice `id`, if any.
-    pub fn get(&self, id: &str) -> Option<OffDecision> {
-        self.by_id.get(id).copied()
+    /// The decision on choice `id`, only when its line's text equals `text` code point for code point.
+    pub fn fits(&self, id: &str, text: &str) -> Option<OffDecision> {
+        match self.by_id.get(id) {
+            Some((decision, made_from)) if made_from == text => Some(*decision),
+            _ => None,
+        }
+    }
+
+    /// The text the decision on choice `id` was made from, if any.
+    pub fn text(&self, id: &str) -> Option<&str> {
+        self.by_id.get(id).map(|(_, text)| text.as_str())
     }
 
     /// Every decided choice id, ascending.
@@ -139,6 +148,10 @@ impl OffDecisions {
     }
 }
 
+/// The sentence for a decision line that is not three fields.
+const EXPECTED: &str = "expected \"off<TAB><choice id><TAB><the choice's text>\" or \
+                        \"role<TAB><choice id><TAB><the choice's text>\"";
+
 /// True for a choice id: `c` and exactly three ASCII digits.
 fn is_choice_id(id: &str) -> bool {
     id.len() == 4 && id.starts_with('c') && id[1..].bytes().all(|byte| byte.is_ascii_digit())
@@ -146,8 +159,9 @@ fn is_choice_id(id: &str) -> bool {
 
 /// The decisions in `text` (a `menu-off.tsv`; MR-6): UTF-8, a leading byte-order mark dropped, lines split on `\n` with
 /// a trailing `\r` left off. A line that is blank or holds only white space and a line starting with `#` are skipped;
-/// every other line is `<decision><TAB><choice id>` with the decision `off` or `role`. Err is every problem, one
-/// sentence each, in line order; a line repeating an earlier one is dropped.
+/// every other line is `<decision><TAB><choice id><TAB><text>` with the decision `off` or `role` and the choice's
+/// `role_text` as the text, not empty. Err is every problem, one sentence each, in line order; a line repeating an
+/// earlier one is dropped.
 pub fn parse_off(text: &str) -> Result<OffDecisions, Vec<String>> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let repr = crate::recording::py_repr_str;
@@ -158,10 +172,14 @@ pub fn parse_off(text: &str) -> Result<OffDecisions, Vec<String>> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        let [word, id] = fields[..] else {
-            errors.push(format!("line {number}: expected \"off<TAB><choice id>\" or \"role<TAB><choice id>\""));
+        let [word, id, made_from] = fields[..] else {
+            errors.push(format!("line {number}: {EXPECTED}"));
             continue;
         };
+        if made_from.is_empty() {
+            errors.push(format!("line {number}: {EXPECTED}"));
+            continue;
+        }
         let decision = match word {
             "off" => Some(OffDecision::Off),
             "role" => Some(OffDecision::Role),
@@ -176,15 +194,18 @@ pub fn parse_off(text: &str) -> Result<OffDecisions, Vec<String>> {
         }
         let Some(decision) = decision else { continue };
         match by_id.get(id) {
-            Some(&earlier) if earlier != decision => errors.push(format!(
+            Some(&(earlier, _)) if earlier != decision => errors.push(format!(
                 "line {number}: {id} is decided {} here and {} on line {}",
                 decision.word(),
                 OffDecision::word(earlier),
                 first_line[id]
             )),
+            Some((_, earlier_text)) if earlier_text != made_from => {
+                errors.push(format!("line {number}: {id} has another text here than on line {}", first_line[id]));
+            }
             Some(_) => {}
             None => {
-                by_id.insert(id.to_string(), decision);
+                by_id.insert(id.to_string(), (decision, made_from.to_string()));
                 first_line.insert(id, number);
             }
         }
@@ -220,7 +241,7 @@ pub fn stream_role(choices: &[(&str, &str)], off: &OffDecisions) -> RoleReading 
         if found.is_empty() {
             continue;
         }
-        match off.get(id) {
+        match off.fits(id, text) {
             Some(OffDecision::Off) => {}
             Some(OffDecision::Role) => roles.extend(found),
             None if needs_decision(text) => undecided.push(id.to_string()),
@@ -289,27 +310,63 @@ mod tests {
         }
     }
 
-    /// A byte-order mark, comments, blank lines and CRLF line ends are read.
     #[test]
-    fn an_off_file_reads_decisions_comments_and_a_byte_order_mark() {
-        let decisions = off("\u{feff}# why\r\noff\tc012\r\n\nrole\tc013\n");
-        assert_eq!(decisions.get("c012"), Some(OffDecision::Off));
-        assert_eq!(decisions.get("c013"), Some(OffDecision::Role));
-        assert_eq!(decisions.get("c014"), None);
-        assert_eq!(decisions.ids(), vec!["c012", "c013"]);
+    fn a_decision_line_names_the_wording_it_was_made_from() {
+        let off = parse_off("# note\noff\tc012\tCOMMENTARY: Off\nrole\tc013\tAUDIO: Commentary by Person A\n").unwrap();
+        assert_eq!(off.ids(), ["c012", "c013"]);
+        assert_eq!(off.text("c012"), Some("COMMENTARY: Off"));
+        assert_eq!(off.fits("c012", "COMMENTARY: Off"), Some(OffDecision::Off));
+        assert_eq!(off.fits("c012", "COMMENTARY: On"), None);
+        assert_eq!(off.fits("c099", "COMMENTARY: Off"), None);
     }
 
-    /// Every problem is one sentence, in line order; a repeated line is dropped.
+    #[test]
+    fn a_windows_off_file_reads_as_a_unix_one() {
+        let off = parse_off("\u{feff}off\tc012\tCOMMENTARY: Off\r\nrole\tc013\tAUDIO: \u{c9}t\u{e9} | A\r\n").unwrap();
+        assert_eq!(off.fits("c012", "COMMENTARY: Off"), Some(OffDecision::Off));
+        assert_eq!(off.text("c013"), Some("AUDIO: \u{c9}t\u{e9} | A"));
+    }
+
+    #[test]
+    fn a_line_without_its_text_and_an_id_with_two_texts_are_refused() {
+        let errors = parse_off("off\tc012\noff\tc012\t\noff\tc012\tA\tB\noff\tc013\tA\noff\tc013\tB\nrole\tc013\tA\n")
+            .unwrap_err();
+        let expected = "expected \"off<TAB><choice id><TAB><the choice's text>\" or \
+                        \"role<TAB><choice id><TAB><the choice's text>\"";
+        assert_eq!(
+            errors,
+            [
+                format!("line 1: {expected}"),
+                format!("line 2: {expected}"),
+                format!("line 3: {expected}"),
+                "line 5: c013 has another text here than on line 4".to_string(),
+                "line 6: c013 is decided role here and off on line 4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decision_that_does_not_fit_its_text_is_no_decision() {
+        // MR-6 with the binding: c012's line was written for other wording, so its text is undecided again.
+        let off = parse_off("off\tc012\tCOMMENTARY: Off\n").unwrap();
+        let now = [("c011", "AUDIO: Commentary by Person A"), ("c012", "COMMENTARY: None")];
+        assert_eq!(stream_role(&now, &off), RoleReading::Undecided(vec!["c012".to_string()]));
+        let then = [("c011", "AUDIO: Commentary by Person A"), ("c012", "COMMENTARY: Off")];
+        assert_eq!(stream_role(&then, &off), RoleReading::Role(AudioRole::Commentary));
+    }
+
+    /// Every other problem is one sentence, in line order.
     #[test]
     fn every_problem_of_an_off_file_is_listed() {
-        let errors = parse_off("off c012\nmaybe\tc012\noff\tc12\noff\tc001\nrole\tc001\noff\tc001\n").unwrap_err();
+        let text = "off c012\nmaybe\tc012\tA\noff\tc12\tA\noff\tc001\tA\nrole\tc001\tA\noff\tc001\tA\n";
+        let errors = parse_off(text).unwrap_err();
         assert_eq!(
             errors,
             vec![
-                "line 1: expected \"off<TAB><choice id>\" or \"role<TAB><choice id>\"",
-                "line 2: unknown decision 'maybe' (use \"off\" or \"role\")",
-                "line 3: 'c12' is not a choice id (c and three digits)",
-                "line 5: c001 is decided role here and off on line 4",
+                format!("line 1: {EXPECTED}"),
+                "line 2: unknown decision 'maybe' (use \"off\" or \"role\")".to_string(),
+                "line 3: 'c12' is not a choice id (c and three digits)".to_string(),
+                "line 5: c001 is decided role here and off on line 4".to_string(),
             ]
         );
     }
@@ -343,8 +400,9 @@ mod tests {
     #[test]
     fn an_off_decision_skips_the_words_and_a_role_decision_reads_them() {
         let choices = [("c001", "COMMENTARY: Off")];
-        assert_eq!(stream_role(&choices, &off("off\tc001\n")), RoleReading::Silent);
-        assert_eq!(stream_role(&choices, &off("role\tc001\n")), RoleReading::Role(AudioRole::Commentary));
+        assert_eq!(stream_role(&choices, &off("off\tc001\tCOMMENTARY: Off\n")), RoleReading::Silent);
+        let role = off("role\tc001\tCOMMENTARY: Off\n");
+        assert_eq!(stream_role(&choices, &role), RoleReading::Role(AudioRole::Commentary));
     }
 
     /// An undecided text beats every other text (MR-6).

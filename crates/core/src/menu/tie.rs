@@ -1122,7 +1122,7 @@ mod tests {
                 "playlist 00800: its play items carry differing stream tables",
             ),
         ];
-        let off = parse_off("off\tc099\n").unwrap();
+        let off = parse_off("off\tc099\tX\n").unwrap();
         for (title, lists, why) in cases {
             let no_effect = choice("c001", Kind::Audio, "AUDIO", "X", Option::None, Level::Read);
             let choices = vec![commentary(Level::Replayed), no_effect];
@@ -1140,8 +1140,8 @@ mod tests {
         let switch = choice("c010", Kind::Audio, "COMMENTARY", "Off", Some(effect("00800", Some(3))), Level::Replayed);
         let cases = [
             ("", Option::None, "undecided: c010 (menu-off.tsv)"),
-            ("off\tc010\n", Option::None, "no role word"),
-            ("role\tc010\n", Some(AudioRole::Commentary), ""),
+            ("off\tc010\tCOMMENTARY: Off\n", Option::None, "no role word"),
+            ("role\tc010\tCOMMENTARY: Off\n", Some(AudioRole::Commentary), ""),
         ];
         for (text, role, why) in cases {
             let off = parse_off(text).unwrap();
@@ -1178,7 +1178,10 @@ mod tests {
             choice("c020", Kind::Subtitle, "SUBTITLES", "Commentary", Some(effect("00800", Some(1))), Level::Replayed),
             audio("c021", "Language A", "00800", 2, Level::Replayed),
         ];
-        let off = parse_off("off\tc099\noff\tc020\nrole\tc021\nrole\tc010\n").unwrap();
+        let off = parse_off(
+            "off\tc099\tX\noff\tc020\tSUBTITLES: Commentary\nrole\tc021\tAUDIO: Language A\n\
+             role\tc010\tAUDIO: Commentary by Person A\n",
+        ).unwrap();
         let report = audio_roles(&map(play(), choices), &off, &title(), &block_only());
         assert_eq!(report.off_unused, vec!["c020".to_string(), "c021".to_string(), "c099".to_string()]);
     }

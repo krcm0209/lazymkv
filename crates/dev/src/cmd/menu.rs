@@ -773,14 +773,14 @@ mod tests {
         assert_eq!(read_off(&ctx, MAP_DIR).unwrap(), OffDecisions::default());
         assert_eq!(read_off(&ctx, &map_file).unwrap(), OffDecisions::default());
         // The folder form and the file form read the same file, the map folder's.
-        let text = "# made-up decisions\noff\tc003\nrole\tc002\n";
+        let text = "# made-up decisions\noff\tc003\tAUDIO: COMMENTARY 1\nrole\tc002\tAUDIO: Language B 5.1\n";
         tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), text);
         let expected = parse_off(text).unwrap();
         assert_ne!(expected, OffDecisions::default());
         assert_eq!(read_off(&ctx, MAP_DIR).unwrap(), expected);
         assert_eq!(read_off(&ctx, &map_file).unwrap(), expected);
         // A malformed file is refused with one `<shown>: <problem>` line per problem, either form.
-        let bad = "of\tc003\noff\tx1\n";
+        let bad = "of\tc003\tA\noff\tx1\tA\n";
         tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), bad);
         let at = format!("{MAP_DIR}/{OFF_FILE_NAME}");
         let lines: Vec<String> = parse_off(bad).unwrap_err().iter().map(|problem| format!("{at}: {problem}")).collect();

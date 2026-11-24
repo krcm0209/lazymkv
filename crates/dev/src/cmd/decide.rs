@@ -3918,7 +3918,7 @@ SINFO:0,4,6,0,"PGS"
         let tmp = Scratch::new("menu-role-bad-off");
         let root = tmp.0.clone();
         disc_b_with_map(&root, MAP_ID);
-        let bad = "of\tc003\noff\tx1\n";
+        let bad = "of\tc003\tA\noff\tx1\tA\n";
         write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), bad);
         let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
         assert_eq!((code, out.as_str()), (2, ""));
@@ -3950,11 +3950,11 @@ SINFO:0,4,6,0,"PGS"
         let undecided = json!("undecided: c002 (menu-off.tsv)");
         assert_eq!((&row["role"], &row["why"], &streams), (&Value::Null, &undecided, &Value::Null));
         // Decided `role`: its words are read, and the decision has the confirmation.
-        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "role\tc002\n");
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "role\tc002\tAUDIO: Commentary Off\n");
         let (row, streams) = row_of(&root);
         assert_eq!((&row["role"], &row["why"], &streams), (&json!("commentary"), &json!(""), &json!([3])));
         // Decided `off`: its words are not read.
-        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "off\tc002\n");
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "off\tc002\tAUDIO: Commentary Off\n");
         let (row, streams) = row_of(&root);
         assert_eq!((&row["role"], &row["why"], &streams), (&Value::Null, &json!("no role word"), &Value::Null));
     }
