@@ -789,6 +789,226 @@ pub fn check(doc: &ReviewDoc, overrides: &Overrides) -> Result<(), String> {
     Ok(())
 }
 
+/// The three moments of a title, as fractions of its length, at which a subtitle track's lines are taken (ruling
+/// T32-R5; phase 3 design, part 6.3). Def: P3-T5. Use: P3-T9, P3-T13, P3-T14.
+pub const LINE_MOMENTS: [f64; 3] = [0.25, 0.50, 0.75];
+
+/// The most characters of a subtitle line the sheet shows (ruling T32-R5; phase 3 design, part 6.3). Def: P3-T5. Use:
+/// P3-T9, P3-T13, P3-T14.
+pub const LINE_WIDTH: usize = 60;
+
+/// One event's text for the sheet: its lines joined by a space, control characters removed, cut to `LINE_WIDTH`
+/// characters; None when nothing but blanks is left.
+fn clean_line(parts: &[String]) -> Option<String> {
+    let joined = parts.join(" ");
+    let kept: String = joined.chars().filter(|c| !c.is_control()).collect();
+    let cut: String = kept.trim().chars().take(LINE_WIDTH).collect();
+    let cut = cut.trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
+}
+
+/// The lines shown for a subtitle track (phase 3 design, part 6.3; ruling T32-R5): at each of `LINE_MOMENTS` of
+/// `seconds`, the first event with text at or after that moment that an earlier moment has not used, as one line cut to
+/// `LINE_WIDTH` characters with control characters removed. `events` are (start in seconds, the event's text lines) in
+/// time order. Zero to three lines, in moment order. Def: P3-T5. Use: P3-T9, P3-T13, P3-T14.
+pub fn sample_lines(events: &[(f64, Vec<String>)], seconds: f64) -> Vec<String> {
+    let mut used = vec![false; events.len()];
+    let mut lines = Vec::new();
+    for moment in LINE_MOMENTS {
+        let at = seconds * moment;
+        let found = events.iter().enumerate().find_map(|(index, (start, text))| {
+            if used[index] || *start < at {
+                return None;
+            }
+            clean_line(text).map(|line| (index, line))
+        });
+        if let Some((index, line)) = found {
+            used[index] = true;
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// One answer an item offers: its letter, its word and how a question line names it.
+type Choice = (&'static str, &'static str, &'static str);
+
+const AUDIO_CHOICES: [Choice; 4] =
+    [("k", "keep", "keep"), ("p", "default", "keep, play by default"), ("c", "commentary", "commentary (dropped)"), ("d", "drop", "drop")];
+const SUBTITLE_CHOICES: [Choice; 5] = [
+    ("r", "regular", "regular"),
+    ("s", "sdh", "SDH"),
+    ("f", "forced", "forced"),
+    ("c", "commentary", "commentary (dropped)"),
+    ("d", "drop", "drop"),
+];
+const COLLISION_CHOICES: [Choice; 2] = [("k", "keep_both", "keep both"), ("r", "replace", "replace the existing file")];
+
+/// The choices an item of this kind can offer, in the order of ruling T32-R3.
+fn choices(kind: ItemKind) -> &'static [Choice] {
+    match kind {
+        ItemKind::Audio => &AUDIO_CHOICES,
+        ItemKind::Subtitle => &SUBTITLE_CHOICES,
+        ItemKind::Collision => &COLLISION_CHOICES,
+    }
+}
+
+/// The answer word that `letter` stands for on `item`'s question line, or None when the item does not offer it (phase
+/// 3 design, part 6.3; ruling T32-R3). Def: P3-T5. Use: P3-T9, P3-T13, P3-T14.
+pub fn letter_word(item: &Item, letter: &str) -> Option<&'static str> {
+    choices(item.kind)
+        .iter()
+        .find(|(each, word, _)| *each == letter && item.answers.iter().any(|answer| answer == word))
+        .map(|(_, word, _)| *word)
+}
+
+/// One item's question line (phase 3 design, part 6.3): what it is, the letters and words it offers, and the letter
+/// that Enter stands for; `leave unanswered` for an item with no standing answer. Def: P3-T5. Use: P3-T9, P3-T13,
+/// P3-T14.
+pub fn question(item: &Item) -> String {
+    let subject = match (item.kind, item.stream) {
+        (ItemKind::Collision, _) | (_, None) => format!("the file at {}:", item.path.as_deref().unwrap_or(&item.describe)),
+        (_, Some(stream)) => format!("track {stream} is:"),
+    };
+    let offered: Vec<&Choice> =
+        choices(item.kind).iter().filter(|(_, word, _)| item.answers.iter().any(|answer| answer == word)).collect();
+    let options: Vec<String> = offered.iter().map(|(letter, _, label)| format!("{letter} {label}")).collect();
+    let standing = offered.iter().find(|(_, word, _)| *word == item.stands).map(|(letter, _, _)| *letter);
+    let enter = standing.unwrap_or("leave unanswered");
+    format!("{subject}  {}     [Enter = {enter}]", options.join("   "))
+}
+
+const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/// `23 Nov`, in UTC.
+fn day_month(unix_secs: u64) -> String {
+    let (_, month, day) = crate::lookup::stale::civil_date(unix_secs);
+    format!("{day} {}", MONTHS[(month.clamp(1, 12) - 1) as usize])
+}
+
+/// The identity step in words, for "Identified by ...".
+fn step_words(step: &str) -> String {
+    match step {
+        "reviewed" => "your own answer".to_string(),
+        "remembered" => "an earlier answer for this disc".to_string(),
+        "discdb_both" | "discdb_one" => "TheDiscDB".to_string(),
+        "tmdb_one" | "tmdb_several" => "TMDb".to_string(),
+        "nothing" => "no database".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// The head line's last sentence: how many open points this sheet can answer and how many it cannot yet.
+fn open_words(answerable: usize, unanswerable: usize) -> String {
+    let count = |n: usize| if n == 1 { "One".to_string() } else { n.to_string() };
+    match (answerable, unanswerable) {
+        (0, 0) => "Nothing is open.".to_string(),
+        (0, 1) => "One point is open and cannot be answered yet.".to_string(),
+        (0, b) => format!("{b} points are open and cannot be answered yet."),
+        (a, 0) if a == 1 => "One point needs your answer.".to_string(),
+        (a, 0) => format!("{a} points need your answer."),
+        (a, b) => format!("{} {} more cannot be answered yet.", open_words(a, 0), count(b)),
+    }
+}
+
+/// The text shown on a track's row after its description: its lines in double quotes joined by ` / `, or why it has
+/// none.
+fn evidence_text(item: &Item) -> Option<String> {
+    let lines: Vec<String> =
+        item.evidence.iter().filter(|each| each.kind == "lines").map(|each| format!("\"{}\"", each.text)).collect();
+    if !lines.is_empty() {
+        return Some(lines.join(" / "));
+    }
+    if let Some(unread) = item.evidence.iter().find(|each| each.kind == "unread") {
+        return Some(format!("(not read: {})", unread.text));
+    }
+    item.evidence.iter().find(|each| each.kind == "file").map(|each| each.text.clone())
+}
+
+/// What an item stands as, for the point's `As it stands:` line.
+fn standing(item: &Item) -> String {
+    match (item.kind, item.stream) {
+        (ItemKind::Collision, _) | (_, None) => format!("{}: not answered", item.path.as_deref().unwrap_or(&item.describe)),
+        (_, Some(stream)) => format!("track {stream} {}", item.stands),
+    }
+}
+
+/// The sheet of a review document (phase 3 design, part 6.3), without the questions: the head line, each point with
+/// its sentence, its tracks and what stands, and the path each title files as. Every point is shown in the document's
+/// order, numbered from 1. Def: P3-T5. Use: P3-T9, P3-T13, P3-T14.
+pub fn render(doc: &ReviewDoc) -> String {
+    let when = day_month(doc.since_unix);
+    let since = if doc.held == HeldAs::Filed { format!("Filed on {when}.") } else { format!("Held since {when}.") };
+    // Identity and titles points wait for a later version; every other open point is settled on this sheet.
+    let open = |later: bool| {
+        let waits = |point: &Point| matches!(point.kind, PointKind::Identity | PointKind::Titles);
+        doc.points.iter().filter(|point| !point.reasons.is_empty() && waits(point) == later).count()
+    };
+    let mut out = format!(
+        "{since} Identified by {} ({:.2}). {}\n",
+        step_words(&doc.identity.step),
+        doc.identity.confidence,
+        open_words(open(false), open(true))
+    );
+    for (number, point) in doc.points.iter().enumerate() {
+        out.push('\n');
+        let label = format!("{}. ", number + 1);
+        let indent = " ".repeat(label.len());
+        // The closing line below says what NOT_ON_THIS_SHEET says, so it is not shown twice.
+        let sentences: Vec<&str> = point.sentence.split(". ").filter(|text| text.trim_end_matches('.') != NOT_ON_THIS_SHEET.trim_end_matches('.')).collect();
+        for (at, text) in sentences.iter().enumerate() {
+            let stop = if at + 1 < sentences.len() { "." } else { "" };
+            out.push_str(if at == 0 { &label } else { &indent });
+            out.push_str(&format!("{text}{stop}\n"));
+        }
+        let items: Vec<&Item> = point.items.iter().filter_map(|id| items_of(doc).find(|item| &item.id == id)).collect();
+        if !items.is_empty() {
+            out.push('\n');
+            let names: Vec<String> = items
+                .iter()
+                .map(|item| match (item.kind, item.stream) {
+                    (ItemKind::Collision, _) | (_, None) => format!("the file at {}", item.path.as_deref().unwrap_or(&item.describe)),
+                    (_, Some(stream)) => format!("track {stream}"),
+                })
+                .collect();
+            let width = names.iter().map(|name| name.chars().count()).max().unwrap_or(0);
+            for (item, name) in items.iter().zip(&names) {
+                let describe = if item.kind == ItemKind::Collision { String::new() } else { item.describe.clone() };
+                let mut row = format!("{indent}{name:<width$}  {describe}", width = width);
+                if let Some(text) = evidence_text(item) {
+                    row.push_str(if describe.is_empty() { " " } else { "   " });
+                    row.push_str(&text);
+                }
+                out.push_str(row.trim_end());
+                out.push('\n');
+            }
+            let staged = point
+                .title_key
+                .as_ref()
+                .and_then(|key| doc.titles.iter().find(|title| &title.key == key))
+                .and_then(|title| title.staged_path.as_ref());
+            if let (Some(path), PointKind::Audio | PointKind::Subtitles) = (staged, point.kind) {
+                out.push_str(&format!("{indent}To watch first: {path}\n"));
+            }
+            out.push('\n');
+            let stands: Vec<String> = items.iter().map(|item| standing(item)).collect();
+            out.push_str(&format!("{indent}As it stands: {}.\n", stands.join(", ")));
+        }
+        if matches!(point.kind, PointKind::Identity | PointKind::Titles) {
+            out.push('\n');
+            out.push_str(&format!("{indent}This can be answered from a later version of lazymkv.\n"));
+        }
+    }
+    let finals: Vec<&String> = doc.titles.iter().filter_map(|title| title.final_path.as_ref()).collect();
+    if !finals.is_empty() {
+        out.push('\n');
+        for path in finals {
+            out.push_str(&format!("Files as: {path}\n"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,5 +1561,191 @@ mod tests {
             let text = sentence(reason);
             assert!(!text.is_empty() && !text.contains('_'), "{reason:?}: {text}");
         }
+    }
+
+    fn event(start: f64, text: &[&str]) -> (f64, Vec<String>) {
+        (start, text.iter().map(|line| line.to_string()).collect())
+    }
+
+    #[test]
+    fn lines_are_taken_at_the_three_moments() {
+        let events = vec![event(100.0, &["one"]), event(1500.0, &["two"]), event(3100.0, &["three"]), event(4600.0, &["four"])];
+        assert_eq!(sample_lines(&events, 6000.0), vec!["two", "three", "four"]);
+    }
+
+    #[test]
+    fn a_track_with_one_event_gives_one_line() {
+        assert_eq!(sample_lines(&[event(5000.0, &["only"])], 6000.0), vec!["only"]);
+    }
+
+    #[test]
+    fn no_event_with_text_gives_none() {
+        assert!(sample_lines(&[], 6000.0).is_empty());
+        let blank = vec![event(2000.0, &[]), event(3000.0, &["  ", "\t"]), event(4000.0, &[""])];
+        assert!(sample_lines(&blank, 6000.0).is_empty());
+        // An event after the last moment's start is still found, but one before the first moment is not.
+        assert!(sample_lines(&[event(10.0, &["early"])], 6000.0).is_empty());
+    }
+
+    #[test]
+    fn a_line_is_cut_and_cleaned() {
+        let long = format!("{}\t\u{1b}{}", "a".repeat(30), "b".repeat(470));
+        let lines = sample_lines(&[event(2000.0, &[&long])], 6000.0);
+        assert_eq!(lines, vec![format!("{}{}", "a".repeat(30), "b".repeat(30))]);
+        assert_eq!(lines[0].chars().count(), LINE_WIDTH);
+        let two = sample_lines(&[event(2000.0, &["First part", "second part"])], 6000.0);
+        assert_eq!(two, vec!["First part second part"]);
+        // The 60 counts characters, not bytes.
+        let wide = sample_lines(&[event(2000.0, &[&"é".repeat(100)])], 6000.0);
+        assert_eq!(wide[0].chars().count(), 60);
+    }
+
+    /// The fixture's held job with two lines on each subtitle track and a staged path.
+    fn lined_doc(disc: &Disc, held: &JobRecord) -> ReviewDoc {
+        let staged = BTreeMap::from([(KEY.to_string(), r"S:\staging\job\rip\t00-00801\title.mkv".to_string())]);
+        let lines = BTreeMap::from([
+            ((KEY.to_string(), 9), vec!["Where are you going?".to_string(), "[door slams]".to_string()]),
+            ((KEY.to_string(), 33), vec!["Hi, I'm the director.".to_string(), "We shot this scene in March.".to_string()]),
+        ]);
+        let unread = BTreeMap::new();
+        let none = BTreeMap::new();
+        build(&DocInputs { record: held, disc, staged: &staged, lines: &lines, unread: &unread, collisions: &none, all: false }).unwrap()
+    }
+
+    #[test]
+    fn the_sheet_for_two_subtitle_tracks_reads_as_the_design_shows_it() {
+        let disc = film_disc();
+        let text = render(&lined_doc(&disc, &record(&disc)));
+        let expected = "\
+Held since 15 Jan. Identified by TMDb (0.90). One point needs your answer.
+
+1. Subtitles: two full English tracks that do not match each other.
+   lazymkv cannot tell which one carries the film's dialogue.
+
+   track 9   English  1,224 lines   \"Where are you going?\" / \"[door slams]\"
+   track 33  English  1,410 lines   \"Hi, I'm the director.\" / \"We shot this scene in March.\"
+   To watch first: S:\\staging\\job\\rip\\t00-00801\\title.mkv
+
+   As it stands: track 9 regular, track 33 regular.
+
+Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
+";
+        assert_eq!(text, expected, "\n{text}");
+    }
+
+    #[test]
+    fn an_unread_track_says_why_in_place_of_lines() {
+        let disc = film_disc();
+        let text = render(&sheet(&record(&disc), &disc, false));
+        assert!(text.contains("track 33  English  1,410 lines   (not read: the time cap was reached)\n"), "{text}");
+        assert!(text.contains("track 9   English  1,224 lines   \"Where are you going?\" / \"Wait.\"\n"), "{text}");
+    }
+
+    #[test]
+    fn a_point_that_cannot_be_answered_says_when_it_can() {
+        let disc = film_disc();
+        let mut held = record(&disc);
+        held.plan.as_mut().unwrap().reviews = vec![ReviewReason::IdentityUnknown];
+        decided(&mut held).reviews = vec![ReviewReason::IdentityUnknown];
+        let text = render(&sheet(&held, &disc, false));
+        assert!(text.contains("1. Which film: lazymkv could not tell which film this disc holds."), "{text}");
+        assert!(text.contains("\n   This can be answered from a later version of lazymkv.\n"), "{text}");
+        assert!(!text.contains("cannot answer it yet"), "{text}");
+        assert!(!text.contains("track "), "{text}");
+        println!("{text}");
+    }
+
+    #[test]
+    fn a_collision_point_and_a_filed_job_read_sensibly() {
+        let disc = film_disc();
+        let mut held = record(&disc);
+        decided(&mut held).reviews = vec![ReviewReason::PathCollision];
+        let collisions = BTreeMap::from([(FINAL.to_string(), "40000000000 bytes, 2026-11-01".to_string())]);
+        let doc = doc_with(&held, &disc, false, &collisions).unwrap();
+        let text = render(&doc);
+        println!("{text}");
+        assert!(text.contains(&format!("   the file at {FINAL}   40000000000 bytes, 2026-11-01\n")), "{text}");
+        assert!(text.contains(&format!("   As it stands: {FINAL}: not answered.\n")), "{text}");
+        assert!(!text.contains("To watch first"), "{text}");
+        assert_eq!(
+            question(item(&doc, "t00-00801 collision")),
+            format!("the file at {FINAL}:  k keep both   r replace the existing file     [Enter = leave unanswered]")
+        );
+        let mut filed = record(&disc);
+        filed.state = State::Filed;
+        filed.filed_unix = Some(1_800_001_000);
+        decided(&mut filed).reviews = vec![];
+        let text = render(&sheet(&filed, &disc, false));
+        println!("{text}");
+        assert!(text.starts_with("Filed on 15 Jan. Identified by TMDb (0.90). Nothing is open.\n"), "{text}");
+        assert!(text.contains("1. Audio: nothing is open here, and each track can still be changed.\n"), "{text}");
+        assert!(text.contains("2. Subtitles: "), "{text}");
+    }
+
+    #[test]
+    fn the_question_line_marks_what_enter_keeps() {
+        let disc = film_disc();
+        let doc = sheet(&record(&disc), &disc, true);
+        assert_eq!(
+            question(item(&doc, "t00-00801 sub 9")),
+            "track 9 is:  r regular   s SDH   f forced   c commentary (dropped)   d drop     [Enter = r]"
+        );
+        assert_eq!(
+            question(item(&doc, "t00-00801 audio 1")),
+            "track 1 is:  k keep   p keep, play by default   c commentary (dropped)   d drop     [Enter = p]"
+        );
+        assert!(question(item(&doc, "t00-00801 audio 8")).ends_with("[Enter = k]"));
+    }
+
+    #[test]
+    fn a_letter_the_item_does_not_offer_is_none() {
+        let disc = film_disc();
+        let doc = sheet(&record(&disc), &disc, true);
+        let sub = item(&doc, "t00-00801 sub 9");
+        assert_eq!(letter_word(sub, "s"), Some("sdh"));
+        assert_eq!(letter_word(sub, "c"), Some("commentary"));
+        assert_eq!(letter_word(sub, "k"), None);
+        assert_eq!(letter_word(sub, "x"), None);
+        assert_eq!(letter_word(item(&doc, "t00-00801 audio 1"), "p"), Some("default"));
+        assert_eq!(letter_word(item(&doc, "t00-00801 audio 1"), "r"), None);
+        let mut narrowed = sub.clone();
+        narrowed.answers = vec!["regular".to_string()];
+        assert_eq!(letter_word(&narrowed, "s"), None);
+        let mut colliding = record(&disc);
+        decided(&mut colliding).reviews = vec![ReviewReason::PathCollision];
+        let doc = sheet(&colliding, &disc, false);
+        let collision = item(&doc, "t00-00801 collision");
+        assert_eq!((letter_word(collision, "k"), letter_word(collision, "r")), (Some("keep_both"), Some("replace")));
+        assert_eq!(letter_word(collision, "d"), None);
+    }
+
+    #[test]
+    fn the_head_line_says_which_points_cannot_be_answered_yet() {
+        let disc = film_disc();
+        let mut held = record(&disc);
+        held.plan.as_mut().unwrap().reviews = vec![ReviewReason::IdentityUnknown];
+        decided(&mut held).reviews = vec![ReviewReason::IdentityUnknown, ReviewReason::SubtitleAmbiguous];
+        let text = render(&sheet(&held, &disc, false));
+        let head = text.lines().next().unwrap();
+        println!("{head}");
+        assert_eq!(head, "Held since 15 Jan. Identified by TMDb (0.90). One point needs your answer. One more cannot be answered yet.");
+        decided(&mut held).reviews = vec![ReviewReason::IdentityUnknown];
+        let text = render(&sheet(&held, &disc, false));
+        let head = text.lines().next().unwrap();
+        println!("{head}");
+        assert_eq!(head, "Held since 15 Jan. Identified by TMDb (0.90). One point is open and cannot be answered yet.");
+    }
+
+    #[test]
+    fn a_rip_point_needs_an_answer_and_is_not_for_a_later_version() {
+        let disc = film_disc();
+        let mut held = record(&disc);
+        held.titles[0].rip_reviews = vec![ReviewReason::ReadErrors];
+        decided(&mut held).reviews = vec![ReviewReason::ReadErrors];
+        let text = render(&sheet(&held, &disc, false));
+        let head = text.lines().next().unwrap();
+        println!("{head}");
+        assert!(head.ends_with("One point needs your answer."), "{head}");
+        assert!(!text.contains("later version"), "{text}");
     }
 }
