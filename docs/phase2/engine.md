@@ -477,6 +477,19 @@ phase 0's. The mini PC's first `--locked` build that resolved printed 3 `Downloa
 0.11.1 and `smallvec` 1.16.4 (the delta's other crates were already in its cargo cache from phase 0's ocrs trial), and
 no tool beyond the MSVC tools was recorded as asked for.
 
+On 2026-11-24 the owner approved the `Cargo.lock` delta of the ocrs 0.14 upgrade, the second yes of U1 (The ocrs 0.14
+upgrade: the owner's decisions, below), to the lock as written that day and read against crates.io: `ocrs` 0.13.1 to
+0.14.0; `rten`, `rten-base`, `rten-gemm`, `rten-imageproc`, `rten-onnx`, `rten-parallel`, `rten-shape-inference`,
+`rten-simd`, `rten-tensor` and `rten-vecmath` 0.26.0 to 0.28.0; `rten-sequence` 0.28.0 added; `anyhow` 1.0.104
+removed; every one MIT OR Apache-2.0. The lock's package count stays 123 and no other entry moves: in `ocrs`'s
+dependency list `rten-sequence` takes `anyhow`'s place. Each of the twelve versions was published on 2026-11-08, 16
+days before, none is yanked, and each lock checksum equals the one crates.io's API gives; ocrs 0.14.0 and rten 0.28.0
+were still the newest release of each crate on 2026-11-24. The lock was written on the Mac by `cargo update -p ocrs -p
+rten -p rten-imageproc` on toolchain 1.100.0, which read the index and downloaded no crate file (U-E2, below); after
+the yes the Mac's first build of `lazymkv-ocr` printed 12 `Downloaded` lines, the delta's twelve crates, 1.3 MB in
+all. Only `lazymkv-ocr` depends on `ocrs` (`=0.14.0`, default features off, features `onnx`) and `rten` (`=0.28.0`,
+default features off), and `cargo tree -i rten` still finds rten in no program but `lazymkv-ocr`.
+
 ## Rulings
 
 The plan of pull request 2 recorded the rulings S1 to S88: S1 to S54 in its Rulings section, under the group headings
@@ -1917,6 +1930,10 @@ which needs rten ^0.26, and were closed on 2026-11-14; `.github/dependabot.yml` 
 - U1 (the lock delta, A1's plan-time yes): ocrs 0.13.1 to 0.14.0; `rten`, `rten-base`, `rten-gemm`, `rten-imageproc`, `rten-onnx`, `rten-parallel`, `rten-shape-inference`, `rten-simd`, `rten-tensor` and `rten-vecmath` 0.26.0 to 0.28.0; `rten-sequence` 0.28.0 added (ocrs's CTC decoder, moved out of rten); `anyhow` removed (only ocrs used it); every one MIT OR Apache-2.0. The second yes, to the written `Cargo.lock`, comes before anything is fetched on the mini PC, and the commit that moves the lock also takes the crate notices job's artifact as `crates/ctl/crate-notices.txt` (`rten-sequence` joins the MIT list, `anyhow` leaves it; call 26), 2026-11-14
 - U2 (the 14-day age rule): kept; both releases are six days old today, so `Cargo.lock` moves on or after 2026-11-22, and until then the branch holds only the manifest, code and document edits, unpushed, 2026-11-14
 - U3 (the trial): the upgrade reopens the trial of design part 10.9 (T5-R54), arms R and R' on 0.14.0 judged against phase 0's arm F as before, with the 600 s bar and `worker-check.ps1` re-made on the new arm R; the items of "The next reopened trial", below, stay for a later reopening, so the parity result is about the engine alone, 2026-11-14
+- U1's second yes (the written lock): "Yes, approve the lock", to the written `Cargo.lock` as The Cargo.lock delta, above, lists it, told beforehand that a yes lets the twelve crate files be downloaded on the Mac and on the mini PC, 2026-11-24
+- the push and the pull request: "Yes, push and open it", once the lock is committed and the Mac's run is clean, 2026-11-24
+- room on the mini PC for the trial's build: "Delete target\debug": `C:\lazymkv\target\debug`, 41.06 GiB (gibibytes) of cargo's test builds, is deleted and nothing else, and Rust 1.100.0 is installed there with rustup; drive C: had 25.39 GiB free against the owner's line of 25 GiB, and the build with its toolchain needs about 3 GiB, 2026-11-24
+- stopping the engine for the trial: "Yes, stop and restart it": `lazymkvctl stop`, never `--force`, for the sitting, with the `lazymkv-engine` task started again afterwards, 2026-11-24
 
 What the upgrade changes, read from the two releases' sources (not yet run): no call lazymkv makes changes signature
 except that ocrs's engine methods return `ocrs::OcrError` instead of `anyhow::Error`, whose plain text leaves out its
@@ -1924,6 +1941,26 @@ cause, so the worker formats them with `{e:#}`; the `onnx` feature, the two pinn
 detector's black padding (detection.rs lines 155 to 160), `expand_dist` (3), `find_text_lines`, the preprocessing and
 rten's thread pool (`RTEN_NUM_THREADS`, K2) are unchanged; the f32 paths of the models' operators have no numeric
 change, so the readings are expected to be the same, which the trial decides.
+
+What was run before the push, on the Mac on 2026-11-24 (toolchain 1.100.0; nothing on Windows): `lazymkv-ocr` built
+against ocrs 0.14.0 and rten 0.28.0 with no warning, so no call needed a change beyond the error formatting, and its
+23 tests passed, the embedded models' load and their reading of a white image among them; the 16 `ocr_trial` tests of
+`lazymkv-dev --features ocr-trial` passed; `cargo tree -i rten` named `lazymkv-ocr` alone. The whole workspace with
+`lazymkv-ocr`, 3462 tests, ran while two other sessions' workspace runs shared the Mac (load average 15 to 19 on 8
+cores): 3422 passed, 5 were ignored and 35 failed, every one at a wait bound in `fake-tools`' tests
+(`engine_file_phase` 21, `engine_tuning` 9, `engine_restart` 3, `engine_ipc` 1 and `makemkv_driver` 1), whose
+programs link no OCR crate. `cargo test -p fake-tools -p lazymkv-engine`, run again two tests at a time, passed all
+719 of its tests. So every test passed on this tree at least once, and no single run of the whole workspace was free
+of failures (U-E5).
+
+The controller's rulings while finishing the upgrade, each with what was decided, why, and what it costs if it is
+wrong, all made on 2026-11-24. Each is not yet ruled on by the owner.
+
+- U-E1 (the prepared commit's place). The commit of 2026-11-14, made on `5ab48b8`, was cherry-picked onto `main` at `e94057a`, and moved with the lock's commit onto `fc535d2` when pull request #32 merged, with its author and committer dates kept both times. Its one conflict, this section against pull request 7's sections at the same place, was settled by keeping both, this section after them; the two design documents merged without one. Why: the sections stand in the order their work finished. Cost if wrong: a reader by date finds the decisions of 2026-11-14 after pull request 7's of 2026-11-23. Not yet ruled on by the owner.
+- U-E2 (where the lock was written). On the Mac, not on the mini PC as the plan of 2026-11-14 had it. Why: the mini PC had no toolchain 1.100.0 and 0.39 GiB above the owner's line on drive C:, and `cargo update` reads crates.io's index alone: the Mac's crate cache held the same 112 files before and after it. Cost if wrong: none found, since the lock's text does not depend on the machine and CI builds it with `--locked` on three systems. Not yet ruled on by the owner.
+- U-E3 (U2's check). The age rule was checked for each of the twelve versions and not for `ocrs` and `rten` alone: publish date, licence, yanked flag and checksum, read from crates.io's API on 2026-11-24 and compared with the lock. Why: the lock holds all twelve. Cost if wrong: none; it reads more than U2 asked. Not yet ruled on by the owner.
+- U-E4 (the notices follow in their own commit; amends U1's last clause). U1 put the crate notices job's artifact into the commit that moves the lock, but the artifact exists only once CI has run on the pushed lock. The lock's commit leaves `crates/ctl/crate-notices.txt` as it was, the crate notices job fails on it as built, and the next commit takes that run's artifact. Why: `cargo-about` is not on the Mac, and installing it there is a new tool for one file. Cost if wrong: one red crate notices job on the pull request's first push, and a later bisect that lands on the lock's commit sees that job red. Not yet ruled on by the owner.
+- U-E5 (the Mac's run before the push). The owner's word for the push was "once the lock is committed and the Mac's run is clean"; the run above is taken as clean. Why: the 35 failures are 10 s waits and time caps of tests that start the engine and its stand-in tools, they moved from test to test between runs with the Mac's load, the two packages that hold them passed whole at two tests at a time, and this branch changes no line those programs compile beyond a comment. Cost if wrong: a failure among them that is not load shows first on CI, on the open pull request, and not before the push. Not yet ruled on by the owner.
 
 ## Rulings on the open points
 
