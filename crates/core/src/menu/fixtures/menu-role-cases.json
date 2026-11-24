@@ -1,0 +1,991 @@
+{
+ "about": "Made-up texts with the answers of the measurement's Python (walk/map_forms.py label_text, languages_named, codecs_named; walk/join.py role_words and needs_decision on kind audio). codecs is null where the named codecs conflict.",
+ "label_text": [
+  {
+   "section": "SETUP > AUDIO",
+   "label": "Language B 5.1",
+   "text": "AUDIO: Language B 5.1"
+  },
+  {
+   "section": "SETUP > AUDIO",
+   "label": "Commentary by Person A",
+   "text": "AUDIO: Commentary by Person A"
+  },
+  {
+   "section": "",
+   "label": "Commentary by Person A",
+   "text": "Commentary by Person A"
+  },
+  {
+   "section": "COMMENTARIES",
+   "label": "Person A and Person B",
+   "text": "COMMENTARIES: Person A and Person B"
+  },
+  {
+   "section": "EXTRAS > COMMENTARIES ",
+   "label": "Person A",
+   "text": "COMMENTARIES: Person A"
+  },
+  {
+   "section": "SETUP > AUDIO > ",
+   "label": "Language A",
+   "text": "Language A"
+  },
+  {
+   "section": "SETUP  >  AUDIO",
+   "label": "Language A",
+   "text": "AUDIO: Language A"
+  },
+  {
+   "section": "SETUP>AUDIO",
+   "label": "Language A",
+   "text": "SETUP>AUDIO: Language A"
+  },
+  {
+   "section": "AUDIO",
+   "label": "Language A | Language B",
+   "text": "AUDIO: Language A / Language B"
+  },
+  {
+   "section": "AUDIO",
+   "label": "  Language\tA \n 5.1  ",
+   "text": "AUDIO: Language A 5.1"
+  },
+  {
+   "section": "AUDIO | SOUND",
+   "label": "Language A",
+   "text": "AUDIO / SOUND: Language A"
+  },
+  {
+   "section": " ",
+   "label": "Language A",
+   "text": "Language A"
+  },
+  {
+   "section": "AUDIO",
+   "label": "",
+   "text": "AUDIO:"
+  },
+  {
+   "section": "",
+   "label": "",
+   "text": ""
+  },
+  {
+   "section": "AUDIO",
+   "label": "Language\u00a0A",
+   "text": "AUDIO: Language A"
+  },
+  {
+   "section": "AUDIO",
+   "label": "Language\u3000A",
+   "text": "AUDIO: Language A"
+  }
+ ],
+ "roles": [
+  {
+   "text": "AUDIO: Language A 5.1",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: English 5.1 DTS-HD Master Audio",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "COMMENTARIES: Person A and Person B",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Commentary by Person A",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: COMMENTARY BY PERSON A",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Audio Commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Commentaries",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Commentar",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Kommentar",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Commentaire",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Comentario",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Uncommentaried track",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Audio Description",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Audio-Description",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: AudioDescription",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: English Audio Descriptive Service",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Descriptive Audio",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: nondescriptive",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Described Video",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Undescribed",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: described.",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: DVS 2.0",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: DVS2.0",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: advs",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Visually Impaired",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: visually-impaired English",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: visuallyimpaired",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: AD",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: English AD 2.0",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: ad-free",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Add",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: BAD",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: A.D.",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: AD_1",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Main Feature",
+   "roles": [
+    "programme"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: main",
+   "roles": [
+    "programme"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Maintain",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Remain",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Programme",
+   "roles": [
+    "programme"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Program",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Programmed",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Programs",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Main Programme",
+   "roles": [
+    "programme"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Main Feature with Commentary",
+   "roles": [
+    "commentary",
+    "programme"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Commentary and Audio Description",
+   "roles": [
+    "commentary",
+    "audio_description"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "COMMENTARY: Off",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "COMMENTARY: OFF",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "COMMENTARY: On",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "COMMENTARY: On/Off",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "COMMENTARY: Off-screen voices",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: No Commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: None (commentary)",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary not selected",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Without commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary disabled",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Disable commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Disables commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Stop commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Hide commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Hidden commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Nothing but commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Notes and commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Nonstop commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Commentary \uff2f\uff26\uff26",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary \uff4f\uff46\uff46",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary o\ufb00",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary NO",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary No. 2",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Commentary n\u00b0 2",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Off",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: None",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Language A | Off",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Audio Description Off",
+   "roles": [
+    "audio_description"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: Main Feature (no commentary)",
+   "roles": [
+    "commentary",
+    "programme"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: COMMENTARY\u00a0OFF",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": true
+  },
+  {
+   "text": "AUDIO: \u212aommentary",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: commentar\u0131",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "AUDIO: Programme\u0301",
+   "roles": [
+    "programme"
+   ],
+   "needs_decision": false
+  },
+  {
+   "text": "",
+   "roles": [],
+   "needs_decision": false
+  },
+  {
+   "text": "Commentary",
+   "roles": [
+    "commentary"
+   ],
+   "needs_decision": false
+  }
+ ],
+ "names": [
+  {
+   "text": "AUDIO: English 5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: ENGLISH",
+   "languages": [
+    "eng"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: English Dolby Digital 2.0",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "AC3"
+   ]
+  },
+  {
+   "text": "AUDIO: English Dolby Digital Plus 7.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "EAC3"
+   ]
+  },
+  {
+   "text": "AUDIO: English DD+ 5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "EAC3"
+   ]
+  },
+  {
+   "text": "AUDIO: English Dolby TrueHD 7.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "TrueHD"
+   ]
+  },
+  {
+   "text": "AUDIO: English Dolby Atmos",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "EAC3",
+    "TrueHD"
+   ]
+  },
+  {
+   "text": "AUDIO: English Dolby Atmos TrueHD",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "TrueHD"
+   ]
+  },
+  {
+   "text": "AUDIO: English DTS-HD Master Audio 5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: English DTS-HD MA 5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: English DTS-HD 5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "DTS-HD HR",
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: English DTS 5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "DTS",
+    "DTS-HD HR",
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: English DTS:X",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: English PCM 2.0",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "LPCM"
+   ]
+  },
+  {
+   "text": "AUDIO: English LPCM 2.0",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "LPCM"
+   ]
+  },
+  {
+   "text": "AUDIO: English AC-3",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "AC3"
+   ]
+  },
+  {
+   "text": "AUDIO: English AC3",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "AC3"
+   ]
+  },
+  {
+   "text": "AUDIO: English E-AC-3",
+   "languages": [
+    "eng"
+   ],
+   "codecs": [
+    "EAC3"
+   ]
+  },
+  {
+   "text": "AUDIO: English TrueHD DTS",
+   "languages": [
+    "eng"
+   ],
+   "codecs": null
+  },
+  {
+   "text": "AUDIO: Fran\u00e7ais 5.1",
+   "languages": [
+    "fra"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Francais 5.1",
+   "languages": [
+    "fra"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: French (Canadien)",
+   "languages": [
+    "fra"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Qu\u00e9b\u00e9cois",
+   "languages": [
+    "fra"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Espa\u00f1ol",
+   "languages": [
+    "spa"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Espanol Latino",
+   "languages": [
+    "spa"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Castellano",
+   "languages": [
+    "spa"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Portugu\u00eas",
+   "languages": [
+    "por"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Deutsch DTS",
+   "languages": [
+    "deu"
+   ],
+   "codecs": [
+    "DTS",
+    "DTS-HD HR",
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: German",
+   "languages": [
+    "deu"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Italiano",
+   "languages": [
+    "ita"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Japanese",
+   "languages": [
+    "jpn"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Mandarin",
+   "languages": [
+    "zho"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Cantonese",
+   "languages": [
+    "zho"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: \u010cesky",
+   "languages": [
+    "ces"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: \u010ce\u0161tina",
+   "languages": [
+    "ces"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: T\u00fcrk\u00e7e",
+   "languages": [
+    "tur"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Svenska",
+   "languages": [
+    "swe"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Suomi",
+   "languages": [
+    "fin"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: English and French",
+   "languages": [
+    "eng",
+    "fra"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: English/French",
+   "languages": [
+    "eng",
+    "fra"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Englishman",
+   "languages": [],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Non-English",
+   "languages": [
+    "eng"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: english_5.1",
+   "languages": [
+    "eng"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Language A 5.1",
+   "languages": [],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Commentary by Person A",
+   "languages": [],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: English Commentary",
+   "languages": [
+    "eng"
+   ],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: dts",
+   "languages": [],
+   "codecs": [
+    "DTS",
+    "DTS-HD HR",
+    "DTS-HD MA"
+   ]
+  },
+  {
+   "text": "AUDIO: DTSX",
+   "languages": [],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Dolby",
+   "languages": [],
+   "codecs": []
+  },
+  {
+   "text": "AUDIO: Digital",
+   "languages": [],
+   "codecs": []
+  },
+  {
+   "text": "",
+   "languages": [],
+   "codecs": []
+  }
+ ]
+}
