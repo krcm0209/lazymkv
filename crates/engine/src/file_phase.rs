@@ -23,6 +23,7 @@ use lazymkv_core::plan::{refresh_identity, Plan};
 use lazymkv_core::recording::files::{FfprobeStreams, MkvmergeIdent, Selection};
 use lazymkv_core::recording::{read_text, text_mode, Encoding, Errors, Tree};
 use lazymkv_core::reconcile::{reconcile, RipLog, RIP_LOG_NAMES};
+use lazymkv_core::review_doc::REVIEW_FILE;
 use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{EditionStyle, Settings};
 use lazymkv_core::subtitle::text::READING;
@@ -30,7 +31,7 @@ use lazymkv_dev::cmd::decide::{
     audio_section, read_decide_inputs, read_level_md5, read_subs, read_unread, rec_folder, replay_answers,
     replay_remembered, subtitle_section, DecideInputs, FileFacts, PlanEntry, RipLogText,
 };
-use lazymkv_dev::cmd::plan::{plan_doc, PlanOptions, PlanSource};
+use lazymkv_dev::cmd::plan::{plan_doc, replay_overrides, PlanOptions, PlanSource};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_platform::write_atomic;
 use serde_json::Value;
@@ -143,10 +144,11 @@ pub(crate) fn partial_path(library_root: &str, job_id: &str, key: &str) -> PathB
     Path::new(library_root).join(PARTIAL_FOLDER).join(format!("{job_id}-{key}.mkv.partial"))
 }
 
-/// The four replay files of a job folder as `lazymkv-dev plan` and `decide` take them (design part 7.1):
-/// `settings.json`, `tmdb-search.json`, `tmdb-record.json` and `remembered.json`, each its absolute path in the job
-/// folder, given only when the file exists. The `command` relay gives the child the same files (design part 9.5).
-/// Def: T24. Use: T24, T3-22.
+/// The five replay files of a job folder as `lazymkv-dev plan` and `decide` take them (design part 7.1):
+/// `settings.json`, `tmdb-search.json`, `tmdb-record.json`, `remembered.json` and the owner's answers `review.json`
+/// (`REVIEW_FILE`, as `--overrides`; phase 3 design, part 6.4), each its absolute path in the job folder, given only
+/// when the file exists. The `command` relay gives the child the same files (design part 9.5). Def: T24, P3-T7.
+/// Use: T24, T3-22, P3-T8, P3-T12, P3-T16.
 pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
     let given = |name: &str| Some(job_dir.join(name)).filter(|path| path.is_file());
     PlanOptions {
@@ -154,6 +156,7 @@ pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
         tmdb_search: given("tmdb-search.json"),
         tmdb_record: given("tmdb-record.json"),
         remembered: given("remembered.json"),
+        overrides: given(REVIEW_FILE),
     }
 }
 
@@ -166,9 +169,11 @@ pub(crate) fn replay_options(job_dir: &Path) -> PlanOptions {
 /// and unread streams of the job folder, the plan section of `plan_doc` over the job folder with its `.plan` replaced
 /// by `plan`, the plan the job decides with (RP-4), the answers of `replay_answers` with the same replay files, the
 /// remembered decision of `replay_remembered` over the job's own remembered.json (the copy the plan applied, never the
-/// data folder's file, which can change after Plan: R-B1, the PR #6 review's V14), the probe the engine ran, and
-/// `library`. Err is the sentence of a file that could not be read, or reconcile's. Def: T24, T5-15, T5-17. Use: T24,
-/// T25, T5-15, T5-17.
+/// data folder's file, which can change after Plan: R-B1, the PR #6 review's V14), the owner's answers of
+/// `replay_overrides` over the job's review.json (phase 3 design, part 6.4: the file the relay hands `--overrides`, so
+/// the two documents of R-B1 read it one way), the probe the engine ran, and `library`. Err is the sentence of a file
+/// that could not be read (a review.json the strict reader refuses included), or reconcile's. Def: T24, T5-15, T5-17,
+/// P3-T7. Use: T24, T25, T5-15, T5-17, P3-T8.
 pub(crate) fn engine_decide_inputs(
     ctx: &Ctx,
     job: &JobContext,
@@ -205,6 +210,7 @@ pub(crate) fn engine_decide_inputs(
     };
     let answers = replay_answers(ctx, &rec, &options);
     let remembered = replay_remembered(ctx, &options);
+    let overrides = replay_overrides(ctx, &options).map_err(|refused| refused.line)?;
     let (subs_index, packets) = read_subs(tree, &label_dir);
     let file = FileFacts {
         level_md5: read_level_md5(tree, &label_dir),
@@ -230,7 +236,7 @@ pub(crate) fn engine_decide_inputs(
         remembered,
         file,
         library,
-        overrides: None,
+        overrides,
         menu: None,
     })
 }
@@ -238,9 +244,10 @@ pub(crate) fn engine_decide_inputs(
 /// The DecideInputs of a title whose probe the engine no longer holds, as after a restart (design part 5.10, PF-27):
 /// `read_decide_inputs` over the rip label `<job dir>/<key>` with no OCR text, `Selection::All` and the replay files of
 /// `engine_decide_inputs`, its plan section's `.plan` replaced by `plan` when the section has results (RP-4); the
-/// readers' `replay_remembered` reads the same remembered.json. (changed) `text` is the staged OCR text and
-/// `clear_max` the job's `sub_clear_max_bytes`: the subtitles section is `subtitle_section(&rec, &label, text,
-/// clear_max)`. Err is the readers' refusal line. Def: T24, T5-15. Use: T24, T25, T5-15.
+/// readers' `replay_remembered` reads the same remembered.json, and their `replay_overrides` the same review.json
+/// (phase 3 design, part 6.5: after a restart the answers are read back with the rest). (changed) `text` is the
+/// staged OCR text and `clear_max` the job's `sub_clear_max_bytes`: the subtitles section is `subtitle_section(&rec,
+/// &label, text, clear_max)`. Err is the readers' refusal line. Def: T24, T5-15. Use: T24, T25, T5-15, P3-T8.
 pub(crate) fn read_back_inputs(
     ctx: &Ctx,
     job_dir: &Path,

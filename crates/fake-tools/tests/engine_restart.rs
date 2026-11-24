@@ -1116,6 +1116,7 @@ fn a_held_job_approved_after_a_restart_reads_the_staged_text_and_the_unread_stre
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, Some(&staged), None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     assert_eq!(read.file.unread, Ok(vec![(1, "lazymkv-ocr exited with code 101".to_string())]));

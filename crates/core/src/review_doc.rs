@@ -24,6 +24,13 @@ use crate::tracks::SubtitleRole;
 /// The review document's format (phase 3 design, part 6.2). Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
 pub const DOC_FORMAT: &str = "lazymkv review document v1";
 
+/// The job folder's file of the owner's answers, which `lazymkv-dev`'s `--overrides FILE` also reads (phase 3 design,
+/// part 6.4; ruling T32-R9). Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+pub const REVIEW_FILE: &str = "review.json";
+
+/// The format of `REVIEW_FILE`, compared whole (phase 3 design, part 6.4). Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+pub const REVIEW_FORMAT: &str = "lazymkv review v1";
+
 /// How the job stands for review: held at the disposition gate, held after a disc copy, or filed (phase 3 design, part
 /// 6.2). Pull request 2 builds documents for `Gate` and `Filed` only. Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

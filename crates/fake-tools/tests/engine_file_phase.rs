@@ -140,6 +140,7 @@ fn assert_dev_renders_decide_json(h: &Harness, id: &str) {
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     let mut written = json_of(&dir.join(KEY).join("decide.json"));
@@ -226,6 +227,7 @@ fn replay_files(dir: &Path) -> PlanOptions {
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     }
 }
 
@@ -711,6 +713,7 @@ fn the_engines_decide_inputs_render_as_read_decide_inputs_over_the_finished_job_
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     let mut written = json_of(&dir.join(KEY).join("decide.json"));
@@ -815,6 +818,7 @@ fn a_remembered_decisions_track_overrides_reach_decide_json() {
         tmdb_search: given("tmdb-search.json"),
         tmdb_record: given("tmdb-record.json"),
         remembered: given("remembered.json"),
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     let mut written = doc.clone();

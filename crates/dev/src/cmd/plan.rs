@@ -1,6 +1,6 @@
 //! `lazymkv-dev plan <slug|recording dir|scan file> [--evidence DIR] [--settings FILE] [--tmdb-search FILE]
-//! [--tmdb-record FILE] [--remembered FILE]` (ruling RP14 of the phase 1 plan; port spec 3.4): the disc phase of the
-//! design spec's 6.1 step 5 for one recording or one pinned TheDiscDB scan log, printed as one JSON document,
+//! [--tmdb-record FILE] [--remembered FILE] [--overrides FILE]` (ruling RP14 of the phase 1 plan; port spec 3.4): the
+//! disc phase of the design spec's 6.1 step 5 for one recording or one pinned TheDiscDB scan log, printed as one JSON document,
 //! `PlanDoc`: the slug or path, the inputs found, the settings in force (spec 14) with their problems, and the `Plan`
 //! of `lazymkv_core::plan::plan` (the identity of 8.1, the kind of 8.2, the titles of 8.3 to 8.5, the mode of 6.2 and
 //! 6.3, the identity and title confidences and the review reasons of 8.8). A recording is read from its scan.txt,
@@ -17,6 +17,10 @@
 //! the fetch failed; design part 8.4, K15); an engine job folder is read as it is; never 1 (ruling RP24). Defined
 //! by Task 15;
 //! `lazymkv-dev decide`'s `plan` section (Task 16) calls `plan_doc`.
+//!
+//! Phase 3 (phase 3 design, part 6.4; ruling T32-R9) adds `--overrides FILE`: a job folder's review.json, whose
+//! `overrides` (the owner's answers) the plan is made with. It is read strictly (`replay_overrides`), and a file the
+//! flag names that is missing, is not JSON, has another format or a misspelt answer key exits 2 naming the file.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -32,7 +36,8 @@ use lazymkv_core::plan::movie::LibraryFacts;
 use lazymkv_core::plan::{plan, Plan, PlanInputs};
 use lazymkv_core::recording::files::Meta;
 use lazymkv_core::recording::{pathlib_str_beside, read_json, read_text, text_mode, Encoding, Errors, PathKey, Tree};
-use lazymkv_core::remembered::Remembered;
+use lazymkv_core::remembered::{overrides_from_value, Overrides, Remembered};
+use lazymkv_core::review_doc::REVIEW_FORMAT;
 use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{Settings, SettingsProblem};
 
@@ -127,6 +132,9 @@ pub struct PlanOptions {
     pub tmdb_record: Option<PathBuf>,
     /// A remembered decision for this disc's fingerprint (spec 5, 8.1 step 1).
     pub remembered: Option<PathBuf>,
+    /// A review.json whose `overrides` are the owner's answers (phase 3 design, part 6.4; ruling T32-R9), read by
+    /// `replay_overrides`. Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+    pub overrides: Option<PathBuf>,
 }
 
 /// What a recording or a pinned log gives before the option files: the document's inputs and the parsed answers.
@@ -172,10 +180,10 @@ struct Found {
 /// and TMDb ID then unknown); `discdb_by_disc_id` is None (TheDiscDB's global_disc_id is not the disc ID, spec 5); no
 /// TMDb answer. Then --settings (defaults otherwise), --tmdb-search, --tmdb-record (which replaces tmdb.json's record
 /// and so clears the pending flag a failed TMDb lookup set, SR8; `inputs.tmdb` still says "failed", a failed TheDiscDB
-/// lookup stays pending, and --tmdb-search, a different lookup, does not clear the flag) and --remembered (refused
-/// when it remembers another fingerprint); the disc name with
-/// `lookup::name::disc_name(bdmt, disc.volume_label)`; PlanInputs with no sessions, no overrides and default
-/// LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). The flag stays cleared
+/// lookup stays pending, and --tmdb-search, a different lookup, does not clear the flag), --remembered (refused
+/// when it remembers another fingerprint) and --overrides (`replay_overrides`; phase 3 design, part 6.4); the disc name
+/// with `lookup::name::disc_name(bdmt, disc.volume_label)`; PlanInputs with no sessions, the overrides of --overrides
+/// (none without it) and default LibraryFacts; `plan::plan` (its Err is Refused { code: 2 }, prefixed by the scan's path). The flag stays cleared
 /// only when the given record is the planned identity's (spec 8.1, ruling G3): when the plan's `identity.tmdb` is not
 /// the record's identity, `plan::plan` dropped the record, so it runs a second time with the pending flag the lookups
 /// set.
@@ -213,6 +221,7 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
         Some(path) => Some(read_remembered(ctx, path, found.fingerprint.as_deref())?),
         None => None,
     };
+    let overrides = replay_overrides(ctx, options)?;
     let name = disc_name(found.bdmt_name.as_deref(), found.disc.volume_label.as_deref());
     let record = given_record.as_ref().map(|(_, record)| record).or(found.recorded.as_ref());
     let library = LibraryFacts::default();
@@ -236,7 +245,7 @@ pub fn plan_doc(ctx: &Ctx, source: &PlanSource<'_>, options: &PlanOptions) -> Re
             reviewed: None,
         },
         remembered: remembered.as_ref().map(|(_, remembered)| remembered),
-        overrides: None,
+        overrides: overrides.as_ref(),
         sessions: &[],
         library: &library,
         settings: &settings,
@@ -508,6 +517,34 @@ fn read_remembered(ctx: &Ctx, path: &Path, fingerprint: Option<&str>) -> Result<
     Ok((shown, remembered))
 }
 
+/// The owner's answers of `--overrides FILE` (phase 3 design, part 6.4; ruling T32-R9): None without the flag; else
+/// the file read with `option_text` (a missing file is refused naming it, exit 2, as --remembered's is), parsed as JSON
+/// (`<file>: <error>`) and read by `review_overrides`. `plan_doc` and decide's readers fill the overrides with it, and
+/// the engine with its job's own review.json, so the engine's documents and the relayed ones read one file one way.
+/// Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+pub fn replay_overrides(ctx: &Ctx, options: &PlanOptions) -> Result<Option<Overrides>, Refused> {
+    let Some(path) = &options.overrides else {
+        return Ok(None);
+    };
+    let (shown, text) = option_text(ctx, path)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| refused(format!("{shown}: {error}")))?;
+    review_overrides(&value, &shown).map(Some).map_err(refused)
+}
+
+/// A review.json's answers (phase 3 design, part 6.4), the one reading of the file that `replay_overrides` and the
+/// engine's store share: its `format` must be `REVIEW_FORMAT`, compared whole (`<shown>: the format is "<found>", not
+/// "lazymkv review v1"`, an absent format found as ""), and its `overrides` are read by the strict
+/// `remembered::overrides_from_value`, whose refusal is prefixed by `shown` (a misspelt key is refused, not ignored).
+/// Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+pub fn review_overrides(value: &serde_json::Value, shown: &str) -> Result<Overrides, String> {
+    let found = value.get("format").and_then(serde_json::Value::as_str).unwrap_or_default();
+    if found != REVIEW_FORMAT {
+        return Err(format!("{shown}: the format is \"{found}\", not \"{REVIEW_FORMAT}\""));
+    }
+    let answers = value.get("overrides").unwrap_or(&serde_json::Value::Null);
+    overrides_from_value(answers).map_err(|error| format!("{shown}: {error}"))
+}
+
 /// A TMDb record answer (8.1): `/movie/{id}` when the object has a non-null `title`, else `/tv/{id}`. Err is the
 /// parser's sentence, prefixed by `shown`. Def: T15. Use: T15, T20.
 pub(crate) fn parse_record(text: &str, shown: &str) -> Result<TmdbRecord, String> {
@@ -588,10 +625,12 @@ const NAME: &str = "plan";
 /// The usage line under the command's name: the COMMANDS synopsis after "plan ", with the --evidence flag every slug
 /// command takes (port spec 3.4).
 const USAGE: &str = "plan <slug|recording dir|scan file> [--evidence DIR] [--settings FILE] [--tmdb-search FILE] \
-                     [--tmdb-record FILE] [--remembered FILE]";
+                     [--tmdb-record FILE] [--remembered FILE] [--overrides FILE]";
 /// plan's long flags, as parse_args declares them; lazymkvctl reads a relayed plan's words with them (V10's ruling).
-/// Def: T15, PR #14 review round 1 (V10). Use: T15, PR #14 review round 1 (V10).
-pub const FLAGS: [&str; 5] = ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered"];
+/// `--overrides` is phase 3's (phase 3 design, part 6.4). Def: T15, PR #14 review round 1 (V10), P3-T7. Use: T15,
+/// PR #14 review round 1 (V10), P3-T8, P3-T12, P3-T16.
+pub const FLAGS: [&str; 6] =
+    ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--overrides"];
 /// What -h prints after the usage line.
 const HELP: &str = "
 The disc phase's plan (design spec 6.1 step 5) as one JSON document: the identity (8.1), the kind (8.2), the titles
@@ -606,12 +645,13 @@ arguments:
   --tmdb-search FILE    a TMDb /search/multi answer for the disc's name
   --tmdb-record FILE    a TMDb /movie/{id} or /tv/{id} answer (replaces the recording's tmdb.json)
   --remembered FILE     a remembered decision for the disc's fingerprint (spec 5)
+  --overrides FILE      a job's review.json: the owner's answers the plan is made with (phase 3 design, 6.4)
 
 exit status: 0 when the plan is printed, with or without review reasons or settings problems; 2 for an argument
-error, a scan that cannot be read, typed or planned, a lookup, settings, TMDb or remembered file that cannot be read
-or does not parse, or a remembered decision for another disc; 3 when a TMDb copy of the folder is more than six
-months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch failed; design part 8.4, K15); an engine job
-folder is read as it is; 3 when a slug is given and the evidence clone is
+error, a scan that cannot be read, typed or planned, a lookup, settings, TMDb, remembered or review file that cannot
+be read or does not parse (or is a review file of another format), or a remembered decision for another disc; 3 when
+a TMDb copy of the folder is more than six months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch
+failed; design part 8.4, K15); an engine job folder is read as it is; 3 when a slug is given and the evidence clone is
 absent; never 1.
 ";
 
@@ -630,13 +670,14 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let tmdb_search = parsed.flag("--tmdb-search")?.map(PathBuf::from);
     let tmdb_record = parsed.flag("--tmdb-record")?.map(PathBuf::from);
     let remembered = parsed.flag("--remembered")?.map(PathBuf::from);
+    let overrides = parsed.flag("--overrides")?.map(PathBuf::from);
     let words = parsed.positionals()?;
     match words.as_slice() {
         [] => Err("the following arguments are required: source".to_string()),
         [source] => Ok(Parsed {
             source: source.clone(),
             evidence,
-            options: PlanOptions { settings, tmdb_search, tmdb_record, remembered },
+            options: PlanOptions { settings, tmdb_search, tmdb_record, remembered, overrides },
         }),
         [_, rest @ ..] => Err(format!("unrecognized arguments: {}", rest.join(" "))),
     }
@@ -1659,6 +1700,45 @@ mod tests {
         assert_eq!((doc.plan.identity.step, doc.plan.title_confidence), (IdentityStep::Remembered, 1.0));
     }
 
+    /// Phase 3 design, part 6.4 (T32-R9): `--overrides FILE` is a review.json, read strictly. No flag is no answers; the
+    /// answers are its `overrides`; a file that is not JSON, of another format, or with a misspelt answer key is refused
+    /// naming the file, and so is the plan; with only track answers the plan is the plan without them.
+    #[test]
+    fn a_review_file_is_read_strictly_for_its_overrides() {
+        use lazymkv_core::remembered::{Overrides, SubtitleOverride, SubtitleTrackOverride};
+        use lazymkv_core::review_doc::{REVIEW_FILE, REVIEW_FORMAT};
+        let tmp = Scratch::new("plan-review-file");
+        film_recording(&tmp, "rec");
+        let ctx = Ctx::for_test(&tmp.0);
+        assert_eq!(replay_overrides(&ctx, &PlanOptions::default()), Ok(None));
+        let answers = Overrides {
+            subtitles: vec![SubtitleTrackOverride { title: 0, stream: 3, action: SubtitleOverride::Drop }],
+            ..Overrides::default()
+        };
+        let options = PlanOptions { overrides: Some(PathBuf::from(REVIEW_FILE)), ..PlanOptions::default() };
+        tmp.write(REVIEW_FILE, serde_json::json!({"format": REVIEW_FORMAT, "overrides": answers, "reviews": []}).to_string());
+        assert_eq!(replay_overrides(&ctx, &options), Ok(Some(answers)));
+        assert_eq!(planned(&tmp, &options).plan, planned(&tmp, &PlanOptions::default()).plan);
+        let refusals = [
+            ("{".to_string(), "review.json: EOF while parsing an object at line 1 column 1".to_string()),
+            (
+                serde_json::json!({"format": "lazymkv review v9", "overrides": {}}).to_string(),
+                "review.json: the format is \"lazymkv review v9\", not \"lazymkv review v1\"".to_string(),
+            ),
+            (
+                serde_json::json!({"format": REVIEW_FORMAT, "overrides": {"subtitle": []}}).to_string(),
+                "review.json: overrides: unknown key \"subtitle\" (identity, season, titles, audio, subtitles, collision)"
+                    .to_string(),
+            ),
+        ];
+        for (text, line) in refusals {
+            tmp.write(REVIEW_FILE, &text);
+            let refused = Refused { code: 2, line };
+            assert_eq!(replay_overrides(&ctx, &options), Err(refused.clone()), "{text}");
+            assert_eq!(refusal(&tmp, &options), refused, "{text}");
+        }
+    }
+
     #[test]
     fn an_option_file_that_cannot_be_read_or_parsed_exits_2() {
         let tmp = Scratch::new("plan-bad-options");
@@ -1899,7 +1979,7 @@ mod tests {
         assert_eq!(
             synopsis,
             "<slug|recording dir|scan file> [--evidence DIR] [--settings FILE] [--tmdb-search FILE] [--tmdb-record FILE] \
-             [--remembered FILE]"
+             [--remembered FILE] [--overrides FILE]"
         );
         assert_eq!(USAGE.strip_prefix("plan "), Some(synopsis));
         // dispatch reaches the command by its name.

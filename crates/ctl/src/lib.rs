@@ -198,10 +198,13 @@ pub(crate) fn retune_spec(ctx: &Ctx, words: &[String]) -> Result<PathBuf, String
 }
 
 /// decide's path flags: `decide::FLAGS` without `--selection`, whose value is a choice, not a path (V10's ruling).
-/// plan's path flags are all of `plan::FLAGS`. `--menu`, a map folder or file, is a path (menu maps increment 3).
-/// Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
-pub(crate) const DECIDE_PATH_FLAGS: [&str; 8] =
-    ["--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence", "--menu"];
+/// plan's path flags are all of `plan::FLAGS`. `--menu`, a map folder or file, is a path (menu maps increment 3), and so
+/// is `--overrides`, a review.json (phase 3 design, part 6.4). Def: PR #14 review round 1 (V10), P3-T7. Use: PR #14
+/// review round 1 (V10), P3-T8, P3-T12, P3-T16.
+pub(crate) const DECIDE_PATH_FLAGS: [&str; 9] = [
+    "--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--overrides", "--evidence",
+    "--menu",
+];
 
 /// retune's path flags that take one path, sent again made absolute (V10). Def: T5-22. Use: T5-22.
 pub(crate) const RETUNE_PATH_FLAGS: [&str; 3] = ["--snapshot", "--compare", "--text"];
