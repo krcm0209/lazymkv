@@ -374,9 +374,9 @@ before:
   (`AudioDecision.menu`, MR-11), as `{"stream", "role", "choices", "outcome"}`, and `verdict`, the content rule's
   verdict, only with the outcome `content_not_keep` (The rule).
 
-A stream the menu drops is listed under `decision.audio.dropped` as `[<stream>, {"why": "menu", "role": "<role>"}]`
-(`AudioDrop::Menu`), in scan order with the other drops. Made up, for the block above with the content rule's verdict
-`keep` on stream 3:
+A stream the menu drops is listed under `decision.decision.audio.dropped` as
+`[<stream>, {"why": "menu", "role": "<role>"}]` (`AudioDrop::Menu`), in scan order with the other drops. Made up, for
+the block above with the content rule's verdict `keep` on stream 3:
 
 ```json
 "dropped": [[3, {"why": "menu", "role": "commentary"}]],
@@ -725,4 +725,29 @@ printed line, `other_playlists` grouped with ASCII case ignored, an empty map pa
 Recorded on 2026-11-24 for the branch that adds the playlist reader, the roles, the off-decisions, the ties and the
 rule, and gives `decide --menu` the `roles` key and the decision's confirmations.
 
-<!-- controller: test counts and acceptance on the 13 real maps go here -->
+- Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline --no-fail-fast`, run on this Mac with
+  toolchain 1.100.0: 3506 tests in 58 result lines, 3505 passed, 1 failed, 5 ignored, with no warning. The one failure
+  is `a_killed_worker_with_a_torn_last_record_counts_only_whole_records` in the engine's test binary
+  `engine_file_phase`, one of its worker tests with a 2.0 s time cap: they fail on this Mac when it is busy, on `main`
+  too (the branch's starting point gave 3430 passed and 4 failed, in the same binary, on the same day), and the binary
+  passes when run alone, 94 of 94. `main` e94057a has 3434 tests with the same command, so the branch adds 72: 73 new
+  ones (26 in `menu::tie`, 15 in `tracks::audio`, 12 in `menu::mpls`, 10 in `menu::role`, 8 in decide, 2 in the `menu`
+  command) and one of decide's replaced. 48 tests print `skipped:` because the evidence clone is absent. Nothing has run
+  on Windows or Linux yet; that is CI's part once the branch is pushed.
+- Acceptance on the 13 real maps (counts only), `decide` without and with `--menu` on a copy of each recording (MR-16:
+  twelve copies without their stub `tmdb.json`, so that decide has a plan; the identity is unknown there and English is
+  the only wanted language): the exit codes are equal on 13 of 13; every key but `decision` and `menu` is byte-equal on
+  13 of 13; `roles.acts` is true on 13 of 13; plain Play's own stream is found on 13 of 13 and no commentary or
+  audio-description role sits on it (MR-17).
+- The off-decisions: 126 audio choices, 68 with a role word. 14 of the measurement's 15 decisions were carried over, one
+  line per choice (8 `off`, 6 `role`); the fifteenth is worded as the hand-walked disc's hand form, so one text of that
+  map is undecided.
+- The roles: 79 `roles.audio` rows. 73 have the role and the tie that the measurement's join gave the same stream. The
+  other 6 carry no role: 2 are on the hand-walked disc, where the measurement used the hand form (ties `osd`); 4 are
+  rows the join called `tie-conflict` because it compared the playlist's entry with the rip's file track, where lazymkv
+  compares it with the scan stream (MR-9), which agrees with the playlist. 1 audio choice is unplaced.
+- The rule: 30 confirmations. 10 are `dropped`, on 5 maps, the programme reference the same before and after on each; 12
+  are `content_not_keep` (the content rule itself says commentary or notes one: MR-12); 8 are `no_verdict`. Of the
+  measurement's 14 disagreeing rows 10 drop. The other 4 are on three maps whose rip fails the verify report's track
+  match, so decide takes no content verdict on any stream there; the rule was not changed to make them drop (design
+  5.4a).

@@ -185,11 +185,11 @@ and the `menu` key gains the title's `roles`. Where the map's disc ID matches th
 playlist was read with one stream table, a stream the menu calls a commentary or an audio description with a strong tie
 is given to the decision as confirmed, and the decision drops it where the content rule's applied verdict on it is
 `keep`. The `decision` section then lists such streams under `decision.facts.menu_streams` and every confirmation
-with its outcome under `decision.decision.audio.menu`, and a dropped one under `decision.audio.dropped` as
+with its outcome under `decision.decision.audio.menu`, and a dropped one under `decision.decision.audio.dropped` as
 `[<stream>, {"why": "menu", "role": "<role>"}]`. With a map, `decision` and `menu` are the only keys that can differ
 from the run without it; without a confirmation the `decision` section is byte for byte the one without the map, and
 without `--menu` nothing changes. A `menu-off.tsv` that cannot be read or parsed exits 2, as a map that cannot be read
-does. The rule, its outcomes and its rulings MR-1 to MR-16 are written in `docs/menu-maps/format.md`.
+does. The rule, its outcomes and its rulings MR-1 to MR-17 are written in `docs/menu-maps/format.md`.
 
 ### `lazymkv-dev labels --subtitles`
 
