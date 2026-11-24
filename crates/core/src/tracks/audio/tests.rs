@@ -1499,7 +1499,7 @@ fn outcomes(decision: &AudioDecision) -> Vec<(u32, MenuOutcome)> {
 
 #[test]
 fn a_menu_commentary_and_a_menu_audio_description_are_dropped_where_content_kept_them() {
-    // MR-1 and MR-2: a confirmed role on a stream the content rule kept drops it; MR-11: no note and no review.
+    // MR-1, MA-1: a confirmed role drops its stream (here the verdicts are keep); MR-11: no note and no review.
     let decision = decide_with(&menu_title(), &menu_facts());
     assert_eq!(order_of(&decision), vec![1]);
     assert_eq!(
@@ -1866,4 +1866,34 @@ fn a_drop_that_would_leave_no_audio_is_not_made() {
     let decision = decide_with(&two, &facts);
     assert_eq!(decision, AudioDecision { menu: decision.menu.clone(), ..today });
     assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::WouldLeaveNone), (2, MenuOutcome::WouldLeaveNone)]);
+}
+
+#[test]
+fn on_a_title_without_a_reference_one_confirmed_stream_of_two_is_dropped() {
+    // MA-2 refuses only the none-left case: with no language code there is no reference, and dropping one of two
+    // streams still leaves a kept track, so the drop is made.
+    let title = title_of(&[video(), dd("und", "2", "192 Kb/s"), dd("und", "2", "224 Kb/s")]);
+    let menu = BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"]))]);
+    let facts = AudioFacts { menu, ..AudioFacts::default() };
+    let decision = decide_with(&title, &facts);
+    assert_eq!(decision.reference, None);
+    assert_eq!(decision.dropped, vec![(1, AudioDrop::Menu { role: AudioRole::Commentary })]);
+    assert_eq!(order_of(&decision), vec![2]);
+    assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::Dropped)]);
+}
+
+#[test]
+fn another_kept_streams_commentary_review_survives_a_menu_drop() {
+    // MR-11 concerns the dropped stream only: stream 3 stays kept with its content verdict of commentary, so its
+    // review is raised as it is without a map, while the menu drops stream 2.
+    let facts = AudioFacts {
+        verdicts: BTreeMap::from([(2, Verdict::Keep), (3, Verdict::Commentary)]),
+        verdict_reference: Some(1),
+        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"]))]),
+        ..AudioFacts::default()
+    };
+    let decision = decide_with(&menu_title(), &facts);
+    assert_eq!(decision.dropped, vec![(2, AudioDrop::Menu { role: AudioRole::Commentary })]);
+    assert_eq!(order_of(&decision), vec![1, 3]);
+    assert_eq!(decision.reviews, vec![ReviewReason::CommentaryDetected]);
 }

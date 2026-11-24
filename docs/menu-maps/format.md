@@ -736,7 +736,8 @@ they are rulings of the plan that the owner can correct:
 - MA-4: the six sentences that pull request #35 added to the main design are replaced by ones that say the rule as it
   now is; they stay dated 2026-11-24.
 
-MA-1 replaces MR-2's verdict conditions and MR-12, and MR-11's list of outcomes is now MA-3's. MR-2's condition that
+MA-1 replaces MR-2's verdict conditions and MR-12, and MR-11's list of outcomes is now MA-3's. Of MA-4's six sentences, five are replaced; the sixth, in the risk
+"Commentary on Blu-ray and UHD", is true as it stands and is kept. MR-2's condition that
 the stream be in the Original or English group falls with the owner's third answer (a track with no language code is
 treated like any other); its other conditions, that the stream is kept and is not the reference, stand, and so do the
 other rulings as written above.

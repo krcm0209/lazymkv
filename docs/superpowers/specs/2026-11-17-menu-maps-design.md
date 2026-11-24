@@ -263,7 +263,7 @@ treat every map alike, so as proposed the rule would also act on BD, DVD and non
 Blu-ray with Java menus can be mapped by agents today, 5.5; non-Java and DVD menus need increment 5). The owner can
 limit it to UHD Java maps until those formats are measured.
 
-**Still unruled.** A menu programme role (the words main or programme) against a content verdict of commentary or
+**Still unruled.** A menu programme role (the words `main`, `programm` or `programme`) against a content verdict of commentary or
 audio description; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging a track on a
 menu role; any user preference that acts on a role. Subtitles are left out by the audio-only proposal above, not by the
 ruling; the owner can bring them in. [Amended 2026-11-24, after the merge of pull request #35: the owner's rulings at
@@ -330,6 +330,9 @@ the owner can correct; as built they are written in `docs/menu-maps/format.md`, 
   `not_kept`, `overridden`, `reference`, `reference_would_change`, `would_leave_none`.
 - MA-4: the six sentences that pull request #35 added to the main design are replaced by ones that say the rule as it
   now is; they stay dated 2026-11-24.
+
+Of MA-4's six sentences, five are replaced; the sixth, in the risk "Commentary on Blu-ray and UHD", is true as it
+stands and is kept.
 
 So the menu's word alone drops a track it confirms as a commentary or an audio description, where a map is given,
 whatever the content rule says of it and also without a verdict; the guards stand as built (MR-3, MR-4, MR-5, MR-6,
