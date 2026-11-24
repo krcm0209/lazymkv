@@ -47,7 +47,7 @@ use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
     no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
     spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
-    DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
+    DISCARD_PREVIEW_NOT_BUILT, DISCARD_REFUSED, NO_CLIENT, REVIEW_NOT_BUILT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
@@ -2953,7 +2953,11 @@ impl Owner {
                 .map(|page| serde_json::to_value(page).unwrap_or(Value::Null)),
             Request::Shutdown { force } => return self.shutdown(client, id, force),
             Request::Command { words } => return self.command(client, id, words),
-            Request::ReviewAction { job, action, overrides } => self.review_action(&job, &action, overrides.as_ref()),
+            Request::ReviewAction { job, action, overrides, labels: _ } => {
+                self.review_action(&job, &action, overrides.as_ref())
+            }
+            Request::Review { .. } => Err(REVIEW_NOT_BUILT.to_string()),
+            Request::DiscardPreview { .. } => Err(DISCARD_PREVIEW_NOT_BUILT.to_string()),
             Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
         };
         self.reply(client, id, answer);

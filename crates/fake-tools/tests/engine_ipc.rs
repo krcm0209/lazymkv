@@ -1589,6 +1589,15 @@ fn discard_is_refused_naming_phase_3() {
 }
 
 #[test]
+fn review_and_discard_preview_are_refused_until_built() {
+    let h = scripted(vec![]);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.err("review", json!({"job": "abc-1"})), "review is not built in this version");
+    assert_eq!(c.err("discard_preview", json!({"job": "abc-1"})), "discard_preview is not built in this version");
+}
+
+#[test]
 fn ui_quit_is_refused_naming_phase_5() {
     let h = scripted(vec![]);
     let mut c = Client::open(&h);
