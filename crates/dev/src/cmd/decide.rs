@@ -917,6 +917,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
             verdict_reference: verdicts.reference,
             remembered: remembered_audio.as_deref(),
             reviewed: None,
+            menu: BTreeMap::new(),
         },
         subtitles: SubtitleFacts {
             events,

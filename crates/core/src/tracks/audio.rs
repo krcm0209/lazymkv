@@ -4,9 +4,10 @@
 //! TheDiscDB descriptions come through `align_descriptions` and `descriptions`, which Tasks 9 and 10 reuse for
 //! subtitles. D13's exact duplicates are found by packet MD5 (6.4 step 10a); D9's defaults are the settings
 //! `prefer_most_channels` and `original_language_first`; spec 5's remembered decisions and spec 11's review
-//! overrides fix what they cover. Written from the spec (RP20): `rank_key` and `guards` are the product's copy of
-//! steps 3 and 4 over scan facts, beside the Python-exact `audio::reference` that the content rule's goldens use.
-//! Used by Tasks 9, 11, 13 and 16.
+//! overrides fix what they cover. A menu map's confirmed commentary or audio description drops a track the content
+//! rule kept (menu maps design 5.4a, MR-1 to MR-4). Written from the spec (RP20): `rank_key` and `guards` are the
+//! product's copy of steps 3 and 4 over scan facts, beside the Python-exact `audio::reference` that the content rule's
+//! goldens use. Used by Tasks 9, 11, 13 and 16.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -17,13 +18,14 @@ use crate::disc::{Flags, Stream, StreamKind, Title};
 use crate::lang::{is_english, is_no_language, norm_lang, Wanted};
 use crate::lookup::discdb::{DiscDbTitle, DiscDbTrack};
 use crate::lookup::{description_kinds, DescriptionKind, REMEMBERED_CONFIDENCE};
+use crate::menu::AudioRole;
 use crate::remembered::{apply_audio, AudioOverride, AudioOverrideEntry};
 use crate::review::{sorted_unique, Note, Noted, ReviewReason};
 use crate::settings::Settings;
 
 /// Facts the file phase measured for one title, keyed by SCAN stream number (the dev crate and phase 2 map file tracks
 /// back through verify::stream_of_track). At planning time it is `AudioFacts::default()`: no MD5, no profile, no
-/// verdict. Spec 8.6, 6.4 steps 9 and 10a. Def: T8. Use: T13, T16.
+/// verdict, no menu confirmation. Spec 8.6, 6.4 steps 9 and 10a, menu maps design 5.4a. Def: T8. Use: T13, T16.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioFacts<'a> {
     /// 6.4 step 10a: the packet MD5 of every audio stream (D13). Empty at planning time.
@@ -47,10 +49,24 @@ pub struct AudioFacts<'a> {
     pub remembered: Option<&'a [AudioOverrideEntry]>,
     /// The owner's Override tracks for this title (spec 11), by scan stream; they win over remembered ones.
     pub reviewed: Option<&'a BTreeMap<u32, AudioOverride>>,
+    /// A menu map's confirmed roles (menu maps design 5.4a, MR-1), by scan stream: a commentary or an audio
+    /// description here drops a stream the content rule kept (`decide_audio`). Empty without a map, and then the
+    /// decision is the one without the menu.
+    pub menu: BTreeMap<u32, MenuConfirmation>,
 }
 
-/// Why an audio stream was dropped, in spec 8.6 step 1's bullet order (D13, RP7, spec 5 and 11 overrides); written
-/// with its reason under "why" (`{"why": "flagged", "flags": 1}`). Def: T8. Use: T13, T16.
+/// A menu map's confirmation of one scan stream (design 5.4a, MR-1): the role and the choices that carry it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuConfirmation {
+    /// What the menu calls the stream.
+    pub role: AudioRole,
+    /// The map's choices that label the stream with that role, as the map names them.
+    pub choices: Vec<String>,
+}
+
+/// Why an audio stream was dropped, in spec 8.6 step 1's bullet order (D13, RP7, spec 5 and 11 overrides), then the
+/// menu's drop (menu maps design 5.4a, MR-1 to MR-4); written with its reason under "why" (`{"why": "flagged",
+/// "flags": 1}`). Def: T8. Use: T13, T16.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "why")]
 pub enum AudioDrop {
@@ -81,6 +97,56 @@ pub enum AudioDrop {
     Remembered,
     /// The owner's Override tracks drops it or marks it as commentary (spec 11).
     Reviewed,
+    /// The disc's menu confirms it as a commentary or an audio description and the content rule's applied verdict on
+    /// it is `keep` (menu maps design 5.4a, MR-1, MR-2); written `{"why": "menu", "role": "commentary"}`.
+    Menu {
+        /// The menu's role: commentary or audio_description.
+        role: AudioRole,
+    },
+}
+
+/// What became of a menu confirmation in `decide_audio` (menu maps design 5.4a, MR-1 to MR-4, MR-11). `NotKept` to
+/// `ContentNotKeep` are checked in the order listed, the first that holds being the outcome; a confirmation none of
+/// them holds for is `Dropped`, or `ReferenceWouldChange` when the drops would move the reference. Def: menu-role
+/// Task 4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuOutcome {
+    /// The stream is dropped as `AudioDrop::Menu`.
+    Dropped,
+    /// The stream is not among the kept tracks: step 1 dropped it, or the title has no such audio stream.
+    NotKept,
+    /// A remembered or owner's Keep override wins over the menu (MR-3).
+    Overridden,
+    /// The stream is kept in the no-language group, which the content rule does not judge.
+    NoLanguage,
+    /// The stream is the decision's programme reference, which is never dropped (MR-2).
+    Reference,
+    /// The keep the drop needs is missing: the verdicts were not measured, or none names the stream (MR-2).
+    NoVerdict,
+    /// The verdicts are not applied: no reference, a reference other than the measured one, or D21's veto (MR-2).
+    VerdictsNotApplied,
+    /// The content rule's verdict on the stream is not `keep` (MR-2, MR-12).
+    ContentNotKeep,
+    /// Dropping the confirmed streams would change the programme reference, so none is dropped (MR-4).
+    ReferenceWouldChange,
+}
+
+/// A menu confirmation as the decision lists it (MR-11): the stream, the role, the choices that carry it, its outcome,
+/// and the content verdict when that is why nothing was dropped. Def: menu-role Task 4.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MenuApplied {
+    /// The scan stream.
+    pub stream: u32,
+    /// The menu's role.
+    pub role: AudioRole,
+    /// The map's choices that carry the role.
+    pub choices: Vec<String>,
+    /// What became of the confirmation.
+    pub outcome: MenuOutcome,
+    /// The content rule's verdict, Some only with `MenuOutcome::ContentNotKeep`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<Verdict>,
 }
 
 /// Which language group a kept track belongs to (8.6 step 5's order); the derived order is Original, English,
@@ -205,7 +271,7 @@ impl FromStr for Alignment {
 pub struct AudioDecision {
     /// In final order (8.6 step 5), flags set.
     pub kept: Vec<AudioTrack>,
-    /// Every dropped audio stream with its reason, in scan order.
+    /// Every dropped audio stream with its reason, in scan order; a menu drop (`AudioDrop::Menu`) among them.
     pub dropped: Vec<(u32, AudioDrop)>,
     /// The programme reference (8.6 "Content"): the first original-language track of the rule's order, else the first
     /// English one; None when no original-language or English track is kept (no-language tracks are never the
@@ -222,6 +288,10 @@ pub struct AudioDecision {
     /// How TheDiscDB's track list aligned; None when it did not align uniquely (descriptions unused) or there is no
     /// record.
     pub description_alignment: Option<Alignment>,
+    /// Every menu confirmation of a commentary or an audio description, ascending stream, with its outcome (menu maps
+    /// design 5.4a, MR-11); empty, and not written, without one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub menu: Vec<MenuApplied>,
 }
 
 /// A TheDiscDB track and a scan stream agree on kind, language (`norm_lang` of both; video compares none), codec
@@ -460,7 +530,17 @@ const DROPPED_DESCRIPTIONS: [DescriptionKind; 4] = [
 /// Keep { order, default } fixes the order and the default. Confidence 0.95, or
 /// lookup::REMEMBERED_CONFIDENCE (1.00) when every audio stream of the title has a remembered or review override. At
 /// planning time `facts` is empty and the ffprobe criterion is skipped (8.3). Reads the settings `prefer_most_channels`
-/// and `original_language_first` (D9). Def: T8. Use: T13, T16.
+/// and `original_language_first` (D9).
+///
+/// Then the menu (menu maps design 5.4a): a confirmation in `facts.menu` of a commentary or an audio description
+/// (MR-1; a programme role is ignored and not listed) makes its stream a candidate when the stream is kept in the
+/// Original or English group, has no remembered or owner's Keep override (MR-3), is not the reference, and the
+/// verdicts apply (measured against the reference, no veto) with `keep` on it (MR-2); otherwise its outcome says why
+/// not (`MenuOutcome`). The kept streams without the candidates are arranged again by the same steps 2 to 6
+/// and "Content"; when that keeps the reference, it is the decision and each candidate is dropped as
+/// `AudioDrop::Menu`, with no note and no review (MR-11); otherwise nothing is dropped (MR-4). Step 1, D13's
+/// duplicates and the confidence are untouched (MR-14); a content commentary verdict stays a review (MR-12). Without
+/// confirmations the decision is the one without the menu, `menu` empty. Def: T8. Use: T13, T16.
 pub fn decide_audio(title: &Title, wanted: &Wanted, facts: &AudioFacts<'_>, settings: &Settings) -> AudioDecision {
     let audio = title.streams_of(StreamKind::Audio);
     let (description_alignment, described) = descriptions(title, facts.discdb);
@@ -480,23 +560,128 @@ pub fn decide_audio(title: &Title, wanted: &Wanted, facts: &AudioFacts<'_>, sett
             }
         }
     }
-    let tracks: Vec<AudioTrack> = kept_streams.iter().map(|stream| track_of(stream, wanted, facts)).collect();
+    let mut arranged = arrange(&kept_streams, wanted, facts, settings, &overrides);
+    let mut menu = menu_outcomes(facts, &arranged, &overrides);
+    let candidates: Vec<u32> =
+        menu.iter().filter(|applied| applied.outcome == MenuOutcome::Dropped).map(|applied| applied.stream).collect();
+    if !candidates.is_empty() {
+        let remaining: Vec<&Stream> =
+            kept_streams.iter().copied().filter(|stream| !candidates.contains(&stream.number)).collect();
+        let second = arrange(&remaining, wanted, facts, settings, &overrides);
+        if second.reference == arranged.reference {
+            arranged = second;
+            for applied in menu.iter().filter(|applied| applied.outcome == MenuOutcome::Dropped) {
+                dropped.push((applied.stream, AudioDrop::Menu { role: applied.role }));
+            }
+            dropped.sort_by_key(|(stream, _)| audio.iter().position(|candidate| candidate.number == *stream));
+        } else {
+            for applied in menu.iter_mut().filter(|applied| applied.outcome == MenuOutcome::Dropped) {
+                applied.outcome = MenuOutcome::ReferenceWouldChange;
+            }
+        }
+    }
+    AudioDecision {
+        kept: arranged.kept,
+        dropped,
+        reference: arranged.reference,
+        verdict_reference: facts.verdict_reference,
+        notes: arranged.notes,
+        reviews: sorted_unique(arranged.reviews),
+        confidence: confidence_of(&audio, &overrides),
+        description_alignment,
+        menu,
+    }
+}
+
+/// One arrangement of the streams step 1 kept: the kept tracks in final order with their flags, the reference, the
+/// notes and the reviews (not yet sorted).
+struct Arrangement {
+    /// In final order, flags and names set.
+    kept: Vec<AudioTrack>,
+    /// The programme reference of the rule's order (`reference_of`).
+    reference: Option<u32>,
+    /// Step 6's, D9's and the verdicts' notes, in the order raised.
+    notes: Vec<Noted>,
+    /// Step 6's gaps and the verdicts' review reasons, unsorted.
+    reviews: Vec<ReviewReason>,
+}
+
+/// Steps 2 to 6 and "Content" over `streams`: rank, guards, order, reference, flags, the overrides' order and default,
+/// notes, gaps and verdicts. `decide_audio` calls it for step 1's kept streams and again without the menu's
+/// candidates (design 5.4a), so both arrangements come from the same steps.
+fn arrange(
+    streams: &[&Stream],
+    wanted: &Wanted,
+    facts: &AudioFacts<'_>,
+    settings: &Settings,
+    overrides: &BTreeMap<u32, (AudioOverride, Source)>,
+) -> Arrangement {
+    let tracks: Vec<AudioTrack> = streams.iter().map(|stream| track_of(stream, wanted, facts)).collect();
     let ordered = rank_and_order(tracks, wanted, settings);
     let reference = reference_of(&ordered);
-    let mut kept = finish(keep_orders(ordered, &overrides), wanted);
-    override_defaults(&mut kept, &overrides);
+    let mut kept = finish(keep_orders(ordered, overrides), wanted);
+    override_defaults(&mut kept, overrides);
     let mut notes = notes_of(&kept);
     let mut reviews = gaps(&kept, wanted);
     apply_verdicts(facts, reference, &kept, &mut notes, &mut reviews);
-    AudioDecision {
-        kept,
-        dropped,
-        reference,
-        verdict_reference: facts.verdict_reference,
-        notes,
-        reviews: sorted_unique(reviews),
-        confidence: confidence_of(&audio, &overrides),
-        description_alignment,
+    Arrangement { kept, reference, notes, reviews }
+}
+
+/// Every confirmation of a commentary or an audio description in `facts.menu`, ascending stream, with its outcome on
+/// the first arrangement (design 5.4a, MR-1 to MR-3, MR-12): `Dropped` marks a candidate, which `decide_audio` keeps
+/// or turns into `ReferenceWouldChange` (MR-4). A programme confirmation is not listed.
+fn menu_outcomes(
+    facts: &AudioFacts<'_>,
+    first: &Arrangement,
+    overrides: &BTreeMap<u32, (AudioOverride, Source)>,
+) -> Vec<MenuApplied> {
+    let mut menu = Vec::new();
+    for (&stream, confirmation) in &facts.menu {
+        if confirmation.role == AudioRole::Programme {
+            continue;
+        }
+        let (outcome, verdict) = menu_outcome(stream, facts, first, overrides);
+        menu.push(MenuApplied {
+            stream,
+            role: confirmation.role,
+            choices: confirmation.choices.clone(),
+            outcome,
+            verdict,
+        });
+    }
+    menu
+}
+
+/// The outcome of one confirmation of `stream` on the first arrangement: the first of `NotKept` to `ContentNotKeep`
+/// that holds, else `Dropped` for a candidate; the verdict with `ContentNotKeep` only.
+fn menu_outcome(
+    stream: u32,
+    facts: &AudioFacts<'_>,
+    first: &Arrangement,
+    overrides: &BTreeMap<u32, (AudioOverride, Source)>,
+) -> (MenuOutcome, Option<Verdict>) {
+    let Some(track) = first.kept.iter().find(|track| track.stream == stream) else {
+        return (MenuOutcome::NotKept, None);
+    };
+    if matches!(overrides.get(&stream), Some((AudioOverride::Keep { .. }, _))) {
+        return (MenuOutcome::Overridden, None);
+    }
+    if track.group == LangGroup::NoLanguage {
+        return (MenuOutcome::NoLanguage, None);
+    }
+    if first.reference == Some(stream) {
+        return (MenuOutcome::Reference, None);
+    }
+    let Some(measured) = facts.verdict_reference else {
+        return (MenuOutcome::NoVerdict, None);
+    };
+    if first.reference != Some(measured) || facts.veto_holds {
+        return (MenuOutcome::VerdictsNotApplied, None);
+    }
+    match facts.verdicts.get(&stream) {
+        None => (MenuOutcome::NoVerdict, None),
+        Some(Verdict::Keep) => (MenuOutcome::Dropped, None),
+        Some(&verdict) => (MenuOutcome::ContentNotKeep, Some(verdict)),
     }
 }
 
