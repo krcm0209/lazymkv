@@ -156,8 +156,8 @@ pub fn parse_playlist(bytes: &[u8]) -> Result<Playlist, String> {
     let mut first: Option<(Vec<PlaylistStream>, Vec<PlaylistStream>)> = None;
     let mut uniform = true;
     for index in 0..count {
-        let (item, audio, subtitles) = read_item(&r, o, index)?;
         let len = usize::from(r.u16(o)?);
+        let (item, audio, subtitles) = read_item(&r, o, index)?;
         o = plus(plus(o, len)?, 2)?;
         match &first {
             None => first = Some((audio, subtitles)),
@@ -329,6 +329,20 @@ mod tests {
         assert!(parse_playlist(&bytes).is_ok());
         for n in 0..bytes.len() {
             assert!(parse_playlist(&bytes[..n]).is_err(), "a playlist cut at {n} bytes was read");
+        }
+    }
+
+    #[test]
+    fn a_cut_short_playlist_names_the_start_of_the_read_that_failed() {
+        let audio = [(0x1100, 0x83, "eng")];
+        let bytes = made_up_playlist(&[item("00001", &audio, &[]), item("00002", &audio, &[])]);
+        let second = FIRST_ITEM + 2 + usize::from(u16::from_be_bytes([bytes[FIRST_ITEM], bytes[FIRST_ITEM + 1]]));
+        for n in [second, second + 1] {
+            let expected = format!("the playlist is cut short at byte {second}");
+            assert_eq!(parse_playlist(&bytes[..n]).unwrap_err(), expected, "cut at {n}");
+        }
+        for n in 1..4 {
+            assert_eq!(parse_playlist(&bytes[..n]).unwrap_err(), "the playlist is cut short at byte 0");
         }
     }
 
