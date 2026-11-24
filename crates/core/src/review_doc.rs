@@ -3,7 +3,7 @@
 //! words to `remembered::Overrides` and the labels they carry (part 6.4, 6.6). Pure: the engine hands in the paths,
 //! subtitle lines and colliding files it read. Pull request 2 answers tracks and collisions only (ruling T32-R1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::decision::FileDecision;
 use crate::disc::{Disc, Stream, Title};
@@ -766,11 +766,15 @@ fn track_id(doc: &ReviewDoc, title: u32, word: &str, stream: u32) -> String {
 /// each audio and subtitle entry a track item and its word (`keep` or `default` for a kept audio action, `commentary`
 /// for an audio commentary, a role's word for a subtitle keep, `drop` for a drop), each collision a collision item whose
 /// path is the entry's (`settings::same_path`) and `keep_both` or `replace`. An identity, season or titles answer is
-/// refused: this sheet does not answer them yet (ruling T32-R1). Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
+/// refused: this sheet does not answer them yet (ruling T32-R1). Two entries for one item (the same track, or two paths
+/// of the same collision) are refused with `the answers name <item id> twice`, since the first would otherwise win
+/// silently (P3-T8). Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
 pub fn check(doc: &ReviewDoc, overrides: &Overrides) -> Result<(), String> {
     if overrides.identity.is_some() || overrides.season.is_some() || !overrides.titles.is_empty() {
         return Err("which film this is and which titles to file cannot be answered on this sheet yet".to_string());
     }
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    let mut once = |id: &str| if named.insert(id.to_string()) { Ok(()) } else { Err(format!("the answers name {id} twice")) };
     for entry in &overrides.audio {
         let word = match entry.action {
             AudioOverride::Keep { default: true, .. } => "default",
@@ -778,20 +782,25 @@ pub fn check(doc: &ReviewDoc, overrides: &Overrides) -> Result<(), String> {
             AudioOverride::Commentary => "commentary",
             AudioOverride::Drop => "drop",
         };
-        offered(doc, &track_id(doc, entry.title, "audio", entry.stream), word)?;
+        let id = track_id(doc, entry.title, "audio", entry.stream);
+        offered(doc, &id, word)?;
+        once(&id)?;
     }
     for entry in &overrides.subtitles {
         let word = match entry.action {
             SubtitleOverride::Keep { role } => role.as_str(),
             SubtitleOverride::Drop => "drop",
         };
-        offered(doc, &track_id(doc, entry.title, "sub", entry.stream), word)?;
+        let id = track_id(doc, entry.title, "sub", entry.stream);
+        offered(doc, &id, word)?;
+        once(&id)?;
     }
     for entry in &overrides.collision {
         let item = items_of(doc)
             .find(|item| item.kind == ItemKind::Collision && item.path.as_deref().is_some_and(|path| same_path(path, &entry.path)))
             .ok_or_else(|| format!("no collision with \"{}\" on this sheet", entry.path))?;
         offered(doc, &item.id, entry.action.as_str())?;
+        once(&item.id)?;
     }
     Ok(())
 }
@@ -1548,6 +1557,47 @@ mod tests {
         );
         let identity = Overrides { identity: Some(TmdbIdentity { kind: TmdbKind::Movie, id: 2 }), ..Overrides::default() };
         assert!(check(&doc, &identity).is_err());
+    }
+
+    /// An answers object naming one track or one path twice is refused: the first entry would otherwise win silently
+    /// (phase 3 design, part 6.4; carried from P3-T7's review).
+    #[test]
+    fn answers_naming_an_item_twice_are_refused() {
+        let disc = film_disc();
+        let doc = sheet(&record(&disc), &disc, false);
+        let sub = |action| SubtitleTrackOverride { title: SCAN_TITLE, stream: 9, action };
+        let subtitles = Overrides {
+            subtitles: vec![sub(SubtitleOverride::Drop), sub(SubtitleOverride::Keep { role: SubtitleRole::Sdh })],
+            ..Overrides::default()
+        };
+        assert_eq!(check(&doc, &subtitles), Err("the answers name t00-00801 sub 9 twice".to_string()));
+        let audio = Overrides {
+            audio: vec![
+                AudioTrackOverride { title: SCAN_TITLE, stream: 1, action: AudioOverride::Drop },
+                AudioTrackOverride { title: SCAN_TITLE, stream: 1, action: AudioOverride::Drop },
+            ],
+            ..Overrides::default()
+        };
+        assert_eq!(check(&doc, &audio), Err("the answers name t00-00801 audio 1 twice".to_string()));
+        // The same stream as an audio and as a subtitle answer is two items, not one named twice.
+        let both = Overrides {
+            audio: vec![AudioTrackOverride { title: SCAN_TITLE, stream: 1, action: AudioOverride::Drop }],
+            subtitles: vec![sub(SubtitleOverride::Drop)],
+            ..Overrides::default()
+        };
+        assert_eq!(check(&doc, &both), Ok(()));
+        // A collision path named twice, spelt the same or not, names the collision item twice.
+        let mut colliding = record(&disc);
+        decided(&mut colliding).reviews = vec![ReviewReason::PathCollision];
+        let collided = sheet(&colliding, &disc, false);
+        let twice = Overrides {
+            collision: vec![
+                CollisionAnswer { path: FINAL.to_string(), action: Collision::KeepBoth },
+                CollisionAnswer { path: FINAL.to_string(), action: Collision::Replace },
+            ],
+            ..Overrides::default()
+        };
+        assert_eq!(check(&collided, &twice), Err("the answers name t00-00801 collision twice".to_string()));
     }
 
     #[test]

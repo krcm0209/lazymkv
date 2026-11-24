@@ -18,6 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use lazymkv_clients::{reason_text, webhook_target, HttpTransport, LookupBook, LookupState, PendingReason};
+use lazymkv_core::disc::disc;
 use lazymkv_core::ipc::{
     is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
     Notification, OutputStream, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
@@ -28,8 +29,10 @@ use lazymkv_core::job::{
 };
 use lazymkv_core::profile::JOB_PROFILE_FILE;
 use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, TuningCopy, DRIVES_FORMAT, JOB_FORMAT};
-use lazymkv_core::remembered::Overrides;
+use lazymkv_core::remembered::{overrides_from_value, Overrides};
 use lazymkv_core::review::{Note, Noted};
+use lazymkv_core::review_doc::{self, DocInputs, ReviewLabel};
+use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{configured_root, Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_core::subtitle::text::READING;
@@ -45,9 +48,9 @@ use crate::cleanup::{run_pass, CleanupJob};
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
-    no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
-    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
-    DISCARD_PREVIEW_NOT_BUILT, DISCARD_REFUSED, NO_CLIENT, REVIEW_NOT_BUILT, STOPPING, UI_QUIT_REFUSED,
+    no_running_step, not_a_review_action, not_a_secret, not_answered_yet, not_cancellable, not_held, secret_states,
+    settings_refused, snapshot_jobs, spawn_reader, spawn_serve, staging_unset, steps_running, Clients, ProgressGate,
+    CLIENT_DRAIN, DISCARD_PREVIEW_NOT_BUILT, DISCARD_REFUSED, NO_CLIENT, REVIEW_NOT_BUILT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
@@ -56,6 +59,7 @@ use crate::relay::{
     COMMAND_WRITABLE, STALE_EXIT,
 };
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
+use crate::review_store::{self, label_entries, LabelEntry, Reviewed};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
 use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
 use crate::staged;
@@ -808,6 +812,49 @@ fn new_record(id: &str, meta: &DiscMeta, drive: &str, now: u64) -> JobRecord {
         notes: Vec::new(),
         tuning_copy: None,
     }
+}
+
+/// Whether a `review_action` field gives nothing: absent, null, or an empty object or array (design part 9.4, as phase
+/// 2 read `overrides`). Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+fn is_empty_value(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(fields)) => fields.is_empty(),
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// An approval's answers and labels checked against the held job's review document (phase 3 design, parts 6.2, 6.4,
+/// 6.6), giving the labels' entries at `time_unix`. The document is built from local files only: the record and the
+/// job folder's `scan.txt` (read as `Step::planned_scan` reads it), with no staged paths, subtitle lines, unread
+/// reasons or colliding files, since the owner thread never reads a share; a collision item needs only the decision's
+/// path and its `path_collision` reason. Err is `build`'s, `check`'s or `label_entries`' refusal, or `<scan.txt>:
+/// <reason>`. Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+fn review_answers(
+    record: &JobRecord,
+    job_dir: &Path,
+    answers: &Overrides,
+    labels: &[ReviewLabel],
+    time_unix: u64,
+) -> Result<Vec<LabelEntry>, String> {
+    let path = job_dir.join("scan.txt");
+    let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let scanned = disc(&parse(&String::from_utf8_lossy(&bytes))).map_err(|error| format!("{}: {error}", path.display()))?;
+    let (staged, collisions) = (BTreeMap::new(), BTreeMap::new());
+    let (lines, unread) = (BTreeMap::new(), BTreeMap::new());
+    let inputs = DocInputs {
+        record,
+        disc: &scanned,
+        staged: &staged,
+        lines: &lines,
+        unread: &unread,
+        collisions: &collisions,
+        all: false,
+    };
+    let doc = review_doc::build(&inputs)?;
+    review_doc::check(&doc, answers)?;
+    label_entries(&doc, labels, time_unix)
 }
 
 /// The plan's identity title, the `title` of a job's notifications (S42).
@@ -2953,8 +3000,8 @@ impl Owner {
                 .map(|page| serde_json::to_value(page).unwrap_or(Value::Null)),
             Request::Shutdown { force } => return self.shutdown(client, id, force),
             Request::Command { words } => return self.command(client, id, words),
-            Request::ReviewAction { job, action, overrides, labels: _ } => {
-                self.review_action(&job, &action, overrides.as_ref())
+            Request::ReviewAction { job, action, overrides, labels } => {
+                self.review_action(&job, &action, overrides.as_ref(), labels.as_ref())
             }
             Request::Review { .. } => Err(REVIEW_NOT_BUILT.to_string()),
             Request::DiscardPreview { .. } => Err(DISCARD_PREVIEW_NOT_BUILT.to_string()),
@@ -3369,25 +3416,62 @@ impl Owner {
         Ok(Value::Null)
     }
 
-    /// `review_action` (design part 9.4, P25, R-A8, S82): only `approve` with no overrides (absent, null or empty) of
-    /// a job held at the disposition gate, which waits for the slot with `ReviewApproved` of default overrides and the
-    /// job's summary's review reasons. Every other action, and `approve` with overrides, waits for phase 3.
-    fn review_action(&mut self, job_id: &str, action: &str, overrides: Option<&Value>) -> Result<Value, String> {
-        let empty = match overrides {
-            None | Some(Value::Null) => true,
-            Some(Value::Object(fields)) => fields.is_empty(),
-            Some(Value::Array(items)) => items.is_empty(),
-            Some(_) => false,
-        };
-        if action != "approve" || !empty {
-            return Err(waits_for_review(action));
+    /// `review_action` (design part 9.4, P25, S82; phase 3 design, parts 6.4 to 6.6; ruling T32-R1): only `approve`, of
+    /// a job held at the disposition gate, which waits for the slot with `ReviewApproved` and the job's summary's review
+    /// reasons. With no answers and no labels (each absent, null or empty) the event carries default overrides and no
+    /// file is written, as in phase 2. Otherwise the answers are read strictly, an identity, season or titles answer is
+    /// refused (T32-R1), the labels are read, and both are checked against the job's review document (`review_answers`);
+    /// only then is the review recorded in `review.json` (`review_store::record`), the labels appended to
+    /// `review-labels.json`, and the event given the merged answers. Every refusal comes before anything is written and
+    /// leaves the job as it was. Def: T26, P3-T8. Use: P3-T12, P3-T14, P3-T16.
+    fn review_action(
+        &mut self,
+        job_id: &str,
+        action: &str,
+        overrides: Option<&Value>,
+        labels: Option<&Value>,
+    ) -> Result<Value, String> {
+        if action != "approve" {
+            return Err(not_a_review_action(action));
         }
         let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
         if job.record.state != (State::NeedsReview { held: Held::DispositionGate }) {
             return Err(not_held(job_id, &job.record.state));
         }
         let approved_reasons = job_summary(&job.record).review_reasons;
-        self.wait_for_slot(job_id, Event::ReviewApproved { overrides: Overrides::default(), approved_reasons });
+        let answers = if is_empty_value(overrides) { None } else { overrides.map(overrides_from_value).transpose()? };
+        if let Some(answers) = &answers {
+            let held = [
+                ("identity", answers.identity.is_some()),
+                ("season", answers.season.is_some()),
+                ("titles", !answers.titles.is_empty()),
+            ];
+            if let Some((key, _)) = held.into_iter().find(|(_, holds)| *holds) {
+                return Err(not_answered_yet(key));
+            }
+        }
+        let labels: Vec<ReviewLabel> = match labels {
+            Some(given) if !is_empty_value(Some(given)) => {
+                serde_json::from_value(given.clone()).map_err(|error| format!("labels: {error}"))?
+            }
+            _ => Vec::new(),
+        };
+        let answers = answers.unwrap_or_default();
+        if answers.is_empty() && labels.is_empty() {
+            self.wait_for_slot(job_id, Event::ReviewApproved { overrides: Overrides::default(), approved_reasons });
+            return Ok(Value::Null);
+        }
+        let job_dir = self.store.job_dir(job_id);
+        let time_unix = self.parts.host.now_unix();
+        let entries = review_answers(&job.record, &job_dir, &answers, &labels, time_unix)?;
+        // A labels file that does not read is refused before review.json is written.
+        review_store::read_labels(&job_dir)?;
+        let reviewed = Reviewed { time_unix, action: action.to_string(), reasons: approved_reasons.clone() };
+        let file = review_store::record(&job_dir, &answers, reviewed)?;
+        if !entries.is_empty() {
+            review_store::append_labels(&job_dir, &entries)?;
+        }
+        self.wait_for_slot(job_id, Event::ReviewApproved { overrides: file.overrides, approved_reasons });
         Ok(Value::Null)
     }
 

@@ -11,9 +11,8 @@ mod notify;
 mod owner;
 mod relay;
 mod restart;
-/// The job's review answers, `review.json` (phase 3 design, part 6.4); its first caller outside the tests is P3-T8's
-/// approval with answers. Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The job's review answers, `review.json`, and its review labels, `review-labels.json` (phase 3 design, parts 6.4,
+/// 6.6). Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
 mod review_store;
 mod selftest;
 mod space;

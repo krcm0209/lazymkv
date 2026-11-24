@@ -2,7 +2,8 @@
 //! review and, for each review, its time, its action and the reasons shown. The file is under the engine's local data
 //! folder, never a share. Its format and its `overrides` are read by `lazymkv_dev::cmd::plan::review_overrides`, the
 //! one reading `--overrides FILE` also uses, so the engine's Decide and the relayed `plan --job` and `decide --job` take
-//! the same answers from it. Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+//! the same answers from it. The labels the owner's answers give, `review-labels.json`, are kept beside it (part 6.6).
+//! Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
 
 use std::fs;
 use std::io;
@@ -10,7 +11,7 @@ use std::path::Path;
 
 use lazymkv_core::remembered::Overrides;
 use lazymkv_core::review::ReviewReason;
-use lazymkv_core::review_doc::{REVIEW_FILE, REVIEW_FORMAT};
+use lazymkv_core::review_doc::{LabelKind, ReviewDoc, ReviewLabel, REVIEW_FILE, REVIEW_FORMAT};
 use lazymkv_dev::cmd::plan::review_overrides;
 use lazymkv_platform::write_atomic;
 use serde_json::Value;
@@ -75,6 +76,112 @@ pub(crate) fn record(job_dir: &Path, answers: &Overrides, review: Reviewed) -> R
     Ok(file)
 }
 
+/// The job folder's file of review labels (phase 3 design, part 6.6). Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+pub(crate) const LABELS_FILE: &str = "review-labels.json";
+
+/// `review-labels.json`'s `format` (phase 3 design, part 6.6). Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+pub(crate) const LABELS_FORMAT: &str = "lazymkv review labels v1";
+
+/// One label an answer gave (phase 3 design, part 6.6): when (the review's `time_unix`), the title's key, the stream, the
+/// kind, the label word and the verdict the sheet showed for the track (its item's `stands`), which is the label it
+/// replaced. Field order is the file's key order. Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LabelEntry {
+    pub time_unix: u64,
+    pub title_key: String,
+    pub stream: u32,
+    pub kind: LabelKind,
+    pub label: String,
+    pub verdict: String,
+}
+
+/// `review-labels.json` (phase 3 design, part 6.6): `LABELS_FORMAT` and every label in the order given.
+#[derive(serde::Serialize)]
+struct LabelsFile<'a> {
+    format: &'a str,
+    labels: &'a [LabelEntry],
+}
+
+/// The words a label of `kind` may be (phase 3 design, part 6.6): `commentary` for audio; a subtitle role or
+/// `commentary` for a subtitle. "Keep" and "drop" say what the owner wants, not what the track is.
+fn label_words(kind: LabelKind) -> &'static [&'static str] {
+    match kind {
+        LabelKind::Audio => &["commentary"],
+        LabelKind::Subtitle => &["regular", "sdh", "forced", "commentary"],
+    }
+}
+
+/// The entries `labels` give at `time_unix`, each checked against `doc` (phase 3 design, part 6.6): a label names a
+/// track item of its kind on the sheet (its id as `review_doc::check` names one: `<title key> audio <stream>` or
+/// `<title key> sub <stream>`, `title <n> ...` for a scan title the sheet does not show), else Err
+/// `no item "<id>" on this sheet`; and its word is one `label_words` allows, else Err `"<word>" is not a label for <id>`.
+/// Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+pub(crate) fn label_entries(doc: &ReviewDoc, labels: &[ReviewLabel], time_unix: u64) -> Result<Vec<LabelEntry>, String> {
+    labels
+        .iter()
+        .map(|given| {
+            let word = match given.kind {
+                LabelKind::Audio => "audio",
+                LabelKind::Subtitle => "sub",
+            };
+            let shown = doc.titles.iter().find(|title| title.scan_title == given.title);
+            let id = match shown {
+                Some(title) => format!("{} {word} {}", title.key, given.stream),
+                None => format!("title {} {word} {}", given.title, given.stream),
+            };
+            let (title, item) = shown
+                .and_then(|title| title.items.iter().find(|item| item.id == id).map(|item| (title, item)))
+                .ok_or_else(|| format!("no item \"{id}\" on this sheet"))?;
+            if !label_words(given.kind).contains(&given.label.as_str()) {
+                return Err(format!("\"{}\" is not a label for {id}", given.label));
+            }
+            Ok(LabelEntry {
+                time_unix,
+                title_key: title.key.clone(),
+                stream: given.stream,
+                kind: given.kind,
+                label: given.label.clone(),
+                verdict: item.stands.clone(),
+            })
+        })
+        .collect()
+}
+
+/// `<job_dir>/review-labels.json`'s labels (phase 3 design, part 6.6): none when there is no file; a file that is not
+/// JSON, of another format or with labels that do not read is refused. Every Err is `<path>: <reason>`. Def: P3-T8.
+/// Use: P3-T12, P3-T14, P3-T16.
+pub(crate) fn read_labels(job_dir: &Path) -> Result<Vec<LabelEntry>, String> {
+    let path = job_dir.join(LABELS_FILE);
+    let shown = path.display().to_string();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{shown}: {error}")),
+    };
+    let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    let value: Value = serde_json::from_slice(text).map_err(|error| format!("{shown}: {error}"))?;
+    let found = value.get("format").and_then(Value::as_str).unwrap_or_default();
+    if found != LABELS_FORMAT {
+        return Err(format!("{shown}: the format is \"{found}\", not \"{LABELS_FORMAT}\""));
+    }
+    let labels = value.get("labels").cloned().unwrap_or(Value::Null);
+    serde_json::from_value(labels).map_err(|error| format!("{shown}: labels: {error}"))
+}
+
+/// `entries` appended to `<job_dir>/review-labels.json` (phase 3 design, part 6.6): the labels already there are kept
+/// as they are and in their order (a file `read_labels` refuses is refused and left as it is), and the whole is written
+/// with `write_atomic`, pretty-printed with a final newline. Every Err is `<path>: <reason>`. Def: P3-T8. Use: P3-T12,
+/// P3-T14, P3-T16.
+pub(crate) fn append_labels(job_dir: &Path, entries: &[LabelEntry]) -> Result<(), String> {
+    let path = job_dir.join(LABELS_FILE);
+    let mut labels = read_labels(job_dir)?;
+    labels.extend(entries.iter().cloned());
+    let file = LabelsFile { format: LABELS_FORMAT, labels: &labels };
+    let mut bytes = serde_json::to_vec_pretty(&file).map_err(|error| format!("{}: {error}", path.display()))?;
+    bytes.push(b'\n');
+    write_atomic(&path, &bytes).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,7 +189,7 @@ mod tests {
 
     use lazymkv_core::remembered::{Overrides, SubtitleOverride, SubtitleTrackOverride};
     use lazymkv_core::review::ReviewReason;
-    use lazymkv_core::review_doc::{REVIEW_FILE, REVIEW_FORMAT};
+    use lazymkv_core::review_doc::{LabelKind, REVIEW_FILE, REVIEW_FORMAT};
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
     use lazymkv_core::tracks::SubtitleRole;
 
@@ -143,6 +250,46 @@ mod tests {
         s.write(REVIEW_FILE, r#"{"format": "lazymkv review v1", "overrides": {"subtitle": []}, "reviews": []}"#);
         let unknown = "overrides: unknown key \"subtitle\" (identity, season, titles, audio, subtitles, collision)";
         assert_eq!(read(&s.0), Err(format!("{}: {unknown}", path.display())));
+    }
+
+    /// A subtitle label given at `time_unix` for stream `stream` of title `t00-00800`.
+    fn label(time_unix: u64, stream: u32) -> LabelEntry {
+        LabelEntry {
+            time_unix,
+            title_key: "t00-00800".to_string(),
+            stream,
+            kind: LabelKind::Subtitle,
+            label: "commentary".to_string(),
+            verdict: "regular".to_string(),
+        }
+    }
+
+    #[test]
+    fn labels_are_appended_and_never_rewritten() {
+        let s = Scratch::new("review-store-labels");
+        assert_eq!(read_labels(&s.0), Ok(Vec::new()));
+        append_labels(&s.0, &[label(100, 2)]).unwrap();
+        append_labels(&s.0, &[label(200, 3)]).unwrap();
+        assert_eq!(read_labels(&s.0), Ok(vec![label(100, 2), label(200, 3)]));
+        let text = fs::read_to_string(s.0.join(LABELS_FILE)).unwrap();
+        assert!(text.starts_with("{\n  \"format\": \"lazymkv review labels v1\",\n  \"labels\": ["), "{text}");
+        assert!(text.ends_with("}\n"), "{text}");
+        let at = |key: &str| text.find(key).unwrap();
+        let keys = ["\"time_unix\"", "\"title_key\"", "\"stream\"", "\"kind\": \"subtitle\"", "\"label\": ", "\"verdict\""];
+        assert!(keys.windows(2).all(|pair| at(pair[0]) < at(pair[1])), "{text}");
+    }
+
+    #[test]
+    fn a_labels_file_of_another_format_is_refused_and_left_as_it_is() {
+        let s = Scratch::new("review-store-labels-format");
+        let path = s.write_path(LABELS_FILE, r#"{"format": "lazymkv review labels v9", "labels": []}"#);
+        let refusal =
+            format!("{}: the format is \"lazymkv review labels v9\", not \"lazymkv review labels v1\"", path.display());
+        assert_eq!(read_labels(&s.0), Err(refusal.clone()));
+        assert_eq!(append_labels(&s.0, &[label(100, 2)]), Err(refusal));
+        assert!(fs::read_to_string(&path).unwrap().contains("v9"));
+        s.write(LABELS_FILE, "{");
+        assert_eq!(read_labels(&s.0), Err(format!("{}: EOF while parsing an object at line 1 column 1", path.display())));
     }
 
     #[test]

@@ -76,9 +76,16 @@ pub(crate) fn not_held(id: &str, state: &State) -> String {
     format!("job {id} is {}, not held at the disposition gate", state.as_str())
 }
 
-/// Every review action but `approve` with no overrides waits for phase 3 (Ruling S76, R-A8). Def: T26. Use: T26.
-pub(crate) fn waits_for_review(action: &str) -> String {
-    format!("{action} waits for phase 3's review commands (R-A8)")
+/// A `review_action` whose action this version does not take (phase 3 design, part 11): only `approve`. Def: P3-T8.
+/// Use: P3-T12, P3-T14, P3-T16.
+pub(crate) fn not_a_review_action(action: &str) -> String {
+    format!("\"{action}\" is not a review action (approve)")
+}
+
+/// An `approve` whose answers hold an identity, season or titles answer, which arrive with a later pull request (phase
+/// 3 design, part 6.4; ruling T32-R1). Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+pub(crate) fn not_answered_yet(key: &str) -> String {
+    format!("this version does not take {key} answers yet")
 }
 
 /// A `shutdown` without `force` while steps run names their jobs (Ruling S76, design part 3.8). Def: T26. Use: T26.

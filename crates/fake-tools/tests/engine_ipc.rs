@@ -1552,6 +1552,9 @@ fn an_approved_job_decides_again_from_its_kept_inputs_and_files() {
     let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
     assert!(!log.contains("read back from the job folder"));
     assert_eq!(fs::read(&target).unwrap().len(), 16);
+    // An approval with no answers keeps no answers file and no labels file (phase 3 design, part 6.5).
+    assert!(!h.job_dir(&id).join("review.json").exists());
+    assert!(!h.job_dir(&id).join("review-labels.json").exists());
 }
 
 #[test]
@@ -1566,18 +1569,189 @@ fn approve_is_refused_outside_the_disposition_gate_naming_the_state() {
                format!("job {id} is Filed, not held at the disposition gate"));
 }
 
-#[test]
-fn approve_with_overrides_is_refused_naming_phase_3() {
-    let h = scripted(held_script());
+// ---- Approval with answers (phase 3 design, parts 6.4 to 6.6; ruling T32-R1) ----
+
+/// movie-direct with `movie-direct-two-subs` held at the disposition gate by a file already at the final path
+/// (path_collision): the harness, a client that has had its snapshot, the held job's ID and the colliding file.
+fn held_two_subs() -> (Harness, Client, String, std::path::PathBuf) {
+    let h = stand_in(&["movie-direct", "movie-direct-two-subs"], settings());
+    let target = h.library().join(FINAL);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"owner's").unwrap();
     let mut c = Client::open(&h);
     c.snapshot();
     h.insert("tok0", DISC_A);
     h.deliver();
     let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    (h, c, id, target)
+}
+
+/// The held job's title key, scan title and first kept subtitle stream with its role's word, read from its record.
+fn kept_subtitle(h: &Harness, id: &str) -> (String, u32, u32, String) {
+    let title = h.record(id).titles[0].clone();
+    let decision = title.decision.expect("the held title was decided");
+    assert_eq!(decision.subtitles.kept.len(), 2, "both subtitle streams are kept before the answer");
+    let kept = &decision.subtitles.kept[0];
+    (title.key, title.scan_title, kept.stream, kept.role.as_str().to_string())
+}
+
+/// The stand-in mkvmerge's identification of the remuxed file, made to hold the video, the audio and the second kept
+/// subtitle track of the held job's decision, as the file is once the first is dropped (the scenario's own lists none).
+fn file_with_one_subtitle(h: &Harness, id: &str) {
+    let decision = h.record(id).titles[0].decision.clone().unwrap();
+    let other = &decision.subtitles.kept[1];
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/partial-ident.json");
+    let mut ident: Value = serde_json::from_str(&fs::read_to_string(base).unwrap()).unwrap();
+    let sdh = other.role == lazymkv_core::tracks::SubtitleRole::Sdh;
+    ident["tracks"].as_array_mut().unwrap().push(json!({"id": 2, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+        "language": "eng", "track_name": other.name, "forced_track": other.forced, "flag_hearing_impaired": sdh}}));
+    fs::write(h.tools().join("partial-ident.json"), ident.to_string()).unwrap();
+}
+
+/// Asserts that a refused approval left the held job as it was: still held, no new transition, and no answers file.
+fn assert_unchanged(h: &Harness, id: &str, transitions: usize) {
+    assert_eq!(h.record(id).state, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(h.transitions(id).len(), transitions);
+    assert!(!h.job_dir(id).join("review.json").exists(), "no review.json was written");
+    assert!(!h.job_dir(id).join("review-labels.json").exists(), "no review-labels.json was written");
+}
+
+#[test]
+fn approve_with_a_subtitle_answer_files_the_job_with_that_answer() {
+    let (h, mut c, id, target) = held_two_subs();
+    let (key, title, stream, verdict) = kept_subtitle(&h, &id);
+    let reasons = h.record(&id).titles[0].decision.clone().unwrap().reviews;
+    let shown = serde_json::to_value(lazymkv_core::ipc::job_summary(&h.record(&id)).review_reasons).unwrap();
+    fs::remove_file(&target).unwrap();
+    file_with_one_subtitle(&h, &id);
+    let answer = json!({"subtitles": [{"title": title, "stream": stream, "action": "drop"}]});
+    let label = json!([{"title": title, "stream": stream, "kind": "subtitle", "label": "commentary"}]);
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer, "labels": label}));
+    c.until_state(Some(&id), "Filed");
+    let dir = h.job_dir(&id);
+    // The decision keeps one subtitle track fewer and names the drop as the owner's.
+    let decided = h.record(&id).titles[0].decision.clone().unwrap();
+    assert_eq!(decided.subtitles.kept.len(), 1, "{decided:?}");
+    assert!(decided.subtitles.kept.iter().all(|track| track.stream != stream));
+    let decide: Value = serde_json::from_str(&fs::read_to_string(dir.join(&key).join("decide.json")).unwrap()).unwrap();
+    let subtitles = &decide["decision"]["decision"]["subtitles"];
+    assert_eq!(subtitles["kept"].as_array().unwrap().len(), 1, "{subtitles}");
+    assert!(subtitles["dropped"].as_array().unwrap().contains(&json!([stream, {"why": "reviewed"}])), "{subtitles}");
+    // review.json keeps the answer and the review with the reasons the owner was shown.
+    let review: Value = serde_json::from_str(&fs::read_to_string(dir.join("review.json")).unwrap()).unwrap();
+    assert_eq!(review["format"], json!("lazymkv review v1"));
+    assert_eq!(review["overrides"]["subtitles"], json!([{"title": title, "stream": stream, "action": "drop"}]));
+    let reviews = review["reviews"].as_array().unwrap();
+    assert_eq!(reviews.len(), 1, "{review}");
+    assert_eq!(reviews[0]["action"], json!("approve"));
+    assert_eq!(reviews[0]["reasons"], shown);
+    assert!(reasons.contains(&ReviewReason::PathCollision), "{reasons:?}");
+    // The ReviewApproved event carries the merged answers and the same reasons.
+    let approved = h.transitions(&id).into_iter().find(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))).unwrap();
+    let event = serde_json::to_value(&approved.event).unwrap();
+    assert_eq!(event["approved_reasons"], shown);
+    assert_eq!(event["overrides"]["subtitles"], review["overrides"]["subtitles"]);
+    assert_eq!(reviews[0]["time_unix"], json!(approved.time_unix));
+    // review-labels.json holds the label, with the verdict the sheet showed.
+    let labels: Value = serde_json::from_str(&fs::read_to_string(dir.join("review-labels.json")).unwrap()).unwrap();
+    assert_eq!(labels, json!({"format": "lazymkv review labels v1", "labels": [{
+        "time_unix": approved.time_unix, "title_key": key, "stream": stream, "kind": "subtitle", "label": "commentary",
+        "verdict": verdict}]}));
+}
+
+#[test]
+fn an_answer_for_a_stream_the_job_lacks_is_refused_and_nothing_is_saved() {
+    let (h, mut c, id, _) = held_two_subs();
+    let (key, title, _, _) = kept_subtitle(&h, &id);
+    let before = h.transitions(&id).len();
+    let answer = json!({"subtitles": [{"title": title, "stream": 99, "action": "drop"}]});
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": answer})),
+               format!("no item \"{key} sub 99\" on this sheet"));
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn a_misspelt_key_is_refused_naming_it() {
+    let (h, mut c, id, _) = held_two_subs();
+    let before = h.transitions(&id).len();
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": {"subtitle": []}})),
+               "overrides: unknown key \"subtitle\" (identity, season, titles, audio, subtitles, collision)");
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn identity_and_titles_answers_wait_for_a_later_version() {
+    let (h, mut c, id, _) = held_two_subs();
+    let before = h.transitions(&id).len();
     assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": {"season": 2}})),
-               "approve waits for phase 3's review commands (R-A8)");
+               "this version does not take season answers yet");
+    let titles = json!({"titles": [{"title": 0, "role": "ignored"}], "season": 2});
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": titles})),
+               "this version does not take season answers yet");
+    // A whole serialised Overrides with nothing in those three keys is not refused for them.
+    let (_, title, stream, _) = kept_subtitle(&h, &id);
+    let whole = json!({"identity": null, "season": null, "titles": [], "audio": [], "collision": [],
+                       "subtitles": [{"title": title, "stream": stream, "action": "bogus"}]});
+    let refused = c.err("review_action", json!({"job": id, "action": "approve", "overrides": whole}));
+    assert!(refused.starts_with("overrides: "), "{refused}");
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn an_unknown_action_is_refused() {
+    let (h, mut c, id, _) = held_two_subs();
+    let before = h.transitions(&id).len();
     assert_eq!(c.err("review_action", json!({"job": id, "action": "set_identity"})),
-               "set_identity waits for phase 3's review commands (R-A8)");
+               "\"set_identity\" is not a review action (approve)");
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn a_label_for_a_track_the_sheet_lacks_or_a_word_that_is_no_label_is_refused() {
+    let (h, mut c, id, _) = held_two_subs();
+    let (key, title, stream, _) = kept_subtitle(&h, &id);
+    let before = h.transitions(&id).len();
+    let missing = json!([{"title": title, "stream": 99, "kind": "subtitle", "label": "sdh"}]);
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "labels": missing})),
+               format!("no item \"{key} sub 99\" on this sheet"));
+    let word = json!([{"title": title, "stream": stream, "kind": "subtitle", "label": "drop"}]);
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "labels": word})),
+               format!("\"drop\" is not a label for {key} sub {stream}"));
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn a_collision_answer_for_the_held_path_is_accepted() {
+    let (h, mut c, id, target) = held_two_subs();
+    let path = h.record(&id).titles[0].decision.clone().unwrap().path.unwrap().path;
+    let answer = json!({"collision": [{"path": path, "action": "keep_both"}]});
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer}));
+    let decisions = |h: &Harness| -> Vec<Event> {
+        h.transitions(&id).into_iter().filter_map(|t| t.event).filter(|e| matches!(e, Event::DecisionDone { .. })).collect()
+    };
+    h.wait("the approval decided again", |h| decisions(h).len() >= 2);
+    // The second decision, made with the answer, no longer holds the job for the collision.
+    let Event::DecisionDone { reasons, .. } = &decisions(&h)[1] else { unreachable!() };
+    assert!(!reasons.contains(&ReviewReason::PathCollision), "{reasons:?}");
+    let review: Value = serde_json::from_str(&fs::read_to_string(h.job_dir(&id).join("review.json")).unwrap()).unwrap();
+    assert_eq!(review["overrides"]["collision"], json!([{"path": path, "action": "keep_both"}]));
+    assert!(!h.job_dir(&id).join("review-labels.json").exists(), "a collision answer writes no label");
+    assert_eq!(fs::read(&target).unwrap(), b"owner's", "the existing file is kept");
+}
+
+#[test]
+fn a_corrupt_review_file_refuses_the_approval_naming_it() {
+    let (h, mut c, id, _) = held_two_subs();
+    let (_, title, stream, _) = kept_subtitle(&h, &id);
+    let path = h.job_dir(&id).join("review.json");
+    fs::write(&path, b"{").unwrap();
+    let before = h.transitions(&id).len();
+    let answer = json!({"subtitles": [{"title": title, "stream": stream, "action": "drop"}]});
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": answer})),
+               format!("{}: EOF while parsing an object at line 1 column 1", path.display()));
+    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(h.transitions(&id).len(), before);
+    assert_eq!(fs::read(&path).unwrap(), b"{", "the file is left as it was");
 }
 
 #[test]
