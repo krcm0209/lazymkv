@@ -96,6 +96,13 @@ pub fn titles_for<'a>(disc: &'a Disc, playlist: &str) -> Vec<&'a Title> {
     disc.titles.values().filter(|title| plays(title, playlist)).collect()
 }
 
+/// The folder name of a disc ID in a maps folder: `id` trimmed, in upper case, when it is exactly 40 ASCII hex digits;
+/// None otherwise. The only part of a map a path is built from.
+pub fn disc_folder(id: &str) -> Option<String> {
+    let id = id.trim();
+    (id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| id.to_ascii_uppercase())
+}
+
 /// The scanned disc's ID (a recording's `meta.json` `disc_id`), or the reason it is not known (M3-6).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DiscId {

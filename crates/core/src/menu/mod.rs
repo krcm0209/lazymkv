@@ -27,6 +27,12 @@ pub const FORMAT: &str = "lazymkv menu map v1";
 /// The map's file name inside its map folder (design 5.1).
 pub const FILE_NAME: &str = "menu-map.json";
 
+/// The most bytes a map file may hold to be published (design 8).
+pub const MAP_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The most bytes an off-decisions file may hold to be published (design 8).
+pub const OFF_MAX_BYTES: u64 = 1024 * 1024;
+
 /// Level `replayed` needs at least this many agreeing replays (design 5.1; the writer's `REPLAYS_NEEDED`).
 pub const REPLAYS_NEEDED: i64 = 3;
 

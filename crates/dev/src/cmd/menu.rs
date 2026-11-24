@@ -1,32 +1,39 @@
-//! `lazymkv-dev menu show <map> | check <map> --scan <scan> [--evidence DIR]`: menu maps at the command line (menu maps
-//! design 5.4; the format and rulings M3-1 to M3-8 are docs/menu-maps/format.md). `show` prints a map, labels as they
-//! are; `check` ties it to a scanned disc and prints ids, playlists and numbers only, never a label. Exit: show 0, or
-//! 2; check 0 when nothing failed, 1 otherwise; 2 for an argument, map or scan problem; 3 for a slug without the
-//! evidence clone. Refusals print `lazymkv-dev menu: error: <line>`, one per problem. The command changes nothing;
-//! `decide --menu` reads a map with `read_map`, the off-decisions beside it with `read_off` and the recording's
+//! `lazymkv-dev menu show <map> | check <map> --scan <scan> [--evidence DIR] | off <map> | publish <map> --to ROOT`:
+//! menu maps at the command line (menu maps design 5.4 and parts 8 and 9; the format and rulings M3-1 to M3-8 are
+//! docs/menu-maps/format.md). `show` prints a map, labels as they are; `check` ties it to a scanned disc and prints
+//! ids, playlists and numbers only, never a label; `off` lists the choices that need an off-decision, each with its
+//! state; `publish` checks a map and copies it and its off-decisions into a maps folder under the disc's ID. Exit:
+//! show and off 0, or 2; check 0 when nothing failed, 1 otherwise; publish 0, or 2; 2 for an argument, map or scan
+//! problem; 3 for a slug without the evidence clone. Refusals print `lazymkv-dev menu: error: <line>`, one per
+//! problem. Only `publish` writes, and only when nothing is refused. `decide --menu` reads a map with `read_map`, the off-decisions beside it with `read_off` and the recording's
 //! playlists with `read_playlists`, and its decision drops a commentary or audio description the map confirms
 //! (design 5.4a).
 
-use crate::evidence::{read_file_text, resolve_recording, Ctx, Recording, Refused};
+use crate::evidence::{os_error_text, read_file_text, resolve_recording, Ctx, Recording, Refused};
 use crate::{usage_error, Args};
 use lazymkv_core::disc::{disc, Disc};
 use lazymkv_core::menu::{
-    self, parse_off, parse_playlist, DiscId, Effect, MenuMap, OffDecisions, Playlist, FILE_NAME, META_WITHOUT_ID,
-    NO_ID_IN_SCAN_FILE, NO_META, OFF_FILE_NAME,
+    self, audio_roles_in, disc_folder, needs_decision, parse_off, parse_playlist, role_text, DiscId, Effect, Kind,
+    MenuMap, OffDecision, OffDecisions, Playlist, FILE_NAME, MAP_MAX_BYTES, META_WITHOUT_ID, NO_ID_IN_SCAN_FILE,
+    NO_META, OFF_FILE_NAME, OFF_MAX_BYTES,
 };
 use lazymkv_core::recording::files::Meta;
-use lazymkv_core::recording::{py_float_repr, py_repr_str, read_json, read_text, text_mode, Encoding, Errors, Tree};
+use lazymkv_core::recording::{
+    decode_text, py_float_repr, py_repr_str, read_json, read_text, text_mode, Encoding, Errors, Tree,
+};
 use lazymkv_core::robot::parse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The command's name as typed.
 const NAME: &str = "menu";
 /// argparse's usage lines, under the command's name.
-const USAGE: &str = "menu [-h] {show,check} ...";
+const USAGE: &str = "menu [-h] {show,check,off,publish} ...";
 const SHOW_USAGE: &str = "menu show [-h] map";
 const CHECK_USAGE: &str = "menu check [-h] map --scan SCAN [--evidence DIR]";
+const OFF_USAGE: &str = "menu off [-h] map";
+const PUBLISH_USAGE: &str = "menu publish [-h] map --to ROOT";
 /// A recording folder's files this command reads.
 const SCAN_FILE: &str = "scan.txt";
 const META_FILE: &str = "meta.json";
@@ -41,9 +48,11 @@ Menu maps (menu maps design 5.4): what a disc's menu calls each choice, and the 
 
   show <map>                 print a map, one line for each part of it, labels as they are
   check <map> --scan SCAN    check a map against a scanned disc; prints ids, playlists and numbers, never a label
+  off <map>                  list the choices that need an off-decision, each with its state
+  publish <map> --to ROOT    check a map and copy it, with its off-decisions, into ROOT under the disc's ID
 
 positional arguments:
-  {show,check}
+  {show,check,off,publish}
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -75,6 +84,40 @@ the map is of another disc (a playlist the scan does not list is reported, not f
 map or scan that cannot be used; 3 when a slug is given and the evidence clone is absent.
 ";
 
+/// What `off -h` prints after the usage line.
+const OFF_HELP: &str = "
+Each audio choice whose wording holds a role word (a commentary, an audio description, the main programme) and that
+may mean a switch is off or a track is absent, or that a decision of the off file names, is printed as one line:
+STATE<TAB>ID<TAB>TEXT. STATE is `off` or `role` (a decision of menu-off.tsv fits the TEXT), `stale` (a decision names
+the ID with another text) or `undecided`. Saving a line with its STATE as `off` or `role` in menu-off.tsv decides it.
+
+positional arguments:
+  map         a map folder (its menu-map.json and menu-off.tsv are read) or a map file
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+exit status: 0 when the lines are printed; 2 for an argument error, or a map or off file that cannot be read or does
+not pass the rules (every problem is printed on its own line).
+";
+/// What `publish -h` prints after the usage line.
+const PUBLISH_HELP: &str = "
+Checks a map and its off-decisions, then copies their files, byte for byte, to ROOT/ID/menu-map.json and
+ROOT/ID/menu-off.tsv, ID being the map's disc ID in upper case. A menu-off.tsv left in ROOT/ID by an earlier publish
+is removed when the map has none. Nothing is written unless every check passes. Prints
+PUBLISHED ID choices=N decisions=M undecided=K.
+
+positional arguments:
+  map         a map folder (its menu-map.json and menu-off.tsv are read) or a map file
+
+optional arguments:
+  -h, --help  show this help message and exit
+  --to ROOT   the maps folder, which must exist; ID is made inside it when missing
+
+exit status: 0 when the map is published; 2 for an argument error, or when anything is refused (every problem is
+printed on its own line, and nothing is written).
+";
+
 /// A refusal with exit code 2.
 fn refused(line: String) -> Refused {
     Refused { code: 2, line }
@@ -86,6 +129,14 @@ fn refused(line: String) -> Refused {
 /// path, the working folder) and the map. The file is UTF-8 with an optional byte-order mark, read strictly. Every
 /// problem of `menu::read` becomes one line `<shown>: <problem>` in the refusal (code 2), the lines joined with '\n'.
 pub(crate) fn read_map(ctx: &Ctx, given: &str) -> Result<(String, MenuMap), Refused> {
+    let (path, shown) = map_path(ctx, given);
+    let text = read_file_text(&path, &shown, Encoding::Utf8Sig, Errors::Strict)
+        .map_err(|problem| refused(format!("{shown}: {problem}")))?;
+    parse_map(&text, &shown).map(|map| (shown, map))
+}
+
+/// The file the map `given` names and its shown path (see `read_map`).
+fn map_path(ctx: &Ctx, given: &str) -> (PathBuf, String) {
     let path = ctx.abs(given);
     let (path, shown) = if path.is_dir() {
         let folder = given.trim_end_matches(['/', '\\']);
@@ -95,15 +146,15 @@ pub(crate) fn read_map(ctx: &Ctx, given: &str) -> Result<(String, MenuMap), Refu
     } else {
         (path, given.to_string())
     };
-    let text = read_file_text(&path, &shown, Encoding::Utf8Sig, Errors::Strict)
-        .map_err(|problem| refused(format!("{shown}: {problem}")))?;
-    match menu::read(&text) {
-        Ok(map) => Ok((shown, map)),
-        Err(problems) => {
-            let lines: Vec<String> = problems.iter().map(|problem| format!("{shown}: {problem}")).collect();
-            Err(refused(lines.join("\n")))
-        }
-    }
+    (path, shown)
+}
+
+/// The map in `text`, or a refusal with one line `<shown>: <problem>` for each problem of `menu::read`.
+fn parse_map(text: &str, shown: &str) -> Result<MenuMap, Refused> {
+    menu::read(text).map_err(|problems| {
+        let lines: Vec<String> = problems.iter().map(|problem| format!("{shown}: {problem}")).collect();
+        refused(lines.join("\n"))
+    })
 }
 
 /// The off-decisions beside the map `given` names (`<folder>/menu-off.tsv`; for a map file, its folder's): none
@@ -112,6 +163,17 @@ pub(crate) fn read_map(ctx: &Ctx, given: &str) -> Result<(String, MenuMap), Refu
 /// the given path's folder part, or the file name alone when it has none), and the file is read as the map is:
 /// UTF-8 with an optional byte-order mark, strictly (`read_file_text` with `Utf8Sig`), then `menu::parse_off`.
 pub(crate) fn read_off(ctx: &Ctx, given: &str) -> Result<OffDecisions, Refused> {
+    let (path, shown) = off_path(ctx, given);
+    if !path.exists() {
+        return Ok(OffDecisions::default());
+    }
+    let text = read_file_text(&path, &shown, Encoding::Utf8Sig, Errors::Strict)
+        .map_err(|problem| refused(format!("{shown}: {problem}")))?;
+    parse_off_text(&text, &shown)
+}
+
+/// The off file beside the map `given` names and its shown path (see `read_off`).
+fn off_path(ctx: &Ctx, given: &str) -> (PathBuf, String) {
     let path = ctx.abs(given);
     let (path, shown) = if path.is_dir() {
         let folder = given.trim_end_matches(['/', '\\']);
@@ -124,12 +186,12 @@ pub(crate) fn read_off(ctx: &Ctx, given: &str) -> Result<OffDecisions, Refused> 
         };
         (path.parent().map_or_else(|| PathBuf::from(OFF_FILE_NAME), |folder| folder.join(OFF_FILE_NAME)), shown)
     };
-    if !path.exists() {
-        return Ok(OffDecisions::default());
-    }
-    let text = read_file_text(&path, &shown, Encoding::Utf8Sig, Errors::Strict)
-        .map_err(|problem| refused(format!("{shown}: {problem}")))?;
-    parse_off(&text).map_err(|problems| {
+    (path, shown)
+}
+
+/// The decisions in `text`, or a refusal with one line `<shown>: <problem>` for each problem of `parse_off`.
+fn parse_off_text(text: &str, shown: &str) -> Result<OffDecisions, Refused> {
+    parse_off(text).map_err(|problems| {
         let lines: Vec<String> = problems.iter().map(|problem| format!("{shown}: {problem}")).collect();
         refused(lines.join("\n"))
     })
@@ -306,6 +368,227 @@ fn run_show(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Write
     }
 }
 
+/// The lines `menu off` prints for a map: for each audio choice, in map order, whose `role_text` holds a role word and
+/// that the net catches or a decision names, its state (`off` or `role` when a decision fits, `stale` when a decision
+/// names the id with another text, else `undecided`), its id and its `role_text`.
+fn off_rows(map: &MenuMap, off: &OffDecisions) -> Vec<(&'static str, String, String)> {
+    let mut rows = Vec::new();
+    for choice in map.choices.iter().filter(|choice| choice.kind == Kind::Audio) {
+        let text = role_text(&choice.section, &choice.label);
+        let named = off.text(&choice.id).is_some();
+        if audio_roles_in(&text).is_empty() || !(named || needs_decision(&text)) {
+            continue;
+        }
+        let state = match off.fits(&choice.id, &text) {
+            Some(OffDecision::Off) => "off",
+            Some(OffDecision::Role) => "role",
+            None if named => "stale",
+            None => "undecided",
+        };
+        rows.push((state, choice.id.clone(), text));
+    }
+    rows
+}
+
+/// `menu off <map>`: one line for each choice that needs an off-decision, exit 0; a refusal as `refuse` prints it.
+fn run_off(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let words = match Args::new(rest, &[]).positionals() {
+        Ok(words) => words,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
+    let given = match words.as_slice() {
+        [] => return usage_error(err, "menu off", OFF_USAGE, "the following arguments are required: map"),
+        [given] => given,
+        [_, extra @ ..] => {
+            return usage_error(err, NAME, USAGE, &format!("unrecognized arguments: {}", extra.join(" ")));
+        }
+    };
+    match read_map(ctx, given).and_then(|(_, map)| read_off(ctx, given).map(|off| (map, off))) {
+        Ok((map, off)) => {
+            for (state, id, text) in off_rows(&map, &off) {
+                let _ = writeln!(out, "{state}\t{id}\t{text}");
+            }
+            0
+        }
+        Err(refusal) => refuse(err, &refusal),
+    }
+}
+
+/// The bytes of the file at `path`, shown as `shown`, or why not: a refusal line is added to `lines` for a file over
+/// `limit` bytes (its size read from its metadata, the file not read) or one that cannot be read.
+fn read_source(path: &Path, shown: &str, limit: u64, lines: &mut Vec<String>) -> Option<Vec<u8>> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > limit {
+            lines.push(format!("{shown}: {} bytes is over the limit of {limit}", meta.len()));
+            return None;
+        }
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            lines.push(format!("{shown}: {}", os_error_text(&error, shown)));
+            None
+        }
+    }
+}
+
+/// Adds the problems of a refusal to `lines`, and gives the value of an accepted one.
+fn collect<T>(found: Result<T, Refused>, lines: &mut Vec<String>) -> Option<T> {
+    match found {
+        Ok(value) => Some(value),
+        Err(refusal) => {
+            lines.extend(refusal.line.split('\n').map(String::from));
+            None
+        }
+    }
+}
+
+/// An I/O failure of a write at `shown` as a refusal.
+fn write_failed(error: &std::io::Error, shown: &str) -> Refused {
+    refused(format!("{shown}: {}", os_error_text(error, shown)))
+}
+
+/// What `check_publish` found fit to write: the disc's folder (as a path and as shown), the files' bytes (the off
+/// file's only when the map has one) and the line to print.
+struct Checked {
+    folder: PathBuf,
+    shown_folder: String,
+    map_bytes: Vec<u8>,
+    off_bytes: Option<Vec<u8>>,
+    summary: String,
+}
+
+/// The `role_text` of the map's audio choice `id`, if it has one.
+fn stale_wording(map: &MenuMap, id: &str) -> Option<String> {
+    map.choices
+        .iter()
+        .find(|choice| choice.kind == Kind::Audio && choice.id == id)
+        .map(|choice| role_text(&choice.section, &choice.label))
+}
+
+/// Checks everything `menu publish` needs, writing nothing: the map's and the off file's sizes (from their metadata,
+/// before they are read), their problems, the map's disc ID, each stale line, and the folders.
+fn check_publish(ctx: &Ctx, given: &str, to: &str) -> Result<Checked, Refused> {
+    let mut lines = Vec::new();
+    let (map_file, map_shown) = map_path(ctx, given);
+    let (off_file, off_shown) = off_path(ctx, given);
+    let decode = |bytes: &[u8], shown: &str| {
+        decode_text(bytes, Encoding::Utf8Sig, Errors::Strict).map_err(|problem| refused(format!("{shown}: {problem}")))
+    };
+    let map_bytes = read_source(&map_file, &map_shown, MAP_MAX_BYTES, &mut lines);
+    let map = map_bytes
+        .as_deref()
+        .and_then(|bytes| collect(decode(bytes, &map_shown).and_then(|text| parse_map(&text, &map_shown)), &mut lines));
+    // No off file is no decisions; one too large to read or with problems is refused, and no decision is known.
+    let off_bytes = if off_file.exists() { read_source(&off_file, &off_shown, OFF_MAX_BYTES, &mut lines) } else { None };
+    let off = match (&off_bytes, off_file.exists()) {
+        (Some(bytes), _) => collect(decode(bytes, &off_shown).and_then(|text| parse_off_text(&text, &off_shown)), &mut lines),
+        (None, true) => None,
+        (None, false) => Some(OffDecisions::default()),
+    };
+    let mut name = None;
+    if let Some(map) = &map {
+        name = disc_folder(map.disc.disc_id_sha1.as_deref().unwrap_or(""));
+        if name.is_none() {
+            lines.push(format!("{map_shown}: the map has no disc ID, so no job could find it"));
+        }
+        if let Some(off) = &off {
+            for id in off.ids() {
+                let Some(wording) = stale_wording(map, id) else { continue };
+                if off.text(id) != Some(wording.as_str()) {
+                    lines.push(format!(
+                        "{off_shown}: {id} is stale: the map's text is {}, the line's is {}",
+                        py_repr_str(&wording),
+                        py_repr_str(off.text(id).unwrap_or(""))
+                    ));
+                }
+            }
+        }
+    }
+    let root = ctx.abs(to);
+    let shown_root = to.trim_end_matches(['/', '\\']);
+    let mut folder = None;
+    if !root.is_dir() {
+        lines.push(format!("{to}: not a folder"));
+    } else if let Some(name) = &name {
+        let path = root.join(name);
+        let shown = format!("{shown_root}/{name}");
+        if path.exists() && !path.is_dir() {
+            lines.push(format!("{shown}: not a folder"));
+        } else {
+            folder = Some((path, shown));
+        }
+    }
+    if !lines.is_empty() {
+        return Err(refused(lines.join("\n")));
+    }
+    let (Some(map), Some(map_bytes), Some(name), Some((folder, shown_folder))) = (map, map_bytes, name, folder) else {
+        return Err(refused(format!("{map_shown}: nothing to publish")));
+    };
+    let rows = off_rows(&map, &off.unwrap_or_default());
+    let fitting = rows.iter().filter(|(state, _, _)| matches!(*state, "off" | "role")).count();
+    let undecided = rows.iter().filter(|(state, _, _)| *state == "undecided").count();
+    let summary = format!("PUBLISHED {name} choices={} decisions={fitting} undecided={undecided}", map.choices.len());
+    Ok(Checked { folder, shown_folder, map_bytes, off_bytes, summary })
+}
+
+/// `menu publish <map> --to ROOT`: after every check has passed, makes ROOT/ID when it is missing, writes the map's
+/// bytes and the off file's (or removes an old off file there when the map has none), and prints the `PUBLISHED` line.
+fn run_publish(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let mut parsed = Args::new(rest, &["--to"]);
+    let to = match parsed.flag("--to") {
+        Ok(to) => to,
+        Err(message) => return usage_error(err, "menu publish", PUBLISH_USAGE, &message),
+    };
+    let words = match parsed.positionals() {
+        Ok(words) => words,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
+    let mut missing = Vec::new();
+    if words.is_empty() {
+        missing.push("map");
+    }
+    if to.is_none() {
+        missing.push("--to");
+    }
+    if !missing.is_empty() {
+        let message = format!("the following arguments are required: {}", missing.join(", "));
+        return usage_error(err, "menu publish", PUBLISH_USAGE, &message);
+    }
+    if words.len() > 1 {
+        return usage_error(err, NAME, USAGE, &format!("unrecognized arguments: {}", words[1..].join(" ")));
+    }
+    let to = to.unwrap_or_default();
+    let checked = match check_publish(ctx, &words[0], &to) {
+        Ok(checked) => checked,
+        Err(refusal) => return refuse(err, &refusal),
+    };
+    let written = (|| {
+        if !checked.folder.exists() {
+            std::fs::create_dir(&checked.folder).map_err(|error| write_failed(&error, &checked.shown_folder))?;
+        }
+        let map_at = checked.folder.join(FILE_NAME);
+        lazymkv_platform::write_atomic(&map_at, &checked.map_bytes)
+            .map_err(|error| write_failed(&error, &format!("{}/{FILE_NAME}", checked.shown_folder)))?;
+        let off_at = checked.folder.join(OFF_FILE_NAME);
+        let shown = format!("{}/{OFF_FILE_NAME}", checked.shown_folder);
+        match &checked.off_bytes {
+            Some(bytes) => lazymkv_platform::write_atomic(&off_at, bytes).map_err(|error| write_failed(&error, &shown)),
+            None => match std::fs::remove_file(&off_at) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(write_failed(&error, &shown)),
+                _ => Ok(()),
+            },
+        }
+    })();
+    match written {
+        Ok(()) => {
+            let _ = writeln!(out, "{}", checked.summary);
+            0
+        }
+        Err(refusal) => refuse(err, &refusal),
+    }
+}
+
 /// `menu check <map> --scan <scan> [--evidence DIR]`: the check's lines on `out`; exit 0 when nothing failed, else 1.
 fn run_check(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut parsed = Args::new(rest, &["--scan", "--evidence"]);
@@ -345,7 +628,8 @@ fn run_check(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Writ
     i32::from(report.failed != 0)
 }
 
-/// `lazymkv-dev menu`: `show <map>` and `check <map> --scan <scan> [--evidence DIR]`. `-h` before or after a verb
+/// `lazymkv-dev menu`: `show <map>`, `check <map> --scan <scan> [--evidence DIR]`, `off <map>` and
+/// `publish <map> --to ROOT`. `-h` before or after a verb
 /// prints that usage and exits 0; an unknown verb is argparse's invalid-choice line, exit 2.
 pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let Some(command) = args.first() else {
@@ -357,11 +641,15 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         "-h" | "--help" => (USAGE, HELP),
         "show" if help => (SHOW_USAGE, SHOW_HELP),
         "check" if help => (CHECK_USAGE, CHECK_HELP),
+        "off" if help => (OFF_USAGE, OFF_HELP),
+        "publish" if help => (PUBLISH_USAGE, PUBLISH_HELP),
         "show" => return run_show(ctx, rest, out, err),
         "check" => return run_check(ctx, rest, out, err),
+        "off" => return run_off(ctx, rest, out, err),
+        "publish" => return run_publish(ctx, rest, out, err),
         other => {
             let message =
-                format!("argument command: invalid choice: {} (choose from 'show', 'check')", py_repr_str(other));
+                format!("argument command: invalid choice: {} (choose from 'show', 'check', 'off', 'publish')", py_repr_str(other));
             return usage_error(err, NAME, USAGE, &message);
         }
     };
@@ -373,12 +661,13 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 #[cfg(test)]
 mod tests {
     use super::{disc_id_of, read_map, read_off, read_playlists, run};
+    use std::fs;
     use crate::evidence::{resolve_recording, Ctx, Refused};
     use crate::testutil::{call, printed, Scratch, ScratchExt};
     use lazymkv_core::disc::disc;
     use lazymkv_core::menu::{
         self, made_up_playlist, parse_off, parse_playlist, DiscId, MadeUpItem, OffDecisions, FILE_NAME, FIXTURE,
-        META_WITHOUT_ID, NO_META, OFF_FILE_NAME,
+        META_WITHOUT_ID, NO_META, OFF_FILE_NAME, MAP_MAX_BYTES, OFF_MAX_BYTES,
     };
     use std::collections::BTreeSet;
     use lazymkv_core::robot::parse;
@@ -834,6 +1123,205 @@ mod tests {
         assert_eq!(read["00802"], Err(cut));
     }
 
+    /// `world`'s map with c002 labelled "Commentary  |  Été   Off" and c003 "Commentary: None", both at level replayed.
+    fn tricky_world(tag: &str) -> Scratch {
+        let tmp = world(tag, None);
+        let mut map: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        map["choices"][1]["label"] = "Commentary  |  Été   Off".into();
+        map["choices"][2]["label"] = "Commentary: None".into();
+        map["choices"][2]["check"] = map["choices"][1]["check"].clone();
+        tmp.write(&format!("{MAP_DIR}/{FILE_NAME}"), map.to_string());
+        tmp
+    }
+
+    #[test]
+    fn menu_off_lists_every_choice_the_net_catches_with_its_state() {
+        let tmp = tricky_world("menu-off-list");
+        let (code, out, err) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out, "undecided\tc002\tAUDIO: Commentary / Été Off\nundecided\tc003\tAUDIO: Commentary: None\n");
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc002\tAUDIO: Commentary / Été Off\nrole\tc003\tAUDIO: Other\n");
+        let (_, out, _) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!(out, "off\tc002\tAUDIO: Commentary / Été Off\nstale\tc003\tAUDIO: Commentary: None\n");
+    }
+
+    #[test]
+    fn menu_off_lists_a_decided_choice_the_net_no_longer_catches_and_nothing_else() {
+        // The made-up map's c003 (COMMENTARY 1) holds a role word the net does not catch: listed only once decided.
+        let tmp = world("menu-off-named", None);
+        let (code, out, err) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "role\tc003\tAUDIO: COMMENTARY 1\nrole\tc001\tAUDIO: Language A 5.1\n");
+        let (_, out, _) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!(out, "role\tc003\tAUDIO: COMMENTARY 1\n");
+    }
+
+    #[test]
+    fn menu_off_refuses_a_map_or_an_off_file_it_cannot_read_with_exit_2() {
+        let tmp = world("menu-off-refused", None);
+        let (code, out, err) = menu_run(&tmp, &["off", "missing"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.starts_with("lazymkv-dev menu: error: missing: "), "{err}");
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc003\n");
+        let (code, out, err) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains(&format!("error: {MAP_DIR}/{OFF_FILE_NAME}: line 1: ")), "{err}");
+    }
+
+    #[test]
+    fn a_line_menu_off_prints_fits_its_choice_when_saved_as_the_off_file() {
+        let tmp = tricky_world("menu-off-round-trip");
+        let (_, listed, _) = menu_run(&tmp, &["off", MAP_DIR]);
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), listed.replace("undecided\t", "off\t"));
+        let (code, out, err) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.lines().count() == 2 && out.lines().all(|line| line.starts_with("off\t")), "{out}");
+    }
+
+    #[test]
+    fn menu_publish_copies_the_pair_under_the_disc_id() {
+        let tmp = tricky_world("menu-publish");
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc002\tAUDIO: Commentary / Été Off\noff\tc099\tAUDIO: Gone\n");
+        fs::create_dir_all(tmp.0.join("root/OTHER")).unwrap();
+        tmp.write("root/OTHER/menu-map.json", "untouched");
+        let (code, out, err) = menu_run(&tmp, &["publish", MAP_DIR, "--to", "root"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out, format!("PUBLISHED {FIXTURE_ID} choices=9 decisions=1 undecided=1\n"));
+        let folder = tmp.0.join("root").join(FIXTURE_ID);
+        assert_eq!(fs::read(folder.join(FILE_NAME)).unwrap(), fs::read(tmp.0.join(MAP_DIR).join(FILE_NAME)).unwrap());
+        assert_eq!(fs::read(folder.join(OFF_FILE_NAME)).unwrap(), fs::read(tmp.0.join(MAP_DIR).join(OFF_FILE_NAME)).unwrap());
+        assert_eq!(fs::read_to_string(tmp.0.join("root/OTHER/menu-map.json")).unwrap(), "untouched");
+        // Again, now without an off file: the map is replaced, the old off file goes, and nothing else is left behind.
+        fs::remove_file(tmp.0.join(MAP_DIR).join(OFF_FILE_NAME)).unwrap();
+        let (code, out, _) = menu_run(&tmp, &["publish", MAP_DIR, "--to", "root"]);
+        assert_eq!((code, out), (0, format!("PUBLISHED {FIXTURE_ID} choices=9 decisions=0 undecided=2\n")));
+        let names: Vec<String> = fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(names, [FILE_NAME]);
+    }
+
+    /// Runs `publish` of `MAP_DIR` into `root` in `tmp`; asserts exit 2, no stdout, every `wanted` text on stderr and
+    /// no folder for the disc under `root`.
+    fn assert_publish_refused(tmp: &Scratch, wanted: &[&str]) {
+        let (code, out, err) = menu_run(tmp, &["publish", MAP_DIR, "--to", "root"]);
+        assert_eq!((code, out.as_str()), (2, ""), "{err}");
+        for text in wanted {
+            assert!(err.contains(text), "{text:?} not in {err}");
+        }
+        assert!(err.lines().all(|line| line.starts_with("lazymkv-dev menu: error: ")), "{err}");
+        assert!(!tmp.0.join("root").join(FIXTURE_ID).is_dir(), "a folder was made for the disc");
+        if tmp.0.join("root").is_dir() {
+            assert!(!tmp.0.join("root").join(FIXTURE_ID).join(FILE_NAME).exists());
+        }
+    }
+
+    /// A tricky world with the map's text changed by `change`, and an empty `root`.
+    fn publish_world(tag: &str, change: impl FnOnce(&mut serde_json::Value)) -> Scratch {
+        let tmp = tricky_world(tag);
+        let at = tmp.0.join(MAP_DIR).join(FILE_NAME);
+        let mut map: serde_json::Value = serde_json::from_str(&fs::read_to_string(&at).unwrap()).unwrap();
+        change(&mut map);
+        fs::write(&at, map.to_string()).unwrap();
+        fs::create_dir_all(tmp.0.join("root")).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn menu_publish_refuses_and_writes_nothing() {
+        // The map has no disc ID.
+        let tmp = publish_world("menu-publish-no-id", |map| map["disc"]["disc_id_sha1"] = serde_json::Value::Null);
+        assert_publish_refused(&tmp, &[&format!("{}: the map has no disc ID, so no job could find it", shown(MAP_DIR))]);
+        // A disc ID that is not forty hex digits is no ID either.
+        let tmp = publish_world("menu-publish-bad-id", |map| map["disc"]["disc_id_sha1"] = "../../x".into());
+        assert_publish_refused(&tmp, &["the map has no disc ID, so no job could find it"]);
+        // A stale off line.
+        let tmp = publish_world("menu-publish-stale", |_| {});
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc002\tAUDIO: Other\n");
+        assert_publish_refused(
+            &tmp,
+            &[&format!(
+                "{MAP_DIR}/{OFF_FILE_NAME}: c002 is stale: the map's text is 'AUDIO: Commentary / Été Off', the line's is 'AUDIO: Other'"
+            )],
+        );
+        // A malformed off line.
+        let tmp = publish_world("menu-publish-bad-off", |_| {});
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc002\n");
+        assert_publish_refused(
+            &tmp,
+            &[&format!("{MAP_DIR}/{OFF_FILE_NAME}: line 1: expected \"off<TAB><choice id><TAB><the choice's text>\"")],
+        );
+        // A map over the limit, and an off file over its limit: refused by their sizes.
+        let tmp = publish_world("menu-publish-big-map", |_| {});
+        let at = tmp.0.join(MAP_DIR).join(FILE_NAME);
+        let mut text = fs::read_to_string(&at).unwrap();
+        text.push_str(&" ".repeat(MAP_MAX_BYTES as usize));
+        fs::write(&at, &text).unwrap();
+        assert_publish_refused(&tmp, &[&format!("{}: {} bytes is over the limit of 4194304", shown(MAP_DIR), text.len())]);
+        let tmp = publish_world("menu-publish-big-off", |_| {});
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), " ".repeat(OFF_MAX_BYTES as usize + 1));
+        assert_publish_refused(&tmp, &[&format!("{MAP_DIR}/{OFF_FILE_NAME}: 1048577 bytes is over the limit of 1048576")]);
+        // An invalid map: every problem, as `show` prints them.
+        let tmp = publish_world("menu-publish-invalid", |map| {
+            map["format"] = serde_json::Value::Null;
+            map["choices"][0]["kind"] = "video".into();
+        });
+        assert_publish_refused(
+            &tmp,
+            &[
+                &format!("{}: format is None, not 'lazymkv menu map v1'", shown(MAP_DIR)),
+                &format!("{}: choices[0] (c001): kind 'video' is not one of", shown(MAP_DIR)),
+            ],
+        );
+        // A missing map.
+        let tmp = publish_world("menu-publish-no-map", |_| {});
+        fs::remove_file(tmp.0.join(MAP_DIR).join(FILE_NAME)).unwrap();
+        assert_publish_refused(&tmp, &[&format!("{}: ", shown(MAP_DIR))]);
+        // ROOT missing, and ROOT a file.
+        let tmp = publish_world("menu-publish-no-root", |_| {});
+        fs::remove_dir(tmp.0.join("root")).unwrap();
+        assert_publish_refused(&tmp, &["error: root: not a folder"]);
+        assert!(!tmp.0.join("root").exists(), "publish made the root");
+        tmp.write("root", "a file");
+        assert_publish_refused(&tmp, &["error: root: not a folder"]);
+        // The disc's folder a file.
+        let tmp = publish_world("menu-publish-id-is-a-file", |_| {});
+        tmp.write(&format!("root/{FIXTURE_ID}"), "a file");
+        assert_publish_refused(&tmp, &[&format!("error: root/{FIXTURE_ID}: not a folder")]);
+        assert_eq!(fs::read_to_string(tmp.0.join("root").join(FIXTURE_ID)).unwrap(), "a file");
+        // Every problem is printed, not the first: a stale line and a root that is not a folder together.
+        let tmp = publish_world("menu-publish-all-problems", |_| {});
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc002\tAUDIO: Other\n");
+        fs::remove_dir(tmp.0.join("root")).unwrap();
+        assert_publish_refused(&tmp, &["c002 is stale", "root: not a folder"]);
+    }
+
+    #[test]
+    fn menu_publish_names_the_folder_in_upper_case_for_a_lower_case_id() {
+        let tmp = publish_world("menu-publish-lower", |map| {
+            map["disc"]["disc_id_sha1"] = FIXTURE_ID.to_lowercase().into();
+        });
+        let (code, out, err) = menu_run(&tmp, &["publish", MAP_DIR, "--to", "root"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out, format!("PUBLISHED {FIXTURE_ID} choices=9 decisions=0 undecided=2\n"));
+        let names: Vec<String> =
+            fs::read_dir(tmp.0.join("root")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(names, [FIXTURE_ID]);
+        // The bytes are the source's, the lower-case ID and all.
+        let published = fs::read(tmp.0.join("root").join(FIXTURE_ID).join(FILE_NAME)).unwrap();
+        assert_eq!(published, fs::read(tmp.0.join(MAP_DIR).join(FILE_NAME)).unwrap());
+    }
+
+    #[test]
+    fn menu_publish_takes_an_absolute_root_and_a_map_file() {
+        let tmp = tricky_world("menu-publish-absolute");
+        let root = tmp.0.join("abs-root");
+        fs::create_dir_all(&root).unwrap();
+        let file = format!("{MAP_DIR}/{FILE_NAME}");
+        let (code, out, err) = menu_run(&tmp, &["publish", &file, "--to", root.to_str().unwrap()]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.starts_with(&format!("PUBLISHED {FIXTURE_ID} ")), "{out}");
+        assert!(root.join(FIXTURE_ID).join(FILE_NAME).is_file());
+    }
+
     #[test]
     fn an_unknown_verb_is_a_usage_error_with_exit_2() {
         let tmp = Scratch::new("menu-verb");
@@ -841,8 +1329,8 @@ mod tests {
         assert_eq!((code, out.as_str()), (2, ""));
         assert_eq!(
             err,
-            "usage: lazymkv-dev menu [-h] {show,check} ...\n\
-             lazymkv-dev menu: error: argument command: invalid choice: 'frob' (choose from 'show', 'check')\n"
+            "usage: lazymkv-dev menu [-h] {show,check,off,publish} ...\n\
+             lazymkv-dev menu: error: argument command: invalid choice: 'frob' (choose from 'show', 'check', 'off', 'publish')\n"
         );
         let (code, _, err) = menu_run(&tmp, &[]);
         assert_eq!(code, 2);
@@ -871,14 +1359,40 @@ mod tests {
         let (code, _, err) = menu_run(&tmp, &["check", MAP_DIR, "--scan"]);
         assert_eq!(code, 2);
         assert_eq!(err, format!("{usage}lazymkv-dev menu check: error: argument --scan: expected one argument\n"));
+        let (code, _, err) = menu_run(&tmp, &["off"]);
+        assert_eq!(code, 2);
+        assert_eq!(
+            err,
+            "usage: lazymkv-dev menu off [-h] map\nlazymkv-dev menu off: error: the following arguments are required: map\n"
+        );
+        let (code, _, err) = menu_run(&tmp, &["off", MAP_DIR, "extra"]);
+        assert_eq!(code, 2);
+        assert!(err.ends_with("lazymkv-dev menu: error: unrecognized arguments: extra\n"), "{err}");
+        let usage = "usage: lazymkv-dev menu publish [-h] map --to ROOT\n";
+        let (code, _, err) = menu_run(&tmp, &["publish", MAP_DIR]);
+        assert_eq!(code, 2);
+        assert_eq!(err, format!("{usage}lazymkv-dev menu publish: error: the following arguments are required: --to\n"));
+        let (code, _, err) = menu_run(&tmp, &["publish"]);
+        assert_eq!(code, 2);
+        assert_eq!(err, format!("{usage}lazymkv-dev menu publish: error: the following arguments are required: map, --to\n"));
+        let (code, _, err) = menu_run(&tmp, &["publish", MAP_DIR, "--to"]);
+        assert_eq!(code, 2);
+        assert_eq!(err, format!("{usage}lazymkv-dev menu publish: error: argument --to: expected one argument\n"));
+        let (code, _, err) = menu_run(&tmp, &["publish", MAP_DIR, "other", "--to", "root"]);
+        assert_eq!(code, 2);
+        assert!(err.ends_with("lazymkv-dev menu: error: unrecognized arguments: other\n"), "{err}");
     }
 
     #[test]
     fn help_before_or_after_a_verb_prints_that_usage_and_exits_0() {
         let tmp = Scratch::new("menu-help");
         for (args, usage) in [
-            (&["-h"][..], "usage: lazymkv-dev menu [-h] {show,check} ...\n"),
-            (&["--help"][..], "usage: lazymkv-dev menu [-h] {show,check} ...\n"),
+            (&["-h"][..], "usage: lazymkv-dev menu [-h] {show,check,off,publish} ...\n"),
+            (&["--help"][..], "usage: lazymkv-dev menu [-h] {show,check,off,publish} ...\n"),
+            (&["off", "-h"][..], "usage: lazymkv-dev menu off [-h] map\n"),
+            (&["off", "x", "--help"][..], "usage: lazymkv-dev menu off [-h] map\n"),
+            (&["publish", "-h"][..], "usage: lazymkv-dev menu publish [-h] map --to ROOT\n"),
+            (&["publish", "x", "--to", "y", "-h"][..], "usage: lazymkv-dev menu publish [-h] map --to ROOT\n"),
             (&["show", "-h"][..], "usage: lazymkv-dev menu show [-h] map\n"),
             (&["show", "x", "--help"][..], "usage: lazymkv-dev menu show [-h] map\n"),
             (&["check", "-h"][..], "usage: lazymkv-dev menu check [-h] map --scan SCAN [--evidence DIR]\n"),
