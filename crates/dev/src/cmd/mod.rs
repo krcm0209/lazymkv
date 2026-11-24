@@ -24,5 +24,7 @@ pub mod plan;
 pub mod census;
 pub mod menu;
 pub mod compare_job;
+/// The review sheet's reader of subtitle lines (phase 3 design, part 6.2). Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+pub mod sheet;
 #[cfg(feature = "ocr-trial")]
 pub mod ocr_trial;

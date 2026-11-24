@@ -11,6 +11,9 @@ mod notify;
 mod owner;
 mod relay;
 mod restart;
+/// The `review` request's worker, which builds the job's review document off the owner thread (phase 3 design, part
+/// 6.2). Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+mod review_build;
 /// The job's review answers, `review.json`, and its review labels, `review-labels.json` (phase 3 design, parts 6.4,
 /// 6.6). Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
 mod review_store;

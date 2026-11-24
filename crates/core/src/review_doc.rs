@@ -823,27 +823,35 @@ fn clean_line(parts: &[String]) -> Option<String> {
     (!cut.is_empty()).then(|| cut.to_string())
 }
 
-/// The lines shown for a subtitle track (phase 3 design, part 6.3; ruling T32-R5): at each of `LINE_MOMENTS` of
-/// `seconds`, the first event with text at or after that moment that an earlier moment has not used, as one line cut to
+/// The lines shown for a subtitle track (phase 3 design, part 6.3; rulings T32-R5, T32-E7): first, at each of
+/// `LINE_MOMENTS` of `seconds` in order, the first event with text at or after that moment that an earlier moment has
+/// not used; then, while fewer than three events are chosen and unused events with text remain, the earliest unused
+/// event with text (T32-E7, so a track whose few events all fall early still shows them). Each is one line, cut to
 /// `LINE_WIDTH` characters with control characters removed. `events` are (start in seconds, the event's text lines) in
-/// time order. Zero to three lines, in moment order. Def: P3-T5. Use: P3-T9, P3-T13, P3-T14.
+/// time order. Zero to three lines, in the time order of their events. Def: P3-T5, P3-T9 (T32-E7). Use: P3-T9,
+/// P3-T13, P3-T14.
 pub fn sample_lines(events: &[(f64, Vec<String>)], seconds: f64) -> Vec<String> {
-    let mut used = vec![false; events.len()];
-    let mut lines = Vec::new();
+    let texts: Vec<Option<String>> = events.iter().map(|(_, text)| clean_line(text)).collect();
+    let mut chosen: Vec<usize> = Vec::new();
     for moment in LINE_MOMENTS {
         let at = seconds * moment;
-        let found = events.iter().enumerate().find_map(|(index, (start, text))| {
-            if used[index] || *start < at {
-                return None;
-            }
-            clean_line(text).map(|line| (index, line))
-        });
-        if let Some((index, line)) = found {
-            used[index] = true;
-            lines.push(line);
+        let found = (0..events.len()).find(|&index| !chosen.contains(&index) && events[index].0 >= at && texts[index].is_some());
+        if let Some(index) = found {
+            chosen.push(index);
         }
     }
-    lines
+    // Ruling T32-E7: fill from the earliest unused events with text.
+    for index in 0..events.len() {
+        if chosen.len() >= LINE_MOMENTS.len() {
+            break;
+        }
+        if !chosen.contains(&index) && texts[index].is_some() {
+            chosen.push(index);
+        }
+    }
+    // In the time order of their events; equal starts keep their order in `events`.
+    chosen.sort_by(|&a, &b| events[a].0.total_cmp(&events[b].0).then(a.cmp(&b)));
+    chosen.into_iter().filter_map(|index| texts[index].clone()).collect()
 }
 
 /// One answer an item offers: its letter, its word and how a question line names it.
@@ -1631,6 +1639,20 @@ mod tests {
         assert_eq!(sample_lines(&events, 6000.0), vec!["two", "three", "four"]);
     }
 
+    /// Ruling T32-E7: a track whose events all come before the first moment still shows its lines, in time order.
+    #[test]
+    fn events_before_the_first_moment_still_give_lines() {
+        let events = vec![event(1.0, &["one"]), event(3.0, &["two"]), event(6.0, &["three"])];
+        assert_eq!(sample_lines(&events, 7150.0), vec!["one", "two", "three"]);
+    }
+
+    /// Ruling T32-E7: the moments' choices are filled from the earliest unused events, and shown in time order.
+    #[test]
+    fn a_sparse_track_fills_from_its_earliest_events() {
+        let events = vec![event(10.0, &["early"]), event(5000.0, &["late"])];
+        assert_eq!(sample_lines(&events, 6000.0), vec!["early", "late"]);
+    }
+
     #[test]
     fn a_track_with_one_event_gives_one_line() {
         assert_eq!(sample_lines(&[event(5000.0, &["only"])], 6000.0), vec!["only"]);
@@ -1641,8 +1663,8 @@ mod tests {
         assert!(sample_lines(&[], 6000.0).is_empty());
         let blank = vec![event(2000.0, &[]), event(3000.0, &["  ", "\t"]), event(4000.0, &[""])];
         assert!(sample_lines(&blank, 6000.0).is_empty());
-        // An event after the last moment's start is still found, but one before the first moment is not.
-        assert!(sample_lines(&[event(10.0, &["early"])], 6000.0).is_empty());
+        // An event before the first moment is found by the second pass (ruling T32-E7).
+        assert_eq!(sample_lines(&[event(10.0, &["early"])], 6000.0), vec!["early"]);
     }
 
     #[test]

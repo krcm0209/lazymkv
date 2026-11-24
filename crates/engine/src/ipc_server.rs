@@ -46,8 +46,6 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
 /// `discard`'s refusal (Ruling S76). Def: T26. Use: T26.
 pub(crate) const DISCARD_REFUSED: &str = "discard waits for phase 3's review commands (P2, R-A1)";
-/// `review`'s refusal until the engine builds it (phase 3 design, part 11). Def: P3-T6. Use: P3-T8.
-pub(crate) const REVIEW_NOT_BUILT: &str = "review is not built in this version";
 /// `discard_preview`'s refusal until the engine builds it (phase 3 design, part 11). Def: P3-T6. Use: P3-T8.
 pub(crate) const DISCARD_PREVIEW_NOT_BUILT: &str = "discard_preview is not built in this version";
 /// `ui_quit`'s refusal (Ruling S76). Def: T26. Use: T26.

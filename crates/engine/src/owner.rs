@@ -50,7 +50,7 @@ use crate::ipc_server::{
     cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
     no_running_step, not_a_review_action, not_a_secret, not_answered_yet, not_cancellable, not_held, secret_states,
     settings_refused, snapshot_jobs, spawn_reader, spawn_serve, staging_unset, steps_running, Clients, ProgressGate,
-    CLIENT_DRAIN, DISCARD_PREVIEW_NOT_BUILT, DISCARD_REFUSED, NO_CLIENT, REVIEW_NOT_BUILT, STOPPING, UI_QUIT_REFUSED,
+    CLIENT_DRAIN, DISCARD_PREVIEW_NOT_BUILT, DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
@@ -59,6 +59,7 @@ use crate::relay::{
     COMMAND_WRITABLE, STALE_EXIT,
 };
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
+use crate::review_build::spawn_review;
 use crate::review_store::{self, label_entries, LabelEntry, Reviewed};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
 use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
@@ -256,6 +257,10 @@ pub(crate) enum Msg {
     /// A refresh of the job's tuning recordings ended (design part 7.5): the job, and whether `tuning_root` was not
     /// reached or `refresh_recordings` failed. Def: T5-20. Use: T5-20.
     Refreshed { job: String, failed: bool },
+    /// A `review` worker ended (phase 3 design, part 6.2): the answer to the `review` request `id` of `client`, the
+    /// serialised document or the refusal. It holds subtitle lines, so it goes to that client only, never to a log.
+    /// Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+    ReviewBuilt { client: u64, id: Option<u64>, answer: Result<Value, String> },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -533,11 +538,12 @@ impl EngineHandle {
     /// queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at most
     /// CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for its
     /// volume is not waited for: it only reads, and its late result goes nowhere. The relay's refetch thread
-    /// is not waited for either (PR #15 review round 1, R1). A step, recording or eject that
+    /// is not waited for either (PR #15 review round 1, R1), nor a `review` worker, which only reads (phase 3 design,
+    /// part 6.2). A step, recording or eject that
     /// panics still reports (R22.11), so stop never waits on one. A notifier still retrying when the drain bound passes
     /// may append its `was not delivered` lines after `engine stopped`. Err when the serve, drive or owner thread
     /// panicked.
-    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12. Use: T22 to T29, T3-23, T4-11, T4-12.
+    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12, P3-T9. Use: T22 to T29, T3-23, T4-11, T4-12.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
             sender,
@@ -1144,6 +1150,10 @@ struct Owner {
     refresh_failed: BTreeSet<String>,
     /// Sent the job's id at the end of each refresh, for the testkit (`TestHooks::refresh_done`).
     refresh_done: Option<Sender<String>>,
+    /// The running `review` workers (phase 3 design, part 6.2), dropped when they end and left running by a stop,
+    /// which does not wait for them: they only read, and a share can stall a read (design part 4.4). Def: P3-T9.
+    /// Use: P3-T13, P3-T14, P3-T16.
+    reviews: Vec<JoinHandle<()>>,
 }
 
 impl Owner {
@@ -1257,6 +1267,7 @@ impl Owner {
             refresh_again: BTreeSet::new(),
             refresh_failed: BTreeSet::new(),
             refresh_done,
+            reviews: Vec::new(),
         };
         owner.restart(present);
         owner
@@ -1479,6 +1490,7 @@ impl Owner {
             Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
             Msg::Refresh { job } => self.request_refresh(&job),
             Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
+            Msg::ReviewBuilt { client, id, answer } => self.reply(client, id, answer),
         }
     }
 
@@ -1513,6 +1525,8 @@ impl Owner {
             Msg::CleanupDone => self.cleanup_ended(),
             Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
             Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
+            // A document built before the shutdown began still answers its request (phase 3 design, part 6.2).
+            Msg::ReviewBuilt { client, id, answer } => self.reply(client, id, answer),
             Msg::Drive(_)
             | Msg::Arrival(_)
             | Msg::Timer { .. }
@@ -1772,6 +1786,7 @@ impl Owner {
     /// (design part 7.5) counting.
     fn after_message(&mut self) {
         self.threads.retain(|thread| !thread.is_finished());
+        self.reviews.retain(|thread| !thread.is_finished());
         self.keep_awake();
         let busy = !self.workers.is_empty()
             || !self.rounds_running.is_empty()
@@ -1810,6 +1825,9 @@ impl Owner {
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+        // A review worker only reads, so it is not waited for: a stalled share would hold the stop (phase 3 design,
+        // part 6.2). Its late answer goes nowhere, as a lookup round's does.
+        self.reviews.clear();
         if self.awake_held {
             self.parts.awake.release();
             self.awake_held = false;
@@ -2605,17 +2623,8 @@ impl Owner {
     fn hand(&mut self, id: &str, actions: Vec<Action>) {
         // Design part 7.5: a pending dataset copy is retried before another step, any job's step.
         self.start_copies();
-        let Some(job) = self.jobs.get(id) else {
+        let (Some(job), Some(context)) = (self.jobs.get(id), self.context(id)) else {
             return;
-        };
-        let drive_root =
-            job.disc.as_ref().and_then(|drive| self.drives.get(drive)).and_then(|drive| drive.root.clone());
-        let context = JobContext {
-            record: job.record.clone(),
-            job_dir: self.store.job_dir(id),
-            settings: job.settings.clone(),
-            drive_root,
-            lookups: Arc::clone(&job.lookups),
         };
         let generation = job.generation;
         let eject_drive = actions.contains(&Action::Eject).then(|| job.record.drive.clone());
@@ -2660,6 +2669,39 @@ impl Owner {
             });
             let _ = sender.send(Msg::StepDone { job, generation, result });
         }));
+    }
+
+    /// What a step or worker of `id` sees of its job (`JobContext`): a copy of its record, its folder, its own settings,
+    /// its drive's root while its disc is in, and its lookup book; None for a job the owner does not hold. Def: T22
+    /// (`hand`), P3-T9. Use: P3-T9, P3-T13, P3-T14, P3-T16.
+    fn context(&self, id: &str) -> Option<JobContext> {
+        let job = self.jobs.get(id)?;
+        let drive_root =
+            job.disc.as_ref().and_then(|drive| self.drives.get(drive)).and_then(|drive| drive.root.clone());
+        Some(JobContext {
+            record: job.record.clone(),
+            job_dir: self.store.job_dir(id),
+            settings: job.settings.clone(),
+            drive_root,
+            lookups: Arc::clone(&job.lookups),
+        })
+    }
+
+    /// `review` (phase 3 design, parts 6.2, 11): `no_job` for a job the owner does not hold; otherwise the job's
+    /// document is built by `spawn_review` on a thread of its own, since its reads touch shares the owner thread never
+    /// reads, kept in `reviews`, which a stop does not wait for; its answer, serialised there, comes back as
+    /// `Msg::ReviewBuilt` and goes to `client` only (a client that has gone gets nothing). A job with nothing to review
+    /// gets `review_doc::build`'s refusal. Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+    fn review(&mut self, client: u64, id: Option<u64>, job_id: &str, all: bool) {
+        let Some(context) = self.context(job_id) else {
+            return self.reply(client, id, Err(no_job(job_id)));
+        };
+        let sender = self.sender.clone();
+        let answer = move |built: Result<review_doc::ReviewDoc, String>| {
+            let answer = built.and_then(|doc| serde_json::to_value(doc).map_err(|error| error.to_string()));
+            let _ = sender.send(Msg::ReviewBuilt { client, id, answer });
+        };
+        self.reviews.push(spawn_review(context, all, Arc::clone(&self.parts.shares), answer));
     }
 
     /// Takes the worker of (`id`, `generation`) off the list, clearing the ejecting mark of the drive it ejected.
@@ -3003,7 +3045,7 @@ impl Owner {
             Request::ReviewAction { job, action, overrides, labels } => {
                 self.review_action(&job, &action, overrides.as_ref(), labels.as_ref())
             }
-            Request::Review { .. } => Err(REVIEW_NOT_BUILT.to_string()),
+            Request::Review { job, all } => return self.review(client, id, &job, all),
             Request::DiscardPreview { .. } => Err(DISCARD_PREVIEW_NOT_BUILT.to_string()),
             Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
         };

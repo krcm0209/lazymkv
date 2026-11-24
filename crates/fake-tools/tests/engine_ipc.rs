@@ -1763,12 +1763,123 @@ fn discard_is_refused_naming_phase_3() {
 }
 
 #[test]
-fn review_and_discard_preview_are_refused_until_built() {
+fn discard_preview_is_refused_until_built() {
     let h = scripted(vec![]);
     let mut c = Client::open(&h);
     c.snapshot();
-    assert_eq!(c.err("review", json!({"job": "abc-1"})), "review is not built in this version");
     assert_eq!(c.err("discard_preview", json!({"job": "abc-1"})), "discard_preview is not built in this version");
+}
+
+// ---- The review document (phase 3 design, part 6.2; ruling T32-R5) ----
+
+/// The made-up line of `movie-direct-two-subs`' stand-in OCR reading.
+const SENTINEL: &str = "text-sentinel-3e8f";
+
+/// The items of the document's one subtitles point, as the document's titles list them.
+fn subtitle_items(doc: &Value) -> Vec<Value> {
+    let points: Vec<&Value> = doc["points"].as_array().unwrap().iter().filter(|p| p["kind"] == json!("subtitles")).collect();
+    assert_eq!(points.len(), 1, "one subtitles point: {doc}");
+    let ids = points[0]["items"].as_array().unwrap();
+    let items = doc["titles"].as_array().unwrap().iter().flat_map(|t| t["items"].as_array().unwrap().iter());
+    items.filter(|item| ids.contains(&item["id"])).cloned().collect()
+}
+
+/// The evidence texts of `item` whose kind is `kind`.
+fn evidence(item: &Value, kind: &str) -> Vec<String> {
+    item["evidence"].as_array().unwrap().iter().filter(|e| e["kind"] == json!(kind))
+        .map(|e| e["text"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn review_returns_the_document_of_a_held_job_with_its_subtitle_lines() {
+    let (h, mut c, id, _) = held_two_subs();
+    let doc = c.ok("review", json!({"job": id}));
+    assert_eq!(doc["format"], json!("lazymkv review document v1"));
+    assert_eq!(doc["job"], json!(id));
+    let items = subtitle_items(&doc);
+    assert_eq!(items.len(), 2, "{doc}");
+    for item in &items {
+        let lines = evidence(item, "lines");
+        assert!(!lines.is_empty(), "{item}");
+        assert!(lines.iter().all(|line| line.split(' ').all(|word| word == SENTINEL)), "{lines:?}");
+        assert!(evidence(item, "unread").is_empty(), "{item}");
+    }
+    let staged = doc["titles"][0]["staged_path"].as_str().unwrap_or_else(|| panic!("a staged path: {doc}"));
+    assert!(Path::new(staged).starts_with(h.staging()), "{staged}");
+    assert!(staged.ends_with(".mkv"), "{staged}");
+    // The colliding file at the final path, its size and day.
+    let collision = doc["titles"][0]["items"].as_array().unwrap().iter().find(|i| i["kind"] == json!("collision")).cloned();
+    let file = evidence(&collision.expect("a collision item"), "file");
+    assert_eq!(file.len(), 1, "{doc}");
+    assert!(file[0].starts_with("7 bytes, "), "{file:?}");
+    assert_eq!(c.err("review", json!({"job": "nope-1"})), "no job nope-1");
+}
+
+#[test]
+fn review_of_a_job_whose_staging_share_is_down_still_answers() {
+    let (h, mut c, id, _) = held_two_subs();
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".to_string()));
+    let doc = c.ok("review", json!({"job": id}));
+    assert_eq!(doc["titles"][0]["staged_path"], Value::Null, "{doc}");
+    let items = subtitle_items(&doc);
+    assert_eq!(items.len(), 2, "{doc}");
+    for item in &items {
+        assert!(evidence(item, "lines").is_empty(), "{item}");
+        assert_eq!(evidence(item, "unread"), vec!["the staging share did not answer: cable out".to_string()], "{item}");
+    }
+}
+
+#[test]
+fn review_of_a_job_with_nothing_to_review_is_an_error_naming_its_state() {
+    let h = scripted(vec![]);
+    let id = seed(&h, 7, State::Discarded);
+    h.restart();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.err("review", json!({"job": id})), format!("job {id} is Discarded: there is nothing to review"));
+}
+
+/// The owner thread never reads a share (design part 4.4): while the staging share stalls inside a review's worker,
+/// the engine answers other requests, and a stop does not wait for the worker.
+#[test]
+fn a_review_whose_staging_share_stalls_neither_blocks_the_engine_nor_its_stop() {
+    let (h, mut c, id, _) = held_two_subs();
+    let staging = h.staging().to_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    c.send("review", json!({"job": id}));
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "the review never reached the staging share");
+    assert!(c.ok("history", json!({})).is_array(), "the engine answers while the review waits");
+    // The stall is released after 15 s; a stop that waited for the worker would take that long.
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(15));
+        gate.release();
+    });
+    let start = Instant::now();
+    h.restart();
+    let took = start.elapsed();
+    release.join().unwrap();
+    assert!(took < Duration::from_secs(10), "the stop waited {took:?} for the stalled review");
+}
+
+#[test]
+fn no_subtitle_line_reaches_a_log_or_a_push() {
+    let (h, mut c, id, _) = held_two_subs();
+    let mut other = Client::open(&h);
+    let mut pushed = vec![other.line().unwrap()];
+    let doc = c.ok("review", json!({"job": id, "all": true}));
+    assert!(doc.to_string().contains(SENTINEL), "the document holds the lines: {doc}");
+    // Every line the second client is sent until a quiet second has passed.
+    while let Ok(line) = other.lines.recv_timeout(Duration::from_secs(1)) {
+        pushed.push(line);
+    }
+    let pushes: Vec<String> = c.pushes.iter().map(|e| serde_json::to_string(&e.payload).unwrap()).collect();
+    let job_log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!job_log.contains(SENTINEL), "job.log holds a subtitle line");
+    assert!(!h.engine_log().contains(SENTINEL), "engine.log holds a subtitle line");
+    for line in pushed.iter().chain(&pushes) {
+        assert!(!line.contains(SENTINEL), "a push holds a subtitle line: {line}");
+    }
 }
 
 #[test]
