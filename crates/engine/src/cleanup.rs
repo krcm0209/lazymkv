@@ -2,7 +2,9 @@
 //! holds, run on a thread of its own. It deletes the TMDb copies past TMDb's six-month limit in every job's folder,
 //! whatever the job's state, and the staging folder of each filed job past its retention whose dataset copy is not
 //! pending (C2). A discarded job's staging folder and its own partial files in its library roots' `.lazymkv-partial`
-//! folders go at any pass, whatever its age (phase 3 design, part 6.8). It never touches `tuning_root`, never touches
+//! folders go at any pass, whatever its age (phase 3 design, part 6.8), but a non-empty `replaced` folder, which holds
+//! a library file a "replace" moved aside, is kept until the job's own retention has passed (part 6.7, Z27; Ruling
+//! T32-E11). It never touches `tuning_root`, never touches
 //! anything under `jobs/` but the three TMDb copies, never touches a library file, and never follows a link out of a
 //! staging folder or a partial folder.
 
@@ -19,7 +21,7 @@ use lazymkv_core::record::{JobRecord, TuningCopy};
 use lazymkv_core::settings::configured_root;
 use lazymkv_platform::{Reach, ShareConnector};
 
-use crate::file_phase::PARTIAL_FOLDER;
+use crate::file_phase::{PARTIAL_FOLDER, REPLACED_FOLDER};
 
 /// The seconds of one day of `retention_days`.
 const DAY_SECONDS: u64 = 86_400;
@@ -84,21 +86,22 @@ pub(crate) fn pass_roots(job: &CleanupJob) -> (Option<&str>, Vec<&str>) {
     (staging, job.library_roots.iter().filter_map(|root| configured_root(Some(root))).collect())
 }
 
-/// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each
-/// job the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
-/// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book
-/// another holder has locked is skipped this pass, and the pass holds the book only while it deletes the job's TMDb
-/// copies, never across the share's reach or the staging deletion (PR #15 review round 1, R6); each TMDb copy in
+/// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each job
+/// the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
+/// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book another
+/// holder has locked is skipped this pass, and the pass holds the book only while it deletes the job's TMDb copies,
+/// never across the share's reach or the staging deletion (PR #15 review round 1, R6); each TMDb copy in
 /// `<data>/jobs/<id>/` whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy without
 /// one is left to the refetch, Ruling T4-R7); and when `retention_due` or `discard_due` holds, the job's staging folder
 /// is deleted once its share answers, without following any link inside it (a root that is absent or blank, `/`
-/// included, is none: `pass_roots`). When `discard_due` holds, the job's partial files in each of its library
-/// roots are deleted once that root's share answers (`delete_partial_files`; phase 3 design, part 6.8). The share of
-/// each root is asked once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives
-/// `log` one engine.log line, and each root not reached gives one line at the pass's end with the count of jobs it
-/// skipped, naming it a staging or a library root (P3-T10). It returns the ids of the jobs whose TMDb copies it
-/// deleted, in the pass's order, each once, for the refresh's mirror (design part 7.5). Def: T4-11; the ids: T5-20;
-/// the discard: P3-T10. Use: T4-11, T5-20, P3-T15, P3-T16.
+/// included, is none: `pass_roots`); for a Discarded job within `replaced_kept_for`, everything but a `replaced` folder
+/// `keeps_replaced` keeps (`delete_staging_but_replaced`; Ruling T32-E11). When `discard_due` holds, the job's partial
+/// files in each of its library roots are deleted once that root's share answers (`delete_partial_files`; phase 3
+/// design, part 6.8). The share of each root is asked once per pass and its answer kept for the pass's other jobs.
+/// Every deletion and failure gives `log` one engine.log line, and each root not reached gives one line at the pass's
+/// end with the count of jobs it skipped, naming it a staging or a library root (P3-T10). It returns the ids of the
+/// jobs whose TMDb copies it deleted, in the pass's order, each once, for the refresh's mirror (design part 7.5). Def:
+/// T4-11; the ids: T5-20; the discard: P3-T10. Use: T4-11, T5-20, P3-T15, P3-T16.
 pub(crate) fn run_pass(
     jobs: Vec<CleanupJob>,
     data: &Path,
@@ -139,7 +142,10 @@ pub(crate) fn run_pass(
         let (staging_root, library_roots) = pass_roots(&job);
         if let Some(root) = staging_root {
             if reached(&mut roots, root, STAGING_ROOT, shares) {
-                delete_staging_folder(root, id, log);
+                match replaced_kept_for(&job, now_unix).filter(|_| discarded) {
+                    Some(seconds) => delete_staging_but_replaced(root, id, seconds, log),
+                    None => delete_staging_folder(root, id, log),
+                }
             }
         }
         if !discarded {
@@ -223,6 +229,85 @@ fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String
         }
     }
     removed
+}
+
+/// The seconds a Discarded `job`'s kept `replaced` folder still has before it is due (Ruling T32-E11, rule 2; phase 3
+/// design, part 6.7, Z27): Some while `now_unix` is not later than `record.updated_unix` plus the job's own
+/// `retention_days`, None once it is. `updated_unix` is never earlier than the move, so a moved file is kept at least
+/// `retention_days` from the day it was replaced; the moved file's own modification time, the old library file's
+/// date, is never read. Def: P3-T11 fix round 1. Use: P3-T16.
+fn replaced_kept_for(job: &CleanupJob, now_unix: u64) -> Option<u64> {
+    let due = job.record.updated_unix.saturating_add(u64::from(job.retention_days) * DAY_SECONDS);
+    (now_unix <= due).then(|| due - now_unix)
+}
+
+/// Whether `folder` (a job's staging folder) holds a `REPLACED_FOLDER` that a discard keeps (Ruling T32-E11, rule 1;
+/// phase 3 design, part 6.7): an entry of that name that is a real folder by `symlink_metadata` (a link is never one)
+/// and is not empty. A folder that cannot be listed is kept too, since what it holds is not known. Def: P3-T11 fix
+/// round 1. Use: P3-T16.
+pub(crate) fn keeps_replaced(folder: &Path) -> bool {
+    let replaced = folder.join(REPLACED_FOLDER);
+    match fs::symlink_metadata(&replaced) {
+        Ok(metadata) if metadata.is_dir() => {}
+        _ => return false,
+    }
+    match fs::read_dir(&replaced) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(_) => true,
+    }
+}
+
+/// A Discarded job's staging folder `<root>/<id>` emptied of everything but its kept `replaced` folder, `kept` seconds
+/// before that folder is due (Ruling T32-E11, rules 1, 2 and 4): when `keeps_replaced` holds, each entry directly
+/// inside the folder but `REPLACED_FOLDER` is deleted by its own type, never through a link (a folder with
+/// `remove_dir_all`, anything else with `remove_file`, a Windows folder link with `remove_dir`), then one line says
+/// so and one line that the `replaced` folder is kept and in how many days it is due; each failure gives its own
+/// line. Otherwise the whole folder goes as `delete_staging_folder` deletes it. Def: P3-T11 fix round 1. Use: P3-T16.
+fn delete_staging_but_replaced(root: &str, id: &str, kept: u64, log: &dyn Fn(String)) {
+    let folder = Path::new(root).join(id);
+    match fs::symlink_metadata(&folder) {
+        Ok(metadata) if metadata.is_dir() && keeps_replaced(&folder) => {}
+        _ => return delete_staging_folder(root, id, log),
+    }
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(error) => return log(format!("cleanup: {id}: the staging folder could not be read: {error}")),
+    };
+    let mut whole = true;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                whole = false;
+                log(format!("cleanup: {id}: the staging folder could not be read: {error}"));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if name == REPLACED_FOLDER {
+            continue;
+        }
+        let path = entry.path();
+        // `DirEntry::file_type` does not follow a link.
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => fs::remove_dir_all(&path),
+            Ok(_) => fs::remove_file(&path).or_else(|error| fs::remove_dir(&path).map_err(|_| error)),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = removed {
+            whole = false;
+            let shown = name.to_string_lossy();
+            log(format!("cleanup: {id}: {shown} in its staging folder could not be deleted: {error}"));
+        }
+    }
+    if whole {
+        log(format!("cleanup: {id}: deleted its staging folder but its {REPLACED_FOLDER} folder"));
+    }
+    let days = kept.div_ceil(DAY_SECONDS);
+    log(format!(
+        "cleanup: {id}: kept its {REPLACED_FOLDER} folder, which holds a replaced library file; it is due for deletion \
+         in {days} day(s)"
+    ));
 }
 
 /// Deletes `<root>/<id>`, the share holding `root` having answered this pass. `fs::remove_dir_all` removes a symbolic
@@ -389,6 +474,107 @@ mod tests {
         for state in [held(), failed(), State::Filed, State::Ripping] {
             assert!(!discard_due(&job(2, state, Some(NOW - 30 * DAY))));
         }
+    }
+
+    /// A Discarded job's staging folder holding `replaced/Film - 1080p.mkv` (the library file a "replace" moved aside)
+    /// and other data; gives the moved file's path.
+    fn replaced_and_other(folders: &Scratch, id: &str) -> PathBuf {
+        folders.write(&format!("staging/{id}/rip/t00-00800/title_t00.mkv"), "b");
+        folders.write(&format!("staging/{id}/evidence/t00-00800.mks"), "e");
+        folders.write(&format!("staging/{id}/notes.txt"), "n");
+        folders.write_path(&format!("staging/{id}/{REPLACED_FOLDER}/Film - 1080p.mkv"), "owner's film")
+    }
+
+    /// Ruling T32-E11, rule 1 (phase 3 design, part 6.7, Z27): a discard deletes everything in the job's staging
+    /// folder but a non-empty `replaced` folder, whose file is kept byte for byte, and says until when it is kept.
+    #[test]
+    fn a_discarded_job_keeps_its_replaced_folder_and_loses_the_rest() {
+        let folders = Scratch::new("cleanup-discarded-replaced");
+        let id = id(1);
+        let moved = replaced_and_other(&folders, &id);
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW);
+        let job_folder = folders.0.join("staging").join(&id);
+        let left: Vec<String> =
+            fs::read_dir(&job_folder).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(left, [REPLACED_FOLDER]);
+        assert_eq!(fs::read(&moved).unwrap(), b"owner's film");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted its staging folder but its {REPLACED_FOLDER} folder"),
+                format!(
+                    "cleanup: {id}: kept its {REPLACED_FOLDER} folder, which holds a replaced library file; it is due \
+                     for deletion in 7 day(s)"
+                ),
+            ]
+        );
+        // A second pass deletes nothing more and says the folder is kept.
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW + DAY);
+        assert_eq!(fs::read(&moved).unwrap(), b"owner's film");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted its staging folder but its {REPLACED_FOLDER} folder"),
+                format!(
+                    "cleanup: {id}: kept its {REPLACED_FOLDER} folder, which holds a replaced library file; it is due \
+                     for deletion in 6 day(s)"
+                ),
+            ]
+        );
+    }
+
+    /// Ruling T32-E11, rule 2: past `updated_unix + retention_days` the `replaced` folder and the job's staging folder
+    /// go.
+    #[test]
+    fn a_discarded_jobs_replaced_folder_goes_once_its_retention_has_passed() {
+        let folders = Scratch::new("cleanup-discarded-replaced-old");
+        let id = id(1);
+        replaced_and_other(&folders, &id);
+        let at_limit = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW + 7 * DAY);
+        assert!(folders.0.join("staging").join(&id).join(REPLACED_FOLDER).is_dir(), "{at_limit:?}");
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW + 7 * DAY + 1);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Ruling T32-E11, rule 1: an empty `replaced` folder keeps nothing, so the job's staging folder goes whole.
+    #[test]
+    fn a_discarded_job_with_an_empty_replaced_folder_loses_its_whole_staging_folder() {
+        let folders = Scratch::new("cleanup-discarded-replaced-empty");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/rip/t00/b.mkv"), "b");
+        fs::create_dir_all(folders.0.join("staging").join(&id).join(REPLACED_FOLDER)).unwrap();
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Ruling T32-E11, rule 1: a `replaced` that is a link to a folder outside staging keeps nothing: the job's staging
+    /// folder goes whole, the link is removed and never followed, and its target's file stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_discarded_job_whose_replaced_is_a_link_loses_its_staging_folder_and_not_the_target() {
+        let folders = Scratch::new("cleanup-discarded-replaced-link");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/rip/t00/b.mkv"), "b");
+        let outside = folders.write_path("elsewhere/Film - 1080p.mkv", "not staging's");
+        std::os::unix::fs::symlink(outside.parent().unwrap(), folders.0.join("staging").join(&id).join(REPLACED_FOLDER))
+            .unwrap();
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW);
+        assert!(fs::symlink_metadata(folders.0.join("staging").join(&id)).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"not staging's");
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Ruling T32-E11, rule 3: a Filed job past its retention loses its whole staging folder, `replaced` included.
+    #[test]
+    fn a_filed_job_past_its_retention_loses_its_replaced_folder_too() {
+        let folders = Scratch::new("cleanup-filed-replaced");
+        let id = id(1);
+        replaced_and_other(&folders, &id);
+        let lines = pass(&folders, vec![job(1, State::Filed, Some(NOW - 8 * DAY))], &FakeShares::new(), TODAY, NOW);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
     }
 
     /// Phase 3 design, part 6.8: nothing is deleted under a root whose share does not answer, and each such root
