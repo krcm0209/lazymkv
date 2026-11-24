@@ -67,8 +67,8 @@ pub struct MenuConfirmation {
 }
 
 /// Why an audio stream was dropped, in spec 8.6 step 1's bullet order (D13, RP7, spec 5 and 11 overrides), then the
-/// menu's drop (menu maps design 5.4a, MR-1, MR-3, MR-4, MA-1, MA-2); written with its reason under "why" (`{"why": "flagged",
-/// "flags": 1}`). Def: T8. Use: T13, T16.
+/// menu's drop (menu maps design 5.4a, MR-1, MR-3, MR-4, MA-1, MA-2); written with its reason under "why"
+/// (`{"why": "flagged", "flags": 1}`). Def: T8. Use: T13, T16.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "why")]
 pub enum AudioDrop {

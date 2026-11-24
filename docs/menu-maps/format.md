@@ -736,11 +736,11 @@ they are rulings of the plan that the owner can correct:
 - MA-4: the six sentences that pull request #35 added to the main design are replaced by ones that say the rule as it
   now is; they stay dated 2026-11-24.
 
-MA-1 replaces MR-2's verdict conditions and MR-12, and MR-11's list of outcomes is now MA-3's. Of MA-4's six sentences, five are replaced; the sixth, in the risk
-"Commentary on Blu-ray and UHD", is true as it stands and is kept. MR-2's condition that
-the stream be in the Original or English group falls with the owner's third answer (a track with no language code is
-treated like any other); its other conditions, that the stream is kept and is not the reference, stand, and so do the
-other rulings as written above.
+MA-1 replaces MR-2's verdict conditions and MR-12, and MR-11's list of outcomes is now MA-3's. Of MA-4's six sentences,
+five are replaced; the sixth, in the risk "Commentary on Blu-ray and UHD", is true as it stands and is kept. MR-2's
+condition that the stream be in the Original or English group falls with the owner's third answer (a track with no
+language code is treated like any other); its other conditions, that the stream is kept and is not the reference, stand,
+and so do the other rulings as written above.
 
 ## Tests and acceptance
 
@@ -795,4 +795,20 @@ that merge widened it (Rulings, MA-1 to MA-4).
 
 ### Menu alone (2026-11-24)
 
-<!-- controller: test counts and acceptance on the 13 real maps go here -->
+Recorded on 2026-11-24 for the branch that takes the content rule's verdict out of the menu's drop (the owner's rulings
+after pull request #35; MA-1 to MA-4).
+
+- Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline --no-fail-fast`, run on this Mac with
+  toolchain 1.100.0: 3509 tests in 58 result lines. One run of the final code gave 3509 passed, 0 failed, 5 ignored,
+  with no warning. A second run gave 3508 passed and 1 failed: the engine's unit test
+  `owner::tests::a_rip_result_that_cannot_be_persisted_fails_the_job_and_gives_the_token_back`, which fails now and then
+  on this Mac and passed when the engine's unit tests ran alone (262 of 262). The branch changes no file of the engine.
+  `main` 9f9e471 has 3506 tests with the same command, so the branch adds 3 and rewrites five of pull request #35's for
+  the rule as it now is. Nothing has run on Windows or Linux yet; that is CI's part once the branch is pushed.
+- Acceptance on the 13 real maps (counts only), on the same copies as the record above: the exit codes are equal on 13
+  of 13; every key but `decision` and `menu` is byte-equal on 13 of 13; the `roles` are those of the record above (79
+  rows, 73 with the measurement's role and tie, plain Play's own stream found on 13 of 13).
+- The rule: 30 confirmations, 30 `dropped`, on 11 maps. The programme reference is the same before and after on each of
+  the 11. `commentary_detected` leaves the review reasons on 4 maps, where every stream whose verdict raised it is now
+  dropped; no other review reason changes on any map. No confirmation met a guard: none is the reference, has a Keep
+  override, or is a title's last audio track.

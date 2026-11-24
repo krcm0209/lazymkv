@@ -263,14 +263,14 @@ treat every map alike, so as proposed the rule would also act on BD, DVD and non
 Blu-ray with Java menus can be mapped by agents today, 5.5; non-Java and DVD menus need increment 5). The owner can
 limit it to UHD Java maps until those formats are measured.
 
-**Still unruled.** A menu programme role (the words `main`, `programm` or `programme`) against a content verdict of commentary or
-audio description; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging a track on a
-menu role; any user preference that acts on a role. Subtitles are left out by the audio-only proposal above, not by the
-ruling; the owner can bring them in. [Amended 2026-11-24, after the merge of pull request #35: the owner's rulings at
-the end of this section rule what this paragraph also listed, a menu role against `not-judged`, `reference-unclear`
-or a vetoed title, content's commentary or audio-description verdict against a menu role of the same or the other
-unwanted kind, and MR-12's track that the menu and the content rule both call a commentary or an audio description.
-The reference track is never dropped, as before.]
+**Still unruled.** A menu programme role (the words `main`, `programm` or `programme`) against a content verdict of
+commentary or audio description; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging a
+track on a menu role; any user preference that acts on a role. Subtitles are left out by the audio-only proposal above,
+not by the ruling; the owner can bring them in. [Amended 2026-11-24, after the merge of pull request #35: the owner's
+rulings at the end of this section rule what this paragraph also listed, a menu role against `not-judged`,
+`reference-unclear` or a vetoed title, content's commentary or audio-description verdict against a menu role of the same
+or the other unwanted kind, and MR-12's track that the menu and the content rule both call a commentary or an audio
+description. The reference track is never dropped, as before.]
 
 **Where it is built (a proposal; the owner has not chosen).** Recommended: its own increment, the menu-role increment,
 after increment 3 and before the navigators, with its own plan and its own branch from `main`. Increment 3's `menu`
