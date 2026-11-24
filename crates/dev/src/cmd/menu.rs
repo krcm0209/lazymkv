@@ -2,19 +2,24 @@
 //! design 5.4; the format and rulings M3-1 to M3-8 are docs/menu-maps/format.md). `show` prints a map, labels as they
 //! are; `check` ties it to a scanned disc and prints ids, playlists and numbers only, never a label. Exit: show 0, or
 //! 2; check 0 when nothing failed, 1 otherwise; 2 for an argument, map or scan problem; 3 for a slug without the
-//! evidence clone. Refusals print `lazymkv-dev menu: error: <line>`, one per problem. Evidence only: no decision reads
-//! a map.
+//! evidence clone. Refusals print `lazymkv-dev menu: error: <line>`, one per problem. The command changes nothing;
+//! `decide --menu` reads a map with `read_map`, the off-decisions beside it with `read_off` and the recording's
+//! playlists with `read_playlists`, and its decision drops a commentary or audio description the map confirms
+//! (design 5.4a).
 
 use crate::evidence::{read_file_text, resolve_recording, Ctx, Recording, Refused};
 use crate::{usage_error, Args};
 use lazymkv_core::disc::{disc, Disc};
 use lazymkv_core::menu::{
-    self, DiscId, Effect, MenuMap, FILE_NAME, META_WITHOUT_ID, NO_ID_IN_SCAN_FILE, NO_META,
+    self, parse_off, parse_playlist, DiscId, Effect, MenuMap, OffDecisions, Playlist, FILE_NAME, META_WITHOUT_ID,
+    NO_ID_IN_SCAN_FILE, NO_META, OFF_FILE_NAME,
 };
 use lazymkv_core::recording::files::Meta;
 use lazymkv_core::recording::{py_float_repr, py_repr_str, read_json, read_text, text_mode, Encoding, Errors, Tree};
 use lazymkv_core::robot::parse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::path::PathBuf;
 
 /// The command's name as typed.
 const NAME: &str = "menu";
@@ -25,6 +30,10 @@ const CHECK_USAGE: &str = "menu check [-h] map --scan SCAN [--evidence DIR]";
 /// A recording folder's files this command reads.
 const SCAN_FILE: &str = "scan.txt";
 const META_FILE: &str = "meta.json";
+/// Why `read_playlists` read no file for a name: it is not five ASCII digits (MR-13), or the recording has no such
+/// playlist file.
+const NOT_A_PLAYLIST_NAME: &str = "not a playlist name";
+const NO_SUCH_PLAYLIST: &str = "no such file";
 
 /// What -h prints after the usage line.
 const HELP: &str = "
@@ -95,6 +104,55 @@ pub(crate) fn read_map(ctx: &Ctx, given: &str) -> Result<(String, MenuMap), Refu
             Err(refused(lines.join("\n")))
         }
     }
+}
+
+/// The off-decisions beside the map `given` names (`<folder>/menu-off.tsv`; for a map file, its folder's): none
+/// when the file is absent; Refused { code: 2 } with one line `<shown>: <problem>` per problem otherwise (MR-6). The
+/// file's shown path is built as `read_map` builds the map's, with `menu-off.tsv` as the file name (for a map file,
+/// the given path's folder part, or the file name alone when it has none), and the file is read as the map is:
+/// UTF-8 with an optional byte-order mark, strictly (`read_file_text` with `Utf8Sig`), then `menu::parse_off`.
+pub(crate) fn read_off(ctx: &Ctx, given: &str) -> Result<OffDecisions, Refused> {
+    let path = ctx.abs(given);
+    let (path, shown) = if path.is_dir() {
+        let folder = given.trim_end_matches(['/', '\\']);
+        let shown = if given.is_empty() { OFF_FILE_NAME.to_string() } else { format!("{folder}/{OFF_FILE_NAME}") };
+        (path.join(OFF_FILE_NAME), shown)
+    } else {
+        let shown = match given.rfind(['/', '\\']) {
+            Some(at) => format!("{}/{OFF_FILE_NAME}", &given[..at]),
+            None => OFF_FILE_NAME.to_string(),
+        };
+        (path.parent().map_or_else(|| PathBuf::from(OFF_FILE_NAME), |folder| folder.join(OFF_FILE_NAME)), shown)
+    };
+    if !path.exists() {
+        return Ok(OffDecisions::default());
+    }
+    let text = read_file_text(&path, &shown, Encoding::Utf8Sig, Errors::Strict)
+        .map_err(|problem| refused(format!("{shown}: {problem}")))?;
+    parse_off(&text).map_err(|problems| {
+        let lines: Vec<String> = problems.iter().map(|problem| format!("{shown}: {problem}")).collect();
+        refused(lines.join("\n"))
+    })
+}
+
+/// Each named playlist of the recording, `nav/BDMV/PLAYLIST/<name>.mpls`: parsed, or why not (`not a playlist
+/// name` for a name that is not five ASCII digits, which is not looked up (MR-13); `no such file`; the read error;
+/// `parse_playlist`'s sentence). Every name requested has an entry, keyed as requested.
+pub(crate) fn read_playlists(rec: &Recording, names: &BTreeSet<String>) -> BTreeMap<String, Result<Playlist, String>> {
+    let folder = rec.dir.join("nav").join("BDMV").join("PLAYLIST");
+    let read = |name: &str| -> Result<Playlist, String> {
+        // MR-13: a map's playlist string reaches the file system only as five ASCII digits.
+        if name.len() != 5 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(NOT_A_PLAYLIST_NAME.to_string());
+        }
+        let key = folder.join(&format!("{name}.mpls"));
+        if !rec.tree.is_file(&key) {
+            return Err(NO_SUCH_PLAYLIST.to_string());
+        }
+        let bytes = rec.tree.read(&key).map_err(|error| error.to_string())?;
+        parse_playlist(&bytes)
+    };
+    names.iter().map(|name| (name.clone(), read(name))).collect()
 }
 
 /// A recording's disc ID, its meta.json `disc_id` (M3-6): `Absent(NO_META)` when the recording has no meta.json,
@@ -314,11 +372,15 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
 
 #[cfg(test)]
 mod tests {
-    use super::{disc_id_of, read_map, run};
+    use super::{disc_id_of, read_map, read_off, read_playlists, run};
     use crate::evidence::{resolve_recording, Ctx, Refused};
     use crate::testutil::{call, printed, Scratch, ScratchExt};
     use lazymkv_core::disc::disc;
-    use lazymkv_core::menu::{self, DiscId, FILE_NAME, FIXTURE, META_WITHOUT_ID, NO_META};
+    use lazymkv_core::menu::{
+        self, made_up_playlist, parse_off, parse_playlist, DiscId, MadeUpItem, OffDecisions, FILE_NAME, FIXTURE,
+        META_WITHOUT_ID, NO_META, OFF_FILE_NAME,
+    };
+    use std::collections::BTreeSet;
     use lazymkv_core::robot::parse;
     use lazymkv_core::testsupport::{menu_scan_text, scan_text};
 
@@ -700,6 +762,76 @@ mod tests {
         assert!(refusal.line.starts_with(&format!("{FILE_NAME}: ")), "{}", refusal.line);
         tmp.write(FILE_NAME, FIXTURE);
         assert_eq!(read_map(&ctx, "").unwrap(), (FILE_NAME.to_string(), map));
+    }
+
+    #[test]
+    fn read_off_reads_the_file_beside_the_map() {
+        let tmp = world("menu-read-off", None);
+        let ctx = Ctx::for_test(&tmp.0);
+        let map_file = format!("{MAP_DIR}/{FILE_NAME}");
+        // An absent file is no decision.
+        assert_eq!(read_off(&ctx, MAP_DIR).unwrap(), OffDecisions::default());
+        assert_eq!(read_off(&ctx, &map_file).unwrap(), OffDecisions::default());
+        // The folder form and the file form read the same file, the map folder's.
+        let text = "# made-up decisions\noff\tc003\nrole\tc002\n";
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), text);
+        let expected = parse_off(text).unwrap();
+        assert_ne!(expected, OffDecisions::default());
+        assert_eq!(read_off(&ctx, MAP_DIR).unwrap(), expected);
+        assert_eq!(read_off(&ctx, &map_file).unwrap(), expected);
+        // A malformed file is refused with one `<shown>: <problem>` line per problem, either form.
+        let bad = "of\tc003\noff\tx1\n";
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), bad);
+        let at = format!("{MAP_DIR}/{OFF_FILE_NAME}");
+        let lines: Vec<String> = parse_off(bad).unwrap_err().iter().map(|problem| format!("{at}: {problem}")).collect();
+        assert_eq!(lines.len(), 2);
+        for given in [MAP_DIR, map_file.as_str()] {
+            let refusal = read_off(&ctx, given).unwrap_err();
+            assert_eq!((refusal.code, refusal.line.clone()), (2, lines.join("\n")), "{given}");
+            assert!(refusal.line.starts_with(&format!("{at}: line 1: ")), "{}", refusal.line);
+        }
+        // A map file named without a folder: the off-decisions of the working folder, shown by the file name alone.
+        tmp.write("loose.json", FIXTURE);
+        assert_eq!(read_off(&ctx, "loose.json").unwrap(), OffDecisions::default());
+        tmp.write(OFF_FILE_NAME, "off c003\n");
+        let refusal = read_off(&ctx, "loose.json").unwrap_err();
+        assert!(refusal.line.starts_with(&format!("{OFF_FILE_NAME}: line 1: ")), "{}", refusal.line);
+        // A file that is not UTF-8 is refused, read strictly as the map is.
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), [0xffu8, 0xfe, 0x41]);
+        let refusal = read_off(&ctx, MAP_DIR).unwrap_err();
+        assert!(refusal.line.starts_with(&format!("{at}: ")), "{}", refusal.line);
+        assert_eq!(refusal.line.lines().count(), 1, "{}", refusal.line);
+    }
+
+    #[test]
+    fn read_playlists_reads_only_five_digit_names() {
+        let tmp = world("menu-read-playlists", None);
+        let item = |audio: Vec<(u16, u8, &'static str)>| MadeUpItem {
+            clip: "00055",
+            in_time: 0,
+            out_time: 90_000,
+            audio,
+            subtitles: vec![(0x1200, "eng")],
+        };
+        let bytes = made_up_playlist(&[item(vec![(0x1100, 0x86, "eng"), (0x1101, 0x81, "spa")])]);
+        let folder = format!("{REC_DIR}/nav/BDMV/PLAYLIST");
+        tmp.write(&format!("{folder}/00800.mpls"), &bytes);
+        tmp.write(&format!("{folder}/00802.mpls"), &bytes[..20]);
+        // A playlist where `../x` would lead: never looked up.
+        tmp.write(&format!("{REC_DIR}/nav/BDMV/x.mpls"), &bytes);
+        tmp.write(&format!("{folder}/0080.mpls"), &bytes);
+        let ctx = Ctx::for_test(&tmp.0);
+        let rec = resolve_recording(&ctx, None, REC_DIR).unwrap();
+        let names: BTreeSet<String> = ["00800", "../x", "0080", "00801", "00802"].map(String::from).into();
+        let read = read_playlists(&rec, &names);
+        assert_eq!(read.keys().collect::<Vec<_>>(), names.iter().collect::<Vec<_>>());
+        assert_eq!(read["00800"], parse_playlist(&bytes));
+        assert!(read["00800"].is_ok());
+        assert_eq!(read["../x"], Err("not a playlist name".to_string()));
+        assert_eq!(read["0080"], Err("not a playlist name".to_string()));
+        assert_eq!(read["00801"], Err("no such file".to_string()));
+        let cut = parse_playlist(&bytes[..20]).unwrap_err();
+        assert_eq!(read["00802"], Err(cut));
     }
 
     #[test]

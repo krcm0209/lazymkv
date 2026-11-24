@@ -1,7 +1,8 @@
 //! What a menu calls an audio choice (menu maps design 5.4a, rulings MR-6, MR-7 and MR-10 of the menu-role plan): the
 //! role words of a choice's text, the "net" of words that may mean a switch, the per-choice off-decisions file, and the
 //! role of a stream from the choices that label it. Words are matched as the measurement's Python matched them, without
-//! regard to case, with a word edge being a neighbour that is neither alphanumeric nor `_`. Evidence only; no I/O.
+//! regard to case, with a word edge being a neighbour that is neither alphanumeric nor `_`. No I/O; the roles reach a
+//! decision only through `tie.rs`'s confirmation (design 5.4a).
 
 use std::collections::{BTreeMap, BTreeSet};
 

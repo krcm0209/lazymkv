@@ -4,8 +4,10 @@
 //! choice's label and the per-choice off-decisions file (design 5.4a); `tie.rs` ties a map's audio choices to a title's
 //! scan streams through the title's playlist and reads each stream's role (design 5.4a). The format, its rules and this
 //! increment's rulings M3-1 to M3-8 are `docs/menu-maps/format.md`.
-//! A map says only what the menu calls a choice and which playlist and streams choosing it selects; it is evidence and
-//! no decision reads it. No I/O: `read` takes the file's text.
+//! A map says only what the menu calls a choice and which playlist and streams choosing it selects. The decision reads
+//! only the confirmed roles of `tie.rs` (a commentary or an audio description with a strong tie, on a map whose
+//! identity matches), and only when `decide --menu` gives a map (design 5.4a); nothing else here changes a verdict,
+//! plan or decision. No I/O: `read` takes the file's text.
 
 mod mpls;
 mod role;
