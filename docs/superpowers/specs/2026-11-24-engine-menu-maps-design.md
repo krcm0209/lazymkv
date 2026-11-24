@@ -2,14 +2,15 @@
 
 Date: 2026-11-24.
 Status: the owner answered seven questions in the design conversation of 2026-11-24 (EO-1 to EO-7, part 3) and
-approved the design in three parts the same day ("Approve part 1", "Approve part 2", "Approve part 3"). The rest is
-the designer's, with every call listed in part 17 for the owner to check. Nothing is built: the implementation plan,
-any push and any pull request wait for the owner's word.
+approved the design in three parts the same day ("Approve part 1", "Approve part 2", "Approve part 3"). The owner then
+went through the calls added while this document was written, and the build order, and answered each (EO-8 to EO-16,
+part 3); two of those answers replace what the document first said. The rest is the designer's, listed in part 17.
+Nothing is built. The owner chose the order: the first pull request now, the engine's after phase 3's fix-after.
 
 "The spec" is `docs/superpowers/specs/2026-10-04-lazymkv-design.md`; "the menu maps design" is
 `docs/superpowers/specs/2026-11-17-menu-maps-design.md`; "the format" is `docs/menu-maps/format.md`; "the phase 2
 design" is `docs/superpowers/specs/2026-10-21-phase-2-engine-design.md`; "the phase 3 design" is
-`docs/superpowers/specs/2026-11-24-phase-3-design.md`; "the notes" are `docs/phase2/engine.md`. EO-1 to EO-7 are the
+`docs/superpowers/specs/2026-11-24-phase-3-design.md`; "the notes" are `docs/phase2/engine.md`. EO-1 to EO-16 are the
 owner's answers and EM-1 to EM-22 the designer's calls, both recorded here.
 
 ## 1. Intent
@@ -47,7 +48,7 @@ job shows about a menu drop. Nothing is built until you approve it.", the owner 
 - **`status` and `history` show the job's own notes.** `core::ipc::job_summary` copies `record.notes` and none of the
   notes of the titles' decisions.
 
-## 3. The owner's answers of 2026-11-24 (EO-1 to EO-7)
+## 3. The owner's answers of 2026-11-24 (EO-1 to EO-16)
 
 Each answer was a button chosen from a question that stated a recommendation and what each choice costs.
 
@@ -83,6 +84,38 @@ Each answer was a button chosen from a question that stated a recommendation and
 - **EO-7, publishing.** Asked "Maps are made on this Mac, and the media share is not mounted here right now. How should
   a finished map be copied into the maps folder on the share?", the owner chose "Mac mounts the share (Recommended)"
   over "Through the mini PC" and "I will copy them by hand".
+
+After the document was written the owner asked to be walked through the calls added since part 3's approval (EM-15 to
+EM-22) and the build order, and answered each. Two answers replace the designer's first call (EO-8, EO-11).
+
+- **EO-8, a map file that cannot be opened (was EM-15).** Asked "A map file exists for the disc and the share answers,
+  but the engine cannot open that one file (wrong permissions, for example). What should the job do? (When the share
+  itself does not answer, the job waits or fails as you already agreed, either way.)", the owner chose "Go on without
+  the map (Recommended)" over "Stop the job (as written)". The chosen option read: "Treat it like any bad map: nothing
+  is dropped on the menu's word, the job gets the 'map not used' note and job.log says why."
+- **EO-9, the job's old copy (EM-16).** Asked "A job keeps a copy of the map it decided with. If the job decides again
+  later and the map is now gone from the share, or is now refused, what happens to the job's old copy?", the owner
+  chose "Remove it (Recommended, as written)" over "Rename it aside".
+- **EO-10, a disc with no map (EM-17).** Asked "Most discs will have no map. Should a job say so anywhere besides its
+  own log?", the owner chose "Only in job.log (Recommended, as written)" over "A note on every such job".
+- **EO-11, the other tracks when the menu contradicts the reference (was EM-18).** Asked "The menu calls lazymkv's
+  reference track a commentary, so the job is held for review (your ruling). The same map also confirms OTHER tracks
+  of that title as commentaries. What happens to those other tracks?", the owner chose "Drop nothing there
+  (Recommended)" over "Still drop the others (as written)". The chosen option read: "The map and lazymkv disagree
+  about the film's own audio, so nothing is dropped on the menu's word on that title; the job is held and you decide."
+- **EO-12, a stale off line at publish (EM-19).** Asked "An off-decision line whose wording no longer matches the map
+  (a 'stale' line) is ignored by the engine. What should the publish command on the Mac do when it sees one?", the
+  owner chose "Refuse to publish (Recommended, as written)" over "Publish with a warning".
+- **EO-13, a leftover off line (EM-22).** Asked "An off-decision line whose choice id is not in the map at all (a
+  leftover from an older map) can act on nothing. What should happen to it?", the owner chose "Allow it, list as
+  unused (Recommended, as written)" over "Refuse to publish".
+- **EO-14, the unset setting (EM-21).** Asked "While the new maps-folder setting is unset, should it be left out of the
+  settings lazymkv writes, or written as empty like the other folder settings?", the owner chose "Leave it out while
+  unset (Recommended, as written)" over "Write it as empty".
+- **EO-15, two pull requests (EM-20), and EO-16, the build order.** Asked "Two pull requests are proposed: first the
+  rule changes, the publish command and the off-file binding (changes only the developer command, Mac only); then the
+  engine. Undoing a menu drop in a real job needs phase 3's fix-after. When should each be built?", the owner chose
+  "First now, engine after fix-after (Recommended)" over "Both now, setting left off" and "Everything after phase 3".
 
 ## 4. Goals, non-goals and anti-goals
 
@@ -257,10 +290,12 @@ the outcome below: a copy left by an earlier run is replaced or removed.
    not read, and a retry once the share answers decides again`. It is never read as "no map" (EO-1).
 4. **The files.** `<root>\<DISC ID>\menu-map.json` and `menu-off.tsv` are read whole. A file over its size limit, 4 MiB
    for the map and 1 MiB for the off file, is not read: the pair is not used (step 6). A missing folder or a missing
-   map is "no map"; a missing off file is "no decisions". Any other read error fails the step with its sentence.
+   map is "no map"; a missing off file is "no decisions". A file that is there and cannot be opened or read is held
+   for step 5.
 5. **The share again.** `reach` is asked once more after the reads, as Decide's second library check does (review
-   round 1 of pull request #14, R28), because a missing file and a share that just dropped read alike. Not answering:
-   fail as in step 3, and nothing read is used.
+   round 1 of pull request #14, R28), because a missing file, a failed read and a share that just dropped read alike.
+   Not answering: fail as in step 3, and nothing read is used. Answering: a file that could not be opened or read is
+   a bad map, so the pair is not used (step 6), with the read's error as its problem (EO-8).
 6. **The check.** The pair is used only if all of these hold: the map is strict UTF-8 and passes `core::menu::read`
    (the format's rules, the reader's rules, the version rule); the off file passes `parse_off` in part 9's form; the
    map's `disc.disc_id_sha1` matches the job's disc ID (`menu::identity` gives `Matches`). Otherwise the pair is **not
@@ -303,8 +338,8 @@ which is private data like the rest of a recording.
 
 ## 11. When something is wrong
 
-A bad map never fails a job and never drops a track. Only a share that does not answer, or a file that cannot be
-read or written, fails the step, as it already does for the library and the job folder.
+A bad map never fails a job and never drops a track. Only a share that does not answer, or a copy that cannot be
+written into the job folder, fails the step, as each already does for the library and the job folder.
 
 | Case | The job | What is recorded |
 |---|---|---|
@@ -314,10 +349,11 @@ read or written, fails the step, as it already does for the library and the job 
 | The map is over its size limit, is not UTF-8 or JSON, breaks the format's rules, or is another format version | decides without it | the note `menu_map_not_used`; every problem in `job.log` |
 | The map inside names another disc, or no disc | decides without it | the same |
 | `menu-off.tsv` is over its limit or cannot be parsed | the pair is not used | the same |
+| Either file is there and cannot be opened or read, while the share answers (EO-8) | decides without the pair | the same, with the read's error |
 | A stale off line | the line is ignored; its choice has no decision | `off_stale` in the title's `roles` block |
 | A title's own playlist is missing, cannot be parsed, or its play items differ | no stream of that title is tied, so nothing is confirmed (MR-8) | `roles.acts` false with `roles.why` |
 | A playlist entry disagrees with the scan in language, codec or count | the tie is `tie-conflict`, which confirms nothing (MR-9) | the row's `why` |
-| The share does not answer, or a read fails with another error | Decide fails and is retried; phase 3 makes it wait for the share (its part 9.3) | the failure's message |
+| The share does not answer, before the reads or after them | Decide fails and is retried; phase 3 makes it wait for the share (its part 9.3) | the failure's message |
 | The copy cannot be written into the job folder | Decide fails | the failure's message |
 
 A share that does not answer, in today's engine and in phase 3's:
@@ -381,8 +417,9 @@ reference.
   Play's stream is known and is among the kept tracks. Otherwise none is dropped, and each candidate gets the new
   outcome `no_reference` (EM-10 reads "known" as "known and kept").
 - Play's own stream is never a candidate (MR-17), so it stays.
-- The outcome is tested before `would_leave_none`. The outcomes are then seven: `dropped`, `not_kept`, `overridden`,
-  `reference`, `no_reference`, `reference_would_change`, `would_leave_none`.
+- The outcome is tested before `would_leave_none`. With part 13.3's the outcomes are then eight: `dropped`,
+  `not_kept`, `overridden`, `reference`, `reference_disputed`, `no_reference`, `reference_would_change`,
+  `would_leave_none`.
 
 ### 13.2 A doubted reference (EO-4)
 
@@ -402,13 +439,18 @@ tracks are kept as today, and the decision adds the review reason `audio_referen
 `menu_reference_conflict`. Made-up details:
 
 ```
-the disc's menu calls stream 1, the programme reference, a commentary ("AUDIO: Commentary by Person A"); kept
+the disc's menu calls stream 1, the programme reference, a commentary ("AUDIO: Commentary by Person A"); nothing was dropped on the menu's word
 dropping the tracks the menu confirms (streams 3, 4) would change the programme reference from 1 to 5; none dropped
 ```
 
-Other candidates of a title whose reference the menu confirms are still dropped, as today; the job is held before it
-files, so the owner sees both. No new review reason is added to spec 8.8's table: `audio_reference_unclear` already
-means "the reference is in doubt", and phase 3's audio point answers it.
+**Nothing else is dropped on such a title (EO-11).** When a confirmation of the title has the outcome `reference`,
+the map and lazymkv disagree about the film's own audio, so no candidate of that title is dropped: each gets the new
+outcome `reference_disputed`. It is tested first of the title-level outcomes, before `no_reference` (the two cannot
+both hold), `would_leave_none` and `reference_would_change`. A confirmation on a reference that has a Keep override
+has the outcome `overridden`, as today, and disputes nothing.
+
+No new review reason is added to spec 8.8's table: `audio_reference_unclear` already means "the reference is in
+doubt", and phase 3's audio point answers it.
 
 ### 13.4 What does not change
 
@@ -422,10 +464,9 @@ EM-14), and subtitles. An outcome that drops nothing raises no note unless part 
 - **With phase 3's review** (its pull requests 2 and 3): `lazymkvctl review JOB` on the filed job, the answer "keep"
   on the dropped track, and the job files again while its rip is kept. The answer is remembered (phase 3 design, Z6),
   so a later job for the same disc keeps the track too.
-- **Before phase 3's review is built** the engine has no undo. The way back is to delete or correct the disc's folder
-  in the maps folder and rip the disc again (EM-12).
-- **A proposal for the owner:** leave `menu_maps_root` unset in the settings that file into the real library until
-  phase 3's fix-after is built. The test library can use maps at once.
+- **The order the owner chose (EO-16)** puts the engine's pull request after phase 3's fix-after, so undo exists
+  before any real job uses a map. No undo command of this design's own is built (EM-12); without phase 3's review the
+  only way back would be to delete or correct the disc's folder in the maps folder and rip the disc again.
 - **Switching off:** one disc by deleting its folder, which the next Decide of any job for that disc sees; every new
   job by unsetting the setting.
 - **A map that arrives after a job filed** takes effect when that job decides again (a fix-after). That reaches only
@@ -452,21 +493,29 @@ EM-14), and subtitles. An outcome that drops nothing raises no note unless part 
 
 ### 16.1 What changes, by crate
 
-- `core`: `Settings.menu_maps_root` and its checks; the three notes; `MenuOutcome::NoReference`; the decision's inputs
-  gain Play's stream and the confirmations' labels; `RolesBlock` gains `play` and `off_stale`; `parse_off` and the role
-  reading take part 9's third field; the three rules of part 13; `job_summary` lists the decisions' notes.
+- `core`: `Settings.menu_maps_root` and its checks; the three notes; the outcomes `no_reference` and
+  `reference_disputed`; the decision's inputs gain Play's stream and the confirmations' labels; `RolesBlock` gains
+  `play` and `off_stale`; `parse_off` and the role reading take part 9's third field; the rules of part 13;
+  `job_summary` lists the decisions' notes.
 - `dev`: the shared menu-input function (part 10.3); `menu publish` (part 8); the off listing (part 9).
 - `engine`: the lookup (part 10.2); the job's note; the relay's `--menu`; the self-test's check.
 - `ctl`: the two new `lazymkv-dev menu` forms are not relayed; nothing else.
 
-Proposed as one implementation plan in two pull requests. The first holds `core` and `dev`: it changes only what
-`decide --menu` prints, and ends with acceptance stage A. The second holds the engine, and ends with stage B. No new
-crate is expected: the SHA-256 of `job.log`'s line comes from a crate the workspace already has.
+Two pull requests, in the order the owner chose (EO-15, EO-16):
 
-Neither pull request needs phase 3 to be built first, but both designs touch the spec, `Note`, the job summary and
-how Decide meets a lost share. When each is built is the owner's choice at plan time. Three things follow from the
-order: which branch carries the spec's amendments second and merges them; which adds the maps folder to the waiting
-job's roots (part 11); and which adds the menu's sentence to the review sheet (part 12).
+1. **The rule and the map's files, now.** `core` and `dev` only, built and tested on the Mac: the rules of part 13 and
+   the two notes of a decision, the off file's binding (part 9), `menu publish` and the off listing (part 8), and the
+   shared menu-input function (part 10.3). It changes only what `lazymkv-dev decide --menu` prints, and ends with
+   acceptance stage A. It has its own implementation plan.
+2. **The engine, after phase 3's fix-after is merged.** The setting, the lookup, the job's note, the job summary, the
+   relay and the self-test. It ends with stage B. Its plan is written then, against the engine as phase 3 leaves it.
+
+No new crate is expected: the SHA-256 of `job.log`'s line comes from a crate the workspace already has.
+
+Both designs touch the spec, `Note`, the job summary and how Decide meets a lost share. Three things follow from the
+order: the engine's pull request adds the menu's sentence to the review sheet (part 12), since the sheet exists by
+then; it also carries its spec amendments onto phase 3's; and whichever of it and phase 3's failures pull request is
+built second adds the maps folder to the waiting job's roots (part 11).
 
 ### 16.2 Documents amended when it is built
 
@@ -477,7 +526,7 @@ job's roots (part 11); and which adds the menu's sentence to the review sheet (p
 | The spec, 8.6 step 1 | "The engine gives no map yet" becomes how the engine gives one; the no-reference rule |
 | The spec, 8.6 step 6 and "Content"; 8.8 | the two decision notes; `audio_reference_unclear` is also raised by part 13.2 and 13.3 |
 | The spec, 13 and 14 | the self-test's check; the setting |
-| The format | the off file's third field, `off_stale`, `roles.play`, the seventh outcome, the notes, MR-11 replaced, the sentences saying the engine gives no map, the rulings EO-1 to EO-7 and EM-1 to EM-22 |
+| The format | the off file's third field, `off_stale`, `roles.play`, the two new outcomes, the notes, MR-11 replaced, the sentences saying the engine gives no map, the rulings EO-1 to EO-16 and EM-1 to EM-22 |
 | The menu maps design | its status line and a pointer to this document; its non-goal stands |
 | `docs/phase1/decision-core.md` | the decide section's `--menu` paragraph |
 | The notes | a section for this increment: rulings, tests, the mini PC record |
@@ -524,12 +573,13 @@ into the test library, as pull request 7 did.
   folder must be as it was: the engine wrote nothing there.
 - The owner plays the filed file once and checks that the film's audio is there and the commentary is not.
 - One disc with no map goes in and must behave as it did before.
-- If phase 3's fix-after is built by then: one drop is undone by a "keep" answer and the job files again.
+- One drop is undone by a "keep" answer in phase 3's review, and the job files again with the track.
 
 ## 17. The designer's calls, for the owner to check
 
 Each is a call made here, with what it costs if it is wrong. The owner saw EM-1 to EM-14 with part 3 and approved the
-part; EM-15 to EM-22 came up while this document was written and checked.
+part. EM-15 to EM-22 came up while this document was written and checked; the owner then answered each (EO-8 to
+EO-15), and the answer is noted on the call.
 
 - **EM-1.** A disc's folder is named by its disc ID, not by a slug. Cost: a person cannot tell a disc from its folder
   name; `menu show` tells.
@@ -555,25 +605,26 @@ part; EM-15 to EM-22 came up while this document was written and checked.
   read shows at the first job, not at setup.
 - **EM-14.** The audio confidence does not change with a menu drop (MR-14). Cost: a job with a menu drop files at the
   same confidence as one without.
-- **EM-15.** A read error other than "not found" fails the step, as a share that does not answer does. Cost: a map
-  file the engine may not open stops that disc's jobs at Decide until it is fixed or removed, where "decide without
-  it" would have let them through; the failure names the file.
-- **EM-16.** The job's copy is removed when a run finds no map or refuses one. Cost: the map an earlier run used is
-  then only in the tuning copy of the recording, if that was made in between.
-- **EM-17.** A missing map raises no note. Cost: which discs have no map is read from `job.log` or from the absence of
-  the `menu` key, not from `status`.
-- **EM-18.** When the menu confirms the reference, the title's other candidates are still dropped, and the job is
-  held. Cost: if the map is wrong about the reference it may be wrong about them too; the owner sees them on the held
-  job before it files.
-- **EM-19.** `menu publish` refuses a stale off line, while the engine only ignores one. Cost: none known; a pair
-  placed by hand is still read safely.
-- **EM-20.** Two pull requests, `core` and `dev` first. Cost: `decide --menu` changes one pull request before any job
-  does.
-- **EM-21.** `menu_maps_root` is written into a settings object only when it is set, unlike the other roots. Cost: one
-  key that behaves differently from its neighbours; an older lazymkv refuses a settings file that names it, as it
-  refuses any key it does not know.
-- **EM-22.** An off line whose id names no audio choice of the map is unused, not stale, and is refused nowhere.
-  Cost: a leftover line from an older map is carried along until someone removes it; it acts on nothing.
+- **EM-15.** Replaced by the owner's answer EO-8. The first call failed the step on any read error but "not found".
+  As ruled: a file that cannot be opened or read while the share answers is a bad map, and the job decides without
+  it. Cost: a commentary stays in that file until the map is fixed and the job is filed again.
+- **EM-16** (confirmed by the owner, EO-9). The job's copy is removed when a run finds no map or refuses one. Cost:
+  the map an earlier run used is then only in the tuning copy of the recording, if that was made in between.
+- **EM-17** (confirmed by the owner, EO-10). A missing map raises no note. Cost: which discs have no map is read from
+  `job.log` or from the absence of the `menu` key, not from `status`.
+- **EM-18.** Replaced by the owner's answer EO-11. The first call still dropped the title's other candidates when the
+  menu confirmed the reference. As ruled: nothing is dropped on that title (`reference_disputed`), and the job is
+  held. Cost: confirmed commentaries stay on that title until the owner answers.
+- **EM-19** (confirmed by the owner, EO-12). `menu publish` refuses a stale off line, while the engine only ignores
+  one. Cost: none known; a pair placed by hand is still read safely.
+- **EM-20** (confirmed by the owner, EO-15). Two pull requests, `core` and `dev` first. Cost: `decide --menu` changes
+  one pull request before any job does.
+- **EM-21** (confirmed by the owner, EO-14). `menu_maps_root` is written into a settings object only when it is set,
+  unlike the other roots. Cost: one key that behaves differently from its neighbours; an older lazymkv refuses a
+  settings file that names it, as it refuses any key it does not know.
+- **EM-22** (confirmed by the owner, EO-13). An off line whose id names no audio choice of the map is unused, not
+  stale, and is refused nowhere. Cost: a leftover line from an older map is carried along until someone removes it; it
+  acts on nothing.
 
 ## 18. Left to the builder, and left for later
 
