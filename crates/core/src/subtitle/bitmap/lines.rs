@@ -9,9 +9,9 @@ use crate::subtitle::bitmap::prepare::{Crop, Grey, INK};
 pub const GAP_ROWS: u32 = 2;
 
 /// The padding of design part 10.6 (P18; T5-R7) by which a line box grows on its left and right within the crop: 3
-/// pixels, ocrs 0.13.1's own expansion of a detected word rectangle (`expand_dist` in its detection.rs); 16 until the
-/// trial of 2026-11-07 showed the recognizer misreading line starts behind the longer white lead-in (the first glyph
-/// doubled, dropped or replaced by `[`, `|`, `?` or `*`). Def: T5-5. Use: T5-8.
+/// pixels, ocrs's own expansion of a detected word rectangle (`expand_dist` in its detection.rs, 3 in 0.13.1 and
+/// 0.14.0); 16 until the trial of 2026-11-07 showed the recognizer misreading line starts behind the longer white
+/// lead-in (the first glyph doubled, dropped or replaced by `[`, `|`, `?` or `*`). Def: T5-5. Use: T5-8.
 pub const LINE_PAD: u32 = 3;
 
 /// The margin of design part 10.6 (P18; T5-R7) by which a line box grows above and below its inked rows within the

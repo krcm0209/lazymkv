@@ -2130,6 +2130,7 @@ Used by:
   rten-imageproc
   rten-onnx
   rten-parallel
+  rten-sequence
   rten-shape-inference
   rten-simd
   rten-tensor
@@ -2326,7 +2327,6 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 Used by:
   adler2
-  anyhow
   hermit-abi
   itoa
   once_cell
