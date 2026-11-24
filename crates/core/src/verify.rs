@@ -860,7 +860,10 @@ mod tests {
                     codecs: vec!["DTS".to_string(), "DTS-ES".to_string(), "DTS 96/24".to_string()],
                     ..expected(2, StreamKind::Audio, "DTS", Some("spa"), Some(6), 2304)
                 },
-                expected(3, StreamKind::Audio, "AC-3", Some("eng"), Some(2), 0),
+                ExpectedTrack {
+                    codecs: vec!["AC-3".to_string(), "AC-3 Dolby Surround EX".to_string()],
+                    ..expected(3, StreamKind::Audio, "AC-3", Some("eng"), Some(2), 0)
+                },
                 expected(4, StreamKind::Subtitles, "HDMV PGS", Some("eng"), None, 0),
                 expected(5, StreamKind::Subtitles, "HDMV PGS", Some("eng"), None, 6144),
                 expected(6, StreamKind::Subtitles, "HDMV PGS", Some("spa"), None, 0),
@@ -960,7 +963,11 @@ mod tests {
             )],
         ));
         let lossy = expected_tracks(&title_of(&scan, 0), &[0], &BTreeSet::new());
-        assert_eq!(lossy, vec![expected(0, StreamKind::Audio, "AC-3", Some("eng"), Some(6), 0)]);
+        let ac3 = ExpectedTrack {
+            codecs: vec!["AC-3".to_string(), "AC-3 Dolby Surround EX".to_string()],
+            ..expected(0, StreamKind::Audio, "AC-3", Some("eng"), Some(6), 0)
+        };
+        assert_eq!(lossy, vec![ac3]);
     }
 
     #[test]
@@ -1557,6 +1564,40 @@ mod tests {
     }
 
     #[test]
+    fn an_ac3_rip_verifies_under_mkvmerges_dolby_surround_ex_name() {
+        // Seen in recordings: MakeMKV's scan gives a Dolby Digital EX stream as plain Dolby Digital (A_AC3, "DD"), and
+        // `mkvmerge -J` names its track "AC-3 Dolby Surround EX" (codec id A_AC3). The track match holds, so the file's
+        // track still leads to its scan stream and the rip is not held with verify_failed.
+        let title = title_of(&audio_scan(("A_AC3", "DD", "Dolby Digital"), "6"), 0);
+        let report = verify_rip(&title, &audio_file("AC-3 Dolby Surround EX", "eng", 6), &[0, 1], None, false);
+        assert_eq!(report.mismatches, Vec::<String>::new());
+        assert!(report.tracks_ok && report.ok);
+        assert_eq!(stream_of_track(&report, 1), Some(1));
+        assert_eq!(failure_reviews(&report, true), Vec::<ReviewReason>::new());
+    }
+
+    #[test]
+    fn the_dolby_surround_ex_name_is_ac3s_alone() {
+        // An AC-3 stream still matches no other codec's name, and an E-AC-3 stream (A_EAC3, "DDplus", as recorded; its
+        // track is "E-AC-3") accepts neither of AC-3's names.
+        let ac3 = title_of(&audio_scan(("A_AC3", "DD", "Dolby Digital"), "6"), 0);
+        for written in ["DTS", "E-AC-3"] {
+            let wrong = verify_rip(&ac3, &audio_file(written, "eng", 6), &[0, 1], None, false);
+            let sentence = format!("track 1: codec expected AC-3 or AC-3 Dolby Surround EX, file {written}");
+            assert_eq!(wrong.mismatches, [sentence]);
+            assert!(!wrong.tracks_ok && !wrong.ok, "{written}");
+            assert_eq!(stream_of_track(&wrong, 1), None, "{written}");
+        }
+        let eac3 = title_of(&audio_scan(("A_EAC3", "DDplus", "Dolby Digital plus"), "8"), 0);
+        assert!(verify_rip(&eac3, &audio_file("E-AC-3", "eng", 8), &[0, 1], None, false).ok);
+        for written in ["AC-3 Dolby Surround EX", "AC-3"] {
+            let wrong = verify_rip(&eac3, &audio_file(written, "eng", 8), &[0, 1], None, false);
+            assert_eq!(wrong.mismatches, [format!("track 1: codec expected E-AC-3, file {written}")]);
+            assert!(!wrong.tracks_ok && !wrong.ok, "{written}");
+        }
+    }
+
+    #[test]
     fn a_codec_the_table_does_not_know_is_not_compared_and_its_rip_verifies() {
         // Not seen in a recording: an audio stream whose codec the table does not know (a made-up A_OPUS, Family
         // Unknown), beside AVC video. Its codec name is not compared and the report says so; its type, language and
@@ -1792,7 +1833,10 @@ mod tests {
         tracks[2]["codec"] = json!("DTS");
         tracks[2]["properties"]["audio_channels"] = json!(6);
         let report = verify_final(&spanish_layout(), &spanish_title(), &staged(7150.1, 22), &file(tracks, &[22], BLURAY_NS));
-        assert_eq!(report.mismatches, ["track 2: codec expected AC-3, file DTS", "track 2: channels expected 2, file 6"]);
+        assert_eq!(
+            report.mismatches,
+            ["track 2: codec expected AC-3 or AC-3 Dolby Surround EX, file DTS", "track 2: channels expected 2, file 6"]
+        );
         assert!(!report.tracks_ok && !report.ok);
         // A layout stream the title does not hold is a difference of its own.
         let mut layout = plain_layout();

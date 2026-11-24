@@ -411,13 +411,15 @@ pub fn object_audio(ffprobe_profile: Option<&str>) -> Option<ObjectAudio> {
 /// named the Atmos track `TrueHD Atmos`; provisional under ruling OR7 until experiment 6 runs), DtsHdMa
 /// ["DTS-HD Master Audio"], DtsHdHr ["DTS-HD High Resolution Audio"], Dts ["DTS", "DTS-ES", "DTS 96/24"] (a DTS-ES or
 /// DTS 96/24 stream is a DTS stream to MakeMKV and has its own name in mkvmerge), DtsExpress ["DTS Express"], Ac3
-/// ["AC-3"], Eac3 ["E-AC-3"], Lpcm
+/// ["AC-3", "AC-3 Dolby Surround EX"] (a Dolby Digital EX stream is plain Dolby Digital to MakeMKV's scan, `A_AC3` and
+/// "DD", and has its own name in mkvmerge under the same codec id; seen on four tracks of three rips, 2026-11-24),
+/// Eac3 ["E-AC-3"] (it takes neither of Ac3's names), Lpcm
 /// ["PCM"], Flac ["FLAC"], MpegAudio ["MP2"], Aac ["AAC"], Pgs ["HDMV PGS"], VobSub ["VobSub"], ClosedCaptions
 /// ["SubRip/SRT"] (converted through attribute 41 "Text"), Vc1 ["VC-1"] (ruling RP26), Unknown [] (`verify` then
 /// compares no codec name for the track and says so in its report). The names seen in
 /// the recordings are HEVC, DTS-HD Master Audio, DTS, AC-3, HDMV PGS, MPEG-1/2, VobSub, SubRip/SRT and AVC, and
-/// TrueHD Atmos on that one rip; the others are mkvmerge's documented spellings, not yet seen. DTS:X, which rides on
-/// DTS-HD MA, is still unseen. Spec 6.2 step 7.
+/// TrueHD Atmos on that one rip, and AC-3 Dolby Surround EX on those three; the others are mkvmerge's documented
+/// spellings, not yet seen. DTS:X, which rides on DTS-HD MA, is still unseen. Spec 6.2 step 7.
 pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str] {
     match codec.family {
         Family::Hevc => &["HEVC/H.265/MPEG-H"],
@@ -429,7 +431,7 @@ pub fn mkvmerge_names(codec: &Codec) -> &'static [&'static str] {
         Family::DtsHdHr => &["DTS-HD High Resolution Audio"],
         Family::Dts => &["DTS", "DTS-ES", "DTS 96/24"],
         Family::DtsExpress => &["DTS Express"],
-        Family::Ac3 => &["AC-3"],
+        Family::Ac3 => &["AC-3", "AC-3 Dolby Surround EX"],
         Family::Eac3 => &["E-AC-3"],
         Family::Lpcm => &["PCM"],
         Family::Flac => &["FLAC"],
@@ -934,7 +936,7 @@ mod tests {
         assert_eq!(names(Family::DtsHdHr), ["DTS-HD High Resolution Audio"]);
         assert_eq!(names(Family::Dts), ["DTS", "DTS-ES", "DTS 96/24"]);
         assert_eq!(names(Family::DtsExpress), ["DTS Express"]);
-        assert_eq!(names(Family::Ac3), ["AC-3"]);
+        assert_eq!(names(Family::Ac3), ["AC-3", "AC-3 Dolby Surround EX"]);
         assert_eq!(names(Family::Eac3), ["E-AC-3"]);
         assert_eq!(names(Family::Lpcm), ["PCM"]);
         assert_eq!(names(Family::Flac), ["FLAC"]);
@@ -969,6 +971,7 @@ mod tests {
             ("A_DTS", "DTS-HD MA", "DTS-HD Master Audio", "DTS-HD Master Audio"),
             ("A_DTS", "DTS", "DTS", "DTS"),
             ("A_AC3", "DD", "Dolby Digital", "AC-3"),
+            ("A_AC3", "DD", "Dolby Digital", "AC-3 Dolby Surround EX"),
             ("S_HDMV/PGS", "PGS", "HDMV PGS Subtitles", "HDMV PGS"),
             ("S_VOBSUB", "", "Dvd Subtitles", "VobSub"),
             ("S_CC608/DVD", "CC", "Closed Captions", "SubRip/SRT"),

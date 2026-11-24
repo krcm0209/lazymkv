@@ -331,7 +331,9 @@ owner may still overturn any of them.
 - F1. The codec table knows DTS Express (`A_DTS` with attribute 6 or 7 `DTS-HD LBR` or `DTS Express`: other lossy,
   displayed and named by mkvmerge "DTS Express"), and a DTS stream accepts mkvmerge's "DTS-ES" and "DTS 96/24". A codec
   the table does not know is not compared: its type, language and channels are, and the report's `unchecked` says the
-  codec was not compared, so a correct rip is neither ripped again nor held with `verify_failed`.
+  codec was not compared, so a correct rip is neither ripped again nor held with `verify_failed`. Since 2026-11-24 an
+  AC-3 stream also accepts mkvmerge's "AC-3 Dolby Surround EX", the name it gives a Dolby Digital EX track (seen on
+  four tracks of three rips; the scan calls the stream plain Dolby Digital).
 - F2. `decide` takes the wanted languages from the filed identity's TMDb record whenever the record is given, so a
   record fetched after planning (a pending TMDb lookup) gives its original language.
 - F3. An Episode item on a play-all-shaped title is kept unless every episode it names is mapped by another kept
