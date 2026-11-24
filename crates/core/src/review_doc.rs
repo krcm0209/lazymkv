@@ -955,11 +955,12 @@ pub fn render(doc: &ReviewDoc) -> String {
         let label = format!("{}. ", number + 1);
         let indent = " ".repeat(label.len());
         // The closing line below says what NOT_ON_THIS_SHEET says, so it is not shown twice.
-        let sentences: Vec<&str> = point.sentence.split(". ").filter(|text| text.trim_end_matches('.') != NOT_ON_THIS_SHEET.trim_end_matches('.')).collect();
-        for (at, text) in sentences.iter().enumerate() {
-            let stop = if at + 1 < sentences.len() { "." } else { "" };
+        let body = point.sentence.strip_suffix(NOT_ON_THIS_SHEET).unwrap_or(&point.sentence);
+        // One sentence per line; `split_inclusive` keeps each sentence's own full stop.
+        for (at, text) in body.split_inclusive(". ").enumerate() {
             out.push_str(if at == 0 { &label } else { &indent });
-            out.push_str(&format!("{text}{stop}\n"));
+            out.push_str(text.trim_end());
+            out.push('\n');
         }
         let items: Vec<&Item> = point.items.iter().filter_map(|id| items_of(doc).find(|item| &item.id == id)).collect();
         if !items.is_empty() {
@@ -1747,5 +1748,21 @@ Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
         println!("{head}");
         assert!(head.ends_with("One point needs your answer."), "{head}");
         assert!(!text.contains("later version"), "{text}");
+    }
+
+    #[test]
+    fn every_printed_sentence_of_an_identity_or_titles_point_ends_with_a_full_stop() {
+        let disc = film_disc();
+        for reason in [ReviewReason::IdentityUnknown, ReviewReason::IdentityAmbiguous, ReviewReason::TitleAmbiguous, ReviewReason::UnnamedCut] {
+            let mut held = record(&disc);
+            held.plan.as_mut().unwrap().reviews = vec![reason];
+            decided(&mut held).reviews = vec![reason];
+            let text = render(&sheet(&held, &disc, false));
+            let block: Vec<&str> = text.lines().skip(2).take_while(|line| !line.starts_with("Files as")).filter(|line| !line.is_empty()).collect();
+            assert!(block.len() >= 2, "{text}");
+            for line in block {
+                assert!(line.ends_with('.'), "{reason:?}: {line:?}\n{text}");
+            }
+        }
     }
 }
