@@ -156,8 +156,10 @@ function Get-ZipProblem([string]$zip, [string]$sha256) {
 }
 
 # Extracts $zip into the fresh folder $into, an earlier one removed first, and returns the tree's path: the zip's one
-# top-level folder, lazymkv-<version>-windows-x64, as packaging/release/smoke.ps1 checks it (pull request 7's notes,
-# call 10). It throws for any other top level, so the task never runs from a zip the release workflow did not make.
+# top-level folder, lazymkv-<version>, the folder packaging/release/assemble.ps1 zips (only the zip file's own name
+# carries -windows-x64); the check is the prefix lazymkv-, the same one packaging/release/smoke.ps1 checks (pull
+# request 7's notes, call 10; the final review of pull request 7, IS-5). It throws for any other top level; that the
+# zip is one the release workflow made rests on its hash, checked before this.
 # The earlier folder goes through Remove-Earlier, which refuses a link (the review of Task 4 of pull request 7).
 function Expand-ReleaseTree([string]$zip, [string]$into) {
     Remove-Earlier $into
@@ -303,7 +305,7 @@ try {
         $into = Join-Path $run 'release'
         Remove-Earlier $copy
         try { Copy-Item -LiteralPath $Zip -Destination $copy -Force }
-        catch { throw "cannot copy the -Zip file to $copy; check that it can be read, and run the script again" }
+        catch { throw "cannot copy the -Zip file to $copy; check that it can be read and that the drive has room, and run the script again" }
         $problem = Get-ZipProblem $copy $Sha256
         if ($problem) {
             Remove-Item -LiteralPath $copy -Force
@@ -312,7 +314,12 @@ try {
         # An earlier tree, left by an earlier -Zip deploy, is removed before the new one is extracted into the same
         # folder, so if the new tree is then refused no engine is left; with one fixed folder name (T7-R4) that cannot
         # be avoided. Earlier loose programs are kept until the new tree has passed every check, below, so a refused
-        # zip leaves a loose deploy and its task whole (the whole-branch review of pull request 7, item A).
+        # zip leaves a loose deploy and its task whole (the whole-branch review of pull request 7, item A). Two more
+        # limits are known and accepted (the final review of pull request 7, IS-1 and IS-2): an engine that already
+        # answers on the pipe, such as a console run, is found only after the earlier deploy has been removed, by the
+        # check below; and the earlier loose programs are removed after the task is registered at the tree and before
+        # the new engine is shown to start, so a tree whose programs cannot run on this machine leaves no engine that
+        # runs.
         Remove-Earlier $into
         # A tree this run extracted, whole or in part, and then refused must not stay where the task registered by an
         # earlier deploy of the same version would start it, so any failure from here removes release before the

@@ -33,9 +33,15 @@ pub struct Report {
 const PENDING_LINE: &str =
     "the job was planned with a lookup pending: only the plan's identity is compared (design part 12.7)";
 /// The line that says what `PlanAndAudio` leaves out (pull request 7's notes, call 5).
-const AUDIO_ONLY_LINE: &str = "not compared: slug, label, reconcile, subtitles, reviews, the plan section's slug, inputs and settings, and the decision section apart from decision.audio (design notes, call 5)";
+/// It names every key of a decide document (`cmd::decide::DecideDoc`, its plan section `cmd::plan::PlanDoc`) but the
+/// two audio parts (the final review of pull request 7, CR-3).
+const AUDIO_ONLY_LINE: &str = "not compared: slug, label, reconcile, subtitles, reviews, the plan section's slug, inputs, settings, settings_problems and plan, the decision section apart from decision.audio, and menu (design notes, call 5)";
 /// The two keys the engine's decide.json has and `lazymkvctl decide`'s output has not.
 const EXTRA_KEYS: [&str; 2] = ["audio_rule_version", "lazymkv_version"];
+/// Keys of a job's state.json (`lazymkv_core::record::JobRecord`, always written) that `lazymkvctl plan`'s document
+/// (`cmd::plan::PlanDoc`: slug, inputs, settings, settings_problems and plan) never has (the final review of pull
+/// request 7, CR-1).
+const STATE_KEYS: [&str; 4] = ["format", "id", "fingerprint", "titles"];
 
 /// Exact comparison: the engine's side is `expected` (pull request 7's notes, call 3).
 fn exact() -> Tolerance {
@@ -223,6 +229,16 @@ fn read_json_file(ctx: &Ctx, given: &str) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|problem| fail(format!("not JSON: {problem}")))
 }
 
+/// Err with the line `compare-job: <given>: has <whose> key <key>, so it is <what>, not the saved output of <saved>`
+/// when `document` has one of `keys` (the first in their order): the job's own file given as a saved output (the final
+/// review of pull request 7, CR-1).
+fn refuse_own_file(given: &str, document: &Value, keys: &[&str], whose: &str, what: &str, saved: &str) -> Result<(), String> {
+    match keys.iter().find(|key| document.get(**key).is_some()) {
+        Some(key) => Err(format!("{NAME}: {given}: has {whose} key {key}, so it is {what}, not the saved output of {saved}")),
+        None => Ok(()),
+    }
+}
+
 /// What the command line asks for.
 struct Request {
     job: String,
@@ -280,14 +296,20 @@ fn compare_request(ctx: &Ctx, request: &Request) -> Result<Report, String> {
             continue;
         }
         let given = format!("{}/{}/decide.json", request.job, key);
-        if ctx.abs(&given).exists() {
-            own.push((key.to_string(), read_json_file(ctx, &given)?));
+        // Only "not found" is absent; a link (even one whose target is missing) or a file that cannot be examined is
+        // read, so its problem exits 2 with the file named (the final review of pull request 7, CR-2).
+        match std::fs::symlink_metadata(ctx.abs(&given)) {
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+            _ => own.push((key.to_string(), read_json_file(ctx, &given)?)),
         }
     }
     let saved_plan = read_json_file(ctx, &request.plan)?;
+    refuse_own_file(&request.plan, &saved_plan, &STATE_KEYS, "state.json's", "a job's state.json", "lazymkvctl plan")?;
     let mut saved = Vec::new();
     for (key, file) in &request.decide {
-        saved.push((key.clone(), read_json_file(ctx, file)?));
+        let document = read_json_file(ctx, file)?;
+        refuse_own_file(file, &document, &EXTRA_KEYS, "the engine's", "a job's decide.json", "lazymkvctl decide")?;
+        saved.push((key.clone(), document));
     }
     compare(&state, &own, &saved_plan, &saved, request.mode).map_err(|text| format!("{NAME}: {text}"))
 }
@@ -593,6 +615,40 @@ mod tests {
         assert_eq!(audio.differences, 0);
     }
 
+    /// Whether `line` names `key` as a word of its own (so `plan` in "the plan section's", not in "explanation").
+    fn names(line: &str, key: &str) -> bool {
+        line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|word| word == key)
+    }
+
+    /// The final review's CR-3: every top-level key of a decide document is either compared whole in the plan-and-audio
+    /// mode or named in its line, and so is every key of the plan section. The document is a characterised one read as
+    /// `DecideDoc` and written again with a menu section, so its keys are the type's (`menu` included).
+    #[test]
+    fn the_plan_and_audio_line_names_every_part_it_does_not_compare() {
+        use crate::cmd::decide::{DecideDoc, MenuEntry};
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/decide/characterisation/disc-a-eng-only.json");
+        let mut typed: DecideDoc = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        typed.menu = Some(MenuEntry::Skipped { skipped: "a reason".to_string() });
+        let document = serde_json::to_value(&typed).unwrap();
+        let kept = audio_parts(&document);
+        let keys: Vec<&String> = document.as_object().unwrap().keys().collect();
+        assert!(keys.iter().any(|key| *key == "menu"), "{keys:?}");
+        for key in keys {
+            let whole = kept.get(key.as_str()) == document.get(key.as_str());
+            assert!(whole || names(AUDIO_ONLY_LINE, key), "{key} is neither compared whole nor named: {AUDIO_ONLY_LINE}");
+        }
+        // The plan section's own list, between "the plan section's " and the decision section.
+        let listed = AUDIO_ONLY_LINE
+            .split_once("the plan section's ")
+            .and_then(|(_, rest)| rest.split_once(", the decision section"))
+            .map_or("", |(part, _)| part);
+        let section: Vec<&String> = document["plan"].as_object().unwrap().keys().collect();
+        assert_eq!(section, ["slug", "inputs", "settings", "settings_problems", "plan"]);
+        for key in section {
+            assert!(names(listed, key), "the plan section's {key} is not named: {AUDIO_ONLY_LINE}");
+        }
+    }
+
     // The command (pull request 7's notes, calls 2 and 7).
     use crate::testutil::{call, Scratch, ScratchExt};
 
@@ -770,5 +826,73 @@ mod tests {
         );
         assert_eq!((code, out.as_str()), (2, ""));
         assert_eq!(err, "compare-job: the job has no decide.json for t01-00801\n");
+    }
+
+    /// The final review's CR-2: only a decide.json that is not found is absent; a link at it whose target is missing
+    /// exits 2 and names the file, as an unreadable file does, and is not left out as "not compared".
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_at_decide_json_exits_2_and_names_it() {
+        let tmp = job("cj-dangling", true);
+        let at = tmp.0.join(format!("job/{KEY2}/decide.json"));
+        std::fs::remove_file(&at).unwrap();
+        std::os::unix::fs::symlink(tmp.0.join("nowhere.json"), &at).unwrap();
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.starts_with("compare-job: job/t01-00801/decide.json: "), "{err}");
+    }
+
+    /// The final review's CR-1: the job's own state.json given as the saved plan is refused, and so is a plan document
+    /// with any of state.json's own keys.
+    #[test]
+    fn a_jobs_state_json_given_as_the_plan_exits_2_and_names_it() {
+        let tmp = job("cj-state-plan", false);
+        let state = json!({"format": "lazymkv job v1", "id": "x-1", "fingerprint": "f", "plan": plan(), "titles": [{"key": KEY}]});
+        tmp.write("job/state.json", state.to_string());
+        let (code, out, err) = compare_run(&tmp, &["job", "--plan", "job/state.json", "--decide", "t00-00800=t00-00800.json"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(
+            err,
+            "compare-job: job/state.json: has state.json's key format, so it is a job's state.json, not the saved output of lazymkvctl plan\n"
+        );
+        for name in STATE_KEYS {
+            tmp.write("plan.json", json!({"plan": plan(), name: 1}).to_string());
+            let (code, out, err) = compare_run(&tmp, &["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"]);
+            assert_eq!((code, out.as_str()), (2, ""), "{name}");
+            assert_eq!(
+                err,
+                format!(
+                    "compare-job: plan.json: has state.json's key {name}, so it is a job's state.json, not the saved output of lazymkvctl plan\n"
+                )
+            );
+        }
+    }
+
+    /// The final review's CR-1: a saved decide document with either of the engine's own keys is refused in both modes,
+    /// the job's own decide.json among them.
+    #[test]
+    fn a_decide_document_with_the_engines_keys_exits_2_and_names_it_in_both_modes() {
+        let tmp = job("cj-own-decide", false);
+        let refused = |file: &str, name: &str| {
+            format!("compare-job: {file}: has the engine's key {name}, so it is a job's decide.json, not the saved output of lazymkvctl decide\n")
+        };
+        let own = format!("t00-00800=job/{KEY}/decide.json");
+        for mode in [&[][..], &["--plan-and-audio"][..]] {
+            let mut args = vec!["job", "--plan", "plan.json", "--decide", own.as_str()];
+            args.extend_from_slice(mode);
+            let (code, out, err) = compare_run(&tmp, &args);
+            assert_eq!((code, out.as_str()), (2, ""), "{mode:?}");
+            assert_eq!(err, refused(&format!("job/{KEY}/decide.json"), "audio_rule_version"), "{mode:?}");
+            for name in EXTRA_KEYS {
+                let mut saved = doc();
+                saved[name] = json!(1);
+                tmp.write(&format!("{KEY}.json"), saved.to_string());
+                let mut args = vec!["job", "--plan", "plan.json", "--decide", "t00-00800=t00-00800.json"];
+                args.extend_from_slice(mode);
+                let (code, out, err) = compare_run(&tmp, &args);
+                assert_eq!((code, out.as_str()), (2, ""), "{name} {mode:?}");
+                assert_eq!(err, refused("t00-00800.json", name), "{mode:?}");
+            }
+        }
     }
 }

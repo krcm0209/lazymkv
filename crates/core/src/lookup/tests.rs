@@ -1118,6 +1118,30 @@ fn a_film_whose_name_a_tv_entry_shares_passes_step_4_on_its_runtime_check() {
 }
 
 #[test]
+fn a_film_listed_between_two_tv_entries_of_its_name_passes_step_4_on_its_runtime_check() {
+    // Ruling A2 of 2026-11-23 with a TV entry before the film and two in all: the structure says movie, preferring
+    // movie results leaves the one film, every other plausible result is TV, and the film's runtime check passes.
+    let name = label("EXAMPLE_FILM");
+    let results = search(&[
+        ("tv", 1003, "Example Film", "Example Film", "2020-01-24"),
+        ("movie", 1001, "Example Film", "Example Film", "1986-05-09"),
+        ("tv", 1004, "Example Film", "Example Film", "1999-09-13"),
+    ]);
+    let record = movie_record(1001, "Example Film", "1986-05-09", Some(100));
+    let inputs = LookupInputs { name: Some(&name), search: Some(&results), record: Some(&record), ..LookupInputs::default() };
+    let identity = identify(&inputs, Kind::Movie, &features(&[6000]), &Settings::default());
+    assert_eq!(
+        (identity.step, identity.confidence, identity.review, identity.tmdb, identity.runtime_check),
+        (IdentityStep::TmdbOne, 0.90, None, Some(movie(1001)), Some(true))
+    );
+    assert_eq!(identity.plausible, vec![tv(1003), movie(1001), tv(1004)]);
+    assert_eq!(
+        identity.evidence.last().map(String::as_str),
+        Some("the only plausible movie result passes the runtime check: step 4 (8.1 row 4, ruling A2 of 2026-11-23)")
+    );
+}
+
+#[test]
 fn a_film_whose_name_a_tv_entry_shares_stays_step_5_when_its_runtime_check_fails_or_cannot_run() {
     let name = label("EXAMPLE_FILM");
     let results = film_and_show();

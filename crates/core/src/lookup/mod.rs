@@ -98,10 +98,14 @@ pub enum IdentityStep {
     DiscdbBoth,
     /// Step 3: TheDiscDB match on one of them (0.95).
     DiscdbOne,
-    /// Step 4: TMDb search on the disc's own name, exactly one plausible result, and the runtime check passes (0.90,
-    /// or 0.84 with identity_ambiguous when tmdb_only_autofile is off).
+    /// Step 4: TMDb search on the disc's own name, exactly one plausible result, or several of which exactly one is of
+    /// the disc's structural kind (8.2) and every other is of the other kind, and the runtime check passes (0.90, or
+    /// 0.84 with identity_ambiguous when tmdb_only_autofile is off; 8.1 row 4 as amended by the owner's ruling A2 of
+    /// 2026-11-23, pull request 7's notes).
     TmdbOne,
-    /// Step 5: several plausible results, or a failed runtime check (0.50, identity_ambiguous).
+    /// Step 5: TMDb search with several plausible results that row 4 does not cover, or a failed or impossible runtime
+    /// check (0.50, identity_ambiguous; 8.1 row 5 as amended by the owner's ruling A2 of 2026-11-23, pull request 7's
+    /// notes).
     TmdbSeveral,
     /// Step 6: nothing (0, identity_unknown).
     Nothing,
@@ -384,7 +388,8 @@ pub struct Identity {
     pub year: Option<i32>,
     pub original_language: Option<String>,
     pub review: Option<crate::review::ReviewReason>,
-    /// The plausible results' identities (several in step 5; one in step 4).
+    /// The plausible results' identities: every plausible result in steps 4 and 5, so one or several in step 4 (several
+    /// when exactly one is of the disc's structural kind, the owner's ruling A2 of 2026-11-23, pull request 7's notes).
     pub plausible: Vec<tmdb::TmdbIdentity>,
     /// Whether a runtime check ran and what it said (None: not applicable, no record, or no runtime).
     pub runtime_check: Option<bool>,
@@ -464,9 +469,10 @@ pub fn identify(
 /// year, read over `inputs.search`; else, for a non-generic disc name, the one result `plausible_by_name` leaves, or,
 /// of several plausible results, the one film (`TmdbKind::Movie`) when every other is TV (the owner's ruling A2 of
 /// 2026-11-23, pull request 7's notes). None for any other several plausible results, when no search answer is in hand,
-/// or for a generic or absent name. The film-only fetch is on purpose: the chain runs at arrival, before the scan, so
-/// the structural kind `identify` prefers is not known when the record is chosen (`crates/engine/src/arrival.rs`,
-/// `chain_inputs`). A TV disc whose show shares its name with exactly one film therefore gets the film's record,
+/// or for a generic or absent name. The film-only fetch is on purpose: the chain's first round starts with the scan
+/// (`crates/engine/src/steps.rs`, `run_scan`; its inputs from `crates/engine/src/arrival.rs`, `chain_inputs`), so the
+/// record is chosen before the plan gives the structural kind `identify` prefers, and this function takes no kind, so
+/// later rounds choose the same record. A TV disc whose show shares its name with exactly one film therefore gets the film's record,
 /// `identify` picks the show and finds no record of it for the runtime check, and the step stays 5. Equals
 /// `identify(..).tmdb` except on a TV disc whose name's search leaves several plausible results: with exactly one film
 /// among them, this gives the film where `identify` shows the one show or nothing; with one show and not exactly one

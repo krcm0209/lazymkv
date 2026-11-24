@@ -222,10 +222,108 @@ fn the_task_script_takes_a_zip_only_with_its_hash() {
     assert_eq!(calls, ["$problem = Get-ZipProblem $copy $Sha256"], "Get-ZipProblem is asked about the copy alone");
     assert!(code.contains(&r"$copy = Join-Path $run 'release.zip'"), "the copy is not the run folder's release.zip");
     assert!(text.contains("Copy-Item -LiteralPath $Zip -Destination $copy -Force"), "the zip is not copied to $copy");
-    for line in code.iter().filter(|line| line.contains("$Zip")) {
+    // The final review of pull request 7 (IS-3): PowerShell's variable names ignore case, so `$zip`, `$ZIP` and
+    // `${Zip}` at script scope are `-Zip` too; inside a function, `$zip` is that function's own parameter.
+    let zip_lines: Vec<&str> = script_scope_lines(&text).into_iter().filter(|line| names_zip(line)).collect();
+    assert!(zip_lines.contains(&"try { Copy-Item -LiteralPath $Zip -Destination $copy -Force }"), "{zip_lines:?}");
+    for line in zip_lines {
         for reader in ["Get-FileHash", "Get-ZipProblem", "Expand-ReleaseTree", "Expand-Archive"] {
-            assert!(!line.contains(reader), "-Zip's own file reaches {reader}: {line}");
+            assert!(!line.to_ascii_lowercase().contains(&reader.to_ascii_lowercase()), "-Zip's own file reaches {reader}: {line}");
         }
+    }
+    let extractions: Vec<&str> =
+        code.iter().copied().filter(|line| line.contains("Expand-ReleaseTree") && !line.starts_with("function ")).collect();
+    assert_eq!(extractions, ["try { $tree = Expand-ReleaseTree $copy $into }"], "Expand-ReleaseTree is called on the copy alone");
+}
+
+/// The code lines of a PowerShell script outside its functions' bodies (a function begins with `function ` and ends
+/// with `}`, both at the start of a line, as the scripts here write them): trimmed, neither empty nor a comment.
+fn script_scope_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.starts_with("function ") {
+            inside = true;
+        } else if inside {
+            inside = line != "}";
+        } else {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                lines.push(line);
+            }
+        }
+    }
+    lines
+}
+
+/// Whether `line` names the variable Zip in any ASCII case: `$zip`, `${zip}` or `$script:zip`, not followed by a
+/// further letter, digit or underscore (so `$zipped` is another variable).
+fn names_zip(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("${zip}") || lower.contains("${script:zip}") {
+        return true;
+    }
+    ["$zip", "$script:zip"].iter().any(|name| {
+        lower.match_indices(name).any(|(at, _)| {
+            lower[at + name.len()..].chars().next().map_or(true, |next| !(next.is_ascii_alphanumeric() || next == '_'))
+        })
+    })
+}
+
+/// The final review of pull request 7 (IS-4): the order of the script's safety steps, read from its code lines. The
+/// planted-file check comes before any removal; with -Zip, the zip's check, the removal of the earlier tree, the
+/// extraction, the owner change, the tree's check, the writers check over the installed files, the task's
+/// registration, the removal of the loose programs and the task's start come in that order; and the writers check over
+/// the installed files never consults -AcceptWritableBuild. Textual, on every system.
+#[test]
+fn the_task_script_takes_its_safety_steps_in_order() {
+    let (_, text) = script();
+    let code = code_lines(&text);
+    let main = code.iter().position(|line| *line == "$status = 'error'").expect("the script's main flow");
+    let flow = &code[main..];
+    // The one line of the main flow that `matches`.
+    let at = |what: &str, matches: &dyn Fn(&str) -> bool| -> usize {
+        let found: Vec<usize> = flow.iter().enumerate().filter(|(_, line)| matches(line)).map(|(at, _)| at).collect();
+        assert_eq!(found.len(), 1, "{what}: {:?}", found.iter().map(|at| flow[*at]).collect::<Vec<_>>());
+        found[0]
+    };
+    let planted = at("the planted-file check", &|line| line == "$problem = Get-PlantedProblem $run $required");
+    let first_removal = flow
+        .iter()
+        .position(|line| line.contains("Remove-Earlier") || line.contains("Remove-Item"))
+        .expect("the main flow removes something");
+    assert!(planted < first_removal, "a removal comes before the planted-file check: {}", flow[first_removal]);
+    let steps = [
+        ("the zip's check", at("the zip's check", &|line| line == "$problem = Get-ZipProblem $copy $Sha256")),
+        ("the earlier tree's removal", at("the earlier tree's removal", &|line| line == "Remove-Earlier $into")),
+        ("the extraction", at("the extraction", &|line| line == "try { $tree = Expand-ReleaseTree $copy $into }")),
+        ("the owner change", at("the owner change", &|line| line.starts_with("& icacls.exe $into /setowner "))),
+        ("the tree's check", at("the tree's check", &|line| line == "$problem = Get-TreeProblem $tree")),
+        ("the installed files' writers", at("the installed files' writers", &|line| line == "foreach ($path in $installed) {")),
+        ("the registration", at("the registration", &|line| line.starts_with("Register-ScheduledTask "))),
+        (
+            "the loose programs' removal",
+            at("the loose programs' removal", &|line| line == "foreach ($program in $required) { Remove-Earlier (Join-Path $run $program) }"),
+        ),
+        ("the start", at("the start", &|line| line.starts_with("Start-ScheduledTask "))),
+    ];
+    for pair in steps.windows(2) {
+        assert!(pair[0].1 < pair[1].1, "{} does not come before {}", pair[0].0, pair[1].0);
+    }
+    // The installed files' loop, to the brace that closes it.
+    let start = steps[5].1;
+    let mut depth = 0i32;
+    let mut end = start;
+    for (offset, line) in flow[start..].iter().enumerate() {
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth <= 0 {
+            end = start + offset;
+            break;
+        }
+    }
+    assert!(end > start, "the installed files' loop does not close");
+    for line in &flow[start..=end] {
+        assert!(!line.to_ascii_lowercase().contains("acceptwritablebuild"), "the installed files' check consults it: {line}");
     }
 }
 

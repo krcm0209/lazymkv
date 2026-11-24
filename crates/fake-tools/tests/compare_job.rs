@@ -35,7 +35,11 @@ fn harness(variants: &[&str]) -> Harness {
 /// so no step runs, with the job's id. A job that stops anywhere else fails the test (item G of the whole-branch
 /// review), so a single-stream job that is held is caught.
 fn filed_with_copy(variants: &[&str], stop: &str) -> (Harness, String) {
-    let h = harness(variants);
+    settled(harness(variants), stop)
+}
+
+/// `filed_with_copy` over a harness the caller has set up.
+fn settled(h: Harness, stop: &str) -> (Harness, String) {
     h.insert("tok0", "movie-direct");
     let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
     let stops = ["Filed", "NeedsReview", "Failed"];
@@ -128,4 +132,21 @@ fn a_changed_saved_value_is_a_difference() {
     assert_eq!((code, err.as_str()), (1, ""));
     // The whole output: the one line about that value, then the verdict (item F of the whole-branch review).
     assert_eq!(out, "plan: /title_confidence: 0.85 != 0.0\ncompare-job: 1 difference(s)\n");
+}
+
+/// A job planned with a lookup pending (the scenario of engine_file_phase.rs's
+/// `a_lookup_pending_job_decides_with_the_refreshed_plan`): its plan was refreshed before the decision, so only the
+/// plan's identity is compared, and the relayed outputs agree with it (pull request 7's notes, call 4; the final review
+/// of pull request 7, CR-4).
+#[test]
+fn a_lookup_pending_job_compares_its_identity_only_through_the_relays_words() {
+    let h = harness(&["movie-direct-lookup-late"]);
+    h.scan_waits_for_lookups(false);
+    let (h, id) = settled(h, "Filed");
+    let (plan, decide, _) = outputs(&h, &id);
+    let pending = "the job was planned with a lookup pending: only the plan's identity is compared (design part 12.7)";
+    assert_eq!(
+        compared(&h, &id, &plan, &decide),
+        (0, format!("{pending}\ncompare-job: no difference\n"), String::new())
+    );
 }
