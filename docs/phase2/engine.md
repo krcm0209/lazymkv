@@ -1953,6 +1953,11 @@ programs link no OCR crate. `cargo test -p fake-tools -p lazymkv-engine`, run ag
 719 of its tests. So every test passed on this tree at least once, and no single run of the whole workspace was free
 of failures (U-E5).
 
+The crate notices (U1, U-E4): on the lock's commit `31f28ed` the crate notices job failed as built (CI run
+45434943862), and its artifact `crate-notices` is `crates/ctl/crate-notices.txt` from the next commit on. It differs
+from the file before in two lines: `rten-sequence` joins the "Used by" list of the MIT text `rten`'s crates share,
+after `rten-parallel`, and `anyhow` leaves the list it stood in; both files hold 2604 lines.
+
 The controller's rulings while finishing the upgrade, each with what was decided, why, and what it costs if it is
 wrong, all made on 2026-11-24. Each is not yet ruled on by the owner.
 
