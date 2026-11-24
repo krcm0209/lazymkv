@@ -1468,20 +1468,31 @@ fn menu_title() -> Title {
     title_of(&[video(), truehd("eng", "8"), dd("eng", "2", "192 Kb/s"), dd("eng", "2", "192 Kb/s")])
 }
 
-/// A menu confirmation of `role` carried by `choices`.
-fn confirmed(role: AudioRole, choices: &[&str]) -> MenuConfirmation {
-    MenuConfirmation { role, choices: choices.iter().map(|choice| choice.to_string()).collect() }
+/// Two Dolby Digital stereo tracks at 192 kb/s, streams 1 and 2, both without a language code, so the title has no
+/// programme reference (spec 8.6 "Content") and the disc position orders them.
+fn no_language_title() -> Title {
+    title_of(&[video(), dd("", "2", "192 Kb/s"), dd("", "2", "192 Kb/s")])
+}
+
+/// A menu confirmation of `role` carried by `choices`, whose shown labels are `labels` in the same order.
+fn confirmed(role: AudioRole, choices: &[&str], labels: &[&str]) -> MenuConfirmation {
+    MenuConfirmation {
+        role,
+        choices: choices.iter().map(|choice| choice.to_string()).collect(),
+        labels: labels.iter().map(|label| label.to_string()).collect(),
+    }
 }
 
 /// The base facts: verdicts measured against stream 1, `keep` on streams 2 and 3, and the menu calling stream 2 a
-/// commentary (choice `c010`) and stream 3 an audio description (choice `c011`).
+/// commentary (choice `c010`, labelled "AUDIO: Commentary by Person A") and stream 3 an audio description (choice
+/// `c011`, labelled "AUDIO: Descriptive Audio").
 fn menu_facts() -> AudioFacts<'static> {
     AudioFacts {
         verdicts: BTreeMap::from([(2, Verdict::Keep), (3, Verdict::Keep)]),
         verdict_reference: Some(1),
         menu: BTreeMap::from([
-            (2, confirmed(AudioRole::Commentary, &["c010"])),
-            (3, confirmed(AudioRole::AudioDescription, &["c011"])),
+            (2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"])),
+            (3, confirmed(AudioRole::AudioDescription, &["c011"], &["AUDIO: Descriptive Audio"])),
         ]),
         ..AudioFacts::default()
     }
@@ -1499,7 +1510,8 @@ fn outcomes(decision: &AudioDecision) -> Vec<(u32, MenuOutcome)> {
 
 #[test]
 fn a_menu_commentary_and_a_menu_audio_description_are_dropped_where_content_kept_them() {
-    // MR-1, MA-1: a confirmed role drops its stream (here the verdicts are keep); MR-11: no note and no review.
+    // MR-1, MA-1: a confirmed role drops its stream (here the verdicts are keep); EO-2: the only note on a dropped
+    // stream is the menu's own; MR-11: no review.
     let decision = decide_with(&menu_title(), &menu_facts());
     assert_eq!(order_of(&decision), vec![1]);
     assert_eq!(
@@ -1509,8 +1521,11 @@ fn a_menu_commentary_and_a_menu_audio_description_are_dropped_where_content_kept
             (3, AudioDrop::Menu { role: AudioRole::AudioDescription }),
         ]
     );
-    let named: Vec<Option<u32>> = decision.notes.iter().map(|noted| noted.stream).collect();
-    assert!(!named.contains(&Some(2)) && !named.contains(&Some(3)), "{:?}", decision.notes);
+    let on_dropped: Vec<(Note, Option<u32>)> = noted(&decision)
+        .into_iter()
+        .filter(|(_, stream)| *stream == Some(2) || *stream == Some(3))
+        .collect();
+    assert_eq!(on_dropped, vec![(Note::MenuDropped, Some(2)), (Note::MenuDropped, Some(3))], "{:?}", decision.notes);
     assert_eq!(decision.reviews, Vec::new());
     assert_eq!(decision.confidence, AUDIO_CONFIDENCE);
     assert_eq!(decision.reference, Some(1));
@@ -1555,6 +1570,8 @@ fn a_menu_drop_is_written_with_its_why_and_role() {
         (MenuOutcome::NotKept, "not_kept"),
         (MenuOutcome::Overridden, "overridden"),
         (MenuOutcome::Reference, "reference"),
+        (MenuOutcome::ReferenceDisputed, "reference_disputed"),
+        (MenuOutcome::NoReference, "no_reference"),
         (MenuOutcome::ReferenceWouldChange, "reference_would_change"),
         (MenuOutcome::WouldLeaveNone, "would_leave_none"),
     ] {
@@ -1607,7 +1624,9 @@ fn a_track_content_also_calls_a_commentary_is_dropped() {
 
 #[test]
 fn every_content_verdict_lets_the_menu_drop() {
-    // MA-1: the content rule's verdict does not gate the drop, and the dropped stream's verdict raises nothing.
+    // MA-1: the content rule's verdict does not gate the drop, and the dropped stream's verdict raises no note of its
+    // own (the one note on stream 2 is the menu's, EO-2) and no review, except that a reference-unclear verdict's
+    // audio_reference_unclear survives the drop (EO-4).
     for verdict in [
         Verdict::Keep,
         Verdict::Commentary,
@@ -1621,15 +1640,19 @@ fn every_content_verdict_lets_the_menu_drop() {
     ] {
         let facts = AudioFacts {
             verdicts: BTreeMap::from([(2, verdict)]),
-            menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"]))]),
+            menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]),
             ..menu_facts()
         };
         let decision = decide_with(&menu_title(), &facts);
         assert_eq!(order_of(&decision), vec![1, 3], "{verdict:?}");
         assert_eq!(decision.dropped, vec![(2, AudioDrop::Menu { role: AudioRole::Commentary })], "{verdict:?}");
         assert_eq!(outcomes(&decision), vec![(2, MenuOutcome::Dropped)], "{verdict:?}");
-        assert!(decision.notes.iter().all(|noted| noted.stream != Some(2)), "{verdict:?}: {:?}", decision.notes);
-        assert_eq!(decision.reviews, Vec::new(), "{verdict:?}");
+        let on_two: Vec<Note> =
+            decision.notes.iter().filter(|noted| noted.stream == Some(2)).map(|noted| noted.note).collect();
+        assert_eq!(on_two, vec![Note::MenuDropped], "{verdict:?}: {:?}", decision.notes);
+        let reviews =
+            if verdict == Verdict::ReferenceUnclear { vec![ReviewReason::AudioReferenceUnclear] } else { Vec::new() };
+        assert_eq!(decision.reviews, reviews, "{verdict:?}");
     }
 }
 
@@ -1670,7 +1693,7 @@ fn a_duplicates_named_copy_may_be_dropped_by_the_menu() {
     let facts = AudioFacts {
         md5,
         verdicts: BTreeMap::from([(2, Verdict::Keep)]),
-        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"]))]),
+        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]),
         ..menu_facts()
     };
     let today = decide_with(&menu_title(), &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
@@ -1709,13 +1732,18 @@ fn a_veto_or_another_reference_does_not_stop_the_drop() {
 fn the_reference_is_never_dropped() {
     let facts = AudioFacts {
         verdicts: BTreeMap::from([(1, Verdict::Keep)]),
-        menu: BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c001"]))]),
+        menu: BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c001"], &["AUDIO: Commentary by Person B"]))]),
         ..menu_facts()
     };
     let decision = decide_with(&menu_title(), &facts);
     assert_eq!(order_of(&decision), vec![1, 2, 3]);
     assert_eq!(decision.dropped, Vec::new());
     assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::Reference)]);
+    // EO-5: the reference is kept, and the job is held with a note naming it.
+    assert_eq!(decision.reviews, vec![ReviewReason::AudioReferenceUnclear]);
+    let conflicts: Vec<(Note, Option<u32>)> =
+        noted(&decision).into_iter().filter(|(note, _)| *note == Note::MenuReferenceConflict).collect();
+    assert_eq!(conflicts, vec![(Note::MenuReferenceConflict, Some(1))]);
 }
 
 #[test]
@@ -1746,9 +1774,9 @@ fn a_stream_step_1_dropped_is_not_kept() {
     let facts = AudioFacts {
         verdicts: BTreeMap::from([(2, Verdict::Keep), (3, Verdict::Keep)]),
         menu: BTreeMap::from([
-            (0, confirmed(AudioRole::Commentary, &["c009"])),
-            (2, confirmed(AudioRole::Commentary, &["c010"])),
-            (3, confirmed(AudioRole::AudioDescription, &["c011"])),
+            (0, confirmed(AudioRole::Commentary, &["c009"], &["AUDIO: Commentary"])),
+            (2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"])),
+            (3, confirmed(AudioRole::AudioDescription, &["c011"], &["AUDIO: Descriptive Audio"])),
         ]),
         ..menu_facts()
     };
@@ -1767,7 +1795,7 @@ fn a_stream_without_a_language_code_is_dropped_like_any_other() {
     let title = title_of(&[video(), truehd("eng", "8"), dd("und", "2", "192 Kb/s")]);
     let facts = AudioFacts {
         verdicts: BTreeMap::from([(2, Verdict::Keep)]),
-        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"]))]),
+        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]),
         ..menu_facts()
     };
     let today = decide_with(&title, &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
@@ -1781,7 +1809,7 @@ fn a_stream_without_a_language_code_is_dropped_like_any_other() {
 
 #[test]
 fn a_programme_confirmation_is_ignored() {
-    let facts = AudioFacts { menu: BTreeMap::from([(2, confirmed(AudioRole::Programme, &["c010"]))]), ..menu_facts() };
+    let facts = AudioFacts { menu: BTreeMap::from([(2, confirmed(AudioRole::Programme, &["c010"], &["AUDIO: Commentary by Person A"]))]), ..menu_facts() };
     let decision = decide_with(&menu_title(), &facts);
     assert_eq!(decision, decide_with(&menu_title(), &AudioFacts { menu: BTreeMap::new(), ..menu_facts() }));
     assert_eq!(decision.menu, Vec::new());
@@ -1799,14 +1827,32 @@ fn a_drop_that_would_move_the_reference_is_not_made() {
     let facts = AudioFacts {
         verdicts: BTreeMap::from([(1, Verdict::Keep)]),
         verdict_reference: Some(3),
-        menu: BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"]))]),
+        menu: BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]),
         ..AudioFacts::default()
     };
     let decision = decide_with(&title, &facts);
     let today = decide_with(&title, &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
     assert_eq!(today.reference, Some(3));
     assert_eq!(order_of(&today), vec![3, 2, 1]);
-    assert_eq!(decision, AudioDecision { menu: decision.menu.clone(), ..today });
+    assert_eq!(today.reviews, Vec::new());
+    // EO-5: the tracks are kept as without the menu, and the job is held with one note on the title.
+    let mut notes = today.notes.clone();
+    notes.push(Noted {
+        note: Note::MenuReferenceConflict,
+        stream: None,
+        detail: "dropping the tracks the menu confirms (stream 1) would change the programme reference from 3 to 2; \
+                 none dropped"
+            .to_string(),
+    });
+    assert_eq!(
+        decision,
+        AudioDecision {
+            menu: decision.menu.clone(),
+            notes,
+            reviews: vec![ReviewReason::AudioReferenceUnclear],
+            ..today
+        }
+    );
     assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::ReferenceWouldChange)]);
     // The same title without the mono 192 kb/s track: G2 lifts the 640 kb/s mono (now stream 1) over the stereo track.
     let without = decide(&title_of(&[video(), dd("eng", "1", "640 Kb/s"), dd("eng", "2", "448 Kb/s")]), Some("en"));
@@ -1823,7 +1869,7 @@ fn dropping_a_stream_recomputes_first_of_language_and_the_notes() {
     let facts = AudioFacts {
         verdicts: BTreeMap::from([(1, Verdict::Keep)]),
         verdict_reference: Some(3),
-        menu: BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"]))]),
+        menu: BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]),
         ..AudioFacts::default()
     };
     let today = decide_with(&title, &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
@@ -1833,7 +1879,8 @@ fn dropping_a_stream_recomputes_first_of_language_and_the_notes() {
     assert_eq!(decision.dropped, vec![(1, AudioDrop::Menu { role: AudioRole::Commentary })]);
     let firsts: Vec<(u32, bool)> = decision.kept.iter().map(|track| (track.stream, track.first_of_language)).collect();
     assert_eq!(firsts, vec![(3, false), (2, true)]);
-    assert_eq!(decision.notes, Vec::new());
+    // Step 6 notes nothing on the second arrangement; the one note is the menu's drop (EO-2).
+    assert_eq!(noted(&decision), vec![(Note::MenuDropped, Some(1))]);
     assert_eq!(decision.reference, Some(3));
     assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::Dropped)]);
 }
@@ -1841,10 +1888,12 @@ fn dropping_a_stream_recomputes_first_of_language_and_the_notes() {
 #[test]
 fn a_drop_that_would_leave_no_audio_is_not_made() {
     // MA-2: a title whose only audio stream has no language code has no reference, so MR-4 cannot protect it; the
-    // drop would leave no kept track, so nothing is dropped and the first arrangement stands.
+    // drop would leave no kept track, so nothing is dropped and the first arrangement stands. Play's stream is set to
+    // the confirmed stream so that EO-3's rule lets the guard be reached (EP-7); the wiring never gives such a
+    // confirmation, since Play's own stream is never a candidate (MR-17).
     let title = title_of(&[video(), dd("und", "2", "192 Kb/s")]);
-    let menu = BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"]))]);
-    let facts = AudioFacts { menu, ..AudioFacts::default() };
+    let menu = BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]);
+    let facts = AudioFacts { menu, menu_play: Some(1), ..AudioFacts::default() };
     let today = decide_with(&title, &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
     assert_eq!(today.reference, None);
     assert_eq!(order_of(&today), vec![1]);
@@ -1853,12 +1902,14 @@ fn a_drop_that_would_leave_no_audio_is_not_made() {
     assert_eq!(decision, AudioDecision { menu: decision.menu.clone(), ..today });
     assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::WouldLeaveNone)]);
     // Two streams without a language code, both confirmed: dropping both would leave none, so neither is dropped.
+    // Play's stream is again a confirmed one (EP-7; the wiring never gives this).
     let two = title_of(&[video(), dd("und", "2", "192 Kb/s"), dd("und", "2", "224 Kb/s")]);
     let facts = AudioFacts {
         menu: BTreeMap::from([
-            (1, confirmed(AudioRole::Commentary, &["c010"])),
-            (2, confirmed(AudioRole::AudioDescription, &["c011"])),
+            (1, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"])),
+            (2, confirmed(AudioRole::AudioDescription, &["c011"], &["AUDIO: Descriptive Audio"])),
         ]),
+        menu_play: Some(2),
         ..AudioFacts::default()
     };
     let today = decide_with(&two, &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
@@ -1871,10 +1922,10 @@ fn a_drop_that_would_leave_no_audio_is_not_made() {
 #[test]
 fn on_a_title_without_a_reference_one_confirmed_stream_of_two_is_dropped() {
     // MA-2 refuses only the none-left case: with no language code there is no reference, and dropping one of two
-    // streams still leaves a kept track, so the drop is made.
+    // streams still leaves a kept track, so the drop is made. Play selects the kept stream 2, which EO-3 asks for.
     let title = title_of(&[video(), dd("und", "2", "192 Kb/s"), dd("und", "2", "224 Kb/s")]);
-    let menu = BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"]))]);
-    let facts = AudioFacts { menu, ..AudioFacts::default() };
+    let menu = BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]);
+    let facts = AudioFacts { menu, menu_play: Some(2), ..AudioFacts::default() };
     let decision = decide_with(&title, &facts);
     assert_eq!(decision.reference, None);
     assert_eq!(decision.dropped, vec![(1, AudioDrop::Menu { role: AudioRole::Commentary })]);
@@ -1889,11 +1940,113 @@ fn another_kept_streams_commentary_review_survives_a_menu_drop() {
     let facts = AudioFacts {
         verdicts: BTreeMap::from([(2, Verdict::Keep), (3, Verdict::Commentary)]),
         verdict_reference: Some(1),
-        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"]))]),
+        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]),
         ..AudioFacts::default()
     };
     let decision = decide_with(&menu_title(), &facts);
     assert_eq!(decision.dropped, vec![(2, AudioDrop::Menu { role: AudioRole::Commentary })]);
     assert_eq!(order_of(&decision), vec![1, 3]);
     assert_eq!(decision.reviews, vec![ReviewReason::CommentaryDetected]);
+}
+
+#[test]
+fn a_menu_drop_raises_a_note_with_the_menus_wording() {
+    let decision = decide_with(&menu_title(), &menu_facts());
+    let notes: Vec<&Noted> = decision.notes.iter().filter(|noted| noted.note == Note::MenuDropped).collect();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0].stream, Some(2));
+    assert_eq!(
+        notes[0].detail,
+        "the disc's menu calls stream 2 a commentary (\"AUDIO: Commentary by Person A\"); dropped on the menu's word"
+    );
+    assert_eq!(
+        notes[1].detail,
+        "the disc's menu calls stream 3 an audio description (\"AUDIO: Descriptive Audio\"); dropped on the menu's word"
+    );
+    assert_eq!(decision.reviews, Vec::new());
+}
+
+#[test]
+fn a_label_that_would_break_a_line_is_escaped_in_the_note() {
+    let mut facts = menu_facts();
+    facts.menu.insert(2, confirmed(AudioRole::Commentary, &["c010", "c012"], &["A \"quoted\" one", "two\nlines"]));
+    let decision = decide_with(&menu_title(), &facts);
+    let detail =
+        &decision.notes.iter().find(|noted| noted.stream == Some(2) && noted.note == Note::MenuDropped).unwrap().detail;
+    assert!(!detail.contains('\n'), "{detail}");
+    assert!(detail.contains("\"A \"quoted\" one\", ") && detail.contains("two\\nlines"), "{detail}");
+}
+
+#[test]
+fn a_title_without_a_reference_drops_only_when_plays_stream_is_known_and_kept() {
+    // Two kept streams with no language code: no reference (spec 8.6 "Content"). The menu confirms stream 2.
+    let title = no_language_title();
+    let menu = BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary"]))]);
+    for (play, outcome, kept) in [
+        (Option::None, MenuOutcome::NoReference, vec![1, 2]),
+        (Some(9), MenuOutcome::NoReference, vec![1, 2]),
+        (Some(1), MenuOutcome::Dropped, vec![1]),
+    ] {
+        let decision =
+            decide_with(&title, &AudioFacts { menu: menu.clone(), menu_play: play, ..AudioFacts::default() });
+        assert_eq!(decision.reference, Option::None);
+        assert_eq!(outcomes(&decision), vec![(2, outcome)], "{play:?}");
+        assert_eq!(order_of(&decision), kept, "{play:?}");
+    }
+}
+
+#[test]
+fn a_doubted_reference_survives_the_menu_drop() {
+    let facts =
+        AudioFacts { verdicts: BTreeMap::from([(2, Verdict::ReferenceUnclear), (3, Verdict::Keep)]), ..menu_facts() };
+    let decision = decide_with(&menu_title(), &facts);
+    assert_eq!(outcomes(&decision), vec![(2, MenuOutcome::Dropped), (3, MenuOutcome::Dropped)]);
+    assert_eq!(decision.reviews, vec![ReviewReason::AudioReferenceUnclear]);
+    // A commentary verdict on a dropped stream still goes with it (the owner's "Yes, drop it").
+    let facts = AudioFacts { verdicts: BTreeMap::from([(2, Verdict::Commentary), (3, Verdict::Keep)]), ..menu_facts() };
+    assert_eq!(decide_with(&menu_title(), &facts).reviews, Vec::new());
+}
+
+#[test]
+fn a_confirmation_on_the_reference_holds_the_job_and_drops_nothing_on_the_title() {
+    let mut facts = menu_facts();
+    facts.menu.insert(1, confirmed(AudioRole::Commentary, &["c001"], &["AUDIO: Commentary by Person B"]));
+    let decision = decide_with(&menu_title(), &facts);
+    assert_eq!(
+        outcomes(&decision),
+        vec![(1, MenuOutcome::Reference), (2, MenuOutcome::ReferenceDisputed), (3, MenuOutcome::ReferenceDisputed)]
+    );
+    assert_eq!(order_of(&decision), vec![1, 2, 3]);
+    assert!(decision.dropped.iter().all(|(_, why)| !matches!(why, AudioDrop::Menu { .. })));
+    assert!(decision.reviews.contains(&ReviewReason::AudioReferenceUnclear));
+    let note = decision.notes.iter().find(|noted| noted.note == Note::MenuReferenceConflict).unwrap();
+    assert_eq!(note.stream, Some(1));
+    assert_eq!(
+        note.detail,
+        "the disc's menu calls stream 1, the programme reference, a commentary (\"AUDIO: Commentary by Person B\"); \
+         nothing was dropped on the menu's word"
+    );
+    assert!(decision.notes.iter().all(|noted| noted.note != Note::MenuDropped));
+}
+
+#[test]
+fn a_keep_override_on_the_reference_disputes_nothing() {
+    // Stream 1 is the reference, the menu confirms it, and a remembered Keep names it: `overridden`, so the title's
+    // other candidates are dropped and nothing is held.
+    let title = menu_title();
+    let remembered = vec![AudioOverrideEntry {
+        signature: signature(&title.streams, 1),
+        action: AudioOverride::Keep { order: 0, default: true },
+    }];
+    let mut facts = AudioFacts { remembered: Some(remembered.as_slice()), ..menu_facts() };
+    facts.menu.insert(1, confirmed(AudioRole::Commentary, &["c001"], &["AUDIO: Commentary by Person B"]));
+    let decision = decide_with(&title, &facts);
+    assert_eq!(decision.reference, Some(1));
+    assert_eq!(
+        outcomes(&decision),
+        vec![(1, MenuOutcome::Overridden), (2, MenuOutcome::Dropped), (3, MenuOutcome::Dropped)]
+    );
+    assert_eq!(order_of(&decision), vec![1]);
+    assert!(!decision.reviews.contains(&ReviewReason::AudioReferenceUnclear), "{:?}", decision.reviews);
+    assert!(decision.notes.iter().all(|noted| noted.note != Note::MenuReferenceConflict), "{:?}", decision.notes);
 }

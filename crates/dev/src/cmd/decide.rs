@@ -951,7 +951,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
         .flat_map(|roles| &roles.audio)
         .filter_map(|row| {
             let role = row.confirms()?;
-            Some((row.stream, MenuConfirmation { role, choices: row.choices.clone() }))
+            Some((row.stream, MenuConfirmation { role, choices: row.choices.clone(), labels: Vec::new() }))
         })
         .collect();
     let facts = FactsSummary {
@@ -983,6 +983,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
             remembered: remembered_audio.as_deref(),
             reviewed: None,
             menu,
+            menu_play: None,
         },
         subtitles: SubtitleFacts {
             events,
