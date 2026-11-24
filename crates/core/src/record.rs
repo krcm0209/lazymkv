@@ -45,7 +45,8 @@ pub fn check_format(document: &serde_json::Value, expected: &str) -> Result<(), 
 
 /// The state of a job's copy to `<tuning_root>\dataset\<job id>\` (design parts 7.3, 7.5; call 10; T5-R14): pending
 /// from the unit's DecisionDone of a job whose own settings keep tuning evidence until every file has landed, then
-/// done. Def: T5-19. Use: T5-19, T5-22.
+/// done; or dropped, when the job was discarded while its copy was pending (phase 3 design, part 6.8). Def: T5-19,
+/// `Dropped` P3-T10. Use: T5-19, T5-22, P3-T15, P3-T16.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TuningCopy {
@@ -53,6 +54,9 @@ pub enum TuningCopy {
     Pending,
     /// Every file landed, the level folders' `audio-proxy.json` last.
     Done,
+    /// The job was discarded while the copy was pending (phase 3 design, part 6.8): the copy is not tried again and
+    /// holds nothing from the cleanup. Serialised `dropped`. Def: P3-T10. Use: P3-T15, P3-T16.
+    Dropped,
 }
 
 /// state.json (design part 7.3; S1). No deny_unknown_fields, so a minor version's added key reads.
@@ -453,9 +457,10 @@ mod tests {
     }
 
     #[test]
-    fn tuning_copy_serialises_as_pending_and_done() {
+    fn tuning_copy_serialises_as_pending_done_and_dropped() {
         let mut record = job();
-        for (copy, word) in [(TuningCopy::Pending, "pending"), (TuningCopy::Done, "done")] {
+        let words = [(TuningCopy::Pending, "pending"), (TuningCopy::Done, "done"), (TuningCopy::Dropped, "dropped")];
+        for (copy, word) in words {
             record.tuning_copy = Some(copy);
             let text = serde_json::to_string(&record).unwrap();
             assert!(text.ends_with(&format!(r#""notes":[],"tuning_copy":"{word}"}}"#)), "{text}");

@@ -45,12 +45,13 @@ use serde_json::{json, Map, Value};
 
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::cleanup::{run_pass, CleanupJob};
+use crate::discard::spawn_preview;
 use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
-    cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
-    no_running_step, not_a_review_action, not_a_secret, not_answered_yet, not_cancellable, not_held, secret_states,
-    settings_refused, snapshot_jobs, spawn_reader, spawn_serve, staging_unset, steps_running, Clients, ProgressGate,
-    CLIENT_DRAIN, DISCARD_PREVIEW_NOT_BUILT, DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
+    cancel_event, cancel_not_persisted, discard_not_persisted, discard_running, failure_event, history_page, main_tag,
+    no_discard, no_job, no_retry, no_rip_again, no_running_step, not_a_review_action, not_a_secret, not_answered_yet,
+    not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs, spawn_reader, spawn_serve, staging_unset,
+    steps_running, Clients, ProgressGate, CLIENT_DRAIN, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
@@ -261,6 +262,9 @@ pub(crate) enum Msg {
     /// serialised document or the refusal. It holds subtitle lines, so it goes to that client only, never to a log.
     /// Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
     ReviewBuilt { client: u64, id: Option<u64>, answer: Result<Value, String> },
+    /// A `discard_preview` worker ended (phase 3 design, part 6.8; ruling T32-R7): the answer to the request `id` of
+    /// `client`, `{"bytes": n, "files": n}` or `{"unknown": "<reason>"}`. Def: P3-T10. Use: P3-T15, P3-T16.
+    DiscardPreviewed { client: u64, id: Option<u64>, answer: Value },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -700,6 +704,15 @@ impl DiscToken {
         self.queue.len() != before
     }
 
+    /// Takes every queued Retry or return of `job` out of the queue, so none is delivered later (phase 3 design, part
+    /// 6.8: a discarded job leaves the queue); an arrival stays. Def: P3-T10. Use: P3-T15, P3-T16.
+    pub(crate) fn forget(&mut self, job: &str) {
+        self.queue.retain(|waiting| match waiting {
+            Waiting::Retry(id) | Waiting::Return(id, _) => id != job,
+            Waiting::Arrival(_) => true,
+        });
+    }
+
     /// Whether a Retry or return of `job` waits in the queue (design part 5.4). Def: T26. Use: T26.
     pub(crate) fn queued_job(&self, job: &str) -> bool {
         self.queue.iter().any(|waiting| match waiting {
@@ -1133,6 +1146,10 @@ struct Owner {
     command: Option<RunningCommand>,
     /// Whether a cleanup pass runs (design part 5.9): set by `Msg::Cleanup`, cleared by `Msg::CleanupDone`.
     cleanup_running: bool,
+    /// Set when a discard asked for a pass while one ran, or when a discarded job's running copy ended (phase 3 design,
+    /// part 6.8): the running pass read the record before the discard, so another pass starts at its end. Def: P3-T10.
+    /// Use: P3-T15, P3-T16.
+    cleanup_again: bool,
     /// Sent once at the end of each cleanup pass, for the testkit (`TestHooks::cleanup_done`).
     cleanup_done: Option<Sender<()>>,
     /// The jobs with a dataset copy thread running (design part 7.5).
@@ -1259,6 +1276,7 @@ impl Owner {
             refeed_armed: BTreeSet::new(),
             command: None,
             cleanup_running: false,
+            cleanup_again: false,
             cleanup_done,
             copies: BTreeSet::new(),
             copy_done,
@@ -1491,6 +1509,7 @@ impl Owner {
             Msg::Refresh { job } => self.request_refresh(&job),
             Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
             Msg::ReviewBuilt { client, id, answer } => self.reply(client, id, answer),
+            Msg::DiscardPreviewed { client, id, answer } => self.reply(client, id, Ok(answer)),
         }
     }
 
@@ -1527,6 +1546,8 @@ impl Owner {
             Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
             // A document built before the shutdown began still answers its request (phase 3 design, part 6.2).
             Msg::ReviewBuilt { client, id, answer } => self.reply(client, id, answer),
+            // A preview counted before the shutdown began still answers its request, as a review does.
+            Msg::DiscardPreviewed { client, id, answer } => self.reply(client, id, Ok(answer)),
             Msg::Drive(_)
             | Msg::Arrival(_)
             | Msg::Timer { .. }
@@ -1545,7 +1566,10 @@ impl Owner {
     /// deleted (design part 7.5), then `Msg::CleanupDone` at its end. First, whether a pass runs or not, every pending
     /// dataset copy is retried (`start_copies`, call 10), and every failed recordings refresh (design part 7.5), so on
     /// an idle engine a copy waits for `tuning_root` at most a cleanup period; the pass reads each record as it is when
-    /// it starts, so a copy that lands during it frees the staging data at the next pass (C2).
+    /// it starts, so a copy that lands during it frees the staging data at the next pass (C2). Each job's
+    /// `library_roots` are its own settings' `movies_root` and `tv_root` that are set (phase 3 design, part 6.8). A
+    /// Discarded job whose dataset copy thread still runs is left out of the pass, so its staging folder is never
+    /// deleted under a running copy; `copy_ended` starts another pass for it (P3-T10).
     fn start_cleanup(&mut self) {
         self.start_copies();
         for id in std::mem::take(&mut self.refresh_failed) {
@@ -1554,13 +1578,19 @@ impl Owner {
         if self.cleanup_running {
             return;
         }
+        let copies = &self.copies;
         let jobs: Vec<CleanupJob> = self
             .jobs
             .values()
+            .filter(|job| !(job.record.state == State::Discarded && copies.contains(&job.record.id)))
             .map(|job| CleanupJob {
                 id: job.record.id.clone(),
                 record: job.record.clone(),
                 staging_root: job.settings.staging_root.clone(),
+                library_roots: [&job.settings.movies_root, &job.settings.tv_root]
+                    .into_iter()
+                    .filter_map(|root| configured_root(root.as_deref()).map(str::to_string))
+                    .collect(),
                 retention_days: job.settings.retention_days,
                 lookups: Arc::clone(&job.lookups),
             })
@@ -1582,11 +1612,31 @@ impl Owner {
         }));
     }
 
-    /// `Msg::CleanupDone` (design part 5.9): no pass runs any more, and the testkit hears of it.
+    /// `Msg::CleanupDone` (design part 5.9): no pass runs any more, and the testkit hears of it. When `cleanup_again`
+    /// is set, another pass starts at once, except during a stop or a forced shutdown (phase 3 design, part 6.8;
+    /// P3-T10).
     fn cleanup_ended(&mut self) {
         self.cleanup_running = false;
         if let Some(done) = &self.cleanup_done {
             let _ = done.send(());
+        }
+        if self.cleanup_again && !self.stopping && self.quiet.is_none() {
+            self.cleanup_again = false;
+            self.start_cleanup();
+        }
+    }
+
+    /// A pass for a discarded job's data (phase 3 design, part 6.8: the first runs at once): started now, or, while a
+    /// pass runs that read the records before the discard, at its end (`cleanup_again`). Nothing starts during a stop
+    /// or a forced shutdown. Def: P3-T10. Use: P3-T15, P3-T16.
+    fn cleanup_for_discard(&mut self) {
+        if self.stopping || self.quiet.is_some() {
+            return;
+        }
+        if self.cleanup_running {
+            self.cleanup_again = true;
+        } else {
+            self.start_cleanup();
         }
     }
 
@@ -1721,10 +1771,18 @@ impl Owner {
     /// pending and runs again at the next trigger. Once a `Landed` record, or any record of a job in Filed,
     /// NeedsReview or Failed, is written, the job's recordings are refreshed (design part 7.5). Last, the testkit hears
     /// of the attempt.
+    /// A copy of a job discarded while it ran changes no record, since its `tuning_copy` says dropped: its end
+    /// writes `tuning copy: ended after the discard, so the record keeps dropped` and starts a pass for the job's data,
+    /// which `start_cleanup` held back while the copy ran (phase 3 design, part 6.8; P3-T10).
     fn copy_ended(&mut self, id: &str, retry: bool, end: CopyEnd) {
         self.copies.remove(id);
         let landed = end == CopyEnd::Landed;
-        if let Some(job) = self.jobs.get(id) {
+        let dropped = self.jobs.get(id).is_some_and(|job| job.record.tuning_copy == Some(TuningCopy::Dropped));
+        if dropped {
+            self.store.job_log(id, "tuning copy: ended after the discard, so the record keeps dropped");
+            self.cleanup_for_discard();
+        }
+        if let Some(job) = self.jobs.get(id).filter(|_| !dropped) {
             let mut record = job.record.clone();
             let changed = match end {
                 CopyEnd::Landed => {
@@ -2118,7 +2176,8 @@ impl Owner {
 
     /// A transition persisted before any of its actions runs (design part 7.3, R22.3, R24.2): the edits the job's
     /// step posted with it applied in order (`Job::edits`), then the record actions (RefreshIdentity's refreshed plan
-    /// among them), `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`; then the
+    /// among them, and DeleteJobData's pending dataset copy made `TuningCopy::Dropped`, phase 3 design, part 6.8),
+    /// `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`; then the
     /// promises released or rebuilt and the stop hook. None when it could not be persisted, or when the stop hook
     /// stopped the engine. All of it is applied to a copy of the record, which becomes the job's record only once
     /// persisted, so a transition that could not be persisted takes its posted edits with it (RR1-16). A transition
@@ -2150,6 +2209,10 @@ impl Owner {
                 Action::RecordNote { note } => add_note(&mut record.notes, *note),
                 Action::ArmRipAgain => record.rip_again = true,
                 Action::RefreshIdentity => self.refresh_identity(id, &mut record),
+                // Phase 3 design, part 6.8: a discard drops a pending dataset copy in the write of its transition.
+                Action::DeleteJobData if record.tuning_copy == Some(TuningCopy::Pending) => {
+                    record.tuning_copy = Some(TuningCopy::Dropped)
+                }
                 _ => {}
             }
         }
@@ -2529,8 +2592,8 @@ impl Owner {
     }
 
     /// Design part 5.2: Notify, StartTimer and WaitForDisc here (RecordNote, ArmRipAgain and RefreshIdentity were
-    /// applied before the persist); a new job's Fingerprint is its recording; every other action goes, in list order,
-    /// to one worker.
+    /// applied before the persist), and DeleteJobData (`delete_job_data`; phase 3 design, part 6.8); a new job's
+    /// Fingerprint is its recording; every other action goes, in list order, to one worker.
     fn perform(&mut self, id: &str, actions: &[Action], recording: Option<(Arrival, PathBuf)>) {
         let mut recording = recording;
         let mut handed = Vec::new();
@@ -2544,6 +2607,7 @@ impl Owner {
                     }
                 }
                 Action::RecordNote { .. } | Action::ArmRipAgain | Action::RefreshIdentity => {}
+                Action::DeleteJobData => self.delete_job_data(id),
                 Action::Fingerprint => match recording.take() {
                     Some((arrival, job_dir)) => self.start_recording(id, arrival, job_dir),
                     None => handed.push(Action::Fingerprint),
@@ -2702,6 +2766,23 @@ impl Owner {
             let _ = sender.send(Msg::ReviewBuilt { client, id, answer });
         };
         self.reviews.push(spawn_review(context, all, Arc::clone(&self.parts.shares), answer));
+    }
+
+    /// `discard_preview` (phase 3 design, parts 6.8, 11; ruling T32-R7): `no_job` for a job the owner does not hold;
+    /// otherwise the job's staging folder is counted by `spawn_preview` on a thread of its own, since it reads the
+    /// staging share the owner thread never reads, kept in `reviews` with the review workers, which a stop does not
+    /// wait for; its answer comes back as `Msg::DiscardPreviewed` and goes to `client` only. It changes nothing.
+    /// Def: P3-T10. Use: P3-T15, P3-T16.
+    fn discard_preview(&mut self, client: u64, id: Option<u64>, job_id: &str) {
+        let Some(job) = self.jobs.get(job_id) else {
+            return self.reply(client, id, Err(no_job(job_id)));
+        };
+        let sender = self.sender.clone();
+        let answer = move |answer: Value| {
+            let _ = sender.send(Msg::DiscardPreviewed { client, id, answer });
+        };
+        let (staging_root, shares) = (job.settings.staging_root.clone(), Arc::clone(&self.parts.shares));
+        self.reviews.push(spawn_preview(job_id.to_string(), staging_root, shares, answer));
     }
 
     /// Takes the worker of (`id`, `generation`) off the list, clearing the ejecting mark of the drive it ejected.
@@ -3035,7 +3116,7 @@ impl Owner {
             Request::SecretSet { name, value } => self.secret_set(&name, &value),
             Request::Retry { job } => return self.retry(client, id, &job),
             Request::Cancel { job } => return self.cancel(client, id, &job),
-            Request::Discard { .. } => Err(DISCARD_REFUSED.to_string()),
+            Request::Discard { job } => self.discard(&job),
             Request::RipAgain { job } => self.rip_again(&job),
             Request::RunSelftest => return self.queue_check(client, id, CheckWork::Selftest),
             Request::History { before } => history_page(&self.records(), before.as_deref())
@@ -3046,7 +3127,7 @@ impl Owner {
                 self.review_action(&job, &action, overrides.as_ref(), labels.as_ref())
             }
             Request::Review { job, all } => return self.review(client, id, &job, all),
-            Request::DiscardPreview { .. } => Err(DISCARD_PREVIEW_NOT_BUILT.to_string()),
+            Request::DiscardPreview { job } => return self.discard_preview(client, id, &job),
             Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
         };
         self.reply(client, id, answer);
@@ -3446,6 +3527,49 @@ impl Owner {
                 job.generation += 1;
             }
         }
+    }
+
+    /// `discard` (phase 3 design, part 6.8): refused, in this order, for a job the owner does not hold (`no_job`), for
+    /// a job with a step running, the worker of its current generation or one a `cancel` is stopping, as `cancel` finds
+    /// it (`discard_running`, which names `cancel`), and for a job whose state the reducer does not discard
+    /// (`no_discard`: only a held, a failed or a waiting job). Otherwise ReviewDiscarded is fed through `feed`, so
+    /// Discarded is persisted before anything else happens, and the reply is `ok` once it is; its DeleteJobData is
+    /// answered on this thread (`delete_job_data`). A transition that could not be persisted is answered with
+    /// `discard_not_persisted` and the job keeps its state. Def: P3-T10. Use: P3-T15, P3-T16.
+    fn discard(&mut self, job_id: &str) -> Result<Value, String> {
+        let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
+        let generation = job.generation;
+        let running =
+            |worker: &Worker| worker.job == job_id && (worker.generation == generation || worker.cancelled.is_some());
+        if self.workers.iter().any(running) {
+            return Err(discard_running(job_id));
+        }
+        if reduce(&job.record.state, &Event::ReviewDiscarded).is_err() {
+            return Err(no_discard(job_id, &job.record.state));
+        }
+        match self.feed(job_id, Event::ReviewDiscarded, None) {
+            Fed::Persisted => Ok(Value::Null),
+            Fed::NotPersisted | Fed::Rejected => Err(discard_not_persisted(job_id)),
+        }
+    }
+
+    /// DeleteJobData (phase 3 design, part 6.8), on the owner thread with no share read: the discarded job leaves the
+    /// disc-phase token's queue (`DiscToken::forget`) and the pending slot events, so no queued Retry, return or
+    /// approval of it is delivered later; its space promises are released; and a cleanup pass, which deletes its
+    /// staging folder and partial files, starts at once (`cleanup_for_discard`). Its place in the file-phase slot, held
+    /// or queued, is freed by `file_slot`, which the transition's `commit` runs next: Discarded leaves the slot
+    /// (`SlotQueue::after`) and the slot is granted again. A pending dataset copy was dropped in the transition's own
+    /// write (`persist_transition`). Def: P3-T10. Use: P3-T15, P3-T16.
+    fn delete_job_data(&mut self, id: &str) {
+        self.token.forget(id);
+        self.slot_events.remove(id);
+        self.rounds_done.remove(id);
+        {
+            let mut promises = lock(&self.parts.promises);
+            promises.release(id, PromisedStep::Rip);
+            promises.release(id, PromisedStep::Remux);
+        }
+        self.cleanup_for_discard();
     }
 
     /// `rip_again` (design part 9.4): RipAgain for a job past its disc phase, which arms it; refused otherwise.

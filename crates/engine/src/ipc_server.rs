@@ -44,10 +44,6 @@ pub(crate) const NO_CLIENT: u64 = 0;
 /// How often a job may push progress (design part 9.2).
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
-/// `discard`'s refusal (Ruling S76). Def: T26. Use: T26.
-pub(crate) const DISCARD_REFUSED: &str = "discard waits for phase 3's review commands (P2, R-A1)";
-/// `discard_preview`'s refusal until the engine builds it (phase 3 design, part 11). Def: P3-T6. Use: P3-T8.
-pub(crate) const DISCARD_PREVIEW_NOT_BUILT: &str = "discard_preview is not built in this version";
 /// `ui_quit`'s refusal (Ruling S76). Def: T26. Use: T26.
 pub(crate) const UI_QUIT_REFUSED: &str = "ui_quit waits for phase 5's user interface (R-A8)";
 /// The reply to a request that comes while a forced shutdown waits for its steps (design part 3.8). Def: T26.
@@ -62,6 +58,24 @@ pub(crate) fn no_job(id: &str) -> String {
 /// A `cancel` of a job with no running step names its state (Ruling S76). Def: T26. Use: T26.
 pub(crate) fn no_running_step(id: &str, state: &State) -> String {
     format!("job {id} has no running step: it is {}", state.as_str())
+}
+
+/// A `discard` of a job with a step running names `cancel`, which fails the job so that it can then be discarded
+/// (phase 3 design, part 6.8). Def: P3-T10. Use: P3-T15, P3-T16.
+pub(crate) fn discard_running(id: &str) -> String {
+    format!("job {id} has a step running: cancel it first")
+}
+
+/// A `discard` whose transition could not be persisted: the job keeps its state (phase 3 design, part 6.8; design
+/// part 7.3). Def: P3-T10. Use: P3-T15, P3-T16.
+pub(crate) fn discard_not_persisted(id: &str) -> String {
+    format!("job {id} was not discarded: its transition could not be persisted")
+}
+
+/// A `discard` of a job the reducer does not discard names its state (phase 3 design, part 6.8). Def: P3-T10.
+/// Use: P3-T15, P3-T16.
+pub(crate) fn no_discard(id: &str, state: &State) -> String {
+    format!("job {id} is {}: only a held, failed or waiting job can be discarded", state.as_str())
 }
 
 /// A `cancel` during CheckSpace or Eject is refused (Ruling S76, design part 9.4). Def: T26. Use: T26.

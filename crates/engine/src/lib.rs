@@ -2,6 +2,9 @@
 
 mod arrival;
 mod cleanup;
+/// The `discard_preview` request's worker, which counts a job's staging folder off the owner thread (phase 3 design,
+/// part 6.8; ruling T32-R7). Def: P3-T10. Use: P3-T15, P3-T16.
+mod discard;
 mod file_phase;
 mod ipc_server;
 /// The engine on Windows (design parts 3.1 to 3.8). Def: T3-23. Use: T3-23.

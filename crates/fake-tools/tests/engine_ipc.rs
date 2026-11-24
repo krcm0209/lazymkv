@@ -16,7 +16,7 @@ use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent,
 use lazymkv_core::lookup::name::disc_name;
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::plan::Mode;
-use lazymkv_core::record::{JobRecord, JOB_FORMAT};
+use lazymkv_core::record::{JobRecord, TuningCopy, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
@@ -1754,20 +1754,226 @@ fn a_corrupt_review_file_refuses_the_approval_naming_it() {
     assert_eq!(fs::read(&path).unwrap(), b"{", "the file is left as it was");
 }
 
-#[test]
-fn discard_is_refused_naming_phase_3() {
-    let h = scripted(vec![]);
+// ---- Discard (phase 3 design, part 6.8; ruling T32-R7) ----
+
+/// A job held at the disposition gate in a scripted harness, with a client that has read its snapshot.
+fn held_job() -> (Harness, Client, String) {
+    let h = scripted(held_script());
     let mut c = Client::open(&h);
     c.snapshot();
-    assert_eq!(c.err("discard", json!({"job": "abc-1"})), "discard waits for phase 3's review commands (P2, R-A1)");
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    (h, c, id)
+}
+
+/// Waits for the engine.log line `line`, then for the pass that wrote it to end (`busy` clears at `CleanupDone`).
+fn wait_for_pass(h: &Harness, line: &str) {
+    h.wait(line, |h| h.engine_log().contains(line));
+    h.wait("the pass's end", |h| !h.busy());
 }
 
 #[test]
-fn discard_preview_is_refused_until_built() {
+fn a_held_job_is_discarded_and_its_data_goes() {
+    let (h, mut c, id) = held_job();
+    let staged = h.staging().join(&id);
+    fs::create_dir_all(staged.join("rip/t00-00800")).unwrap();
+    fs::write(staged.join("rip/t00-00800/title_t00.mkv"), b"rip").unwrap();
+    let partials = h.library().join(".lazymkv-partial");
+    fs::create_dir_all(&partials).unwrap();
+    let own = partials.join(format!("{id}-t00-00800.mkv.partial"));
+    fs::write(&own, b"partial").unwrap();
+    let other = partials.join(format!("{:032x}-1-t00-00800.mkv.partial", 0xabc));
+    fs::write(&other, b"another job's").unwrap();
+    let film = h.library().join(FINAL);
+    fs::create_dir_all(film.parent().unwrap()).unwrap();
+    fs::write(&film, b"owner's").unwrap();
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    assert_eq!(h.record(&id).state, State::Discarded, "persisted before the reply");
+    wait_for_pass(&h, &format!("cleanup: {id}: deleted its staging folder"));
+    assert!(!staged.exists());
+    assert!(h.staging().is_dir());
+    assert!(!own.exists());
+    assert_eq!(fs::read(&other).unwrap(), b"another job's");
+    assert_eq!(fs::read(&film).unwrap(), b"owner's");
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted the partial file {id}-t00-00800.mkv.partial")));
+    let state: JobRecord = serde_json::from_slice(&fs::read(h.job_dir(&id).join("state.json")).unwrap()).unwrap();
+    assert_eq!(state.state, State::Discarded);
+    let history = c.ok("history", json!({}));
+    let listed = history.as_array().unwrap().iter().find(|job| job["id"] == json!(id)).expect("history lists the job");
+    assert_eq!(listed["state"], json!({"state": "Discarded"}));
+    let discarded = h.transitions(&id).into_iter().last().unwrap();
+    assert_eq!(discarded.event, Some(Event::ReviewDiscarded));
+    assert_eq!(discarded.actions, vec![Action::DeleteJobData]);
+}
+
+#[test]
+fn a_failed_job_and_a_waiting_job_can_be_discarded() {
     let h = scripted(vec![]);
+    let failed = seed(&h, 3, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    h.restart();
     let mut c = Client::open(&h);
     c.snapshot();
-    assert_eq!(c.err("discard_preview", json!({"job": "abc-1"})), "discard_preview is not built in this version");
+    assert_eq!(c.ok("discard", json!({"job": failed})), Value::Null);
+    assert_eq!(h.record(&failed).state, State::Discarded);
+    drop((c, h));
+
+    let h = stand_in(&["movie-direct"], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    assert_eq!(h.record(&id).state, State::Discarded);
+    // A retry of the discarded job is refused, naming its state.
+    assert!(c.err("retry", json!({"job": id})).contains("is Discarded"));
+}
+
+#[test]
+fn discard_of_a_running_job_is_refused_naming_cancel() {
+    let h = scripted(hanging_at("RipTitle", 0));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let id = id_of(&h, DISC_A);
+    let lines = h.transitions(&id).len();
+    assert_eq!(c.err("discard", json!({"job": id})), format!("job {id} has a step running: cancel it first"));
+    assert_eq!(h.record(&id).state, State::Ripping);
+    assert_eq!(h.transitions(&id).len(), lines);
+}
+
+#[test]
+fn discard_of_a_filed_job_is_refused_naming_its_state() {
+    let h = scripted(vec![]);
+    let id = seed_filed(&h, 4, 1_792_800_000 - 30 * 86_400);
+    fs::create_dir_all(h.staging().join(&id).join("rip")).unwrap();
+    h.restart();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(
+        c.err("discard", json!({"job": id})),
+        format!("job {id} is Filed: only a held, failed or waiting job can be discarded")
+    );
+    assert_eq!(c.err("discard", json!({"job": "nope-1"})), "no job nope-1");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::Filed);
+    assert!(h.staging().join(&id).join("rip").is_dir(), "a refused discard starts no deletion");
+}
+
+/// Review Focus 3: a discard while the staging share is down is persisted at once and deletes nothing; a later pass
+/// deletes the data once the share answers.
+#[test]
+fn a_discard_while_the_share_is_down_deletes_at_a_later_pass() {
+    let (h, mut c, id) = held_job();
+    let staged = h.staging().join(&id).join("rip/t00-00800/title_t00.mkv");
+    fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    fs::write(&staged, b"rip").unwrap();
+    let root = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&root, Reach::Unreachable("cable out".to_string()));
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    assert_eq!(h.record(&id).state, State::Discarded);
+    wait_for_pass(&h, &format!("cleanup: the staging root {root} was not reached: cable out; 1 job(s) skipped"));
+    assert_eq!(fs::read(&staged).unwrap(), b"rip");
+    h.shares().set_reach(&root, Reach::Reachable);
+    h.run_cleanup();
+    assert!(!h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted its staging folder")));
+}
+
+#[test]
+fn a_discarded_jobs_pending_tuning_copy_is_dropped() {
+    let h = scripted(vec![]);
+    let id = seed(&h, 5, State::NeedsReview { held: Held::DispositionGate });
+    let path = h.job_dir(&id).join("state.json");
+    let mut r: JobRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    r.tuning_copy = Some(TuningCopy::Pending);
+    fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
+    fs::create_dir_all(h.staging().join(&id).join("tuning/t00-00800")).unwrap();
+    let (staging, tuning) = (h.staging().to_str().unwrap().to_string(), h.tuning().to_str().unwrap().to_string());
+    // With neither share answering, the start's copy attempt waits for tuning_root and the copy stays pending.
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".to_string()));
+    h.shares().set_reach(&tuning, Reach::Unreachable("cable out".to_string()));
+    h.restart();
+    h.wait_copy();
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Pending));
+    h.shares().set_reach(&staging, Reach::Reachable);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    let record = h.record(&id);
+    assert_eq!((record.state, record.tuning_copy), (State::Discarded, Some(TuningCopy::Dropped)));
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(r#""tuning_copy": "dropped""#) || text.contains(r#""tuning_copy":"dropped""#), "{text}");
+    // The cleanup no longer waits for the copy, and the copy is not tried again.
+    wait_for_pass(&h, &format!("cleanup: {id}: deleted its staging folder"));
+    assert!(!h.staging().join(&id).exists());
+    assert_eq!(h.run_copies(), Vec::<String>::new());
+    h.shares().set_reach(&tuning, Reach::Reachable);
+    h.run_cleanup();
+    h.settle();
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Dropped));
+    assert!(!h.tuning().join("dataset").join(&id).exists());
+}
+
+#[test]
+fn discard_preview_counts_the_staging_folder() {
+    let (h, mut c, id) = held_job();
+    assert_eq!(c.ok("discard_preview", json!({"job": id})), json!({"bytes": 0, "files": 0}), "no folder yet");
+    let staged = h.staging().join(&id);
+    fs::create_dir_all(staged.join("rip/t00-00800")).unwrap();
+    fs::create_dir_all(staged.join("tuning/t00-00800/empty")).unwrap();
+    fs::write(staged.join("rip/t00-00800/title_t00.mkv"), b"12345").unwrap();
+    fs::write(staged.join("tuning/t00-00800/audio-proxy.mka"), b"123").unwrap();
+    let outside = h.library().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("big.mkv"), vec![0u8; 1000]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, staged.join("rip/link")).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(staged.join("rip/link"))
+            .arg(&outside).output().unwrap();
+        assert!(made.status.success(), "mklink /J failed");
+    }
+    assert_eq!(c.ok("discard_preview", json!({"job": id})), json!({"bytes": 8, "files": 2}));
+    let root = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&root, Reach::Unreachable("cable out".to_string()));
+    assert_eq!(
+        c.ok("discard_preview", json!({"job": id})),
+        json!({"unknown": "the staging share did not answer: cable out"})
+    );
+    assert_eq!(c.err("discard_preview", json!({"job": "nope-1"})), "no job nope-1");
+    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate }, "a preview changes nothing");
+    assert!(staged.join("rip/t00-00800/title_t00.mkv").is_file());
+}
+
+/// A job that waits in a state entered during its file phase holds the file-phase slot (design part 5.7); its discard
+/// frees the slot, and the next job in the queue gets it.
+#[test]
+fn a_job_discarded_while_it_holds_the_file_phase_slot_frees_it() {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(9).collect(); // A to Decided
+    script.push(("CheckSpace", step(Event::ShareLost))); // A waits, holding the slot
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", StepScript::Hang)); // B, once it has the slot
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert!(matches!(h.record(&a).state, State::AwaitingShare { .. }));
+    h.insert("tok1", DISC_B);
+    let b = id_of(&h, DISC_B);
+    h.wait("B waits for the slot", |h| h.state_of(&b) == "Ejected");
+    h.settle();
+    assert_eq!(h.steps().calls().iter().filter(|call| *call == "Probe").count(), 1, "B waits while A holds the slot");
+    assert_eq!(c.ok("discard", json!({"job": a})), Value::Null);
+    wait_for_call(&h, "Probe", 2);
+    h.wait("B has the slot", |h| h.state_of(&b) == "Inspecting");
 }
 
 // ---- The review document (phase 3 design, part 6.2; ruling T32-R5) ----
