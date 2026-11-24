@@ -188,7 +188,13 @@ verdict (the owner's rulings of 2026-11-24 after pull request #35), unless a gua
 kept, a Keep override names it, it is the programme reference, or the drop would move the reference or leave the title
 no audio. The `decision` section then lists such streams under `decision.facts.menu_streams` and every confirmation
 with its outcome under `decision.decision.audio.menu`, and a dropped one under `decision.decision.audio.dropped` as
-`[<stream>, {"why": "menu", "role": "<role>"}]`. With a map, `decision` and `menu` are the only keys that can differ
+`[<stream>, {"why": "menu", "role": "<role>"}]`. Each dropped stream also raises the note `menu_dropped`, which names
+the stream, its role and the menu's labels for it. A confirmation can end in two more outcomes, `reference_disputed`
+and `no_reference`, and the note `menu_reference_conflict` is raised where the menu and the content rule disagree on
+the programme reference. The `roles` key also gains `off_stale`, the choices whose off-decision line was written for
+other wording and so applies to nothing, and `play`, the stream plain Play selects (null when not known). An
+off-decision line has three fields: `<decision><TAB><choice id><TAB><the choice's text>`; a line with two is refused.
+With a map, `decision` and `menu` are the only keys that can differ
 from the run without it; without a confirmation the `decision` section is byte for byte the one without the map, and
 without `--menu` nothing changes. A `menu-off.tsv` that cannot be read or parsed exits 2, as a map that cannot be read
 does. The rule, its outcomes and its rulings MR-1 to MR-17 and MA-1 to MA-4 are written in `docs/menu-maps/format.md`.

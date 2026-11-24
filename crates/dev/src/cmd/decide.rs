@@ -615,10 +615,18 @@ fn playlist_names(map: &MenuMap, inputs: &DecideInputs) -> BTreeSet<String> {
     names
 }
 
+/// The map `given` names and the off-decisions beside it (`read_map`, then `read_off`, MR-6): the refusal of either
+/// as those give it (exit 2, one line per problem). Public so the other commands read the pair the same way.
+pub fn read_menu_pair(ctx: &Ctx, given: &str) -> Result<(MenuMap, OffDecisions), Refused> {
+    let (_, map) = read_map(ctx, given)?;
+    Ok((map, read_off(ctx, given)?))
+}
+
 /// `--menu`'s input for the recording `run` read (design 5.4a): the map and its off-decisions, the recording's disc ID
 /// (a meta.json `disc_id_of` cannot read is held back as its refusal's line, M3-6) and the playlists `playlist_names`
-/// names, read from the recording's tree (`read_playlists`, which reads only five-digit names, MR-13).
-fn menu_input(rec: &Recording, map: MenuMap, off: OffDecisions, inputs: &DecideInputs) -> MenuInput {
+/// names, read from the recording's tree (`read_playlists`, which reads only five-digit names, MR-13). Public so
+/// the other commands that read a menu map build the same input.
+pub fn menu_input(rec: &Recording, map: MenuMap, off: OffDecisions, inputs: &DecideInputs) -> MenuInput {
     let playlists = read_playlists(rec, &playlist_names(&map, inputs));
     MenuInput { disc_id: disc_id_of(rec).map_err(|refused| refused.line), map, off, playlists }
 }
@@ -830,7 +838,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
     // read only skips the menu key: plan reports it as it does without a map.
     let menu_given = match menu_map {
         None => None,
-        Some(given) => match read_map(ctx, &given).and_then(|(_, map)| Ok((map, read_off(ctx, &given)?))) {
+        Some(given) => match read_menu_pair(ctx, &given) {
             Ok(found) => Some(found),
             Err(refused) => {
                 for line in refused.line.split('\n') {
@@ -944,14 +952,24 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
     // Design 5.4a: the roles the menu section shows (`title_menu`, read against the scan's title, not the narrowed
     // one); a block that does not act (MR-5, MR-8) and a skipped one confirm nothing, so the decision is the one
     // without a map.
-    let roles = inputs.menu.as_ref().and_then(|given| title_menu(given, inputs).ok()).map(|(_, roles)| roles);
-    let menu: BTreeMap<u32, MenuConfirmation> = roles
-        .iter()
-        .filter(|roles| roles.acts)
-        .flat_map(|roles| &roles.audio)
-        .filter_map(|row| {
+    let given = inputs.menu.as_ref();
+    let roles = given.and_then(|given| title_menu(given, inputs).ok()).map(|(_, roles)| roles);
+    let menu_play = roles.as_ref().filter(|roles| roles.acts).and_then(|roles| roles.play);
+    let menu: BTreeMap<u32, MenuConfirmation> = given
+        .zip(roles.as_ref())
+        .filter(|(_, roles)| roles.acts)
+        .into_iter()
+        .flat_map(|(given, roles)| roles.audio.iter().map(move |row| (given, row)))
+        .filter_map(|(given, row)| {
             let role = row.confirms()?;
-            Some((row.stream, MenuConfirmation { role, choices: row.choices.clone(), labels: Vec::new() }))
+            // The labels as shown: the map's choice of each id; an id the map lacks (it cannot occur) is left out.
+            let labels = row
+                .choices
+                .iter()
+                .filter_map(|id| given.map.choices.iter().find(|choice| &choice.id == id))
+                .map(menu::Choice::shown_label)
+                .collect();
+            Some((row.stream, MenuConfirmation { role, choices: row.choices.clone(), labels }))
         })
         .collect();
     let facts = FactsSummary {
@@ -983,7 +1001,7 @@ fn decision_section(inputs: &DecideInputs, plan: &PlanDoc, doc: &DecideDoc) -> R
             remembered: remembered_audio.as_deref(),
             reviewed: None,
             menu,
-            menu_play: None,
+            menu_play,
         },
         subtitles: SubtitleFacts {
             events,
@@ -3749,6 +3767,56 @@ SINFO:0,4,6,0,"PGS"
     /// The rendered document as decide prints it, as a JSON value.
     fn printed_value(inputs: &DecideInputs) -> Value {
         serde_json::to_value(decide_doc(inputs)).unwrap()
+    }
+
+    #[test]
+    fn a_menu_drop_prints_its_note_and_plays_stream() {
+        let tmp = Scratch::new("menu-note");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), true, "Commentary");
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        let notes = with["decision"]["decision"]["notes"].as_array().unwrap();
+        let dropped: Vec<&Value> = notes.iter().filter(|note| note["note"] == json!("menu_dropped")).collect();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0]["stream"], json!(3));
+        assert_eq!(
+            dropped[0]["detail"],
+            json!("the disc's menu calls stream 3 a commentary (\"SETUP > AUDIO: Commentary\"); dropped on the menu's word")
+        );
+        assert_eq!(with["menu"]["roles"]["play"], json!(1));
+        assert_eq!(with["menu"]["roles"]["off_stale"], json!([]));
+        assert!(without["decision"]["decision"]["notes"].as_array().unwrap().iter().all(|n| n["note"] != json!("menu_dropped")));
+    }
+
+    #[test]
+    fn a_stale_off_line_is_listed_and_decides_nothing() {
+        // c002 reads "AUDIO: Commentary Off": the net catches it. A line written for other wording does not apply.
+        let tmp = Scratch::new("menu-off-stale");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), true, "Commentary Off");
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "role\tc002\tAUDIO: Commentary None\n");
+        let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let ran: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(ran["menu"]["roles"]["off_stale"], json!(["c002"]));
+        assert!(ran["decision"]["decision"]["audio"].get("menu").is_none());
+        // The line as it should be: the choice is read as a role, and the stream is dropped.
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "role\tc002\tAUDIO: Commentary Off\n");
+        let (_, out, _) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
+        let ran: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(ran["decision"]["decision"]["audio"]["menu"][0]["outcome"], json!("dropped"));
+    }
+
+    #[test]
+    fn a_two_field_off_file_is_refused_with_exit_2() {
+        let tmp = Scratch::new("menu-off-two-fields");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), true, "Commentary Off");
+        write(&root.join(MAP_DIR).join(menu::OFF_FILE_NAME), "off\tc002\n");
+        let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("menu-off.tsv: line 1: expected \"off<TAB><choice id><TAB><the choice's text>\""), "{err}");
     }
 
     #[test]
