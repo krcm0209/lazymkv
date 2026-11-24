@@ -1,11 +1,12 @@
 # Menu maps: design
 
 Status: approved by the owner on 2026-11-17. Section 5.4a was added on 2026-11-21 to record the owner's ruling of that
-day; its terms beyond the ruling's own words are proposals the owner can correct. Nothing in this design is built into
-lazymkv yet. Increment 1 (the tooling in `experiments/menu-spike/menu/` and the maps of the 13 trial discs) is built.
-Where it departs from this text the tooling's README is the description as built: set-up reuses an existing build of
-the library instead of building it from pinned source, screenshots are converted without ffmpeg, and `made.profile`
-records no UHD capability.
+day; its terms beyond the ruling's own words are proposals the owner can correct. Increment 3 (lazymkv reads maps) is
+in `main`, and the menu-role increment of 5.4a is built on its branch (2026-11-24; `docs/menu-maps/format.md`, "The
+rule"); the owner's answer of that day is at the end of 5.4a. Increment 1 (the tooling in
+`experiments/menu-spike/menu/` and the maps of the 13 trial discs) is built. Where it departs from this text the
+tooling's README is the description as built: set-up reuses an existing build of the library instead of building it
+from pinned source, screenshots are converted without ffmpeg, and `made.profile` records no UHD capability.
 
 ## 1. Intent
 
@@ -261,9 +262,10 @@ limit it to UHD Java maps until those formats are measured.
 
 **Still unruled.** Content's commentary or audio-description verdict against another menu role; a menu programme role
 (the words main or programme) against such a verdict; a menu role against `not-judged`, `reference-unclear`, the
-reference track or a vetoed title; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging
-a track on a menu role; any user preference that acts on a role. Subtitles are left out by the audio-only proposal
-above, not by the ruling; the owner can bring them in.
+reference track or a vetoed title; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging a
+track on a menu role; any user preference that acts on a role; a track that the menu and the content rule both call a
+commentary or an audio description (it stays as today, a review or a note and nothing dropped: MR-12 of the menu-role
+plan). Subtitles are left out by the audio-only proposal above, not by the ruling; the owner can bring them in.
 
 **Where it is built (a proposal; the owner has not chosen).** Recommended: its own increment, the menu-role increment,
 after increment 3 and before the navigators, with its own plan and its own branch from `main`. Increment 3's `menu`
@@ -285,6 +287,16 @@ outside the repository and reports counts and slugs only; the join read every me
 not fire as proposed. Whatever the count, it goes to the owner with the reason each missing row did not fire, and the
 rule is not changed to make a row fire (a proposal). The alternatives: fold the rule into increment 3 as a last task,
 or wait until BD and DVD maps are measured.
+
+**The owner's answer (2026-11-24).** While the menu-role increment was planned, the owner was asked "A menu map says a
+track is a commentary or audio description (strong tie) and lazymkv's content check kept it as programme. What should
+lazymkv do with that track?" and answered "Drop it as confirmed", over the other choice offered, "Send the job to
+review". The "Outranks" proposal's reading above (a review for a commentary, a note for an audio description, nothing
+dropped) is thereby replaced by a drop: where a map is given, the menu joins the confirmations of R6, D12 and D15. The
+other terms are the rulings MR-2 to MR-16 of the menu-role plan
+(`docs/superpowers/plans/2026-11-24-menu-role-increment.md`), proposals the owner can correct; as built they are
+written in `docs/menu-maps/format.md`. As built, increment 3's `menu` block also carries the title's `roles` with their
+ties (MR-15), so "stays evidence only, carries no role and no tie" above now holds for its other keys only.
 
 ### 5.5 Built-in navigators (increment 4)
 
@@ -343,6 +355,11 @@ Made by the owner
 - A menu role with a strong tie outranks a content verdict of keep (2026-11-21). Asked "Rule that a menu role with
   a strong tie outranks a content verdict of keep?", the owner answered "Yes, rule so". That is the whole ruling;
   the terms proposed for it are in 5.4a and under the proposals below.
+- A menu role that outranks a content keep counts as confirmed: the track is dropped (2026-11-24). Asked "A menu map
+  says a track is a commentary or audio description (strong tie) and lazymkv's content check kept it as programme.
+  What should lazymkv do with that track?", the owner chose "Drop it as confirmed" over "Send the job to review". It
+  replaces the proposal below that outranking drops nothing; the other terms are MR-2 to MR-16 of the menu-role plan,
+  proposals the owner can correct (5.4a, "The owner's answer").
 
 Made here, as proposals the owner can correct
 - Maps are made and replayed on the Mac from captured files; the mini PC only reads them.
