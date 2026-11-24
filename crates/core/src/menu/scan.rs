@@ -5,7 +5,7 @@
 
 use crate::disc::{Disc, Flags, StreamKind, Title};
 
-use super::{map_level, Effect, Kind, Level, MenuMap};
+use super::{map_level, Effect, Kind, Level, MenuMap, RolesBlock};
 
 /// Why a disc's ID is unknown: a scan file was given, not the recording folder (M3-6).
 pub const NO_ID_IN_SCAN_FILE: &str = "a scan file carries no disc ID; give the recording folder";
@@ -288,7 +288,8 @@ pub struct OtherPlaylist {
 /// what starts the title (play and the version, bonus and other choices on its playlist), the audio and shown
 /// subtitle choices by the scan stream of their own number, the subtitle choices that turn subtitles off, every other
 /// playlist the map's effects name, the own-kind choices whose own number labels no stream, and the entries without an
-/// effect.
+/// effect. `roles` is the menu-role increment's reading of the audio choices (design 5.4a, `tie.rs`); `title_block`
+/// sets it to None, and None is not printed, so a block without it prints as before.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MenuBlock {
     pub map: String,
@@ -302,10 +303,12 @@ pub struct MenuBlock {
     pub other_playlists: Vec<OtherPlaylist>,
     pub out_of_range: Vec<String>,
     pub no_effect: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<RolesBlock>,
 }
 
 /// `file` without a final `.mpls` (ASCII case ignored); a source file of another kind is kept whole.
-fn playlist_of(file: &str) -> String {
+pub(super) fn playlist_of(file: &str) -> String {
     match file.len().checked_sub(5) {
         Some(at) if file.is_char_boundary(at) && file[at..].eq_ignore_ascii_case(".mpls") => file[..at].to_string(),
         _ => file.to_string(),
@@ -354,6 +357,7 @@ pub fn title_block(map: &MenuMap, disc: &Disc, title: &Title, identity: &Identit
         other_playlists: Vec::new(),
         out_of_range: Vec::new(),
         no_effect: Vec::new(),
+        roles: None,
     };
     match &map.play.effect {
         None => block.no_effect.push("play".to_string()),

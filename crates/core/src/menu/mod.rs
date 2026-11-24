@@ -1,7 +1,8 @@
 //! Menu maps, `core::menu` (menu maps design 5.4): the types of a `lazymkv menu map v1` file, its reader and the
 //! writer's validator; `scan.rs` ties a map to a scanned disc (stream numbers, identity, the check, decide's per-title
 //! block); `mpls.rs` reads a Blu-ray playlist's play items and stream tables; `role.rs` reads the role words of a
-//! choice's label and the per-choice off-decisions file (design 5.4a). The format, its rules and this
+//! choice's label and the per-choice off-decisions file (design 5.4a); `tie.rs` ties a map's audio choices to a title's
+//! scan streams through the title's playlist and reads each stream's role (design 5.4a). The format, its rules and this
 //! increment's rulings M3-1 to M3-8 are `docs/menu-maps/format.md`.
 //! A map says only what the menu calls a choice and which playlist and streams choosing it selects; it is evidence and
 //! no decision reads it. No I/O: `read` takes the file's text.
@@ -9,11 +10,13 @@
 mod mpls;
 mod role;
 mod scan;
+mod tie;
 mod validate;
 
 pub use mpls::*;
 pub use role::*;
 pub use scan::*;
+pub use tie::*;
 pub use validate::validate;
 
 /// The format name a v1 map's `format` holds (design 5.1).
