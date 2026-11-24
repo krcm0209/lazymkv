@@ -298,6 +298,7 @@ pub struct SubtitleTrackOverride {
 /// because `Event::ReviewApproved` carries them inside an internally tagged enum, whose buffered content cannot give an
 /// integer map key (the interfaces' "Keyed collections"). Def: T6. Use: T7, T13, T14.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Overrides {
     /// Set identity.
     pub identity: Option<TmdbIdentity>,
@@ -311,6 +312,30 @@ pub struct Overrides {
     /// Resolve collision: one answer per colliding final path the owner was shown, sorted by path (a list of entries,
     /// as the other keyed collections here).
     pub collision: Vec<CollisionAnswer>,
+}
+
+/// The keys of an answers object, in the order the refusal names them (phase 3 design, part 6.4). Def: P3-T2. Use: P3-T7,
+/// P3-T8.
+pub const OVERRIDE_KEYS: [&str; 6] = ["identity", "season", "titles", "audio", "subtitles", "collision"];
+
+/// Reads an answers object arriving as JSON over a pipe: strictly, so a misspelt key is refused naming it rather than
+/// ignored (a key left out is the empty answer), and any other defect is refused with serde's text. Every refusal starts
+/// "overrides: ". Phase 3 design, part 6.4. Def: P3-T2. Use: P3-T7, P3-T8.
+pub fn overrides_from_value(value: &serde_json::Value) -> Result<Overrides, String> {
+    let object = value.as_object().ok_or_else(|| "overrides: not an object".to_string())?;
+    if let Some(key) = object.keys().find(|key| !OVERRIDE_KEYS.contains(&key.as_str())) {
+        return Err(format!("overrides: unknown key {key:?} ({})", OVERRIDE_KEYS.join(", ")));
+    }
+    serde_json::from_value(value.clone()).map_err(|error| format!("overrides: {error}"))
+}
+
+/// The entries of `earlier` and `later` with one entry per key: a `later` entry replaces the `earlier` one with the same
+/// key (`same` says when two keys are one), the rest are kept, and the result is sorted by `order`.
+fn merge_entries<T: Clone, K: Ord>(earlier: &[T], later: &[T], key: impl Fn(&T) -> K, same: impl Fn(&T, &T) -> bool) -> Vec<T> {
+    let mut merged: Vec<T> = earlier.iter().filter(|old| !later.iter().any(|new| same(old, new))).cloned().collect();
+    merged.extend(later.iter().cloned());
+    merged.sort_by_key(key);
+    merged
 }
 
 impl Overrides {
@@ -344,6 +369,31 @@ impl Overrides {
         self.collision.iter().find(|answer| same_path(&answer.path, path)).map(|answer| answer.action)
     }
 
+    /// The answers after a later round: `later`'s identity and season when it has them, and each of its entries replacing the
+    /// earlier entry for the same thing (titles by title, audio and subtitles by title and stream, collision by
+    /// `settings::same_path`), the rest kept, every list sorted by its key. Phase 3 design, part 6.4. Def: P3-T2.
+    /// Use: P3-T7, P3-T8.
+    pub fn merged(&self, later: &Overrides) -> Overrides {
+        Overrides {
+            identity: later.identity.clone().or_else(|| self.identity.clone()),
+            season: later.season.or(self.season),
+            titles: merge_entries(&self.titles, &later.titles, |e| e.title, |a, b| a.title == b.title),
+            audio: merge_entries(&self.audio, &later.audio, |e| (e.title, e.stream), |a, b| (a.title, a.stream) == (b.title, b.stream)),
+            subtitles: merge_entries(
+                &self.subtitles,
+                &later.subtitles,
+                |e| (e.title, e.stream),
+                |a, b| (a.title, a.stream) == (b.title, b.stream),
+            ),
+            collision: merge_entries(&self.collision, &later.collision, |e| e.path.clone(), |a, b| same_path(&a.path, &b.path)),
+        }
+    }
+
+    /// Whether no answer is given (equal to `Overrides::default()`). Phase 3 design, part 6.4. Def: P3-T2. Use: P3-T7, P3-T8.
+    pub fn is_empty(&self) -> bool {
+        *self == Overrides::default()
+    }
+
     /// The same for subtitles (`SubtitleFacts.reviewed`). Spec 11. Def: T6. Use: T13.
     pub fn subtitles_of(&self, title: u32) -> Option<BTreeMap<u32, SubtitleOverride>> {
         let streams: BTreeMap<u32, SubtitleOverride> = self
@@ -365,6 +415,32 @@ mod tests {
     use crate::plan::fixtures::{pinned, CHERNOBYL_1, ENG_AC3, ENG_AC3_2CH, ENG_PGS, FIREFLY_1_API, FIREFLY_2, VIDEO};
     use crate::robot::parse;
     use crate::testsupport::scan_text;
+
+    #[test]
+    fn an_unknown_key_in_the_answers_is_refused_naming_it() {
+        let refused = overrides_from_value(&serde_json::json!({"subtitle": []})).unwrap_err();
+        assert_eq!(refused, "overrides: unknown key \"subtitle\" (identity, season, titles, audio, subtitles, collision)");
+        assert_eq!(overrides_from_value(&serde_json::json!([1])).unwrap_err(), "overrides: not an object");
+        assert_eq!(overrides_from_value(&serde_json::json!({})).unwrap(), Overrides::default());
+        assert!(overrides_from_value(&serde_json::json!({"audio": [{"title": 0, "stream": 1, "action": "louder"}]}))
+            .unwrap_err()
+            .starts_with("overrides: "));
+    }
+
+    #[test]
+    fn a_later_answer_replaces_the_earlier_one_for_the_same_track_and_keeps_the_rest() {
+        let json = |value| overrides_from_value(&value).unwrap();
+        let first = json(serde_json::json!({"subtitles": [
+            {"title": 0, "stream": 9, "action": "keep", "role": "sdh"},
+            {"title": 0, "stream": 33, "action": "drop"}]}));
+        let later = json(serde_json::json!({"subtitles": [{"title": 0, "stream": 9, "action": "keep", "role": "regular"}],
+            "collision": [{"path": "M:/Movies/F (2000)/F (2000) - 2160p.mkv", "action": "keep_both"}]}));
+        let merged = first.merged(&later);
+        assert_eq!(merged.subtitles_of(0).unwrap()[&9], SubtitleOverride::Keep { role: SubtitleRole::Regular });
+        assert_eq!(merged.subtitles_of(0).unwrap()[&33], SubtitleOverride::Drop);
+        assert_eq!(merged.collision_for("m:\\movies\\f (2000)\\f (2000) - 2160p.mkv"), Some(Collision::KeepBoth));
+        assert!(Overrides::default().is_empty() && !merged.is_empty());
+    }
 
     fn json_of<T: serde::Serialize>(value: &T) -> String {
         serde_json::to_string(value).unwrap()
