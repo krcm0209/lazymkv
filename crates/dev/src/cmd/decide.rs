@@ -43,8 +43,8 @@
 //! the map (`cmd::menu::read_off`, MR-6; a file it refuses exits 2 as a refused map does) and the recording's
 //! playlists (`cmd::menu::read_playlists`, MR-8, MR-13), and gives the block the title's roles (`menu::audio_roles`).
 //! The roles a block that acts confirms (a commentary or an audio description with a strong tie, MR-5) reach the
-//! decision, which drops such a track where the content rule kept it: with a map, the `decision` key and the `menu`
-//! key are the only keys that can differ.
+//! decision, which drops such a track whatever the content rule's verdict (the owner's rulings of 2026-11-24, MA-1):
+//! with a map, the `decision` key and the `menu` key are the only keys that can differ.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -124,8 +124,7 @@ arguments:
   --remembered FILE     a remembered decision for the disc's fingerprint, for the plan section and the
                         decision's track overrides (spec 5)
   --menu MAP            a menu map, its folder or its menu-map.json: adds the menu key, and a commentary or
-                        audio description it confirms is dropped where the content rule kept it
-                        (docs/menu-maps/format.md)
+                        audio description it confirms is dropped (docs/menu-maps/format.md)
   --evidence DIR        the evidence clone (default: LAZYMKV_EVIDENCE, else corpus/owner)
 
 exit status: 0; 1 when a reconcile verdict is no; 2 for an argument error, an unreadable scan.txt or
@@ -3785,13 +3784,20 @@ SINFO:0,4,6,0,"PGS"
             row,
             &json!({"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "play": false, "why": ""})
         );
-        // `run` reads the same map, off-decisions and playlists: its menu key is the renderer's, and its decision lists
-        // the confirmation (run's audio section has no verdict, so nothing is dropped there).
+        // `run` reads the same map, off-decisions and playlists: its menu key is the renderer's, and on the recording
+        // as read (its audio section gives no verdict on stream 3) the menu's word alone drops the stream (MA-1).
         let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--menu", MAP_DIR]);
         assert_eq!((code, err.as_str()), (0, ""));
         let ran: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(ran["menu"], with["menu"]);
-        assert_eq!(ran["decision"]["decision"]["audio"]["menu"][0]["outcome"], json!("no_verdict"));
+        let ran_audio = &ran["decision"]["decision"]["audio"];
+        assert!(
+            ran_audio["dropped"].as_array().unwrap().contains(&json!([3, {"why": "menu", "role": "commentary"}])),
+            "{}",
+            ran_audio["dropped"]
+        );
+        assert!(ran_audio["kept"].as_array().unwrap().iter().all(|track| track["stream"] != json!(3)));
+        assert_eq!(ran_audio["menu"][0]["outcome"], json!("dropped"));
         assert_eq!(ran["decision"]["facts"]["menu_streams"], json!([3]));
     }
 

@@ -2,8 +2,10 @@
 
 Status: approved by the owner on 2026-11-17. Section 5.4a was added on 2026-11-21 to record the owner's ruling of that
 day; its terms beyond the ruling's own words are proposals the owner can correct. Increment 3 (lazymkv reads maps) is
-in `main`, and the menu-role increment of 5.4a is built on its branch (2026-11-24; `docs/menu-maps/format.md`, "The
-rule"); the owner's answer of that day is at the end of 5.4a. Increment 1 (the tooling in
+in `main`, and so is the menu-role rule of 5.4a (pull request #35, 2026-11-24; `docs/menu-maps/format.md`, "The
+rule"); the owner's answer of that day is at the end of 5.4a. The owner's rulings after that merge widen the rule so
+that the menu's word alone drops the track, whatever the content rule says of it; the widening is built on its own
+branch (2026-11-24; 5.4a, "The owner's rulings after the merge"). Increment 1 (the tooling in
 `experiments/menu-spike/menu/` and the maps of the 13 trial discs) is built. Where it departs from this text the
 tooling's README is the description as built: set-up reuses an existing build of the library instead of building it
 from pinned source, screenshots are converted without ffmpeg, and `made.profile` records no UHD capability.
@@ -218,8 +220,9 @@ sections 3 and 4). Whatever goes further than that, or narrower, is marked as a 
   ones, or none, give no role. A label part that also says off, none, without or the like gives a role only through a
   recorded decision made from its wording alone, as in 5.3 (an entry that names both states of a toggle goes to the
   owner), never by a guess. On audio the role words give commentary, audio description (`ad`) and programme (the words
-  main, programme or program). The join reads a content keep as programme (`AUDIO_ROLE`), so commentary and audio
-  description are the roles that can outrank it.
+  main, programme or program [corrected 2026-11-24: the pattern reads `main`, `programm` and `programme` between word
+  edges, not `program`; `docs/menu-maps/format.md`, "Roles"]). The join reads a content keep as programme
+  (`AUDIO_ROLE`), so commentary and audio description are the roles that can outrank it.
 - **Strong tie**: the measurement's strong ties, unchanged. From a map: `replay` (the choice is at level `replayed`,
   plain Play has a recorded effect that names a playlist, and the choice's playlist or its own kind of stream differs
   from Play's) and `attr` (a choice at level `replayed` that `replay` does not fit, whose text names exactly one
@@ -260,12 +263,14 @@ treat every map alike, so as proposed the rule would also act on BD, DVD and non
 Blu-ray with Java menus can be mapped by agents today, 5.5; non-Java and DVD menus need increment 5). The owner can
 limit it to UHD Java maps until those formats are measured.
 
-**Still unruled.** Content's commentary or audio-description verdict against another menu role; a menu programme role
-(the words main or programme) against such a verdict; a menu role against `not-judged`, `reference-unclear`, the
-reference track or a vetoed title; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging a
-track on a menu role; any user preference that acts on a role; a track that the menu and the content rule both call a
-commentary or an audio description (it stays as today, a review or a note and nothing dropped: MR-12 of the menu-role
-plan). Subtitles are left out by the audio-only proposal above, not by the ruling; the owner can bring them in.
+**Still unruled.** A menu programme role (the words `main`, `programm` or `programme`) against a content verdict of
+commentary or audio description; weak ties (`order`, `ear`, `default`, `none`) and tie conflicts; naming or flagging a
+track on a menu role; any user preference that acts on a role. Subtitles are left out by the audio-only proposal above,
+not by the ruling; the owner can bring them in. [Amended 2026-11-24, after the merge of pull request #35: the owner's
+rulings at the end of this section rule what this paragraph also listed, a menu role against `not-judged`,
+`reference-unclear` or a vetoed title, content's commentary or audio-description verdict against a menu role of the same
+or the other unwanted kind, and MR-12's track that the menu and the content rule both call a commentary or an audio
+description. The reference track is never dropped, as before.]
 
 **Where it is built (a proposal; the owner has not chosen).** Recommended: its own increment, the menu-role increment,
 after increment 3 and before the navigators, with its own plan and its own branch from `main`. Increment 3's `menu`
@@ -298,6 +303,40 @@ other terms are the rulings MR-2 to MR-16 of the menu-role plan
 written in `docs/menu-maps/format.md`. As built, increment 3's `menu` block also carries the title's `roles` with their
 ties (MR-15), so "stays evidence only, carries no role and no tie" above now holds for its other keys only. The final
 review added MR-17 (a stream plain Play itself selects is never confirmed), recorded in `docs/menu-maps/format.md`.
+
+**The owner's rulings after the merge (2026-11-24).** After pull request #35 merged, the owner was asked three
+questions:
+- Asked "The menu says a track is a commentary (strong tie) and lazymkv's content check ALSO says commentary. Today
+  that track is kept: 6 send the job to review, 6 only get a note. Should the menu's word drop it?", the owner chose
+  "Yes, drop it".
+- Asked "The menu says a track is a commentary or audio description (strong tie) and lazymkv's content check has NO
+  verdict on it (not measured, or the measurement could not be used). Should the menu's word alone drop it?", the
+  owner chose "Yes, menu alone".
+- Asked whether to keep the six guards (the map's disc ID must match; the title's own playlist must be read and agree
+  with the scan; an "off" wording with no recorded decision gives no role; never the stream plain Play selects; never
+  the programme reference, and nothing is dropped if a drop would move it; a Keep override wins), with a track that
+  has no language code treated like any other, the owner chose "Keep all six".
+
+The plan that builds them (`docs/superpowers/plans/2026-11-24-menu-alone.md`) reads them as these rulings, proposals
+the owner can correct; as built they are written in `docs/menu-maps/format.md`, "The rule":
+- MA-1: the two answers together mean the content rule's verdict does not gate the menu's drop in any state: keep,
+  commentary, cross-language commentary, a noted commentary or audio description, the audio-description pattern,
+  not judged, reference unclear, D21's veto holding, another reference than the measured one, or no verdict at all.
+  This replaces MR-2's verdict conditions and MR-12.
+- MA-2: a drop that would leave the title with no kept audio track is not made: none of the title's confirmed streams
+  is dropped (outcome `would_leave_none`). Now that a track with no language code can be dropped, a title without a
+  programme reference could otherwise lose its only audio.
+- MA-3: the decision's list of confirmations no longer carries a content verdict; the outcomes are `dropped`,
+  `not_kept`, `overridden`, `reference`, `reference_would_change`, `would_leave_none`.
+- MA-4: the six sentences that pull request #35 added to the main design are replaced by ones that say the rule as it
+  now is; they stay dated 2026-11-24.
+
+Of MA-4's six sentences, five are replaced; the sixth, in the risk "Commentary on Blu-ray and UHD", is true as it
+stands and is kept.
+
+So the menu's word alone drops a track it confirms as a commentary or an audio description, where a map is given,
+whatever the content rule says of it and also without a verdict; the guards stand as built (MR-3, MR-4, MR-5, MR-6,
+MR-8, MR-9, MR-13, MR-17, and never the programme reference).
 
 ### 5.5 Built-in navigators (increment 4)
 
@@ -361,6 +400,11 @@ Made by the owner
   What should lazymkv do with that track?", the owner chose "Drop it as confirmed" over "Send the job to review". It
   replaces the proposal below that outranking drops nothing; the other terms are MR-2 to MR-16 of the menu-role plan,
   proposals the owner can correct (5.4a, "The owner's answer").
+- The menu's word alone drops the track (2026-11-24, after the merge of pull request #35). Asked whether the menu's
+  word should drop a track the content check also calls a commentary, the owner chose "Yes, drop it"; asked whether it
+  should drop a track the content check has no verdict on, "Yes, menu alone"; asked whether to keep the six guards,
+  "Keep all six". The questions are quoted in full in 5.4a, "The owner's rulings after the merge"; the plan's reading
+  of them, MA-1 to MA-4, replaces MR-2's verdict conditions and MR-12 and is a proposal the owner can correct.
 
 Made here, as proposals the owner can correct
 - Maps are made and replayed on the Mac from captured files; the mini PC only reads them.
