@@ -145,9 +145,9 @@ fn is_choice_id(id: &str) -> bool {
 }
 
 /// The decisions in `text` (a `menu-off.tsv`; MR-6): UTF-8, a leading byte-order mark dropped, lines split on `\n` with
-/// a trailing `\r` left off. A blank line and a line starting with `#` are skipped; every other line is
-/// `<decision><TAB><choice id>` with the decision `off` or `role`. Err is every problem, one sentence each, in line
-/// order; a line repeating an earlier one is dropped.
+/// a trailing `\r` left off. A line that is blank or holds only white space and a line starting with `#` are skipped;
+/// every other line is `<decision><TAB><choice id>` with the decision `off` or `role`. Err is every problem, one
+/// sentence each, in line order; a line repeating an earlier one is dropped.
 pub fn parse_off(text: &str) -> Result<OffDecisions, Vec<String>> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let repr = crate::recording::py_repr_str;

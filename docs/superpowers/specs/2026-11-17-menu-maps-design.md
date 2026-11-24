@@ -296,7 +296,8 @@ dropped) is thereby replaced by a drop: where a map is given, the menu joins the
 other terms are the rulings MR-2 to MR-16 of the menu-role plan
 (`docs/superpowers/plans/2026-11-24-menu-role-increment.md`), proposals the owner can correct; as built they are
 written in `docs/menu-maps/format.md`. As built, increment 3's `menu` block also carries the title's `roles` with their
-ties (MR-15), so "stays evidence only, carries no role and no tie" above now holds for its other keys only.
+ties (MR-15), so "stays evidence only, carries no role and no tie" above now holds for its other keys only. The final
+review added MR-17 (a stream plain Play itself selects is never confirmed), recorded in `docs/menu-maps/format.md`.
 
 ### 5.5 Built-in navigators (increment 4)
 

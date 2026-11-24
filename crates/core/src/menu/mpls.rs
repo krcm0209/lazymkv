@@ -7,16 +7,22 @@
 /// One play item: its clip's five-character name, and its in and out time in 45 kHz ticks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayItem {
+    /// The clip's five-character name.
     pub clip: String,
+    /// The in time, in 45 kHz ticks.
     pub in_time: u32,
+    /// The out time, in 45 kHz ticks.
     pub out_time: u32,
 }
 
 /// One entry of a stream table: the stream's PID, its coding type, its language as the disc writes it ("" if none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaylistStream {
+    /// The stream's PID.
     pub pid: u16,
+    /// The stream's coding type (the attributes' first byte).
     pub coding: u8,
+    /// The language as the disc writes it, "" if none.
     pub language: String,
 }
 
@@ -24,9 +30,13 @@ pub struct PlaylistStream {
 /// every play item carries those same two tables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Playlist {
+    /// The play items, in order.
     pub items: Vec<PlayItem>,
+    /// The first item's primary audio table; entry n is `[n - 1]`.
     pub audio: Vec<PlaylistStream>,
+    /// The first item's PG table; entry n is `[n - 1]`.
     pub subtitles: Vec<PlaylistStream>,
+    /// True when every play item carries the first item's two tables.
     pub uniform: bool,
 }
 
@@ -128,6 +138,7 @@ fn read_item(r: &Reader, o: usize, item: usize) -> Result<ItemRead, String> {
     let mut p = plus(s, 32)?;
     if flags & 0x10 != 0 {
         let angles = usize::from(r.u8(p)?);
+        // An angle count of 0 is read as 1: `saturating_sub` gives no extra angle clip, never an underflow.
         p = plus(p, 2 + 10 * angles.saturating_sub(1))?;
     }
     let q = plus(p, 4)?;
@@ -173,10 +184,15 @@ pub fn parse_playlist(bytes: &[u8]) -> Result<Playlist, String> {
 /// subtitle tables `(pid, language)`.
 #[cfg(any(test, feature = "testsupport"))]
 pub struct MadeUpItem {
+    /// The clip's five-character name.
     pub clip: &'static str,
+    /// The in time, in 45 kHz ticks.
     pub in_time: u32,
+    /// The out time, in 45 kHz ticks.
     pub out_time: u32,
+    /// The audio table, `(pid, coding, language)` per entry.
     pub audio: Vec<(u16, u8, &'static str)>,
+    /// The subtitle table, `(pid, language)` per entry (coded 0x90).
     pub subtitles: Vec<(u16, &'static str)>,
 }
 
@@ -358,6 +374,27 @@ mod tests {
         let second = FIRST_ITEM + 2 + usize::from(u16::from_be_bytes([bytes[FIRST_ITEM], bytes[FIRST_ITEM + 1]]));
         bytes[second + 2 + 32 + 16 + 1] = 9;
         assert_eq!(parse_playlist(&bytes).unwrap_err(), "play item 1: a stream entry of unknown type 9");
+    }
+
+    #[test]
+    fn an_items_length_is_honoured_when_padding_follows_its_table() {
+        let audio = [(0x1100, 0x83, "eng")];
+        let mut bytes = made_up_playlist(&[item("00001", &audio, &[]), item("00002", &audio, &[])]);
+        let len = u16::from_be_bytes([bytes[FIRST_ITEM], bytes[FIRST_ITEM + 1]]);
+        let end = FIRST_ITEM + 2 + usize::from(len);
+        bytes.splice(end..end, [0xFF; 4]);
+        bytes[FIRST_ITEM..FIRST_ITEM + 2].copy_from_slice(&(len + 4).to_be_bytes());
+        let playlist = parse_playlist(&bytes).unwrap();
+        let clips: Vec<&str> = playlist.items.iter().map(|item| item.clip.as_str()).collect();
+        assert_eq!(clips, vec!["00001", "00002"]);
+        assert!(playlist.uniform);
+    }
+
+    #[test]
+    fn a_stream_entry_without_a_coding_type_is_refused() {
+        let mut bytes = made_up_playlist(&[item("00001", &[(0x1100, 0x83, "eng")], &[])]);
+        bytes[ENTRIES + 10] = 0;
+        assert_eq!(parse_playlist(&bytes).unwrap_err(), "play item 0: a stream entry without a coding type");
     }
 
     #[test]

@@ -124,7 +124,8 @@ arguments:
   --remembered FILE     a remembered decision for the disc's fingerprint, for the plan section and the
                         decision's track overrides (spec 5)
   --menu MAP            a menu map, its folder or its menu-map.json: adds the menu key, and a commentary or
-                        audio description it confirms is dropped (docs/menu-maps/format.md)
+                        audio description it confirms is dropped where the content rule kept it
+                        (docs/menu-maps/format.md)
   --evidence DIR        the evidence clone (default: LAZYMKV_EVIDENCE, else corpus/owner)
 
 exit status: 0; 1 when a reconcile verdict is no; 2 for an argument error, an unreadable scan.txt or
@@ -3782,7 +3783,7 @@ SINFO:0,4,6,0,"PGS"
         let row = roles["audio"].as_array().unwrap().iter().find(|row| row["stream"] == json!(3)).unwrap();
         assert_eq!(
             row,
-            &json!({"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "why": ""})
+            &json!({"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "play": false, "why": ""})
         );
         // `run` reads the same map, off-decisions and playlists: its menu key is the renderer's, and its decision lists
         // the confirmation (run's audio section has no verdict, so nothing is dropped there).
@@ -3866,6 +3867,43 @@ SINFO:0,4,6,0,"PGS"
         assert_eq!(roles["acts"], json!(false));
         assert_eq!(roles["why"], json!("playlist 00800: no such file"));
         assert_eq!(roles["audio"], json!([]));
+        assert_eq!(with["decision"], without["decision"]);
+    }
+
+    #[test]
+    fn a_role_on_plays_own_stream_confirms_nothing() {
+        let tmp = Scratch::new("menu-role-plays-own");
+        let root = tmp.0.clone();
+        role_world(&root, Some(MAP_ID), true, "Commentary");
+        // Play on the twin 00801, whose audio 1 is 00800's audio 2 by PID: c002's stream 3 is the stream plain Play
+        // selects, so its commentary confirms nothing although its tie is `replay` (MR-17).
+        let mut map: Value = serde_json::from_str(&map_labelling_c002("Commentary")).unwrap();
+        map["play"]["effect"]["playlist"] = json!("00801");
+        // Every choice's differs_from_play follows the effects again, as the format requires.
+        let play = map["play"]["effect"].clone();
+        for choice in map["choices"].as_array_mut().unwrap() {
+            if choice["effect"].is_object() {
+                choice["differs_from_play"] = json!(choice["effect"] != play);
+            }
+        }
+        assert!(menu::read(&map.to_string()).is_ok());
+        write(&root.join(MAP_DIR).join(menu::FILE_NAME), map.to_string());
+        let twin = menu::made_up_playlist(&[menu::MadeUpItem {
+            clip: "00055",
+            in_time: 0,
+            out_time: 135_000_000,
+            audio: vec![(0x1101, 0x86, "eng")],
+            subtitles: vec![],
+        }]);
+        write(&root.join("recs/disc-b/nav/BDMV/PLAYLIST/00801.mpls"), twin);
+        let (plain, mapped) = keep_inputs(&root);
+        let (without, with) = (printed_value(&plain), printed_value(&mapped));
+        let roles = &with["menu"]["roles"];
+        assert_eq!(roles["acts"], json!(true), "{roles}");
+        let row = roles["audio"].as_array().unwrap().iter().find(|row| row["stream"] == json!(3)).unwrap();
+        let shown = json!({"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "play": true,
+                           "why": "the stream plain Play selects"});
+        assert_eq!(row, &shown);
         assert_eq!(with["decision"], without["decision"]);
     }
 

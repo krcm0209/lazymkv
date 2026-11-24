@@ -322,9 +322,11 @@ decide.json files are unchanged. The key is one of:
     - `why`: empty when they act; else why no stream of the title is tied (Playlists), or `the map's identity is
       <identity>` (`the map's identity is not checked: the recording has no meta.json`);
     - `audio`: one row for each scan audio stream that at least one audio choice labels, ascending, as `{"stream",
-      "role", "tie", "choices", "why"}`: the scan stream, its role (`commentary`, `audio_description`, `programme`, or
-      null without exactly one role), its tie (Ties), the ids of the choices that label it in map order, and why it
-      confirms nothing (empty when the role is set and the tie strong);
+      "role", "tie", "choices", "play", "why"}`: the scan stream, its role (`commentary`, `audio_description`,
+      `programme`, or null without exactly one role), its tie (Ties), the ids of the choices that label it in map
+      order, whether it is the stream plain Play itself selects (Ties, "Play's own stream"; such a row never
+      confirms, MR-17), and why it confirms nothing (Roles; empty when the role is set, the tie strong and the row is
+      not a commentary or audio description on Play's own stream);
     - `unplaced`: the audio choices that label no stream of the title, in map order, as `{"id", "why"}`;
     - `off_unused`: the ids of the off-decisions that name no audio choice whose text holds a role word, ascending.
 
@@ -356,8 +358,8 @@ selects audio 2, both at level `replayed`, and whose c004 selects a playlist tha
  "acts": true,
  "why": "",
  "audio": [
-  {"stream": 1, "role": null, "tie": "default", "choices": ["c001"], "why": "no role word"},
-  {"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "why": ""}
+  {"stream": 1, "role": null, "tie": "default", "choices": ["c001"], "play": true, "why": "no role word"},
+  {"stream": 3, "role": "commentary", "tie": "replay", "choices": ["c002"], "play": false, "why": ""}
  ],
  "unplaced": [{"id": "c004", "why": "other playlist 00801"}],
  "off_unused": []
@@ -366,9 +368,9 @@ selects audio 2, both at level `replayed`, and whose c004 selects a playlist tha
 
 The `decision` key gains two keys, each written only when it is not empty, so a decision with no confirmation prints as
 before:
-- `facts.menu_streams`: the scan streams the block confirms as a commentary or an audio description (the ones the
-  decision is given; `FactsSummary.menu_streams`), ascending;
-- `decision.audio.menu`: every confirmation the decision was given, ascending stream, with what became of it
+- `decision.facts.menu_streams`: the scan streams the block confirms as a commentary or an audio description (the
+  ones the decision is given; `FactsSummary.menu_streams`), ascending;
+- `decision.decision.audio.menu`: every confirmation the decision was given, ascending stream, with what became of it
   (`AudioDecision.menu`, MR-11), as `{"stream", "role", "choices", "outcome"}`, and `verdict`, the content rule's
   verdict, only with the outcome `content_not_keep` (The rule).
 
@@ -416,10 +418,14 @@ made-up texts with the answers of the measurement's Python) pin the text, the ro
   texts say (MR-6). Else the one distinct role read is the stream's role; none, or several different ones, give no
   role.
 
-A stream's `why` in the `roles` key says why it has no role: `no role word`, `several roles: commentary, programme`,
-or `undecided: c012 (menu-off.tsv)`. Made up: c011 `AUDIO: Commentary by Person A` and c012 `COMMENTARY: Off` both
-label stream 4; without a decision on c012 the stream has no role (`undecided: c012 (menu-off.tsv)`); with `off` on
-c012 its role is `commentary`.
+A stream's `why` in the `roles` key says why the row confirms nothing. Its forms, in the order the code tests them:
+the conflict texts of a `tie-conflict` (Ties); then why the stream has no role, `no role word`, `several roles:
+commentary, programme` or `undecided: c012 (menu-off.tsv)`; then `the stream plain Play selects` (a commentary or
+audio description with a strong tie on Play's own stream, MR-17); then `tie <word>: <reason>` (a tie that is not
+strong, with its reason, Ties). It is empty when the role is set and the tie strong and the row is not a commentary
+or audio description on Play's own stream; a `programme` row then still confirms nothing (The rule). Made up: c011
+`AUDIO: Commentary by Person A` and c012 `COMMENTARY: Off` both label stream 4; without a decision on c012 the stream
+has no role (`undecided: c012 (menu-off.tsv)`); with `off` on c012 its role is `commentary`.
 
 ## The off-decisions file
 
@@ -435,6 +441,10 @@ Without the file there is no decision, and decide still runs.
   so its words are not read) or `role` (its words are read as any other choice's), and a choice id, `c` and three
   digits.
 - A line that repeats an earlier one is dropped.
+
+`menu-off.tsv` names choices by id and is not bound to the map it was written for; a map that is made again with other
+ids needs its decisions written again (a decision for an id that no longer bears a role word is listed under
+`off_unused`).
 
 Made up (the fields are separated by one tab):
 
@@ -469,8 +479,8 @@ The menu role ties a choice to its stream through the recording's own Blu-ray pl
   coding with no language field). It also says whether every play item carries those same two tables. A file that is
   not a playlist is refused with one sentence: `not a playlist: the file does not start with MPLS`, `the playlist is
   cut short at byte <n>` (the start of the read that failed), `the playlist has no play item`, `play item <i>: a stream
-  entry of unknown type <t>` or `play item <i>: a stream entry without a coding type`. No input makes the reader
-  panic.
+  entry of unknown type <t>` or `play item <i>: a stream entry without a coding type`, where `<i>` counts the play
+  items from 0. No input makes the reader panic.
 - **The title's playlist** (MR-8). Without it, or when its play items carry differing tables, no stream of the title
   has a tie: the `roles` key does not act, its `audio` and `unplaced` are empty, and its `why` is one of `the title has
   no playlist`, `playlist <p> was not read`, `playlist <p>: <why>` (one of the reasons above, or the file's read
@@ -502,7 +512,8 @@ twin); `no stream number`; `unmatched: no audio <n> in <p>`; `unmatched: no audi
 - `none`: the choice is below level `replayed` (why: `level <level>`);
 - `replay`: plain Play's effect names a playlist, and the choice's playlist or audio number differs from Play's,
   compared exactly as the map writes them. `replay` holds when a choice's playlist differs from Play's even if its
-  translated stream is the one Play selects: that is the measurement's rule unchanged (design 5.4a);
+  translated stream is the one Play selects: that is the measurement's rule unchanged (design 5.4a); such a stream's
+  row is marked `play` and confirms nothing (MR-17, below);
 - `attr`: the choice's text names exactly one language (the measurement's closed table of 24 languages), names no
   conflicting codecs, and exactly one entry of the title's playlist has that language (and one of the named codecs, if
   any), the one the choice selects;
@@ -521,6 +532,13 @@ twin); `no stream number`; `unmatched: no audio <n> in <p>`; `unmatched: no audi
   AC-3, 0x82 DTS, 0x83 TrueHD, 0x84 E-AC-3, 0x85 DTS-HD HR or DTS, 0x86 DTS-HD MA or DTS; any other coding allows every
   family.
 
+**Play's own stream** (MR-17). Plain Play's effect is placed as an audio choice's effect is placed (on the title's
+playlist, or through a twin by PID, with the same checks) and names the scan stream M3-1 names for that number. The
+row of that stream has `play` true and never confirms, whatever its role and tie; when it would otherwise confirm,
+its `why` is `the stream plain Play selects`. When Play has no effect, names no audio number, is on another playlist
+or cannot be translated, Play's stream is not known and every row has `play` false. The ties are not changed by this:
+a twin choice that lands on Play's stream is still `replay`, as the measurement has it.
+
 `tie-conflict` is not strong whatever the choices' ties. Made up: the title's playlist lists audio 1 `eng` TrueHD,
 audio 2 `eng` AC-3 and audio 3 `fra` AC-3; the scan's third audio stream without `CORE_AUDIO` is English AC-3; a
 replayed commentary choice on audio 3 gives stream `tie-conflict` with why `language fra vs eng`, and confirms nothing.
@@ -532,9 +550,11 @@ confirmation: the track is dropped (owner, 2026-11-21 and 2026-11-24; MR-1; desi
 `core::tracks::audio::decide_audio`; `decide --menu` gives it the confirmations.
 
 **The confirmations** are the rows of the `roles` key, when it acts (MR-5, MR-8), whose role is `commentary` or
-`audio_description` and whose tie is strong (`StreamRole::confirms`). A `programme` role confirms nothing. Without
-`--menu`, or with a block that does not act or a `menu` key that is skipped, the decision is given none and is the one
-without the map.
+`audio_description`, whose tie is strong and that are not the stream plain Play itself selects (`play`, MR-17;
+`StreamRole::confirms`). A `programme` role confirms nothing. A limit, stated plainly: when two choices label one
+stream, one with a plain label that holds no role word and one that names a commentary, the stream reads as a
+commentary (the measurement's reading: a text without a role word is skipped). Without `--menu`, or with a block
+that does not act or a `menu` key that is skipped, the decision is given none and is the one without the map.
 
 **The drop.** After step 1 and steps 2 to 6 and "Content" as without the menu, each confirmation gets the first
 outcome that holds, tested in this order (`MenuOutcome`):
@@ -593,9 +613,9 @@ The role reading (Roles) gives the measurement's answer on every case of the sha
   word edge uses `str.isalnum()`. They differ on marks that are Alphabetic but not letters, such as U+0345: it is a
   word character in lazymkv and not in Python.
 - White space. lazymkv's white space is Unicode's `White_Space` (Rust's `char::is_whitespace`) and the four separators
-  U+001C to U+001F, which Python's `str.isspace` also counts. On the Python 3.9 of this Mac the two sets are equal; a
-  later Unicode version in either language could make them differ. The off-decisions file finds a blank line with
-  Rust's `trim`, which is `White_Space` alone.
+  U+001C to U+001F, which Python's `str.isspace` also counts. On the Python 3.9 the measurement ran on the two sets
+  are equal; a later Unicode version in either language could make them differ. The off-decisions file finds a blank
+  line with Rust's `trim`, which is `White_Space` alone.
 
 ## Rulings
 
@@ -675,6 +695,13 @@ verbatim. MR-1 records the owner's answer; MR-2 to MR-16 are rulings of the plan
   key holds them translated to the title's streams.
 - MR-16: acceptance runs on copies of the 13 recordings without their stub `tmdb.json` (with it decide has no plan
   and so no decision), so the plan's identity is unknown there and English is the only wanted language.
+
+Added on 2026-11-24 at the final review of the branch (a ruling the owner can correct):
+
+- MR-17: a stream that plain Play itself selects is never confirmed. Play's own stream is the scan stream Play's
+  effect names, placed as an audio choice's effect is placed (on the title's playlist, or through a twin by PID).
+  When Play has no effect, names no audio number, is on another playlist or cannot be translated, Play's stream is
+  not known and this ruling excludes nothing. The ties stay the measurement's.
 
 ## Tests and acceptance
 

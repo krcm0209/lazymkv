@@ -1583,6 +1583,9 @@ fn without_confirmations_the_decision_is_todays() {
     assert_eq!(decision.dropped, Vec::new());
     assert_eq!(noted(&decision), vec![(Note::PossibleCommentary, Some(2)), (Note::PossibleCommentary, Some(3))]);
     assert_eq!(decision.reviews, Vec::new());
+    assert_eq!(decision.reference, Some(1));
+    assert_eq!(defaults(&decision), vec![true, false, false]);
+    assert_eq!(decision.confidence, AUDIO_CONFIDENCE);
     assert_eq!(decision.menu, Vec::new());
     let value = serde_json::to_value(&decision).unwrap();
     assert!(value.get("menu").is_none(), "{value}");
@@ -1612,6 +1615,7 @@ fn the_other_verdicts_drop_nothing() {
         Verdict::NoteCommentary,
         Verdict::NoteAd,
         Verdict::Duplicate,
+        Verdict::CommentaryCrossLanguage,
     ] {
         let facts = AudioFacts {
             verdicts: BTreeMap::from([(2, verdict)]),
@@ -1638,6 +1642,31 @@ fn no_measured_reference_or_no_verdict_drops_nothing() {
     let none = decide_with(&menu_title(), &AudioFacts { verdicts: BTreeMap::new(), ..menu_facts() });
     assert_eq!(order_of(&none), vec![1, 2, 3]);
     assert_eq!(outcomes(&none), vec![(2, MenuOutcome::NoVerdict, None), (3, MenuOutcome::NoVerdict, None)]);
+}
+
+#[test]
+fn a_duplicates_named_copy_may_be_dropped_by_the_menu() {
+    // MR-14: streams 2 and 3 carry one MD5, so 3 is a duplicate of 2; the menu confirms 2 with verdict keep, so 2 is
+    // dropped as the menu's, 3's reason still names 2, and only stream 1 is kept.
+    let md5 = BTreeMap::from([
+        (1, "aaaa0000000000000000000000000001".to_string()),
+        (2, "bbbb0000000000000000000000000002".to_string()),
+        (3, "bbbb0000000000000000000000000002".to_string()),
+    ]);
+    let facts = AudioFacts {
+        md5,
+        verdicts: BTreeMap::from([(2, Verdict::Keep)]),
+        menu: BTreeMap::from([(2, confirmed(AudioRole::Commentary, &["c010"]))]),
+        ..menu_facts()
+    };
+    let today = decide_with(&menu_title(), &AudioFacts { menu: BTreeMap::new(), ..facts.clone() });
+    assert_eq!(today.dropped, vec![(3, AudioDrop::Duplicate { of: 2 })]);
+    let decision = decide_with(&menu_title(), &facts);
+    assert_eq!(order_of(&decision), vec![1]);
+    assert!(decision.dropped.contains(&(3, AudioDrop::Duplicate { of: 2 })), "{:?}", decision.dropped);
+    assert!(decision.dropped.contains(&(2, AudioDrop::Menu { role: AudioRole::Commentary })), "{:?}", decision.dropped);
+    assert_eq!(decision.dropped.len(), 2, "{:?}", decision.dropped);
+    assert_eq!(outcomes(&decision), vec![(2, MenuOutcome::Dropped, None)]);
 }
 
 #[test]

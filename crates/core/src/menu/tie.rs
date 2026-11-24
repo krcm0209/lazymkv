@@ -204,14 +204,21 @@ pub struct StreamRole {
     pub tie: Tie,
     /// The ids of the choices that label it, in map order.
     pub choices: Vec<String>,
-    /// Why it confirms nothing: empty when the role is Some and the tie strong.
+    /// True when it is the stream plain Play itself selects (MR-17): Play's effect placed as an audio choice's effect
+    /// is placed; false for every row when Play's stream is not known.
+    pub play: bool,
+    /// Why it confirms nothing: empty when the role is Some, the tie strong and, for a commentary or an audio
+    /// description, the stream is not the one plain Play selects (MR-17).
     pub why: String,
 }
 
 impl StreamRole {
     /// The role the menu confirms: a commentary or an audio description with a strong tie (design 5.4a, MR-1); never
-    /// a programme role, never a tie conflict.
+    /// a programme role, never a tie conflict, never the stream plain Play selects (MR-17).
     pub fn confirms(&self) -> Option<AudioRole> {
+        if self.play {
+            return Option::None;
+        }
         match self.role {
             Some(role @ (AudioRole::Commentary | AudioRole::AudioDescription)) if self.tie.is_strong() => Some(role),
             _ => Option::None,
@@ -233,9 +240,13 @@ pub struct Unplaced {
 /// with a role word.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RolesReport {
+    /// Why no stream of the title is tied (MR-8); None when the block was read.
     pub untied: Option<String>,
+    /// The labelled streams, ascending.
     pub audio: Vec<StreamRole>,
+    /// The audio choices that label no stream, in map order.
     pub unplaced: Vec<Unplaced>,
+    /// The off-decisions that name no audio choice with a role word, in id order.
     pub off_unused: Vec<String>,
 }
 
@@ -350,6 +361,7 @@ fn block_number(
     block: &Playlist,
     playlists: &BTreeMap<String, Result<Playlist, String>>,
 ) -> Result<usize, String> {
+    // Case is ignored here, not in the twin lookup: only five-digit names are ever read (MR-13), so case cannot matter.
     let twin = if effect.playlist.eq_ignore_ascii_case(block_name) {
         Option::None
     } else {
@@ -435,18 +447,23 @@ fn conflict(block: &Playlist, k: usize, stream: &Stream, scan_count: usize) -> O
 
 /// One audio choice that labels a scan stream: its id, its text, its tie and the tie's reason.
 struct Labelled<'a> {
+    /// The choice's id.
     id: &'a str,
+    /// The choice's `role_text`.
     text: String,
+    /// The choice's tie (`tie_of`).
     tie: Tie,
+    /// Why the tie is not strong; empty for a strong one.
     reason: String,
 }
 
 /// The roles of `title`'s audio streams from `map`'s audio choices (design 5.4a, MR-6, MR-8, MR-9). `playlists` holds
 /// the recording's playlists by name without `.mpls`. In order: the unused off-decisions; the block, or `untied` with
 /// nothing placed; each audio choice in map order placed on a block number (directly, or through a twin by PID) and
-/// the scan stream M3-1 names for it, with its tie, or unplaced with the reason; then per labelled stream, ascending,
-/// its choices, the weakest tie (`TieConflict` when the entry and the stream disagree), the role and why it confirms
-/// nothing.
+/// the scan stream M3-1 names for it, with its tie, or unplaced with the reason; Play's own stream, its effect placed
+/// the same way (MR-17; not known when it cannot be placed); then per labelled stream, ascending, its choices, the
+/// weakest tie (`TieConflict` when the entry and the stream disagree), whether it is Play's, the role and why it
+/// confirms nothing.
 pub fn audio_roles(
     map: &MenuMap,
     off: &OffDecisions,
@@ -485,14 +502,22 @@ pub fn audio_roles(
         let row = by_stream.entry(stream.number).or_insert_with(|| (k, stream, Vec::new()));
         row.2.push(Labelled { id: &choice.id, text, tie, reason });
     }
+    // MR-17: Play's effect placed as an audio choice's is; any failure leaves Play's stream not known.
+    let play = map.play.effect.as_ref().and_then(|effect| block_number(effect, &block_name, block, playlists).ok());
+    let play_stream = play.and_then(|k| scan.get(k - 1).copied());
     let audio = by_stream
         .into_iter()
-        .map(|(number, (k, stream, labelled))| stream_role_of(number, k, stream, &labelled, block, scan.len(), off))
+        .map(|(number, (k, stream, labelled))| {
+            let play = play_stream == Some(number);
+            stream_role_of(number, k, stream, &labelled, block, scan.len(), play, off)
+        })
         .collect();
     RolesReport { untied: Option::None, audio, unplaced, off_unused }
 }
 
-/// The `StreamRole` of scan stream `number` (block entry `k`) from the choices that label it, in map order.
+/// The `StreamRole` of scan stream `number` (block entry `k`) from the choices that label it, in map order; `play`
+/// says it is the stream plain Play selects (MR-17).
+#[allow(clippy::too_many_arguments)]
 fn stream_role_of(
     number: u32,
     k: usize,
@@ -500,6 +525,7 @@ fn stream_role_of(
     labelled: &[Labelled],
     block: &Playlist,
     scan_count: usize,
+    play: bool,
     off: &OffDecisions,
 ) -> StreamRole {
     let weakest = labelled.iter().min_by_key(|label| label.tie.strength());
@@ -515,7 +541,9 @@ fn stream_role_of(
         (Option::None, Some(label)) => label.tie,
         (Option::None, Option::None) => Tie::None,
     };
-    let why = if role.is_some() && tie.is_strong() {
+    // MR-17: a commentary or audio description that would confirm but is Play's own stream says so.
+    let held = play && matches!(role, Some(AudioRole::Commentary | AudioRole::AudioDescription));
+    let why = if role.is_some() && tie.is_strong() && !held {
         String::new()
     } else if let Some(clash) = clash {
         clash
@@ -527,6 +555,7 @@ fn stream_role_of(
                 format!("several roles: {}", words.join(", "))
             }
             RoleReading::Undecided(ids) => format!("undecided: {} (menu-off.tsv)", ids.join(", ")),
+            RoleReading::Role(_) if held && tie.is_strong() => "the stream plain Play selects".to_string(),
             RoleReading::Role(_) => {
                 let reason = weakest.map_or("", |label| label.reason.as_str());
                 format!("tie {}: {reason}", tie.word())
@@ -538,6 +567,7 @@ fn stream_role_of(
         role,
         tie,
         choices: labelled.iter().map(|label| label.id.to_string()).collect(),
+        play,
         why,
     }
 }
@@ -756,6 +786,7 @@ mod tests {
         assert_eq!(role.role, Some(AudioRole::Commentary));
         assert_eq!(role.tie, Tie::Replay);
         assert_eq!(role.choices, vec!["c010".to_string()]);
+        assert!(!role.play);
         assert_eq!(role.why, "");
         assert_eq!(role.confirms(), Some(AudioRole::Commentary));
     }
@@ -794,6 +825,8 @@ mod tests {
             assert_eq!(report.audio.len(), 1, "{label}");
             let role = &report.audio[0];
             assert_eq!((role.stream, role.role), (1, Some(AudioRole::Programme)), "{label}");
+            // Stream 1 is the stream Play selects; a programme row shows its tie's reason as before (MR-17).
+            assert!(role.play, "{label}");
             assert_eq!((role.tie, role.why.as_str()), (tie, why), "{label}");
             assert_eq!(role.confirms(), Option::None, "{label}");
         }
@@ -841,6 +874,8 @@ mod tests {
         assert_eq!(role.stream, 4);
         assert_eq!(role.choices, vec!["c010".to_string(), "c011".to_string()]);
         assert_eq!(role.role, Some(AudioRole::Commentary));
+        // Play's twin audio 2 is this stream too (MR-17); the weak tie is the reason shown, as before.
+        assert!(role.play);
         assert_eq!((role.tie, role.why.as_str()), (Tie::Default, "tie default: attr: 0 languages named"));
         assert_eq!(role.confirms(), Option::None);
     }
@@ -1172,6 +1207,77 @@ mod tests {
         let text = serde_json::to_string(&block).unwrap();
         let want = r#"{"acts":false,"why":"playlist 00800 was not read","audio":[],"unplaced":[],"off_unused":[]}"#;
         assert_eq!(text, want);
+    }
+
+    /// A replayed commentary choice on a twin whose PID lands on the block audio Play selects keeps its `replay` tie
+    /// and confirms nothing (MR-17).
+    #[test]
+    fn a_stream_plain_play_selects_is_never_confirmed() {
+        let twin_audio = [(0x1102, 0x81, "eng"), (0x1100, 0x83, "eng")];
+        let lists = playlists(vec![
+            ("00800", Ok(playlist(&[("00001", 0, 900)], &BLOCK_AUDIO))),
+            ("00801", Ok(playlist(&[("00001", 0, 900)], &twin_audio))),
+        ]);
+        let choice = audio("c010", "Commentary by Person A", "00801", 2, Level::Replayed);
+        let report = roles(&map(play(), vec![choice]), &title(), &lists);
+        assert_eq!(report.unplaced, vec![]);
+        assert_eq!(report.audio.len(), 1);
+        let role = &report.audio[0];
+        assert_eq!(role.stream, 1);
+        assert_eq!(role.tie, Tie::Replay);
+        assert_eq!(role.role, Some(AudioRole::Commentary));
+        assert!(role.play);
+        assert_eq!(role.confirms(), Option::None);
+        assert_eq!(role.why, "the stream plain Play selects");
+    }
+
+    /// Play's own stream is the scan stream of its block audio, read directly on the block or through a twin by PID;
+    /// no other row is Play's (MR-17).
+    #[test]
+    fn plays_own_stream_is_found_directly_and_through_a_twin() {
+        let twin_audio = [(0x1100, 0x83, "eng"), (0x1102, 0x81, "eng")];
+        let lists = playlists(vec![
+            ("00800", Ok(playlist(&[("00001", 0, 900)], &BLOCK_AUDIO))),
+            ("00801", Ok(playlist(&[("00001", 0, 900)], &twin_audio))),
+        ]);
+        let choices = || {
+            (1..=3).map(|n| audio(&format!("c01{n}"), "Commentary by Person A", "00800", n, Level::Replayed)).collect()
+        };
+        for (play, own) in [(effect("00800", Some(2)), 3), (effect("00801", Some(2)), 4)] {
+            let report = roles(&map(Some(play.clone()), choices()), &title(), &lists);
+            let rows: Vec<(u32, bool)> = report.audio.iter().map(|role| (role.stream, role.play)).collect();
+            let want: Vec<(u32, bool)> = [1, 3, 4].into_iter().map(|stream| (stream, stream == own)).collect();
+            assert_eq!(rows, want, "{play:?}");
+        }
+    }
+
+    /// Play without an effect, without an audio number, on another playlist or on a twin entry that matches no block
+    /// entry has no known stream: no row is Play's, and a confirmed commentary still confirms (MR-17).
+    #[test]
+    fn a_play_effect_that_cannot_be_placed_excludes_nothing() {
+        let block_audio = [(0x1100, 0x83, "eng"), (0x1101, 0x81, "fra"), (0x1102, 0x81, "fra")];
+        let lists = playlists(vec![
+            ("00800", Ok(playlist(&[("00001", 0, 900)], &block_audio))),
+            ("00801", Ok(playlist(&[("00001", 0, 900)], &[(0x1100, 0x83, "eng"), (0x1105, 0x81, "eng")]))),
+        ]);
+        let scan = scan_title(
+            "00800.mpls",
+            &[("eng", "TrueHD", "0"), ("eng", "AC3", "256"), ("fra", "AC3", "0"), ("fra", "AC3", "0")],
+        );
+        let plays = [
+            (Option::None, Tie::Attr),
+            (Some(effect("00800", Option::None)), Tie::Replay),
+            (Some(effect("00900", Some(1))), Tie::Replay),
+            (Some(effect("00801", Some(2))), Tie::Replay),
+        ];
+        for (play, tie) in plays {
+            let choice = audio("c010", "Commentary English", "00800", 1, Level::Replayed);
+            let report = roles(&map(play.clone(), vec![choice]), &scan, &lists);
+            assert_eq!(report.audio.len(), 1, "{play:?}");
+            let role = &report.audio[0];
+            assert_eq!((role.stream, role.tie, role.play, role.why.as_str()), (1, tie, false, ""), "{play:?}");
+            assert_eq!(role.confirms(), Some(AudioRole::Commentary), "{play:?}");
+        }
     }
 
     /// `title_block` gives no roles, and the printed block has no `roles` key, so it prints as before.
