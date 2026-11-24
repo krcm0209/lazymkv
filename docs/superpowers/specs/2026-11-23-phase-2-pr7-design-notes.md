@@ -77,8 +77,10 @@ A1 amends, for the acceptance run only:
   identified at step 5 because TMDb lists a TV entry with the film's exact name. The owner ruled: when preferring the
   disc's structural kind leaves exactly one result, that result's record is fetched, and if the runtime check passes
   it is step 4. Built in this pull request before the second disc runs (spec 8.1 rows 4 and 5; `core::lookup`). The
-  fetch is the one film among TV entries, since the lookups run before the scan; a TV disc of that shape keeps step 5
-  until TV is built (phase 4).
+  fetch is the one film among TV entries: the record is chosen while the scan runs, before the plan gives the
+  structural kind, and the choice takes no kind, so later rounds fetch the same record; a TV disc of that shape keeps
+  step 5 until TV is built (phase 4). (Wording corrected after the final review recorded in `docs/phase2/engine.md`,
+  finding A2-2; it said the lookups run before the scan.)
 
 ## 4. What the code does today
 
@@ -165,11 +167,14 @@ would end phase 2 without having run a job.
    12.7's second Pan's Labyrinth run, on phase 0's recording with the job's `settings.json` and without `--text`.
    It compares the whole plan, and for each `--decide` pair the audio section and the audio tracks of the decision
    section. It compares nothing else, and its output lists what it left out (the slug, the label and the title key,
-   the input paths and the lookup status, the reconcile section, the subtitles). The phase 0 side's outputs come
-   from the zip's `lazymkvctl` on the mini PC, in its local form, over the copy of the evidence clone that the mini
-   PC holds, or over a copy of that one recording when the clone there is missing or behind. Phase 0's recording
-   holds lookup answers saved in October, so a plan difference that comes from changed TheDiscDB or TMDb data is
-   possible; it is a finding, and the rehearsal of call 16 shows it before the sitting.
+   the input paths and the lookup status, the reconcile section, the subtitles; since the final review's finding
+   CR-3 (`docs/phase2/engine.md`), the printed line names every part of a decide document that this mode does not
+   compare, the reviews, the plan section's `settings_problems` and `plan`, and `menu` among them). The phase 0
+   side's outputs come from the zip's `lazymkvctl` on the mini PC, in its local form, over the copy of the
+   evidence clone that the mini PC holds, or over a copy of that one recording when the clone there is missing or
+   behind. Phase 0's recording holds lookup answers saved in October, so a plan difference that comes from
+   changed TheDiscDB or TMDb data is possible; it is a finding, and the rehearsal of call 16 shows it before the
+   sitting.
 6. **When the outputs are saved.** After the job's tuning copy is done, so that `decide --job` is given `--text`.
    They are saved on the mini PC as bytes (through `cmd.exe`'s redirection, as `assemble.ps1` does), never through
    Windows PowerShell's `>`.
@@ -221,7 +226,9 @@ would end phase 2 without having run a job.
 14. **What it must be.** Design part 12.7's list (a film TheDiscDB does not know and TMDb identifies, two or more
     English subtitle streams, ideally Atmos or DTS:X), and what the engine needs for the job to end as the
     checklist allows:
-    - TMDb gives exactly one plausible result and the runtime check passes (spec 8.1 step 4);
+    - TMDb gives exactly one plausible result and the runtime check passes (spec 8.1 step 4); amended by A2
+      (section 3): or several plausible results, of which exactly one is of the disc's structural kind and every
+      other is of the other kind, and the runtime check passes;
     - the plan is in Direct mode with one main title: no second playlist of the same length that the planner
       cannot tell apart (T4-R20);
     - no hold other than `subtitle_ambiguous` is expected, so a disc without a commentary or audio description

@@ -34,9 +34,10 @@ in a worker process when it has two or more, measures each title's audio with ff
 the owner's tuning dataset, and runs `retune` over that dataset beside phase 0's recordings. Its sixth builds the
 release: a zip whose `resources` folder carries mkvmerge and a minimal, reproducible FFmpeg build's ffprobe and ffmpeg,
 from a release workflow that runs as a dry run on pull requests and has published nothing. Its seventh ran the
-acceptance on the mini PC from that zip on two real discs, Pan's Labyrinth and a film TheDiscDB does not know: each
-was filed once its one allowed hold was approved unchanged, and `lazymkv-dev compare-job` found the engine's plan and
-decisions equal to what `lazymkvctl plan` and `decide` print for each job;
+acceptance on the mini PC from that workflow's zips, two of them, the second holding the identification ruling A2, on
+two real discs, Pan's Labyrinth and a film TheDiscDB does not know: each was filed once its one allowed hold was
+approved unchanged, and `lazymkv-dev compare-job` found the engine's plan and decisions equal to what
+`lazymkvctl plan` and `decide` print for each job;
 [`docs/phase2/engine.md`](docs/phase2/engine.md) says how to run them, what the acceptance found and how many tests
 there are.
 
