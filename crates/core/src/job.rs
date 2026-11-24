@@ -523,6 +523,11 @@ pub enum Event {
     FileDone,
     /// 6.4 step 14: the rename into the final path failed, with its 10.2 class.
     FileFailed { failure: Failure },
+    /// 6.4 step 14: the rename met a file already at the final path (or a final folder the share reports and the engine
+    /// cannot open); `reasons` are the job's, with `path_collision`. Taken only in Verified: the job goes to NeedsReview
+    /// at the disposition gate, deleting the partial file, and notifies (spec 7: a file the job did not create is never
+    /// overwritten). Phase 3 design, parts 6.7 and 6.8; spec 10.1. Def: P3-T3. Use: P3-T10, P3-T11.
+    FileCollided { reasons: Vec<ReviewReason> },
     /// Spec 10.1 "share unreachable"; section 7.
     ShareLost,
     /// Spec 10.1: the share is reachable again; AwaitingShare returns (section 7).
@@ -557,9 +562,10 @@ pub enum Event {
     /// FilePhaseSlot is for a Direct job in Ejected; the job holds the slot until it reaches Filed, NeedsReview, Failed or
     /// Discarded.
     ReviewApproved { overrides: Overrides, approved_reasons: Vec<ReviewReason> },
-    /// Spec 11 Discard: accepted from NeedsReview and from Failed of every class (spec 11's Discard deletes the job's
-    /// staging data, 4.5 `discard`, and spec 7 never deletes a held or failed job's data automatically, so a failed job's
-    /// data is freed only this way), to Discarded with DeleteJobData.
+    /// Spec 11 Discard: accepted from NeedsReview, from Failed of every class and from every waiting state (spec 11's
+    /// Discard deletes the job's staging data, 4.5 `discard`, and spec 7 never deletes a held or failed job's data
+    /// automatically, so a failed job's data is freed only this way; a waiting job may be discarded too, phase 3 design,
+    /// parts 6.7 and 6.8, spec 10.1), to Discarded with DeleteJobData. Def: P3-T3. Use: P3-T10, P3-T11.
     ReviewDiscarded,
     /// Spec 11 Retry, for a failed job. For a job that failed in its file phase, phase 2 delivers it only once spec 6's
     /// file-phase slot is free for this job, as for ReviewApproved.
@@ -947,9 +953,12 @@ fn copy_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
 /// no longer matches raises it) or built no final path (`has_path` false, Open points 38 and 39); a decision made again in an
 /// unapproved job (an auto-filed job after a restart, a Return or a Retry) goes on only when it files automatically with
 /// a final path and is otherwise held at the disposition gate (6.4 step 12; a job with no final path is never AutoFile);
-/// Discard deletes the job's data, of a held job (10.1's table) or of a failed one of any class (spec 11's Discard, the
+/// Discard deletes the job's data, of a held job (10.1's table), of a failed one of any class (spec 11's Discard, the
 /// 10.1 row extended by the final review's ruling: spec 7 never deletes a failed job's data automatically, so this is
-/// how the owner frees it); Re-finalise takes a filed job back to a Decided that approves the filed decision's reasons;
+/// how the owner frees it) or of a waiting one (any of the six Awaiting states; phase 3 design, parts 6.7 and 6.8,
+/// spec 10.1); a file collision found at filing (`FileCollided`, in Verified) holds the job at the disposition gate,
+/// deleting the partial file and notifying with the job's reasons (6.4 step 14; phase 3 design, parts 6.7 and 6.8,
+/// spec 10.1. Def: P3-T3. Use: P3-T10, P3-T11); Re-finalise takes a filed job back to a Decided that approves the filed decision's reasons;
 /// Rip again arms a new job for a
 /// filed, held or file-phase job, one that failed in its file phase, or a waiting job returning to a file-phase state
 /// (6.1 step 2 counts each as past the disc phase), and leaves its state.
@@ -983,9 +992,14 @@ fn review_line(state: &State, event: &Event) -> Option<(State, Vec<Action>)> {
             State::NeedsReview { held: Held::DispositionGate },
             vec![notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
         ),
+        (State::Verified, Event::FileCollided { reasons }) => (
+            State::NeedsReview { held: Held::DispositionGate },
+            vec![Action::DeletePartialFile, notify(NotifyEvent::NeedsReview { reasons: reasons.clone() })],
+        ),
         (State::NeedsReview { .. } | State::Failed { .. }, Event::ReviewDiscarded) => {
             (State::Discarded, vec![Action::DeleteJobData])
         }
+        (_, Event::ReviewDiscarded) if state.is_waiting() => (State::Discarded, vec![Action::DeleteJobData]),
         (State::Filed, Event::ReFinalise { approved_reasons }) => {
             (State::Decided { approved: Some(approved_reasons.clone()) }, vec![Action::Decide])
         }

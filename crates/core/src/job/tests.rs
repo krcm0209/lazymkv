@@ -178,6 +178,7 @@ fn sample_events() -> Vec<Event> {
         Event::FileVerifyFailed { failure: read },
         Event::FileDone,
         Event::FileFailed { failure: read },
+        Event::FileCollided { reasons: vec![ReviewReason::PathCollision] },
         Event::ShareLost,
         Event::ShareBack,
         Event::LicenceMessage,
@@ -1713,8 +1714,7 @@ fn re_finalise_and_discard_are_rejected_outside_their_states() {
         &State::Inspecting,
         &Event::ReviewApproved { overrides: Overrides::default(), approved_reasons: Vec::new() }
     ));
-    // A waiting job is neither held nor failed: Discard waits until it is.
-    assert!(rejects(&State::AwaitingSpace { return_to: boxed(State::Copying) }, &Event::ReviewDiscarded));
+    // A waiting job may be discarded (phase 3), so it is not rejected here.
     for state in disc_phase_states().into_iter().chain(file_phase_states()) {
         assert!(rejects(&state, &Event::ReviewDiscarded), "{state:?}");
     }
@@ -2450,4 +2450,28 @@ fn a_job_lookup_skips_an_id_that_is_not_numbered() {
     let jobs = [(format!("{FP_LOWER}-x"), State::Ripping, false), earlier(1, State::Filed, false)];
     assert_eq!(job_lookup(&jobs), JobLookup::AlreadyRipped(format!("{FP_LOWER}-1")));
     assert_eq!(job_lookup(&[(FP_LOWER.to_string(), State::Ripping, false)]), JobLookup::NewJob);
+}
+
+#[test]
+fn a_collision_at_filing_holds_the_job_at_the_gate_and_deletes_the_partial_file() {
+    let reasons = vec![ReviewReason::SubtitleAmbiguous, ReviewReason::PathCollision];
+    let (state, actions) = reduce(&State::Verified, &Event::FileCollided { reasons: reasons.clone() }).unwrap();
+    assert_eq!(state, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(actions, vec![Action::DeletePartialFile, Action::Notify { event: NotifyEvent::NeedsReview { reasons } }]);
+    assert!(reduce(&State::Remuxing, &Event::FileCollided { reasons: vec![] }).is_err());
+}
+
+#[test]
+fn a_waiting_job_can_be_discarded() {
+    let back = || Box::new(State::Ripping);
+    for waiting in [
+        State::AwaitingShare { return_to: back() }, State::AwaitingSpace { return_to: back() },
+        State::AwaitingMakeMkv { return_to: back() }, State::AwaitingNetwork { return_to: back() },
+        State::AwaitingLookup { return_to: Box::new(State::Inspecting) }, State::AwaitingTool { return_to: back() },
+    ] {
+        assert_eq!(reduce(&waiting, &Event::ReviewDiscarded).unwrap(), (State::Discarded, vec![Action::DeleteJobData]));
+    }
+    for working in [State::Ripping, State::Remuxing, State::Filed, State::Discarded] {
+        assert!(reduce(&working, &Event::ReviewDiscarded).is_err());
+    }
 }
