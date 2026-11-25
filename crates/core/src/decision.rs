@@ -1803,6 +1803,27 @@ mod tests {
         assert_eq!(decision.disposition, Disposition::NeedsReview);
     }
 
+    /// Ruling T32-E25: the owner's `keep` answer for a track dropped as unwanted_language keeps it, and
+    /// no_wanted_audio is not raised.
+    #[test]
+    fn a_keep_answer_settles_no_wanted_audio() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(3, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let overrides = Overrides {
+            audio: vec![AudioTrackOverride { title: 3, stream: 1, action: AudioOverride::Keep { order: 0, default: false } }],
+            ..Overrides::default()
+        };
+        let mut input = inputs(&plan, &disc, 3, Some(&record), &library, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(decision.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1]);
+        assert!(decision.audio.dropped.is_empty(), "{:?}", decision.audio.dropped);
+        assert!(!decision.reviews.contains(&ReviewReason::NoWantedAudio), "{:?}", decision.reviews);
+    }
+
     #[test]
     fn a_plan_title_confidence_of_085_files_automatically() {
         let disc = film_disc();
@@ -2426,7 +2447,32 @@ mod tests {
             kept.sort();
             assert_eq!(kept, vec![1, 2], "{action:?}");
             assert_eq!(menu_outcomes(&answered), vec![(2, MenuOutcome::Overridden)], "{action:?}");
+            if action == (AudioOverride::Keep { order: 0, default: true }) {
+                let default: Vec<u32> = answered.audio.kept.iter().filter(|track| track.default).map(|track| track.stream).collect();
+                assert_eq!(default, vec![2], "the stream answered default is the default track");
+            }
         }
+    }
+
+    /// Final review (K-I1): a round that answers `default` on stream 1, then a later round that answers `default` on
+    /// stream 2, both through `merged` as review.json keeps them: `decide` makes stream 2 the default track.
+    #[test]
+    fn a_later_default_answer_moves_the_default() {
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_DTS_HD_MA_6CH), (2, ENG_AC3_2CH)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let round = |stream, order| Overrides {
+            audio: vec![AudioTrackOverride { title: 0, stream, action: AudioOverride::Keep { order, default: true } }],
+            ..Overrides::default()
+        };
+        let saved = Overrides::default().merged(&round(1, 0)).merged(&round(2, 1));
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &library, &settings);
+        input.overrides = Some(&saved);
+        let decided = decide(&input).unwrap();
+        let default: Vec<u32> = decided.audio.kept.iter().filter(|track| track.default).map(|track| track.stream).collect();
+        assert_eq!(default, vec![2]);
     }
 
     #[test]

@@ -66,8 +66,9 @@ pub(crate) fn discard_running(id: &str) -> String {
     format!("job {id} has a step running: cancel it first")
 }
 
-/// A `discard` whose transition could not be persisted: the job keeps its state (phase 3 design, part 6.8; design
-/// part 7.3). Def: P3-T10. Use: P3-T15, P3-T16.
+/// A `discard` whose transition could not be persisted: the job is not discarded (phase 3 design, part 6.8; design
+/// part 7.3). A held or failed job keeps its state; a waiting job may end Failed, since the owner's `unpersisted`
+/// feeds a waiting job whose transition was lost its failure event. Def: P3-T10. Use: P3-T15, P3-T16.
 pub(crate) fn discard_not_persisted(id: &str) -> String {
     format!("job {id} was not discarded: its transition could not be persisted")
 }

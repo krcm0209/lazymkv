@@ -1580,6 +1580,93 @@ fn a_replaced_file_that_cannot_be_moved_fails_the_step_and_leaves_both_files() {
     assert_eq!(fs::read(&replaced).unwrap(), b"in the way");
 }
 
+/// Whether `from` is a file in a `replaced` folder: the put-back's rename, not the partial file's.
+fn from_replaced(from: &Path) -> bool {
+    from.parent().and_then(Path::file_name).is_some_and(|name| name == "replaced")
+}
+
+/// Ruling T32-E22: the rename of the job's file fails (not for a file at the path) after "replace" moved the library
+/// file aside; the library file is put back at its path, byte for byte, with one job.log line, `replaced` holds
+/// nothing, and the step fails as before.
+#[test]
+fn a_rename_that_fails_after_the_move_puts_the_library_file_back() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    h.file_rename_with(|from, _| (!from_replaced(from)).then(|| Err(std::io::Error::other("the share hiccuped"))));
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let message = record.message.unwrap_or_default();
+    let partial = partial_of(&h, &id);
+    let head = format!("{} could not be renamed to {}: the share hiccuped", partial.display(), decided_path(&h, &id));
+    assert_eq!(message, head);
+    assert_eq!(fs::read(&target).unwrap(), b"already here");
+    assert!(replaced_of(&h, &id).is_dir());
+    assert_eq!(files_under(&replaced_of(&h, &id)), set(&[]));
+    assert_eq!(fs::read(&partial).unwrap(), b"lazymkv-test-mkv");
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    let moved = replaced_of(&h, &id).join(&name);
+    let line = format!(
+        "{KEY}: the rename failed, so the library file moved to {} was put back at {}",
+        moved.display(),
+        decided_path(&h, &id)
+    );
+    assert_eq!(job_log(&h, &id).lines().filter(|l| *l == line).count(), 1, "{}", job_log(&h, &id));
+}
+
+/// Ruling T32-E22: when the put-back fails too, the library file stays in `replaced`, and the failure sentence and
+/// job.log end with where it is.
+#[test]
+fn a_put_back_that_fails_says_where_the_library_file_is() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    h.file_rename_with(|_, _| Some(Err(std::io::Error::other("the share hiccuped"))));
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    let moved = replaced_of(&h, &id).join(&name);
+    let tail = format!("The library file that was at {} is now at {}.", decided_path(&h, &id), moved.display());
+    let message = record.message.unwrap_or_default();
+    assert!(message.ends_with(&tail), "{message}");
+    assert!(job_log(&h, &id).lines().any(|line| line.ends_with(&tail)), "{}", job_log(&h, &id));
+    assert!(!target.exists());
+    assert_eq!(fs::read(&moved).unwrap(), b"already here");
+    assert_eq!(fs::read(partial_of(&h, &id)).unwrap(), b"lazymkv-test-mkv");
+}
+
+/// Ruling T32-E22: a file that appears at the path after the move holds the job (the library file cannot be put back
+/// without replacing it), and the hold's job.log line ends with where the library file is.
+#[test]
+fn a_file_that_appears_after_the_move_holds_the_job_and_says_where_the_library_file_is() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    h.file_rename_with(|from, to| {
+        if !from_replaced(from) && !to.exists() {
+            fs::write(to, b"late").unwrap();
+        }
+        None
+    });
+    let answer = json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]});
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer}));
+    h.wait("FileCollided", |h| events(h, &id).iter().any(|e| matches!(e, Event::FileCollided { .. })));
+    h.settle();
+    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate });
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    let moved = replaced_of(&h, &id).join(&name);
+    let tail = format!("The library file that was at {} is now at {}.", decided_path(&h, &id), moved.display());
+    let log = job_log(&h, &id);
+    let held_line = log.lines().rev().find(|line| line.contains("the job is held for review with path_collision"));
+    assert!(held_line.is_some_and(|line| line.ends_with(&tail)), "{log}");
+    assert_eq!(fs::read(&target).unwrap(), b"late");
+    assert_eq!(fs::read(&moved).unwrap(), b"already here");
+}
+
 #[test]
 fn filed_records_path_size_mtime_and_filed_unix() {
     let h = harness(&[], json!({}));
@@ -1969,12 +2056,21 @@ fn review_of_a_job_held_for_a_folder_that_would_not_open_says_nothing_is_there()
         let items = doc["titles"][0]["items"].as_array().unwrap();
         items.iter().filter(|item| item["kind"] == json!("collision")).cloned().collect()
     };
-    // Closed: the share cannot say what is at the path, so the ordinary item stands, with no file to describe.
+    // Closed: the share cannot say what is at the path, so the ordinary item stands, with no file to describe. That
+    // holds on Unix only, where a folder of mode 0o000 makes the stat of the final path a permission error. Windows
+    // closes the folder with a handle of share mode 0, which stops a listing and a rename but not the stat of a child,
+    // so the stat says nothing is there and the document already holds the nothing-at-the-path point. The product is
+    // right on both; on Windows the closed state makes no claim about collision items, and the request answers `ok`.
     let shut = c.ok("review", json!({"job": id}));
-    let items = collision_ids(&shut);
-    assert_eq!(items.len(), 1, "{shut}");
-    assert_eq!(shut["points"][0]["answerable"], json!(true), "{shut}");
-    assert_eq!(items[0]["evidence"], json!([]), "{shut}");
+    #[cfg(unix)]
+    {
+        let items = collision_ids(&shut);
+        assert_eq!(items.len(), 1, "{shut}");
+        assert_eq!(shut["points"][0]["answerable"], json!(true), "{shut}");
+        assert_eq!(items[0]["evidence"], json!([]), "{shut}");
+    }
+    #[cfg(not(unix))]
+    let _ = shut;
     closed.open();
     let doc = c.ok("review", json!({"job": id}));
     let points = doc["points"].as_array().unwrap();

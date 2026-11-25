@@ -243,6 +243,46 @@ pub(crate) fn move_aside(source: &Path, folder: &Path) -> Result<PathBuf, String
     })
 }
 
+/// A rename that never replaces a file at its destination, as `rename_no_replace` is: the one File renames into a
+/// title's final path with, which the testkit replaces (`TestHooks::file_rename`). Def: T32-E22. Use: T32-E22.
+pub(crate) type RenameFn = std::sync::Arc<dyn Fn(&Path, &Path) -> io::Result<()> + Send + Sync>;
+
+/// The library file `moved` (`move_aside`'s result) put back at `target`, its path before the move (ruling T32-E22),
+/// with `rename`, which never replaces a file at `target`. A rename refused because the two are on different volumes
+/// (`CrossesDevices`) copies with `copy` (the checked copy) to `<target>.partial` beside `target` instead, renames
+/// that copy to `target` with `rename`, so the copy never replaces a file there either, and removes `moved` only after
+/// that rename succeeded, as `move_aside` does. Err names both paths: a failed copy or a failed rename of the copy
+/// removes the copy, and a failed remove after the copy keeps both. Def: T32-E22. Use: T32-E22.
+pub(crate) fn put_back_with(
+    moved: &Path,
+    target: &Path,
+    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    copy: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), String> {
+    let (from, to) = (moved.display(), target.display());
+    let refused = |error: &dyn std::fmt::Display| format!("{from} could not be put back at {to}: {error}");
+    match rename(moved, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            let mut landing = target.as_os_str().to_os_string();
+            landing.push(crate::staged::PARTIAL);
+            let landing = PathBuf::from(landing);
+            let landed = copy(moved, &landing).and_then(|()| rename(&landing, target));
+            if let Err(error) = landed {
+                let mut partial = landing.as_os_str().to_os_string();
+                partial.push(crate::staged::PARTIAL);
+                let _ = fs::remove_file(PathBuf::from(partial));
+                let _ = fs::remove_file(&landing);
+                return Err(refused(&error));
+            }
+            fs::remove_file(moved).map_err(|error| {
+                format!("{from} was copied back to {to} but could not be removed: {error}; both are kept")
+            })
+        }
+        Err(error) => Err(refused(&error)),
+    }
+}
+
 /// The five replay files of a job folder as `lazymkv-dev plan` and `decide` take them (design part 7.1):
 /// `settings.json`, `tmdb-search.json`, `tmdb-record.json`, `remembered.json` and the owner's answers `review.json`
 /// (`REVIEW_FILE`, as `--overrides`; phase 3 design, part 6.4), each its absolute path in the job folder, given only
@@ -1066,6 +1106,47 @@ mod tests {
         assert_eq!(error, format!("{} could not be moved to {}: access denied", source.display(), to.display()));
         assert_eq!(std::fs::read(&source).unwrap(), b"owner's");
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+    }
+
+    /// Ruling T32-E22: across volumes the put-back copies beside the library path and renames the copy in, so the
+    /// library file is back whole and the moved file is gone.
+    #[test]
+    fn across_volumes_the_put_back_copies_and_renames_the_copy_in() {
+        let s = Scratch::new("put-back-volumes");
+        let (target, folder) = aside(&s, b"owner's");
+        let moved = move_aside(&target, &folder).unwrap();
+        let rename = |from: &Path, to: &Path| {
+            if from == moved {
+                return Err(io::Error::from(io::ErrorKind::CrossesDevices));
+            }
+            lazymkv_platform::rename_no_replace(from, to)
+        };
+        put_back_with(&moved, &target, &rename, &|from, to| crate::staged::copy_checked(from, to)).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"owner's");
+        assert!(!moved.exists());
+        assert_eq!(std::fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    /// Ruling T32-E22: across volumes a file that appeared at the library path is never replaced: the copy is removed,
+    /// the moved file is kept, and the error names both paths.
+    #[test]
+    fn across_volumes_the_put_back_never_replaces_a_file_that_appeared() {
+        let s = Scratch::new("put-back-appeared");
+        let (target, folder) = aside(&s, b"owner's");
+        let moved = move_aside(&target, &folder).unwrap();
+        std::fs::write(&target, b"late").unwrap();
+        let rename = |from: &Path, to: &Path| {
+            if from == moved {
+                return Err(io::Error::from(io::ErrorKind::CrossesDevices));
+            }
+            lazymkv_platform::rename_no_replace(from, to)
+        };
+        let error = put_back_with(&moved, &target, &rename, &|from, to| crate::staged::copy_checked(from, to));
+        let head = format!("{} could not be put back at {}: ", moved.display(), target.display());
+        assert!(error.as_ref().unwrap_err().starts_with(&head), "{error:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"late");
+        assert_eq!(std::fs::read(&moved).unwrap(), b"owner's");
+        assert_eq!(std::fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
     }
 
     #[test]

@@ -6,9 +6,11 @@
 //! review sheet of a job folder, for tests and for a wording trial; not an owner command. It reads the folder's
 //! `state.json` and `scan.txt`, builds the document with `review_doc::build` and prints `review_doc::render` of it to
 //! standard output. It looks at no share and writes nothing: no staged file, no collision and no library file is
-//! known to it (`staged`, `collisions` and `nothing_at` are empty). `--text DIR` is the OCR reading, `DIR/sub-<n>.ocr.jsonl`,
-//! and gives each subtitle stream its lines (`subtitle_lines` over each title's label folder of the job folder), with
-//! the streams the label's `subs-ocr/summary.json` records as not read as `unread`; without it no line is shown.
+//! known to it (`staged`, `collisions` and `nothing_at` are empty). `--text DIR` is one title's OCR reading,
+//! `DIR/sub-<n>.ocr.jsonl`, and is for a job with one title: it is read for every title of the job, so a job with
+//! several would show the first title's lines on the others. It gives each subtitle stream its lines (`subtitle_lines`
+//! over the title's label folder of the job folder), with the streams the label's `subs-ocr/summary.json` records as
+//! not read as `unread`; without it no line is shown.
 //! `--held` sets the record's state to the disposition gate in memory, so that a filed job is shown as it was held;
 //! `--all` gives every title an audio and a subtitles point. Exit 0; 2 for an argument error, a folder with no
 //! readable `state.json` or `scan.txt`, or a job with nothing to review (`review_doc::build`'s refusal, named).
@@ -35,7 +37,7 @@ use crate::evidence::{read_scan_in, Ctx, Recording};
 use crate::{usage_error, Args};
 
 const NAME: &str = "sheet";
-const USAGE: &str = "sheet <job folder> [--text DIR] [--held] [--all]";
+const USAGE: &str = "sheet <job folder> [--text DIR (one title's reading: a job with one title)] [--held] [--all]";
 
 /// What the command read for the document (`DocInputs`' maps that it fills).
 #[derive(Default)]
@@ -91,19 +93,7 @@ fn sheet(ctx: &Ctx, job: &str, text: Option<&str>, held: bool, all: bool) -> Res
         // In memory only: a filed job's sheet as it was when it was held.
         record.state = State::NeedsReview { held: Held::DispositionGate };
     }
-    let scanned = match read_scan(&job_dir) {
-        Ok(scanned) => scanned,
-        Err(error) => {
-            // A job with nothing to review may have no scan: `build`'s refusal comes first, as the engine's does.
-            let empty = disc(&parse(""))?;
-            let none = Read::default();
-            // Any other failure of that build is the empty scan's, so the scan's own error is the one to give.
-            return match review_doc::build(&inputs(&record, &empty, &none, all)) {
-                Err(refusal) if refusal.ends_with("there is nothing to review") => Err(refusal),
-                _ => Err(error),
-            };
-        }
-    };
+    let scanned = job_scan(&job_dir, &record)?;
     let mut read = Read::default();
     if let Some(text) = text {
         read_lines(ctx, &job_dir, &record, &scanned, &ctx.abs(text), &mut read);
@@ -129,17 +119,44 @@ fn inputs<'a>(record: &'a JobRecord, scanned: &'a Disc, read: &'a Read, all: boo
     }
 }
 
-/// The job folder's `scan.txt`, typed; Err `<path>: <error>`.
-fn read_scan(job_dir: &Path) -> Result<Disc, String> {
+/// The job folder `job_dir`'s `scan.txt`, typed, for the review document of `record` (phase 3 design, part 6.2): when
+/// it cannot be read, `review_doc::nothing_to_review`'s refusal of `record` if there is one (a job with nothing to
+/// review may have no scan), else `<path>: <error>`. The engine's review worker and this command both read it so.
+/// Def: the final review (E-I4, C-M7). Use: P3-T9, P3-T13.
+pub fn job_scan(job_dir: &Path, record: &JobRecord) -> Result<Disc, String> {
     let path = job_dir.join("scan.txt");
-    let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    disc(&parse(&String::from_utf8_lossy(&bytes))).map_err(|error| format!("{}: {error}", path.display()))
+    let read = fs::read(&path).map_err(|error| error.to_string()).and_then(|bytes| {
+        disc(&parse(&String::from_utf8_lossy(&bytes))).map_err(|error| error.to_string())
+    });
+    read.map_err(|error| {
+        review_doc::nothing_to_review(record).unwrap_or_else(|| format!("{}: {error}", path.display()))
+    })
 }
+
+/// The lines and the not-read streams of the title `key` of the job folder `job_dir` (phase 3 design, part 6.2;
+/// ruling T32-R5): `subtitle_lines` over the job folder's `<key>` label folder with the OCR reading `text` and the
+/// title's length `seconds`, and each stream that the label's `subs-ocr/summary.json` records as not read
+/// (`read_unread`) with that reason, by scan stream. Err is the sentence of a file that could not be read. The
+/// engine's review worker and this command both read a title so. Def: the final review (C-M7). Use: P3-T9, P3-T13.
+pub fn title_reading(ctx: &Ctx, job_dir: &Path, key: &str, text: &Path, seconds: f64) -> Result<TitleReading, String> {
+    let (rec, label) = rec_folder(ctx, &job_dir.join(key).display().to_string()).map_err(|refused| refused.line)?;
+    let lines = subtitle_lines(&rec, &label, text, seconds)?;
+    let by_n: BTreeMap<i64, String> = read_unread(&rec.tree, &rec.dir.join(&label))?.into_iter().collect();
+    let skipped: Vec<(u32, String)> = scan_streams(&rec, &label)?
+        .into_iter()
+        .filter_map(|(n, stream)| by_n.get(&n).map(|why| (stream, why.clone())))
+        .collect();
+    Ok((lines, skipped))
+}
+
+/// `title_reading`'s answer: each scan stream's lines, and each stream not read with its reason.
+pub type TitleReading = (BTreeMap<u32, Vec<String>>, Vec<(u32, String)>);
 
 /// The lines of every subtitle stream the decisions list, as the engine's worker reads them: `subtitle_lines` over
 /// each title's label folder, the title's length from the scan, and the streams of its `subs-ocr/summary.json` that
-/// were not read as `unread`. A title whose files cannot be read gives each of its subtitle streams `the subtitle
-/// reading could not be read: <error>`, whose error names the file only.
+/// were not read as `unread` (`title_reading`). A title whose files cannot be read gives each of its subtitle streams
+/// `the subtitle reading could not be read: <error>`, whose error names the file and never holds the reading's text
+/// (`subtitle_lines`).
 fn read_lines(ctx: &Ctx, job_dir: &Path, record: &JobRecord, scanned: &Disc, text: &Path, read: &mut Read) {
     for title in &record.titles {
         let Some(decision) = &title.decision else { continue };
@@ -147,18 +164,7 @@ fn read_lines(ctx: &Ctx, job_dir: &Path, record: &JobRecord, scanned: &Disc, tex
         let dropped = decision.subtitles.dropped.iter().map(|(stream, _)| *stream);
         let streams: Vec<u32> = kept.chain(dropped).collect();
         let seconds = scanned.title(title.scan_title).ok().and_then(|t| t.seconds).map_or(0.0, f64::from);
-        let found = rec_folder(ctx, &job_dir.join(&title.key).display().to_string())
-            .map_err(|refused| refused.line)
-            .and_then(|(rec, label)| {
-                let lines = subtitle_lines(&rec, &label, text, seconds)?;
-                let by_n: BTreeMap<i64, String> = read_unread(&rec.tree, &rec.dir.join(&label))?.into_iter().collect();
-                let skipped: Vec<(u32, String)> = scan_streams(&rec, &label)?
-                    .into_iter()
-                    .filter_map(|(n, stream)| by_n.get(&n).map(|why| (stream, why.clone())))
-                    .collect();
-                Ok((lines, skipped))
-            });
-        match found {
+        match title_reading(ctx, job_dir, &title.key, text, seconds) {
             Ok((lines, skipped)) => {
                 for (stream, shown) in lines {
                     read.lines.insert((title.key.clone(), stream), shown);
@@ -181,8 +187,9 @@ fn read_lines(ctx: &Ctx, job_dir: &Path, record: &JobRecord, scanned: &Disc, tex
 /// else `t`) and text lines (`lines` when it is a list, else `text`), in time order, through `review_doc::sample_lines`
 /// at `seconds`, the scan title's length, keyed by the scan stream that `n` is (`scan_streams`, as the decision's text
 /// is mapped); a stream with a reading file but no event with text gives an empty list, and an `n` that maps to no scan
-/// stream is left out. Err `<file>: <error>` for a reading file that cannot be read or parsed, and `scan_streams`'
-/// error; no error holds subtitle text. Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+/// stream is left out. Err `<file>: <error>` for a reading file that cannot be read (the reader's error, or where its
+/// bytes stop being UTF-8), `<file>: this file could not be read` for one that cannot be parsed, without the parser's
+/// text, and `scan_streams`' error; no error holds subtitle text. Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
 pub fn subtitle_lines(
     rec: &Recording,
     label: &str,
@@ -196,13 +203,15 @@ pub fn subtitle_lines(
         if !file.is_file() {
             continue;
         }
-        // The errors name the file and the reader's or parser's position only, never the text.
+        // The errors name the file, and the reader's error or the byte position only: never the parser's text, which
+        // can quote a value, and a value can be a subtitle line.
         let shown = |error: String| format!("{}: {error}", file.display());
+        let unparsed = |_| format!("{}: this file could not be read", file.display());
         let bytes = fs::read(&file).map_err(|error| shown(error.to_string()))?;
         let read = String::from_utf8(bytes).map_err(|error| shown(error.to_string()))?;
-        let records = read_jsonl(&read).map_err(shown)?;
+        let records = read_jsonl(&read).map_err(unparsed)?;
         let mut events: Vec<(f64, Vec<String>)> = ocr_records(&records, &BTreeMap::new())
-            .map_err(shown)?
+            .map_err(unparsed)?
             .into_iter()
             .map(|record| (record.t, record.lines))
             .collect();
@@ -337,6 +346,20 @@ SINFO:0,3,6,0,"PGS"
         let error = subtitle_lines(&rec, &label, &text, 600.0).unwrap_err();
         let file = text.join("sub-1.ocr.jsonl");
         assert!(error.starts_with(&format!("{}: ", file.display())), "{error}");
+        assert!(!error.contains("made-up secret"), "{error}");
+    }
+
+    /// A reading file that does not parse names the file and says it could not be read, without the parser's own
+    /// text, which can quote a value (here a made-up line where a time belongs).
+    #[test]
+    fn an_unread_reason_never_quotes_the_reading_file() {
+        let tmp = Scratch::new("sheet-quoted");
+        let (rec, label) = recording(&tmp.0);
+        let text = tmp.0.join("text");
+        write(&text.join("sub-1.ocr.jsonl"), "{\"t\": \"made-up secret\", \"lines\": []}\n");
+        let error = subtitle_lines(&rec, &label, &text, 600.0).unwrap_err();
+        let file = text.join("sub-1.ocr.jsonl");
+        assert_eq!(error, format!("{}: this file could not be read", file.display()));
         assert!(!error.contains("made-up secret"), "{error}");
     }
 

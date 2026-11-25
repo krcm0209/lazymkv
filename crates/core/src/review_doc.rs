@@ -384,9 +384,11 @@ fn described(kind: DescriptionKind) -> &'static str {
 }
 
 /// Why an audio track was dropped, in words; None for a drop the owner cannot overrule, which is never an item
-/// (ruling T32-R2).
-fn audio_drop(why: &AudioDrop) -> Option<String> {
+/// (ruling T32-R2). A drop for its language is one the owner can overrule when the title is held for
+/// no_wanted_audio (`no_wanted`; ruling T32-E25), since every track of such a title is dropped so.
+fn audio_drop(why: &AudioDrop, no_wanted: bool) -> Option<String> {
     let text = match why {
+        AudioDrop::UnwantedLanguage if no_wanted => "dropped: its language is not one you want".to_string(),
         AudioDrop::Derived | AudioDrop::UnwantedLanguage => return None,
         AudioDrop::Flagged { .. } => {
             "dropped: the disc marks it as a director's commentary or a description for people who cannot see the picture"
@@ -484,8 +486,10 @@ fn track_item(key: &str, kind: ItemKind, title: u32, stream: u32) -> Item {
     }
 }
 
-/// The audio items of a decided title, by stream: every kept track and every dropped one the owner can overrule.
+/// The audio items of a decided title, by stream: every kept track and every dropped one the owner can overrule
+/// (`audio_drop`; on a title held for no_wanted_audio, the tracks dropped for their language too).
 fn audio_items(key: &str, scanned: &Title, decision: &FileDecision) -> Result<Vec<Item>, String> {
+    let no_wanted = decision.reviews.contains(&ReviewReason::NoWantedAudio);
     let kept = &decision.audio.kept;
     // 8.10 and `tracks::layout`: the kept track flagged default, else the first kept track.
     let default = kept.iter().find(|track| track.default).or(kept.first()).map(|track| track.stream);
@@ -501,7 +505,7 @@ fn audio_items(key: &str, scanned: &Title, decision: &FileDecision) -> Result<Ve
         items.push(item);
     }
     for (stream, why) in &decision.audio.dropped {
-        let Some(verdict) = audio_drop(why) else { continue };
+        let Some(verdict) = audio_drop(why, no_wanted) else { continue };
         let scan = scan_stream(scanned, *stream)?;
         let what = match scan.channels {
             Some(channels) => format!("{}, {channels} channels", scan.codec.display),
@@ -598,21 +602,35 @@ fn title_reasons(title: &TitleRecord) -> Vec<ReviewReason> {
     sorted_unique(reasons)
 }
 
+/// The refusal `build` gives for `record` when it has nothing to review (phase 3 design, part 6.2): `job <id> is
+/// <state>: there is nothing to review` for a state other than held at the disposition gate or Filed, else `job <id>
+/// has no plan: there is nothing to review` for a job with no plan; None when there is something to review. A reader
+/// whose scan cannot be read gives this refusal before the scan's error (such a job may have no scan). Def: the final
+/// review (E-I4). Use: P3-T9, P3-T13.
+pub fn nothing_to_review(record: &JobRecord) -> Option<String> {
+    match &record.state {
+        State::NeedsReview { held: Held::DispositionGate } | State::Filed => {}
+        other => return Some(format!("job {} is {}: there is nothing to review", record.id, other.as_str())),
+    }
+    record.plan.is_none().then(|| format!("job {} has no plan: there is nothing to review", record.id))
+}
+
 /// The review document of a job held at the disposition gate or filed (phase 3 design, part 6.2; rulings T32-R1 to
 /// T32-R4): its points in spec 8.8's order of reasons (a held job's only for the reasons it carries; with `all`, or for
 /// a filed job, every title also gets an audio and a subtitles point listing all its items), and every ripped title with
-/// its items. Err `job <id> is <state>: there is nothing to review` for any other state, and Err for a job with no plan
-/// or a title or stream the scan lacks. A title whose final path is in `nothing_at` (and holds no file) has its
-/// collision point without an item and says nothing is there (phase 3 design, part 6.7). Def: P3-T4. Use: P3-T5, P3-T8,
-/// P3-T9, P3-T14.
+/// its items. Err is `nothing_to_review`'s refusal first, and Err for a title or stream the scan lacks. A title whose
+/// final path is in `nothing_at` (and holds no file) has its collision point without an item and says nothing is there
+/// (phase 3 design, part 6.7). Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
 pub fn build(inputs: &DocInputs<'_>) -> Result<ReviewDoc, String> {
     let record = inputs.record;
+    if let Some(refusal) = nothing_to_review(record) {
+        return Err(refusal);
+    }
     let (held, since_unix) = match &record.state {
-        State::NeedsReview { held: Held::DispositionGate } => (HeldAs::Gate, record.updated_unix),
         State::Filed => (HeldAs::Filed, record.filed_unix.unwrap_or(record.updated_unix)),
-        other => return Err(format!("job {} is {}: there is nothing to review", record.id, other.as_str())),
+        _ => (HeldAs::Gate, record.updated_unix),
     };
-    let plan = record.plan.as_ref().ok_or_else(|| format!("job {} has no plan: there is nothing to review", record.id))?;
+    let Some(plan) = record.plan.as_ref() else { unreachable!("nothing_to_review refuses a job with no plan") };
     let every = inputs.all || held == HeldAs::Filed;
 
     let mut ordered: Vec<&TitleRecord> = record.titles.iter().collect();
@@ -803,13 +821,17 @@ fn track_id(doc: &ReviewDoc, title: u32, word: &str, stream: u32) -> String {
 /// path is the entry's (`settings::same_path`) and `keep_both` or `replace`. An identity, season or titles answer is
 /// refused: this sheet does not answer them yet (ruling T32-R1). Two entries for one item (the same track, or two paths
 /// of the same collision) are refused with `the answers name <item id> twice`, since the first would otherwise win
-/// silently (P3-T8). Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
+/// silently (P3-T8), and two `default` answers for one title's audio with `the answers make both <first id> and
+/// <second id> the default; a title has one default track` (final review, K-I1). Def: P3-T4. Use: P3-T5, P3-T8,
+/// P3-T9, P3-T14.
 pub fn check(doc: &ReviewDoc, overrides: &Overrides) -> Result<(), String> {
     if overrides.identity.is_some() || overrides.season.is_some() || !overrides.titles.is_empty() {
         return Err("which film this is and which titles to file cannot be answered on this sheet yet".to_string());
     }
     let mut named: BTreeSet<String> = BTreeSet::new();
-    let mut once = |id: &str| if named.insert(id.to_string()) { Ok(()) } else { Err(format!("the answers name {id} twice")) };
+    let mut once = |id: &str| if named.insert(id.to_string()) { Ok(()) } else { Err(named_twice(id)) };
+    // The `default` answer of each title so far: a second one for the same title is refused (final review, K-I1).
+    let mut defaults: BTreeMap<u32, String> = BTreeMap::new();
     for entry in &overrides.audio {
         let word = match entry.action {
             AudioOverride::Keep { default: true, .. } => "default",
@@ -820,6 +842,12 @@ pub fn check(doc: &ReviewDoc, overrides: &Overrides) -> Result<(), String> {
         let id = track_id(doc, entry.title, "audio", entry.stream);
         offered(doc, &id, word)?;
         once(&id)?;
+        if word == "default" {
+            if let Some(first) = defaults.insert(entry.title, id.clone()) {
+                let refused = format!("the answers make both {first} and {id} the default; a title has one default track");
+                return Err(refused);
+            }
+        }
     }
     for entry in &overrides.subtitles {
         let word = match entry.action {
@@ -848,11 +876,22 @@ pub const LINE_MOMENTS: [f64; 3] = [0.25, 0.50, 0.75];
 /// P3-T9, P3-T13, P3-T14.
 pub const LINE_WIDTH: usize = 60;
 
-/// One event's text for the sheet: its lines joined by a space, control characters removed, cut to `LINE_WIDTH`
-/// characters; None when nothing but blanks is left.
+/// The format characters a line loses besides control characters (final review, K-M3): the zero-width and direction
+/// marks U+200B to U+200F, the direction embeddings and overrides U+202A to U+202E, the invisible operators U+2060 to
+/// U+2064, the direction isolates U+2066 to U+2069, and the byte order mark U+FEFF, any of which can hide text or turn
+/// a terminal line around.
+fn is_hiding_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
+/// One event's text for the sheet: its lines joined by a space, control characters and `is_hiding_mark`'s format
+/// characters removed, cut to `LINE_WIDTH` characters; None when nothing but blanks is left.
 fn clean_line(parts: &[String]) -> Option<String> {
     let joined = parts.join(" ");
-    let kept: String = joined.chars().filter(|c| !c.is_control()).collect();
+    let kept: String = joined.chars().filter(|c| !c.is_control() && !is_hiding_mark(*c)).collect();
     let cut: String = kept.trim().chars().take(LINE_WIDTH).collect();
     let cut = cut.trim_end();
     (!cut.is_empty()).then(|| cut.to_string())
@@ -862,9 +901,9 @@ fn clean_line(parts: &[String]) -> Option<String> {
 /// `LINE_MOMENTS` of `seconds` in order, the first event with text at or after that moment that an earlier moment has
 /// not used; then, while fewer than three events are chosen and unused events with text remain, the earliest unused
 /// event with text (T32-E7, so a track whose few events all fall early still shows them). Each is one line, cut to
-/// `LINE_WIDTH` characters with control characters removed. `events` are (start in seconds, the event's text lines) in
-/// time order. Zero to three lines, in the time order of their events. Def: P3-T5, P3-T9 (T32-E7). Use: P3-T9,
-/// P3-T13, P3-T14.
+/// `LINE_WIDTH` characters with control characters and the format characters of `is_hiding_mark` removed. `events`
+/// are (start in seconds, the event's text lines) in time order. Zero to three lines, in the time order of their
+/// events. Def: P3-T5, P3-T9 (T32-E7). Use: P3-T9, P3-T13, P3-T14.
 pub fn sample_lines(events: &[(f64, Vec<String>)], seconds: f64) -> Vec<String> {
     let texts: Vec<Option<String>> = events.iter().map(|(_, text)| clean_line(text)).collect();
     let mut chosen: Vec<usize> = Vec::new();
@@ -921,13 +960,36 @@ pub fn letter_word(item: &Item, letter: &str) -> Option<&'static str> {
         .map(|(_, word, _)| *word)
 }
 
+/// What an item's question calls it: `track <stream>`, or `the file at <path>` for a collision (or an item with no
+/// stream).
+fn item_name(item: &Item) -> String {
+    match (item.kind, item.stream) {
+        (ItemKind::Collision, _) | (_, None) => format!("the file at {}", item.path.as_deref().unwrap_or(&item.describe)),
+        (_, Some(stream)) => format!("track {stream}"),
+    }
+}
+
+/// One answer as the list before `File it now?` shows it (ruling T32-E27): the item named as its question names it,
+/// and `word` in the question's own words, as `track 9: SDH` or `track 10: commentary (dropped)`; a word the item's
+/// kind does not offer is shown as it is. Def: T32-E27. Use: T32-E27.
+pub fn answer_line(item: &Item, word: &str) -> String {
+    let label = choices(item.kind).iter().find(|(_, each, _)| *each == word).map_or(word, |(_, _, label)| *label);
+    format!("{}: {label}", item_name(item))
+}
+
+/// The refusal of answers that name the item `id` twice (P3-T8), which `check` and lazymkvctl's `--answer` give.
+/// Def: P3-T8. Use: P3-T8, the final review (C-M1).
+pub fn named_twice(id: &str) -> String {
+    format!("the answers name {id} twice")
+}
+
 /// One item's question line (phase 3 design, part 6.3): what it is, the letters and words it offers, and the letter
 /// that Enter stands for; `leave unanswered` for an item with no standing answer. Def: P3-T5. Use: P3-T9, P3-T13,
 /// P3-T14.
 pub fn question(item: &Item) -> String {
     let subject = match (item.kind, item.stream) {
-        (ItemKind::Collision, _) | (_, None) => format!("the file at {}:", item.path.as_deref().unwrap_or(&item.describe)),
-        (_, Some(stream)) => format!("track {stream} is:"),
+        (ItemKind::Collision, _) | (_, None) => format!("{}:", item_name(item)),
+        (_, Some(_)) => format!("{} is:", item_name(item)),
     };
     let offered: Vec<&Choice> =
         choices(item.kind).iter().filter(|(_, word, _)| item.answers.iter().any(|answer| answer == word)).collect();
@@ -1017,6 +1079,7 @@ pub fn render(doc: &ReviewDoc) -> String {
         let body = point.sentence.strip_suffix(NOT_ON_THIS_SHEET).unwrap_or(&point.sentence);
         // One sentence per line; `split_inclusive` keeps each sentence's own full stop. The nothing-at-the-path sentence
         // holds a path, which may hold ". " ("Dr. X"), so its path part is kept whole and only its fixed part is split off.
+        // Any later sentence that holds a path must be added to this guard, or its path is split at a ". " in it.
         let (whole, rest) = match body.strip_suffix(NOTHING_AT_PATH) {
             Some(path_part) if path_part.starts_with("Nothing is at ") => (path_part.trim_end(), NOTHING_AT_PATH),
             _ => ("", body),
@@ -1385,6 +1448,38 @@ mod tests {
         let ten = item(&doc, "t00-00801 sub 10");
         assert_eq!((ten.stands.as_str(), ten.describe.as_str()), ("drop", "English"));
         assert_eq!(doc.points[0].items, vec!["t00-00801 sub 9", "t00-00801 sub 10", "t00-00801 sub 33"]);
+    }
+
+    /// Ruling T32-E25 (amending T32-R2): on a title held for no_wanted_audio every track dropped as unwanted_language
+    /// is an item, standing as dropped and offering keep and default, so the point can be answered; without that
+    /// reason such a track is still no item.
+    #[test]
+    fn a_title_with_no_wanted_audio_offers_every_track() {
+        let disc = film_disc();
+        let mut none_wanted = record(&disc);
+        let decision = decided(&mut none_wanted);
+        decision.audio.kept.clear();
+        decision.audio.dropped = vec![(1, AudioDrop::UnwantedLanguage), (8, AudioDrop::UnwantedLanguage)];
+        decision.audio.reviews = vec![ReviewReason::NoWantedAudio];
+        decision.reviews = vec![ReviewReason::NoWantedAudio];
+        let doc = sheet(&none_wanted, &disc, false);
+        let audio: Vec<&Point> = doc.points.iter().filter(|point| point.kind == PointKind::Audio).collect();
+        assert_eq!(audio.len(), 1, "{:?}", doc.points);
+        assert_eq!(audio[0].reasons, vec![ReviewReason::NoWantedAudio]);
+        assert_eq!(audio[0].items, vec!["t00-00801 audio 1", "t00-00801 audio 8"]);
+        assert!(audio[0].answerable);
+        for id in ["t00-00801 audio 1", "t00-00801 audio 8"] {
+            let track = item(&doc, id);
+            assert_eq!(track.stands, "drop", "{id}");
+            assert!(track.answers.iter().any(|answer| answer == "keep"), "{:?}", track.answers);
+            assert!(track.answers.iter().any(|answer| answer == "default"), "{:?}", track.answers);
+        }
+        // Without no_wanted_audio, T32-R2 stands: a track dropped for its language is no item.
+        let mut one_unwanted = record(&disc);
+        decided(&mut one_unwanted).audio.kept.truncate(1);
+        decided(&mut one_unwanted).audio.dropped = vec![(8, AudioDrop::UnwantedLanguage)];
+        let doc = sheet(&one_unwanted, &disc, true);
+        assert!(doc.titles[0].items.iter().all(|track| track.id != "t00-00801 audio 8"), "{:?}", doc.titles[0].items);
     }
 
     #[test]
@@ -1787,6 +1882,77 @@ mod tests {
         assert_eq!(check(&collided, &twice), Err("the answers name t00-00801 collision twice".to_string()));
     }
 
+    /// Final review (K-I3): a job of two titles, the fixture's (scan title 2, key t00-00801) and a second one (scan
+    /// title 5, key t00-00805) with the same streams but subtitle 33: each title's items carry its own key, answers for
+    /// stream 9 of each title go to that title through `answers_of` and pass `check`, and an id naming the second
+    /// title's stream 33, which only the first title has, is refused.
+    #[test]
+    fn two_titles_keep_their_own_items() {
+        let other: &[(u32, &[(u32, &str)])] = &[(0, UHD_VIDEO), (1, ENG_TRUEHD_ATMOS), (8, ENG_AC3_2CH), (9, ENG_PGS)];
+        let first: &[(u32, &[(u32, &str)])] = &[
+            (0, UHD_VIDEO),
+            (1, ENG_TRUEHD_ATMOS),
+            (8, ENG_AC3_2CH),
+            (9, ENG_PGS),
+            (10, ENG_PGS),
+            (11, FRA_PGS),
+            (33, ENG_PGS),
+        ];
+        let attrs: &[(u32, &str)] = &[(8, "24"), (9, "1:58:42"), (11, "40000000000"), (16, "00801.mpls"), (26, "1,2,3")];
+        let attrs_5: &[(u32, &str)] = &[(8, "20"), (9, "1:40:00"), (11, "30000000000"), (16, "00805.mpls"), (26, "4")];
+        let text = scan_text(&[(1, "Blu-ray disc")], &[(SCAN_TITLE, attrs, first), (5, attrs_5, other)]);
+        let disc = disc(&parse(&text)).unwrap();
+        let mut two = record(&disc);
+        let mut second = two.titles[0].clone();
+        (second.key, second.scan_title) = ("t00-00805".to_string(), 5);
+        let decision = second.decision.as_mut().unwrap();
+        decision.title_key = "t00-00805".to_string();
+        decision.subtitles.kept = vec![kept_subtitle(9, 900)];
+        decision.subtitles.dropped = vec![];
+        (decision.subtitles.full, decision.subtitles.groups) = (vec![9], vec![vec![9]]);
+        two.titles.push(second);
+        let mut planned = two.plan.as_ref().unwrap().titles[0].clone();
+        (planned.key, planned.title) = ("t00-00805".to_string(), 5);
+        two.plan.as_mut().unwrap().titles.push(planned);
+        let doc = sheet(&two, &disc, true);
+        let ids = |at: usize| doc.titles[at].items.iter().map(|item| item.id.clone()).collect::<Vec<String>>();
+        assert_eq!(ids(0), vec!["t00-00801 audio 1", "t00-00801 audio 8", "t00-00801 sub 9", "t00-00801 sub 33"]);
+        assert_eq!(ids(1), vec!["t00-00805 audio 1", "t00-00805 audio 8", "t00-00805 sub 9"]);
+        let answered = answers_of(&doc, &words(&[("t00-00801 sub 9", "sdh"), ("t00-00805 sub 9", "forced")])).unwrap();
+        let subtitles: Vec<(u32, u32, SubtitleOverride)> =
+            answered.overrides.subtitles.iter().map(|entry| (entry.title, entry.stream, entry.action.clone())).collect();
+        let expected = vec![
+            (SCAN_TITLE, 9, SubtitleOverride::Keep { role: SubtitleRole::Sdh }),
+            (5, 9, SubtitleOverride::Keep { role: SubtitleRole::Forced }),
+        ];
+        assert_eq!(subtitles, expected);
+        assert_eq!(check(&doc, &answered.overrides), Ok(()));
+        let missing = Err("no item \"t00-00805 sub 33\" on this sheet".to_string());
+        assert_eq!(answers_of(&doc, &words(&[("t00-00805 sub 33", "drop")])).map(|_| ()), missing);
+        let lacking = Overrides {
+            subtitles: vec![SubtitleTrackOverride { title: 5, stream: 33, action: SubtitleOverride::Drop }],
+            ..Overrides::default()
+        };
+        assert_eq!(check(&doc, &lacking), missing);
+    }
+
+    /// Final review (K-I1): one answers object that makes two audio tracks of one title the default is refused naming
+    /// the title and both streams; one default answer is accepted.
+    #[test]
+    fn two_default_answers_for_one_title_are_refused() {
+        let disc = film_disc();
+        let doc = sheet(&record(&disc), &disc, true);
+        let default = |stream, order| AudioTrackOverride { title: SCAN_TITLE, stream, action: AudioOverride::Keep { order, default: true } };
+        let two = Overrides { audio: vec![default(1, 0), default(8, 1)], ..Overrides::default() };
+        assert_eq!(
+            check(&doc, &two),
+            Err("the answers make both t00-00801 audio 1 and t00-00801 audio 8 the default; a title has one default track"
+                .to_string())
+        );
+        let one = Overrides { audio: vec![default(8, 0)], ..Overrides::default() };
+        assert_eq!(check(&doc, &one), Ok(()));
+    }
+
     #[test]
     fn the_document_round_trips_through_json() {
         let disc = film_disc();
@@ -1859,6 +2025,21 @@ mod tests {
         assert_eq!(wide[0].chars().count(), 60);
     }
 
+    /// Final review (K-M3): the format characters that turn text around or hide in it (U+200B to U+200F, U+202A to
+    /// U+202E, U+2060 to U+2064, U+2066 to U+2069, U+FEFF) are removed, each range at both ends.
+    #[test]
+    fn a_line_loses_its_direction_and_zero_width_marks() {
+        let marks = [
+            '\u{200B}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2060}', '\u{2064}', '\u{2066}', '\u{2069}', '\u{FEFF}',
+        ];
+        let marked: String = marks.iter().map(|mark| format!("{mark}ab")).collect::<Vec<String>>().join(" ");
+        let lines = sample_lines(&[event(2000.0, &[&marked])], 6000.0);
+        assert_eq!(lines, vec![vec!["ab"; marks.len()].join(" ")]);
+        // A mark alone is nothing to show; letters outside the ranges stay.
+        assert_eq!(sample_lines(&[event(2000.0, &["\u{202E}\u{200B}"])], 6000.0), Vec::<String>::new());
+        assert_eq!(sample_lines(&[event(2000.0, &["\u{2010}\u{2070}"])], 6000.0), vec!["\u{2010}\u{2070}"]);
+    }
+
     /// The fixture's held job with two lines on each subtitle track and a staged path.
     fn lined_doc(disc: &Disc, held: &JobRecord) -> ReviewDoc {
         let staged = BTreeMap::from([(KEY.to_string(), r"S:\staging\job\rip\t00-00801\title.mkv".to_string())]);
@@ -1922,7 +2103,6 @@ Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
         assert!(text.contains("\n   This can be answered from a later version of lazymkv.\n"), "{text}");
         assert!(!text.contains("cannot answer it yet"), "{text}");
         assert!(!text.contains("track "), "{text}");
-        println!("{text}");
     }
 
     #[test]
@@ -1933,7 +2113,6 @@ Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
         let collisions = BTreeMap::from([(FINAL.to_string(), "40000000000 bytes, 2026-11-01".to_string())]);
         let doc = doc_with(&held, &disc, false, &collisions).unwrap();
         let text = render(&doc);
-        println!("{text}");
         assert!(text.contains(&format!("   the file at {FINAL}   40000000000 bytes, 2026-11-01\n")), "{text}");
         assert!(text.contains(&format!("   As it stands: {FINAL}: not answered.\n")), "{text}");
         assert!(!text.contains("To watch first"), "{text}");
@@ -1946,7 +2125,6 @@ Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
         filed.filed_unix = Some(1_800_001_000);
         decided(&mut filed).reviews = vec![];
         let text = render(&sheet(&filed, &disc, false));
-        println!("{text}");
         assert!(text.starts_with("Filed on 15 Jan. Identified by TMDb (0.90). Nothing is open.\n"), "{text}");
         assert!(text.contains("1. Audio: nothing is open here, and each track can still be changed.\n"), "{text}");
         assert!(text.contains("2. Subtitles: "), "{text}");
@@ -1997,12 +2175,10 @@ Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
         decided(&mut held).reviews = vec![ReviewReason::IdentityUnknown, ReviewReason::SubtitleAmbiguous];
         let text = render(&sheet(&held, &disc, false));
         let head = text.lines().next().unwrap();
-        println!("{head}");
         assert_eq!(head, "Held since 15 Jan. Identified by TMDb (0.90). One point needs your answer. One more cannot be answered yet.");
         decided(&mut held).reviews = vec![ReviewReason::IdentityUnknown];
         let text = render(&sheet(&held, &disc, false));
         let head = text.lines().next().unwrap();
-        println!("{head}");
         assert_eq!(head, "Held since 15 Jan. Identified by TMDb (0.90). One point is open and cannot be answered yet.");
     }
 
@@ -2014,7 +2190,6 @@ Files as: M:/Movies/F (2000)/F (2000) - 2160p.mkv
         decided(&mut held).reviews = vec![ReviewReason::ReadErrors];
         let text = render(&sheet(&held, &disc, false));
         let head = text.lines().next().unwrap();
-        println!("{head}");
         assert!(head.ends_with("One point needs your answer."), "{head}");
         assert!(!text.contains("later version"), "{text}");
     }

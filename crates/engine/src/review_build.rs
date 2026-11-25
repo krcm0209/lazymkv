@@ -12,15 +12,13 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::UNIX_EPOCH;
 
-use lazymkv_core::disc::{disc, Disc};
+use lazymkv_core::disc::Disc;
 use lazymkv_core::lookup::stale::civil_date;
 use lazymkv_core::record::{JobRecord, TuningCopy};
 use lazymkv_core::review_doc::{self, DocInputs, ReviewDoc};
-use lazymkv_core::robot::parse;
 use lazymkv_core::settings::configured_root;
 use lazymkv_core::subtitle::text::READING;
-use lazymkv_dev::cmd::decide::{read_unread, rec_folder};
-use lazymkv_dev::cmd::sheet::{scan_streams, subtitle_lines};
+use lazymkv_dev::cmd::sheet::{job_scan, title_reading};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_platform::{Reach, ShareConnector};
 
@@ -63,18 +61,10 @@ struct Read {
 }
 
 /// The document of `job` (phase 3 design, part 6.2): `review_doc::build` over the job folder's scan and what `read`
-/// found. A job folder whose `scan.txt` cannot be read gives `build`'s refusal of a job with nothing to review first
-/// (such a job may have no scan), else the read error.
+/// found. A job folder whose `scan.txt` cannot be read gives `review_doc::nothing_to_review`'s refusal first (such a
+/// job may have no scan), else the read error naming the file (`job_scan`).
 fn build_review(job: &JobContext, all: bool, shares: &dyn ShareConnector) -> Result<ReviewDoc, String> {
-    let read = Read::default();
-    let scanned = match read_scan(&job.job_dir) {
-        Ok(scanned) => scanned,
-        Err(error) => {
-            let empty = disc(&parse(""))?;
-            review_doc::build(&inputs(&job.record, &empty, &read, all))?;
-            return Err(error);
-        }
-    };
+    let scanned = job_scan(&job.job_dir, &job.record)?;
     let read = read_evidence(job, &scanned, shares);
     review_doc::build(&inputs(&job.record, &scanned, &read, all))
 }
@@ -90,13 +80,6 @@ fn inputs<'a>(record: &'a JobRecord, scanned: &'a Disc, read: &'a Read, all: boo
         nothing_at: &read.nothing_at,
         all,
     }
-}
-
-/// The job folder's `scan.txt`, typed, as `review_answers` reads it; Err `<path>: <error>`.
-fn read_scan(job_dir: &Path) -> Result<Disc, String> {
-    let path = job_dir.join("scan.txt");
-    let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    disc(&parse(&String::from_utf8_lossy(&bytes))).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Every subtitle stream the decision of a title lists, kept or dropped: the streams that can be subtitle items.
@@ -177,7 +160,8 @@ impl<'a> TuningShare<'a> {
 /// (`read_unread`) with that reason as `unread`. A title step 10 never read (no reading in either place) gets nothing;
 /// a tuning share that does not answer, for a job whose dataset copy landed, gives each of the title's subtitle streams
 /// `the tuning share did not answer: <why>`; a reading or job folder file that cannot be read gives each of them
-/// `the subtitle reading could not be read: <error>`, whose error names the file only.
+/// `the subtitle reading could not be read: <error>`, whose error names the file and never holds the reading's text
+/// (`subtitle_lines`).
 fn lines_of(job: &JobContext, key: &str, seconds: f64, tuning: &mut TuningShare<'_>, read: &mut Read) {
     let streams: Vec<(String, u32)> = subtitle_streams(&job.record).into_iter().filter(|(at, _)| at == key).collect();
     let all_unread = |read: &mut Read, why: String| {
@@ -198,19 +182,8 @@ fn lines_of(job: &JobContext, key: &str, seconds: f64, tuning: &mut TuningShare<
             }
         },
     };
-    let ctx = Ctx::from_process();
-    let found = rec_folder(&ctx, &job.job_dir.join(key).display().to_string())
-        .map_err(|refused| refused.line)
-        .and_then(|(rec, label)| {
-            let lines = subtitle_lines(&rec, &label, &text, seconds)?;
-            let by_n: BTreeMap<i64, String> = read_unread(&rec.tree, &rec.dir.join(&label))?.into_iter().collect();
-            let skipped: Vec<(u32, String)> = scan_streams(&rec, &label)?
-                .into_iter()
-                .filter_map(|(n, stream)| by_n.get(&n).map(|why| (stream, why.clone())))
-                .collect();
-            Ok((lines, skipped))
-        });
-    match found {
+    // No engine profile is named eng-only.mmcp.xml, so `scan_streams`' selection is Selection::All, as the decision's.
+    match title_reading(&Ctx::from_process(), &job.job_dir, key, &text, seconds) {
         Ok((lines, skipped)) => {
             for (stream, shown) in lines {
                 read.lines.insert((key.to_string(), stream), shown);

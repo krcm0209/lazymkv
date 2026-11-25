@@ -2100,6 +2100,18 @@ fn review_of_a_job_whose_staging_share_is_down_still_answers() {
     }
 }
 
+/// A held job whose `scan.txt` is gone is refused with the scan's read error, naming the file, not with what an empty
+/// scan would say.
+#[test]
+fn review_of_a_held_job_whose_scan_is_gone_names_the_scan() {
+    let (h, mut c, id, _) = held_two_subs();
+    let scan = h.job_dir(&id).join("scan.txt");
+    std::fs::remove_file(&scan).unwrap();
+    let error = c.err("review", json!({"job": id}));
+    assert!(error.starts_with(&format!("{}: ", scan.display())), "{error}");
+    assert!(!error.contains("the scan lists no title"), "{error}");
+}
+
 #[test]
 fn review_of_a_job_with_nothing_to_review_is_an_error_naming_its_state() {
     let h = scripted(vec![]);

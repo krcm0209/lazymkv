@@ -46,7 +46,7 @@ use serde_json::{json, Map, Value};
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::cleanup::{run_pass, CleanupJob};
 use crate::discard::spawn_preview;
-use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
+use crate::file_phase::{refreshed_plan, waiting_message, RenameFn, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
     cancel_event, cancel_not_persisted, discard_not_persisted, discard_running, failure_event, history_page, main_tag,
     no_discard, no_job, no_retry, no_rip_again, no_running_step, not_a_review_action, not_a_secret, not_answered_yet,
@@ -189,6 +189,9 @@ pub(crate) struct TestHooks {
     /// The copy step every copy thread passes to `copy_dataset`; None copies with `staged::copy_checked`. Def: T5-19.
     /// Use: T5-19.
     pub(crate) copy_with: Option<CopyFn>,
+    /// The rename File makes into a title's final path; None renames with `rename_no_replace` (ruling T32-E22).
+    /// Def: T32-E22. Use: T32-E22.
+    pub(crate) file_rename: Option<RenameFn>,
     /// Sent the job's id once at the end of each refresh of its tuning recordings, whatever its end (design part 7.5).
     /// Def: T5-20. Use: T5-20.
     pub(crate) refresh_done: Option<Sender<String>>,
@@ -313,6 +316,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     let cleanup_done = hooks.cleanup_done;
     let (copy_done, copy_with) = (hooks.copy_done, hooks.copy_with);
     let refresh_done = hooks.refresh_done;
+    let file_rename = hooks.file_rename;
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
     remove_work_folder(&store, &config.data);
     let outbox = Outbox::default();
@@ -338,7 +342,8 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     let steps = steps.unwrap_or_else(|| {
         let (store, outbox, promises) = (Arc::clone(&store), outbox.clone(), Arc::clone(&promises));
         let (http, java_in_use, makemkv) = (Arc::clone(&http), Arc::clone(&java_in_use), Arc::clone(&makemkv));
-        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv))
+        let real = RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv);
+        Arc::new(real.with_file_rename(file_rename))
     });
     let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
     let notify_stop = notify.stop_flag();

@@ -57,8 +57,8 @@ use serde_json::{json, Value};
 
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
-    engine_decide_inputs, library_facts, library_unread, lookup_word, move_aside, partial_path, read_back_inputs,
-    refetch_stale, refreshed_plan, replaced_dir, staged_text, OwedCheck, Refetched,
+    engine_decide_inputs, library_facts, library_unread, lookup_word, move_aside, partial_path, put_back_with,
+    read_back_inputs, refetch_stale, refreshed_plan, replaced_dir, staged_text, OwedCheck, Refetched, RenameFn,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -69,8 +69,8 @@ use crate::space::{
     staged_remux_check, unreachable, Promises,
 };
 use crate::staged::{
-    clear_incomplete, evidence_file, staged_state, tuning_dir, unit_outputs_left, work_dir, Staged, UnitError,
-    CLEARED_INCOMPLETE, SKIPPED_COMPLETE, WORK,
+    clear_incomplete, copy_checked, evidence_file, staged_state, tuning_dir, unit_outputs_left, work_dir, Staged,
+    UnitError, CLEARED_INCOMPLETE, SKIPPED_COMPLETE, WORK,
 };
 use crate::step10;
 use crate::step10::{read_streams, stream_cap, OCR_MISSING};
@@ -539,6 +539,9 @@ pub(crate) struct RealSteps {
     ocr: Option<PathBuf>,
     /// The harness's cap, for tests only (T5-R58).
     ocr_cap_override: Option<Duration>,
+    /// The rename File makes into a title's final path, for tests only (`TestHooks::file_rename`); None renames with
+    /// `rename_no_replace`. Def: T32-E22. Use: T32-E22.
+    file_rename: Option<RenameFn>,
 }
 
 impl RealSteps {
@@ -576,6 +579,23 @@ impl RealSteps {
             work_root: config.data.join(WORK),
             ocr: config.ocr.clone(),
             ocr_cap_override: config.ocr_cap_override,
+            file_rename: None,
+        }
+    }
+
+    /// The runner with `rename` in place of `rename_no_replace` for File's renames into a title's final path, for
+    /// tests only (`TestHooks::file_rename`). Def: T32-E22. Use: T32-E22.
+    pub(crate) fn with_file_rename(mut self, rename: Option<RenameFn>) -> RealSteps {
+        self.file_rename = rename;
+        self
+    }
+
+    /// `from` renamed to `to` by the testkit's rename when one is set, else by `rename_no_replace`; neither replaces a
+    /// file at `to`. Def: T32-E22. Use: T32-E22.
+    fn rename_into_place(&self, from: &Path, to: &Path) -> io::Result<()> {
+        match &self.file_rename {
+            Some(rename) => rename(from, to),
+            None => rename_no_replace(from, to),
         }
     }
 }
@@ -2065,6 +2085,10 @@ impl Step<'_> {
     /// answer in the job's review.json, and only then, `replace_existing` moves the file found at exactly that path
     /// into the job's `replaced` folder just before the rename; a rename that still finds a file is a collision. A
     /// review.json that cannot be read gives FileFailed { Unknown } with its error, before anything is renamed.
+    /// Ruling T32-E22: once a file was moved aside, a rename that fails for any reason but a file at the path puts it
+    /// back with `put_back_with` (never replacing) and logs one job.log line, and the step fails as before; a put-back
+    /// that fails, and a hold for a file that appeared at the path after the move, end their sentence and job.log line
+    /// with `The library file that was at <final path> is now at <path under replaced>.`
     ///
     /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
     /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
@@ -2163,10 +2187,15 @@ impl Step<'_> {
                 }
             }
             self.check_cancel()?;
-            if answers.collision_for(&path.path) == Some(Collision::Replace) {
-                self.replace_existing(key, &path.root, target, &partial)?;
-            }
-            match rename_no_replace(&partial, target) {
+            let moved = match answers.collision_for(&path.path) {
+                Some(Collision::Replace) => self.replace_existing(key, &path.root, target, &partial)?,
+                _ => None,
+            };
+            // Ruling T32-E22: once the library file was moved aside, a rename that fails puts it back, or says where
+            // it is when it cannot be put back.
+            let now_at =
+                |moved: &Path| format!("The library file that was at {} is now at {}.", path.path, moved.display());
+            match self.steps.rename_into_place(&partial, target) {
                 Ok(()) => {}
                 #[cfg(not(windows))]
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists && one_file(&partial, target) => {
@@ -2178,7 +2207,10 @@ impl Step<'_> {
                     self.log(&format!("{key}: {shown} already held the partial file, so the rename was finished"));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    return self.collided(key, &path.path, &format!("{} already exists", path.path));
+                    let sentence = format!("{} already exists", path.path);
+                    // Something appeared at the path after the move: putting the library file back would replace it.
+                    let note = moved.as_deref().map(now_at).unwrap_or_default();
+                    return self.collided_noting(key, &path.path, &sentence, &note);
                 }
                 #[cfg(not(windows))]
                 Err(error) if one_file(&partial, target) => {
@@ -2186,7 +2218,23 @@ impl Step<'_> {
                     return Ok(unknown(failed, half_done(&partial, &path.path, &error)));
                 }
                 Err(error) => {
-                    let message = format!("{} could not be renamed to {}: {error}", partial.display(), path.path);
+                    let mut message = format!("{} could not be renamed to {}: {error}", partial.display(), path.path);
+                    if let Some(moved) = moved.as_deref() {
+                        let rename = |from: &Path, to: &Path| self.steps.rename_into_place(from, to);
+                        match put_back_with(moved, target, &rename, &|from, to| copy_checked(from, to)) {
+                            Ok(()) => {
+                                let shown = moved.display();
+                                self.log(&format!(
+                                    "{key}: the rename failed, so the library file moved to {shown} was put back at {}",
+                                    path.path
+                                ));
+                            }
+                            Err(refused) => {
+                                message = format!("{message}; {refused}. {}", now_at(moved));
+                                self.log(&format!("{key}: {message}"));
+                            }
+                        }
+                    }
                     return Ok(unknown(failed, message));
                 }
             }
@@ -2231,8 +2279,15 @@ impl Step<'_> {
     /// after that edit (the job's reasons with `path_collision`), sorted and unique. Titles renamed earlier in this run
     /// keep their `filed` record. Err is the cancelled result. Def: P3-T11. Use: P3-T16.
     fn collided(&self, key: &str, path: &str, sentence: &str) -> Outcome {
+        self.collided_noting(key, path, sentence, "")
+    }
+
+    /// `collided` with `note`, when it is not empty, after the job.log line's end: `... is deleted. <note>` (ruling
+    /// T32-E22: where a library file moved aside now is). Def: T32-E22. Use: T32-E22.
+    fn collided_noting(&self, key: &str, path: &str, sentence: &str, note: &str) -> Outcome {
+        let note = if note.is_empty() { String::new() } else { format!(". {note}") };
         self.log(&format!(
-            "{key}: {sentence}; the job is held for review with path_collision and its partial file is deleted"
+            "{key}: {sentence}; the job is held for review with path_collision and its partial file is deleted{note}"
         ));
         let mut after = self.job.record.clone();
         hold_for_collision(&mut after, key, path.to_string());
@@ -2252,14 +2307,21 @@ impl Step<'_> {
     /// answers `reach`) moves nothing and makes no folder, and anything else there is left for the rename to meet as a
     /// collision. The staging share is asked `reach` first, as `file` asks the library's. Every failure is FileFailed
     /// { Unknown } naming the paths, and leaves the library file and the partial file as they were (`move_aside`'s
-    /// errors). The moved file is never deleted here. Def: P3-T11. Use: P3-T16.
-    fn replace_existing(&self, key: &str, root: &str, target: &Path, partial: &Path) -> Result<(), StepResult> {
+    /// errors). The moved file is never deleted here. Ok is the moved file's path, None when nothing was moved.
+    /// Def: P3-T11. Use: P3-T16.
+    fn replace_existing(
+        &self,
+        key: &str,
+        root: &str,
+        target: &Path,
+        partial: &Path,
+    ) -> Result<Option<PathBuf>, StepResult> {
         let failed = |failure| Event::FileFailed { failure };
         let (shown, stays) = (target.display(), partial.display());
         let tail = format!("{shown} was not moved and the partial file {stays} was not renamed");
         match fs::symlink_metadata(target) {
             Ok(meta) if meta.is_file() => {}
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(None),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 // A share that stopped answering reports a missing path as NotFound.
                 if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
@@ -2267,7 +2329,7 @@ impl Step<'_> {
                     let message = format!("{key}: {head}; {tail}, and a retry once the share answers files it");
                     return Err(unknown(failed, message));
                 }
-                return Ok(());
+                return Ok(None);
             }
             Err(error) => return Err(unknown(failed, format!("{key}: {shown}: {error}; {tail}"))),
         }
@@ -2284,7 +2346,7 @@ impl Step<'_> {
         match move_aside(target, &replaced_dir(staging, self.id)) {
             Ok(moved) => {
                 self.log(&format!("{key}: {shown} was moved to {} before filing (replace)", moved.display()));
-                Ok(())
+                Ok(Some(moved))
             }
             Err(error) => Err(unknown(failed, format!("{key}: {error}; the partial file {stays} was not renamed"))),
         }

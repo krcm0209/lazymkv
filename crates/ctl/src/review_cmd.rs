@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
 use lazymkv_core::ipc::{read_reply, Envelope, Reply, PROTOCOL_VERSION};
-use lazymkv_core::review_doc::{self, Answers, HeldAs, Item, ReviewDoc};
+use lazymkv_core::review_doc::{self, Answers, HeldAs, Item, ItemKind, ReviewDoc};
 use lazymkv_core::settings::SettingsProblem;
 use lazymkv_dev::Args;
 use lazymkv_platform::IpcStream;
@@ -25,8 +25,10 @@ const ACCEPTED: &str = "Accepted. The job is filing; watch it with: lazymkvctl w
 const DISCARDED: &str = "Discarded. The job's rip is being deleted.";
 /// What guided mode says after the sheet of a job that is not held (it is in the library), where nothing can be answered.
 const NOT_HELD: &str = "This job is not held, so there is nothing to answer.";
-/// The question after the last item's.
-const FILE_IT_NOW: &str = "File it now?  y yes   n not yet   x discard the job";
+/// The question after the last item's; Enter is "not yet" (ruling T32-E29).
+const FILE_IT_NOW: &str = "File it now?  y yes   n not yet   x discard the job     [Enter = n]";
+/// What is said before `FILE_IT_NOW` when no answer changes an item (ruling T32-E27).
+const NO_CHANGE: &str = "Your answers change nothing: the job would file as it stands.";
 /// What is said when a typed line is none of the choices, before the question is asked again.
 const NOT_A_CHOICE: &str = "That is not one of the choices.";
 /// The message of exit 4 when the engine's review document is not one this lazymkvctl reads.
@@ -251,6 +253,9 @@ impl Session<'_> {
     fn on_the_command_line(mut self, options: &Options) -> i32 {
         let words: Vec<(String, String)> =
             options.answers.iter().map(|(id, word)| (self.full_id(id), word.clone())).collect();
+        if let Err(message) = self.refuse_given(&words) {
+            return argument_error(self.err, "review", &message);
+        }
         let answers = match review_doc::answers_of(&self.doc, &words) {
             Ok(answers) => answers,
             Err(message) => return argument_error(self.err, "review", &message),
@@ -260,7 +265,72 @@ impl Session<'_> {
             let _ = writeln!(self.out, "{}", one_line(&self.job, &words));
             return 0;
         }
-        self.send(&answers)
+        let unanswered = self.unanswered_collisions(&words);
+        self.send(&answers, &unanswered)
+    }
+
+    /// The `--answer` words refused before anything is sent: a second answer for one item (its full and its short id
+    /// count as one), in core's words for an item named twice; and, on a job with several titles, an id without its
+    /// title key, with core's refusal and how to give the key.
+    fn refuse_given(&self, words: &[(String, String)]) -> Result<(), String> {
+        let ids: Vec<&String> = self.doc.titles.iter().flat_map(|title| &title.items).map(|item| &item.id).collect();
+        let mut seen: Vec<&str> = Vec::new();
+        for (id, word) in words {
+            if seen.contains(&id.as_str()) {
+                return Err(review_doc::named_twice(id));
+            }
+            seen.push(id);
+            let keyed = self.doc.titles.iter().any(|title| id.starts_with(&format!("{} ", title.key)));
+            if self.doc.titles.len() > 1 && !keyed && !ids.contains(&id) {
+                let refusal = match review_doc::answers_of(&self.doc, &[(id.clone(), word.clone())]) {
+                    Err(refusal) => refusal,
+                    Ok(_) => continue,
+                };
+                let example = ids.iter().find(|each| each.ends_with(&format!(" {id}"))).or(ids.first());
+                if let Some(example) = example {
+                    return Err(format!("{refusal} (this job has several titles: give the title key, as in {example})"));
+                }
+                return Err(refusal);
+            }
+        }
+        Ok(())
+    }
+
+    /// The path of each collision item the sheet asks about that `words` leave unanswered: approving without an
+    /// answer for it holds the job again (ruling T32-E26).
+    fn unanswered_collisions(&self, words: &[(String, String)]) -> Vec<String> {
+        let answered = |item: &Item| words.iter().any(|(id, _)| *id == item.id);
+        self.questions()
+            .into_iter()
+            .filter(|(_, item)| item.kind == ItemKind::Collision && !answered(item))
+            .map(|(_, item)| item.path.clone().unwrap_or(item.describe))
+            .collect()
+    }
+
+    /// The answers that change an item, before `FILE_IT_NOW` (ruling T32-E27; design part 6.3): `Your answers:` and
+    /// one line per answer (`review_doc::answer_line`), under each title's line when the job has several titles; or
+    /// `NO_CHANGE` when none changes an item.
+    fn print_answers(&mut self, words: &[(String, String)]) {
+        let questions = self.questions();
+        let changed: Vec<(&String, &Item, &str)> = questions
+            .iter()
+            .filter_map(|(key, item)| {
+                words.iter().find(|(id, _)| *id == item.id).map(|(_, word)| (key, item, word.as_str()))
+            })
+            .collect();
+        if changed.is_empty() {
+            let _ = writeln!(self.out, "{NO_CHANGE}");
+            return;
+        }
+        let _ = writeln!(self.out, "Your answers:");
+        let mut named: Option<&str> = None;
+        for (key, item, word) in changed {
+            if self.doc.titles.len() > 1 && named != Some(key.as_str()) {
+                let _ = writeln!(self.out, "{}", self.title_line(key));
+                named = Some(key);
+            }
+            let _ = writeln!(self.out, "  {}", review_doc::answer_line(item, word));
+        }
     }
 
     /// `id` as the document names an item: whole, or without its title key when the job has one title.
@@ -293,6 +363,11 @@ impl Session<'_> {
                 Asked::Ended => return self.nothing_changed(),
             }
         }
+        self.print_answers(&words);
+        let unanswered = self.unanswered_collisions(&words);
+        for path in &unanswered {
+            let _ = writeln!(self.out, "Not answered: the file at {path}. Filing now would hold the job again.");
+        }
         match self.ask_file_it() {
             Verdict::File => {}
             Verdict::NotYet | Verdict::Ended => return self.nothing_changed(),
@@ -304,7 +379,7 @@ impl Session<'_> {
         };
         let _ = writeln!(self.out, "The same answers in one line, for next time:");
         let _ = writeln!(self.out, "{}", one_line(&self.job, &words));
-        self.send(&answers)
+        self.send(&answers, &unanswered)
     }
 
     /// The items to ask about, each with its title's key, in the sheet's order: those of the points this sheet
@@ -379,7 +454,7 @@ impl Session<'_> {
         Some(typed == "replace")
     }
 
-    /// Asks `FILE_IT_NOW` until the owner types one of its letters.
+    /// Asks `FILE_IT_NOW` until the owner types one of its letters, or Enter, which is "not yet" (ruling T32-E29).
     fn ask_file_it(&mut self) -> Verdict {
         loop {
             let _ = writeln!(self.out, "{FILE_IT_NOW}");
@@ -387,7 +462,7 @@ impl Session<'_> {
             let Some(typed) = self.read_line() else { return Verdict::Ended };
             match typed.to_lowercase().as_str() {
                 "y" | "yes" => return Verdict::File,
-                "n" | "no" => return Verdict::NotYet,
+                "n" | "no" | "" => return Verdict::NotYet,
                 "x" => return Verdict::Discard,
                 _ => {
                     let _ = writeln!(self.out, "{NOT_A_CHOICE}");
@@ -402,11 +477,20 @@ impl Session<'_> {
     }
 
     /// Sends the owner's answers as `review_action`'s `approve`, and says how to watch the job when the engine accepts
-    /// (ruling T32-R6); it does not wait for the remux.
-    fn send(&mut self, answers: &Answers) -> i32 {
+    /// (ruling T32-R6); it does not wait for the remux. With a collision left `unanswered` the engine holds the job
+    /// again, so each of its paths gets `Accepted. The job will be held again until the file at <path> is answered.`
+    /// in place of `ACCEPTED` (ruling T32-E26).
+    fn send(&mut self, answers: &Answers, unanswered: &[String]) -> i32 {
         match self.peer.ask("review_action", approval(&self.job, answers)) {
-            Ok(_) => {
+            Ok(_) if unanswered.is_empty() => {
                 let _ = writeln!(self.out, "{ACCEPTED}");
+                0
+            }
+            Ok(_) => {
+                for path in unanswered {
+                    let said = format!("Accepted. The job will be held again until the file at {path} is answered.");
+                    let _ = writeln!(self.out, "{said}");
+                }
                 0
             }
             Err(failure) => failure.report(self.err),
@@ -504,11 +588,13 @@ fn gigabytes(bytes: u64) -> String {
 
 /// The question before a discard, asked on `out` and answered on `input` (ruling T32-E15; shared with `lazymkvctl
 /// discard`). `preview` is the engine's reply to `discard_preview`: `{"bytes", "files"}` for the job's staging folder,
-/// or `{"unknown": <reason>}` when its size is not known. True only when the next line read is the word `discard`,
-/// white space around it ignored; any other line, or the end of the input, is false.
-pub(crate) fn confirm_discard(_job: &str, preview: &Value, input: &mut dyn BufRead, out: &mut dyn Write) -> bool {
+/// or `{"unknown": <reason>}` when its size is not known. The question names `job` (ruling T32-E28). True only when
+/// the next line read is the word `discard`, white space around it ignored; any other line, or the end of the input,
+/// is false.
+pub(crate) fn confirm_discard(job: &str, preview: &Value, input: &mut dyn BufRead, out: &mut dyn Write) -> bool {
     let counted = (preview.get("bytes").and_then(Value::as_u64), preview.get("files").and_then(Value::as_u64));
     let size = match counted {
+        (Some(bytes), Some(1)) => format!("1 file, {}", gigabytes(bytes)),
         (Some(bytes), Some(files)) => format!("{files} files, {}", gigabytes(bytes)),
         _ => {
             let reason = match preview.get("unknown") {
@@ -519,7 +605,10 @@ pub(crate) fn confirm_discard(_job: &str, preview: &Value, input: &mut dyn BufRe
             format!("its size is unknown ({reason})")
         }
     };
-    let _ = writeln!(out, "Discard deletes this job's rip: {size}. The disc would have to be ripped again. Type discard to go on:");
+    let _ = writeln!(
+        out,
+        "Discard deletes job {job}'s rip: {size}. The disc would have to be ripped again. Type discard to go on:"
+    );
     let _ = out.flush();
     let mut typed = String::new();
     matches!(input.read_line(&mut typed), Ok(read) if read > 0) && typed.trim() == "discard"
@@ -556,6 +645,7 @@ mod tests {
     const SNAPSHOT: &str = r#"{"v":1,"type":"snapshot","id":null,"payload":{"jobs":[]}}"#;
     const PUSH: &str = r#"{"v":1,"type":"job_update","id":null,"payload":{"id":"made-up-1"}}"#;
     const ACCEPTED: &str = "Accepted. The job is filing; watch it with: lazymkvctl watch";
+    const FILE_IT_NOW_LINE: &str = "File it now?  y yes   n not yet   x discard the job     [Enter = n]";
 
     fn item(kind: ItemKind, id: String, stream: Option<u32>, stands: &str, order: Option<u32>, answers: &[&str]) -> Item {
         Item {
@@ -793,7 +883,7 @@ mod tests {
         for item in &doc.titles[0].items {
             assert_eq!(out.matches(&review_doc::question(item)).count(), 1, "{out}");
         }
-        assert!(out.contains("File it now?  y yes   n not yet   x discard the job\n"), "{out}");
+        assert!(out.contains(&format!("{FILE_IT_NOW_LINE}\n")), "{out}");
         assert!(!out.contains("(files as"), "a job with one title names no title: {out}");
         let one_line = format!("lazymkvctl review {JOB} --answer \"{KEY} sub 9=sdh\" --answer \"{KEY} sub 10=commentary\" --yes");
         assert!(out.ends_with(&format!("{one_line}\n{ACCEPTED}\n")), "{out}");
@@ -919,7 +1009,7 @@ mod tests {
     fn x_asks_for_the_word_discard() {
         let doc = rip_doc();
         let preview = json!({"bytes": 41_300_000_000u64, "files": 3});
-        let asked = "Discard deletes this job's rip: 3 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:";
+        let asked = "Discard deletes job made-up-1's rip: 3 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:";
         let (code, out, err, requests) =
             review(&["review", JOB], &doc, vec![Say::Ok(preview.clone()), Say::Ok(Value::Null)], "x\ndiscard\n", true);
         assert_eq!((code, err.as_str()), (0, ""));
@@ -992,7 +1082,10 @@ mod tests {
         let first = "Title t00-00801 (files as Made Up (2000) - 2160p.mkv):";
         let second = "Title t01-00802 (files as Made Up (2000) - Extra.mkv):";
         let question = review_doc::question(&doc.titles[0].items[0]);
-        assert_eq!(out.matches(first).count() + out.matches(second).count(), 2, "{out}");
+        // Each title line heads its questions, and again its answers before `File it now?` (ruling T32-E27).
+        assert_eq!(out.matches(first).count() + out.matches(second).count(), 4, "{out}");
+        let listed = format!("Your answers:\n{first}\n  track 9: SDH\n{second}\n  track 9: drop\n{FILE_IT_NOW_LINE}\n");
+        assert!(out.contains(&listed), "{out}");
         assert_eq!(out.matches(&question).count(), 2, "the same question is asked for both titles: {out}");
         let at = |text: &str, from: usize| from + out[from..].find(text).unwrap_or_else(|| panic!("{text}: {out}"));
         let named_first = at(&format!("{first}\n"), 0);
@@ -1096,20 +1189,22 @@ mod tests {
     #[test]
     fn confirm_discard_asks_with_the_size_and_takes_only_the_word() {
         let known = json!({"bytes": 41_300_000_000u64, "files": 12});
-        let asked = "Discard deletes this job's rip: 12 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:\n";
+        let asked = "Discard deletes job made-up-1's rip: 12 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:\n";
         assert_eq!(confirmed(known.clone(), "discard\n"), (true, asked.to_string()));
         assert_eq!(confirmed(known.clone(), "  discard \r\n").0, true);
         for typed in ["", "no\n", "Discard now\n", "\n", "y\n"] {
             assert_eq!(confirmed(known.clone(), typed), (false, asked.to_string()), "{typed:?}");
         }
         let zero = json!({"bytes": 0, "files": 0});
-        assert!(confirmed(zero, "").1.starts_with("Discard deletes this job's rip: 0 files, 0.0 GB. "));
+        assert!(confirmed(zero, "").1.starts_with("Discard deletes job made-up-1's rip: 0 files, 0.0 GB. "));
+        let one = json!({"bytes": 2_000_000_000u64, "files": 1});
+        assert!(confirmed(one, "").1.starts_with("Discard deletes job made-up-1's rip: 1 file, 2.0 GB. "));
     }
 
     #[test]
     fn confirm_discard_says_when_the_size_is_unknown() {
         let unknown = json!({"unknown": "the staging share did not answer: cable out"});
-        let asked = "Discard deletes this job's rip: its size is unknown (the staging share did not answer: cable out). \
+        let asked = "Discard deletes job made-up-1's rip: its size is unknown (the staging share did not answer: cable out). \
                      The disc would have to be ripped again. Type discard to go on:\n";
         assert_eq!(confirmed(unknown.clone(), "discard\n"), (true, asked.to_string()));
         assert_eq!(confirmed(unknown, "stop\n"), (false, asked.to_string()));
@@ -1128,7 +1223,7 @@ mod tests {
     }
 
     const ASKED_KNOWN: &str =
-        "Discard deletes this job's rip: 3 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:\n";
+        "Discard deletes job made-up-1's rip: 3 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:\n";
 
     #[test]
     fn discard_asks_with_the_size_and_sends_on_the_word() {
@@ -1175,7 +1270,7 @@ mod tests {
             discarding(&["discard", JOB], vec![Say::Ok(preview), Say::Ok(Value::Null)], "discard\n", true);
         assert_eq!((code, err.as_str()), (0, ""));
         assert_eq!(kinds(&requests), ["discard_preview", "discard"]);
-        assert!(out.starts_with("Discard deletes this job's rip: its size is unknown (the staging share did not answer: cable out). \
+        assert!(out.starts_with("Discard deletes job made-up-1's rip: its size is unknown (the staging share did not answer: cable out). \
                                  The disc would have to be ripped again. Type discard to go on:\n"), "{out}");
     }
 
@@ -1220,17 +1315,94 @@ mod tests {
         assert_eq!((code, err.as_str()), (4, "lazymkvctl: no engine is running\n"));
     }
 
+    /// Ruling T32-E29: Enter at `File it now?` is "not yet": nothing is sent, `Nothing was changed.`, exit 0. Any
+    /// other text that is not a choice is said so and the question is asked again.
     #[test]
     fn an_empty_line_at_file_it_now_does_not_approve() {
         let doc = subtitles_doc();
-        let (code, out, err, requests) =
-            review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "\n\n\ny\n", true);
+        let (code, out, err, requests) = review(&["review", JOB], &doc, vec![], "\n\n\n", true);
         assert_eq!((code, err.as_str()), (0, ""));
-        assert_eq!(out.matches("File it now?").count(), 2, "{out}");
-        assert_eq!(kinds(&requests), ["review", "review_action"]);
-        let (code, out, _, requests) = review(&["review", JOB], &doc, vec![], "\n\n\nn\n", true);
+        assert_eq!(out.matches(FILE_IT_NOW_LINE).count(), 1, "{out}");
+        assert_eq!(requests, vec![review_request()]);
+        assert!(out.ends_with(&format!("{FILE_IT_NOW_LINE}\nNothing was changed.\n")), "{out}");
+        let (code, out, _, requests) = review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "\n\nq\ny\n", true);
         assert_eq!(code, 0);
-        assert_eq!(out.matches("File it now?").count(), 2, "{out}");
+        assert_eq!(out.matches(FILE_IT_NOW_LINE).count(), 2, "{out}");
+        assert_eq!(out.matches("That is not one of the choices.").count(), 1, "{out}");
+        assert_eq!(kinds(&requests), ["review", "review_action"]);
+    }
+
+    /// Ruling T32-E27 (design 6.3): before `File it now?` the answers that change an item are listed, each named as
+    /// its question names it, with the choice in the question's own words.
+    #[test]
+    fn the_answers_are_listed_before_the_question() {
+        let doc = subtitles_doc();
+        let (code, out, err, _) = review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "s\nc\ny\n", true);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let listed = format!("Your answers:\n  track 9: SDH\n  track 10: commentary (dropped)\n{FILE_IT_NOW_LINE}\n");
+        assert!(out.contains(&listed), "{out}");
+        assert!(!out.contains("Your answers change nothing"), "{out}");
+        // An answer equal to how the item stands is not listed.
+        let (_, out, _, _) = review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "r\nd\ny\n", true);
+        assert!(out.contains(&format!("Your answers:\n  track 10: drop\n{FILE_IT_NOW_LINE}\n")), "{out}");
+    }
+
+    /// Ruling T32-E27: when no answer changes an item, the one sentence says so before the question.
+    #[test]
+    fn answers_that_change_nothing_say_so() {
+        let doc = subtitles_doc();
+        let (code, out, err, _) = review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "\nr\ny\n", true);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let said = format!("Your answers change nothing: the job would file as it stands.\n{FILE_IT_NOW_LINE}\n");
+        assert!(out.contains(&said), "{out}");
+        assert!(!out.contains("Your answers:"), "{out}");
+    }
+
+    /// Ruling T32-E26: a collision left unanswered is said before `File it now?`, and after the engine accepts the
+    /// approval the line says the job will be held again, in place of the accepted sentence; the one-line form says
+    /// the same. An answered collision changes nothing of this.
+    #[test]
+    fn an_unanswered_collision_is_said_before_and_after_filing() {
+        let doc = collision_doc();
+        let before = format!("Not answered: the file at {FINAL}. Filing now would hold the job again.\n{FILE_IT_NOW_LINE}\n");
+        let after = format!("Accepted. The job will be held again until the file at {FINAL} is answered.\n");
+        let (code, out, err, requests) = review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "\ny\n", true);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(kinds(&requests), ["review", "review_action"]);
+        assert!(out.contains(&before), "{out}");
+        assert!(out.ends_with(&after), "{out}");
+        assert!(!out.contains(ACCEPTED), "{out}");
+        // The one-line form with --yes.
+        let (code, out, _, _) = review(&["review", JOB, "--yes"], &doc, vec![Say::Ok(Value::Null)], "", false);
+        assert_eq!((code, out), (0, after.clone()));
+        // Answered, the ordinary sentence.
+        let (code, out, _, _) = review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "k\ny\n", true);
+        assert_eq!(code, 0);
+        assert!(!out.contains("Not answered") && out.ends_with(&format!("{ACCEPTED}\n")), "{out}");
+    }
+
+    /// A second `--answer` for one item (its full id and its short id count as one) is refused before anything is
+    /// sent, in core's words for an item named twice.
+    #[test]
+    fn the_same_item_answered_twice_is_refused() {
+        let doc = subtitles_doc();
+        let (first, second) = (format!("{KEY} sub 9=sdh"), "sub 9=drop");
+        let argv = ["review", JOB, "--answer", &first, "--answer", second, "--yes"];
+        let (code, out, err, requests) = review(&argv, &doc, vec![], "", false);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("lazymkvctl review: error: the answers name t00-00801 sub 9 twice"), "{err}");
+        assert_eq!(requests, vec![review_request()], "only the document was asked for");
+    }
+
+    /// On a job with several titles a short id is refused with a hint to give the title key.
+    #[test]
+    fn a_short_id_on_a_job_with_several_titles_asks_for_the_title_key() {
+        let doc = two_titles_doc();
+        let (code, out, err, requests) = review(&["review", JOB, "--answer", "sub 9=sdh", "--yes"], &doc, vec![], "", false);
+        assert_eq!((code, out.as_str()), (2, ""));
+        let said = "lazymkvctl review: error: no item \"sub 9\" on this sheet (this job has several titles: give the title \
+                    key, as in t00-00801 sub 9)";
+        assert!(err.contains(said), "{err}");
         assert_eq!(requests, vec![review_request()]);
     }
 
