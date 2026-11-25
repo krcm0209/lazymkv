@@ -7,6 +7,12 @@ went through the calls added while this document was written, and the build orde
 part 3); two of those answers replace what the document first said. The rest is the designer's, listed in part 17.
 Nothing is built. The owner chose the order: the first pull request now, the engine's after phase 3's fix-after.
 
+Redirected on 2026-11-24, after the first pull request was built (#42): the owner said that a map made ahead of time
+cannot be the routine way, and that lazymkv is to make the map itself during the job
+(`docs/superpowers/specs/2026-11-24-menu-crawler-design.md`). Parts 7, 8, 10.1 and 10.2 here (the maps folder,
+publishing, the lookup on a share) are parked, and the engine's pull request is not planned from this document as it
+stands.
+
 "The spec" is `docs/superpowers/specs/2026-10-04-lazymkv-design.md`; "the menu maps design" is
 `docs/superpowers/specs/2026-11-17-menu-maps-design.md`; "the format" is `docs/menu-maps/format.md`; "the phase 2
 design" is `docs/superpowers/specs/2026-10-21-phase-2-engine-design.md`; "the phase 3 design" is
