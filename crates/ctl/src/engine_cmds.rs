@@ -17,11 +17,11 @@ use crate::{argument_error, relayed_paths, retune_spec, Env, NOT_ELEVATED, NOT_R
 
 /// Design part 9.6's engine commands as (name, synopsis after "usage: lazymkvctl "), in its table order.
 /// Def: T28. Use: T28.
-pub(crate) const ENGINE_COMMANDS: [(&str, &str); 11] = [
+pub(crate) const ENGINE_COMMANDS: [(&str, &str); 12] = [
     ("status", "status"), ("watch", "watch"), ("history", "history [--before JOB]"),
     ("settings", "settings get | settings set FILE"), ("secret", "secret set NAME"), ("selftest", "selftest"),
     ("retry", "retry JOB"), ("cancel", "cancel JOB"), ("rip-again", "rip-again JOB"), ("approve", "approve JOB"),
-    ("stop", "stop [--force]"),
+    ("stop", "stop [--force]"), ("review", "review JOB [--all] [--json] [--answer ID=WORD ...] [--yes]"),
 ];
 
 /// The argument error of a request whose line, newline excluded, is longer than MAX_LINE_BYTES (engine.md "Pull
@@ -29,7 +29,7 @@ pub(crate) const ENGINE_COMMANDS: [(&str, &str); 11] = [
 /// text where the engine would have closed the connection (exit 4). Def: T4-14. Use: T4-14.
 pub(crate) const REQUEST_TOO_LONG: &str = "the request is longer than 4 MiB, the most the engine reads in one line";
 /// The message of exit 4 when the connection closes before the answer (T28-d).
-const CLOSED: &str = "lazymkvctl: the engine closed the connection before replying";
+pub(crate) const CLOSED: &str = "lazymkvctl: the engine closed the connection before replying";
 /// The message of exit 1 when `selftest`'s `ok` came with no `selftest_result` push before it (T28-i).
 const NO_SELFTEST: &str = "lazymkvctl: the engine replied without a self-test result";
 /// The message of exit 4 when a relayed command's `ok` carries no integer `exit_code`.
@@ -265,7 +265,7 @@ fn stdin_value(stdin: &mut dyn Read) -> Result<String, String> {
 }
 
 /// The connection to the engine, or the message of exit 4 when there is none.
-fn open(connector: Option<&dyn IpcConnector>) -> Result<IpcStream, &'static str> {
+pub(crate) fn open(connector: Option<&dyn IpcConnector>) -> Result<IpcStream, &'static str> {
     let connector = connector.ok_or(NO_TRANSPORT)?;
     connector.connect().map_err(|error| match error {
         ConnectError::NotRunning => NOT_RUNNING,
@@ -396,7 +396,7 @@ fn answered(answer: &Answer, result: Value, selftest: Option<Value>, out: &mut d
 }
 
 /// An `error` reply as T28-e prints it: `lazymkvctl: <message>`, then `lazymkvctl: <key>: <problem>` per problem.
-fn print_refusal(err: &mut dyn Write, message: &str, problems: &[SettingsProblem]) {
+pub(crate) fn print_refusal(err: &mut dyn Write, message: &str, problems: &[SettingsProblem]) {
     let _ = writeln!(err, "lazymkvctl: {message}");
     for problem in problems {
         let _ = writeln!(err, "lazymkvctl: {}: {}", problem.key, problem.problem);
@@ -404,7 +404,7 @@ fn print_refusal(err: &mut dyn Write, message: &str, problems: &[SettingsProblem
 }
 
 /// `value` in lazymkvctl's one JSON style, indent 1 and ASCII, and a newline (T28-a).
-fn print_json(out: &mut dyn Write, value: &Value) {
+pub(crate) fn print_json(out: &mut dyn Write, value: &Value) {
     let _ = writeln!(out, "{}", dumps(value, Style::INDENT1_ASCII));
 }
 
@@ -430,7 +430,7 @@ mod tests {
         let mut input = stdin;
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let argv: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
-        let code = run(&argv, Env { ctx: &ctx, connector, stdin: &mut input, out: &mut out, err: &mut err });
+        let code = run(&argv, Env { ctx: &ctx, connector, stdin: &mut input, out: &mut out, err: &mut err, interactive: false });
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
     }
 

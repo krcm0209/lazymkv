@@ -12,7 +12,9 @@ fn main() {
     #[cfg(not(windows))]
     let connector: Option<&dyn lazymkv_platform::IpcConnector> = None;
     let (stdin, stdout, stderr) = (std::io::stdin(), std::io::stdout(), std::io::stderr());
+    // `review` asks its questions only at a terminal (phase 3 design, part 6.3).
+    let interactive = std::io::IsTerminal::is_terminal(&stdin);
     let code = lazymkv_ctl::run(&argv, lazymkv_ctl::Env { ctx: &ctx, connector, stdin: &mut stdin.lock(),
-        out: &mut stdout.lock(), err: &mut stderr.lock() });
+        out: &mut stdout.lock(), err: &mut stderr.lock(), interactive });
     std::process::exit(code);
 }

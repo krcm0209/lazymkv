@@ -458,7 +458,7 @@ mod retune_jobs {
             argv.extend(["--spec".to_string(), SPEC.to_string()]);
             let (mut out, mut err) = (Vec::new(), Vec::new());
             let code = run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out,
-                                        err: &mut err });
+                                        err: &mut err, interactive: false });
             let printed = (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap());
             assert_eq!(printed, (0, "relay retune line 1\n".to_string(), String::new()), "{extra:?}");
             let mut expected =
@@ -692,7 +692,7 @@ fn ctl_plan_job_prints_the_childs_lines_and_exits_with_its_code() {
     let argv: Vec<String> = ["plan", "--job", id.as_str(), "--relay-exit-3"].map(str::to_string).into();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code =
-        run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out, err: &mut err });
+        run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out, err: &mut err, interactive: false });
     let printed = (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap());
     assert_eq!(printed, (3, "relay plan line 1\nrelay plan line 2\n".to_string(), "relay plan warning\n".to_string()));
 }
@@ -711,7 +711,7 @@ fn ctl_plan_job_sends_a_relative_settings_path_made_absolute_against_its_own_fol
     let argv: Vec<String> = ["plan", "--job", id.as_str(), "--settings", "alt.json"].map(str::to_string).into();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code =
-        run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out, err: &mut err });
+        run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut &b""[..], out: &mut out, err: &mut err, interactive: false });
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
     let mut expected = built(&["plan".to_string(), text(job.clone())], &job, &REPLAY);
     expected.extend(["--settings", "alt.json", "--settings"].map(str::to_string));

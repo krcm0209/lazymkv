@@ -9,7 +9,7 @@ fn words(text: &[&str]) -> Vec<String> { text.iter().map(|w| w.to_string()).coll
 fn ctl(ctx: &Ctx, argv: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let mut stdin: &[u8] = b"";
-    let code = run(&words(argv), Env { ctx, connector: None, stdin: &mut stdin, out: &mut out, err: &mut err });
+    let code = run(&words(argv), Env { ctx, connector: None, stdin: &mut stdin, out: &mut out, err: &mut err, interactive: false });
     (code, out, err)
 }
 

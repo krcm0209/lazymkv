@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 mod engine_cmds;
 pub mod licenses;
 pub mod models;
+mod review_cmd;
 
 /// What lazymkvctl reads and writes: the dev context, the engine connector (the named pipe's client on Windows, design
 /// part 3.3; None on Linux and macOS, S38), and the three streams (design parts 9.5, 9.6). Def: T27, T3-12.
@@ -26,6 +27,8 @@ pub struct Env<'a> {
     pub out: &'a mut dyn Write,
     /// Standard error.
     pub err: &'a mut dyn Write,
+    /// Whether standard input is a terminal: only then does `review` ask its questions (phase 3 design, part 6.3).
+    pub interactive: bool,
 }
 
 /// The commands lazymkvctl runs itself through lazymkv-dev's dispatcher (design part 9.5, P23). Def: T27. Use: T27, T28.
@@ -98,6 +101,9 @@ pub fn run(argv: &[String], env: Env) -> i32 {
     }
     if LOCAL_COMMANDS.contains(&name.as_str()) {
         return local(argv, env);
+    }
+    if name == "review" {
+        return review_cmd::run(argv, env);
     }
     if engine_cmds::ENGINE_COMMANDS.iter().any(|(command, _)| command == name) {
         return engine_cmds::run(argv, env);

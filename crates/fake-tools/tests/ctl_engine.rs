@@ -32,7 +32,7 @@ fn ctl(harness: &Harness, argv: &[&str], stdin: &[u8]) -> (i32, String, String) 
     let mut input = stdin;
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let argv: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
-    let code = run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut input, out: &mut out, err: &mut err });
+    let code = run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut input, out: &mut out, err: &mut err, interactive: false });
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
 
