@@ -18,7 +18,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::audio::rule::RULE_VERSION;
-use lazymkv_core::decision::{same_path_reviews, Disposition, FileDecision, COPY_LABEL_MAX, KEEP_BOTH_COPY};
+use lazymkv_core::decision::{remember, same_path_reviews, Disposition, FileDecision, COPY_LABEL_MAX, KEEP_BOTH_COPY};
 use lazymkv_core::disc::{disc, same_scan_title, Disc, Title};
 use lazymkv_core::ipc::{job_summary, OutputStream, CANCELLED};
 use lazymkv_core::job::{classify_title_failure, decision_done, Action, Event, Failure, FailureClass, State, Tool};
@@ -30,7 +30,7 @@ use lazymkv_core::profile::{
 };
 use lazymkv_core::record::{FiledFile, JobRecord, TitleRecord};
 use lazymkv_core::recording::files::{FfprobeStreams, MkvmergeIdent, Selection};
-use lazymkv_core::remembered::Collision;
+use lazymkv_core::remembered::{Collision, Overrides, Remembered};
 use lazymkv_core::review::{sorted_unique, Note, ReviewReason};
 use lazymkv_core::robot::lines::RunSummary;
 use lazymkv_core::robot::{parse, Scan};
@@ -2072,6 +2072,9 @@ impl Step<'_> {
     /// final path holding no file. A root that does not answer, or any other metadata error, gives FileFailed
     /// { Unknown } naming the title, the root or path, and the error (design part 5.2 keeps the class; review round
     /// 1, V7 and RR1-9).
+    ///
+    /// Once every title is filed, `remember_answers` writes the job's answers as the disc's remembered decision (phase 3
+    /// design, part 6.6); it feeds no event and never changes the outcome.
     fn file(&self) -> Outcome {
         let failed = |failure| Event::FileFailed { failure };
         let plan = self.job_plan(failed)?;
@@ -2189,7 +2192,37 @@ impl Step<'_> {
             }
             self.record_filed(key, &path.path)?;
         }
+        self.remember_answers(plan, &answers);
         Ok(event(Event::FileDone))
+    }
+
+    /// Phase 3 design, part 6.6 (Def: P3-T12): once every title is filed, the job's review answers `answers` (any answer
+    /// at all, a collision answer included: ruling T32-E14) become the disc's remembered decision,
+    /// `<data>/remembered/<fingerprint>.json`, which a later job of the same disc applies. `remember` of the plan, the
+    /// scan the plan was made from and the titles' decisions builds it, `Store::write_remembered` replaces the file.
+    /// No answer writes nothing. An Err of either is the one job.log line `remember: <error>` and nothing else: the
+    /// job is filed whether or not the file is written, and no event or record edit follows from it.
+    fn remember_answers(&self, plan: &Plan, answers: &Overrides) {
+        if answers.is_empty() {
+            return;
+        }
+        let built = self.remembered_decision(plan, answers);
+        if let Err(error) = built.and_then(|remembered| {
+            self.steps.store.write_remembered(&remembered).map_err(|error| error.to_string())
+        }) {
+            self.log(&format!("remember: {error}"));
+        }
+    }
+
+    /// `remember`'s file for the job's decisions with `answers`: the titles' decisions in the plan's order.
+    fn remembered_decision(&self, plan: &Plan, answers: &Overrides) -> Result<Remembered, String> {
+        let (_, typed) = self.planned_scan()?;
+        let decisions: Vec<FileDecision> = plan
+            .titles
+            .iter()
+            .filter_map(|planned| self.decided(&planned.key).ok().map(|(decision, _)| decision.clone()))
+            .collect();
+        remember(&self.job.record.fingerprint, &typed, plan, &decisions, answers)
     }
 
     /// A collision found at filing for the title `key` at `path` (phase 3 design, part 6.7; LIB-8 and L7): the job.log

@@ -1996,6 +1996,132 @@ fn review_of_a_job_held_for_a_folder_that_would_not_open_says_nothing_is_there()
     assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
 }
 
+// ---- Remember after filing (phase 3 design, part 6.6; Task 12; ruling T32-E14) ----
+
+/// A job held for a file at its final path with both English subtitle streams kept, and the answer that drops the
+/// first of them: the held job's ID, the dropped stream's scan title and number, and the answer. The colliding file is
+/// removed, so the approval files, and the stand-in's identification of the remuxed file holds the one subtitle
+/// track that stays.
+fn held_two_subs_with_a_drop(h: &Harness) -> (String, u32, u32, Value) {
+    let id = held(h);
+    let title = h.record(&id).titles[0].clone();
+    let decision = title.decision.expect("the held title was decided");
+    assert_eq!(decision.subtitles.kept.len(), 2, "both subtitle streams are kept before the answer");
+    let (dropped, other) = (&decision.subtitles.kept[0], &decision.subtitles.kept[1]);
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/partial-ident.json");
+    let mut ident: Value = serde_json::from_str(&fs::read_to_string(base).unwrap()).unwrap();
+    let sdh = other.role == lazymkv_core::tracks::SubtitleRole::Sdh;
+    ident["tracks"].as_array_mut().unwrap().push(json!({"id": 2, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+        "language": "eng", "track_name": other.name, "forced_track": other.forced, "flag_hearing_impaired": sdh}}));
+    fs::write(h.tools().join("partial-ident.json"), ident.to_string()).unwrap();
+    fs::remove_file(final_path(h)).unwrap();
+    let answer = json!({"subtitles": [{"title": title.scan_title, "stream": dropped.stream, "action": "drop"}]});
+    (id, title.scan_title, dropped.stream, answer)
+}
+
+/// `<data>/remembered/<fingerprint>.json` of the stand-in disc.
+fn remembered_path(h: &Harness) -> PathBuf {
+    h.data().join("remembered").join(format!("{}.json", h.fingerprint("movie-direct")))
+}
+
+/// The signature of the scan's stream `stream` of title `title`, read from the job's scan the way the engine reads it.
+fn signature_in_scan(h: &Harness, id: &str, title: u32, stream: u32) -> lazymkv_core::remembered::StreamSignature {
+    let text = fs::read(h.job_dir(id).join("scan.txt")).unwrap();
+    let typed = lazymkv_core::disc::disc(&lazymkv_core::robot::parse(&String::from_utf8_lossy(&text))).unwrap();
+    let streams = &typed.title(title).unwrap().streams;
+    let index = streams.iter().position(|candidate| candidate.number == stream).unwrap();
+    lazymkv_core::remembered::signature(streams, index)
+}
+
+/// Phase 3 design, part 6.6: a job approved with an answer writes the disc's remembered decision when it files, with
+/// the dropped subtitle stream's signature and `drop`, and the file is the one the store reads (format v1, this disc).
+#[test]
+fn a_reviewed_job_is_remembered_when_it_files() {
+    let h = two_subs(&[], json!({}));
+    let (id, title, stream, answer) = held_two_subs_with_a_drop(&h);
+    assert!(!remembered_path(&h).exists());
+    approve_and_finish(&h, &id, answer);
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    let text = fs::read_to_string(remembered_path(&h)).unwrap();
+    let remembered: lazymkv_core::remembered::Remembered = serde_json::from_str(&text).unwrap();
+    assert_eq!(json_of(&remembered_path(&h))["format"], json!("lazymkv remembered v1"));
+    assert!(remembered.fingerprint.eq_ignore_ascii_case(&h.fingerprint("movie-direct")), "{text}");
+    assert_eq!(remembered.titles.len(), 1, "{text}");
+    let dropped = signature_in_scan(&h, &id, title, stream);
+    let drops: Vec<_> = remembered.titles[0]
+        .subtitles
+        .iter()
+        .filter(|entry| entry.action == lazymkv_core::remembered::SubtitleOverride::Drop)
+        .collect();
+    assert_eq!(drops.len(), 1, "{text}");
+    assert_eq!(drops[0].signature, dropped, "{text}");
+    assert_eq!(remembered.titles[0].subtitles.len(), 2, "the stream that stays is remembered too: {text}");
+    let log = job_log(&h, &id);
+    assert!(!log.contains("remember:"), "{log}");
+}
+
+/// Phase 3 design, part 6.6: a second rip of the same disc applies the remembered answers and files without a hold,
+/// with no needs_review notification of its own.
+#[test]
+fn the_same_disc_ripped_again_files_without_a_hold() {
+    let h = two_subs(&[], json!({}));
+    let (id, _, _, answer) = held_two_subs_with_a_drop(&h);
+    approve_and_finish(&h, &id, answer);
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert!(remembered_path(&h).is_file());
+    // The first job's filed file would collide with the second job's path.
+    fs::remove_file(final_path(&h)).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.ok("rip_again", json!({"job": id})), Value::Null);
+    let earlier = h.notifications().len();
+    h.remove("tok0");
+    h.insert("tok0", "movie-direct");
+    let second = id.replace("-1", "-2");
+    h.wait("the second job Filed", |h| h.job_ids().contains(&second) && h.state_of(&second) == "Filed");
+    h.settle();
+    assert_eq!(h.state_of(&second), "Filed", "{:?}", h.record(&second).message);
+    let notified = h.notifications().split_off(earlier);
+    assert!(notified.iter().all(|sent| !matches!(sent.event, NotifyEvent::NeedsReview { .. })), "{notified:?}");
+    assert!(!h.transitions(&second).iter().any(|line| line.new.as_str() == "NeedsReview"));
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"lazymkv-test-mkv");
+    // The remembered answer was applied: the second job keeps one subtitle track, as the first did after its drop.
+    let decision = h.record(&second).titles[0].decision.clone().unwrap();
+    assert_eq!(decision.subtitles.kept.len(), 1, "{decision:?}");
+    assert!(!h.job_dir(&second).join("review.json").exists());
+}
+
+/// Ruling T32-E14: a job approved with no answer writes no remembered file.
+#[test]
+fn a_job_approved_unchanged_writes_no_remembered_file() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    fs::remove_file(final_path(&h)).unwrap();
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert!(!h.data().join("remembered").exists(), "{:?}", files_under(h.data()));
+    assert!(!job_log(&h, &id).contains("remember:"));
+}
+
+/// Design part 6.6: a remembered file that cannot be written (a plain file stands where the folder should be) is one
+/// `remember: <error>` line in job.log and never fails the job.
+#[test]
+fn a_remembered_file_that_cannot_be_written_is_logged_and_the_job_stays_filed() {
+    let h = two_subs(&[], json!({}));
+    let (id, _, _, answer) = held_two_subs_with_a_drop(&h);
+    let blocker = h.data().join("remembered");
+    fs::write(&blocker, b"not a folder").unwrap();
+    approve_and_finish(&h, &id, answer);
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&blocker).unwrap(), b"not a folder");
+    let log = job_log(&h, &id);
+    let lines: Vec<&str> = log.lines().filter(|line| line.starts_with("remember: ")).collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(!lines[0].contains(SENTINEL));
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"lazymkv-test-mkv");
+    assert!(h.transitions(&id).iter().all(|line| line.new.as_str() != "Failed"));
+}
+
 #[test]
 fn a_first_decide_with_a_stale_copy_it_cannot_fetch_waits_for_its_lookup() {
     let h = harness(&[], json!({}));
