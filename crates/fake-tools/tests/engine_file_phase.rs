@@ -1463,27 +1463,69 @@ fn keep_both_files_under_the_copy_label() {
     assert!(!replaced_of(&h, &id).exists());
 }
 
-/// Phase 3 design, part 6.7 (Open point 39): "keep both" with the copy-labelled path taken too never replaces that
-/// file: the rename meets it and holds the job again with that path.
+/// `<library>/<film folder>/<film folder> - 1080p <n>.mkv`, the stand-in film's copy-labelled path `n` (phase 3 design,
+/// part 6.7).
+fn copy_path(h: &Harness, n: u32) -> PathBuf {
+    let folder = "Synthetic Movie (2001) {tmdb-900001}";
+    h.library().join(folder).join(format!("{folder} - 1080p {n}.mkv"))
+}
+
+/// Phase 3 design, part 6.7 (P3-T11b): "keep both" with the copy-2 path taken too files under the next free copy
+/// label, copy 3, and leaves both earlier files as they were.
 #[test]
-fn keep_both_with_the_copy_label_taken_too_holds_the_job_again() {
+fn keep_both_with_copy_2_taken_files_as_copy_3() {
     let h = harness(&[], json!({}));
     let id = held(&h);
-    let folder = "Synthetic Movie (2001) {tmdb-900001}";
-    let copy = h.library().join(folder).join(format!("{folder} - 1080p 2.mkv"));
+    let (copy, next) = (copy_path(&h, 2), copy_path(&h, 3));
     fs::write(&copy, b"second").unwrap();
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "keep_both"}]}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(PathBuf::from(decided_path(&h, &id)), next);
+    assert_eq!(fs::read(&next).unwrap(), b"lazymkv-test-mkv");
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
+    assert_eq!(fs::read(&copy).unwrap(), b"second");
+    assert_eq!(h.record(&id).titles[0].filed.as_ref().map(|filed| PathBuf::from(&filed.path)), Some(next));
+    assert!(!partial_of(&h, &id).exists());
+}
+
+/// Phase 3 design, part 6.7 (P3-T11b, LIB-8's hook): a file written at the copy-2 path after a keep-both Decide and
+/// before the rename holds the job with path_collision and is kept; the second approval, with the keep-both answer
+/// still in review.json, files under copy 3.
+#[test]
+fn a_file_that_appears_at_the_copy_path_before_the_rename_holds_the_job() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let (copy, next) = (copy_path(&h, 2), copy_path(&h, 3));
+    let late = copy.clone();
+    h.on_spawn(&["-J", ".partial"], move || {
+        if !late.exists() {
+            fs::write(&late, b"late").unwrap();
+        }
+    });
+    let answer = json!({"collision": [{"path": decided_path(&h, &id), "action": "keep_both"}]});
     let mut c = Client::open(&h);
     c.snapshot();
-    let answer = json!({"collision": [{"path": decided_path(&h, &id), "action": "keep_both"}]});
     c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer}));
     let collided = |h: &Harness| events(h, &id).iter().any(|e| matches!(e, Event::FileCollided { .. }));
     h.wait("FileCollided", collided);
     h.settle();
-    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate });
-    assert!(h.record(&id).collisions.iter().any(|path| PathBuf::from(path) == copy));
-    assert_eq!(fs::read(&copy).unwrap(), b"second");
-    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
+    // The hold at Decide recorded the plain path first; the hold at filing adds the copy-2 path.
+    let record = h.record(&id);
+    assert_eq!(record.state, State::NeedsReview { held: Held::DispositionGate });
+    let held_by =
+        |e: &Event| matches!(e, Event::FileCollided { reasons } if reasons.contains(&ReviewReason::PathCollision));
+    assert!(events(&h, &id).iter().any(held_by), "{:?}", events(&h, &id));
+    assert!(record.titles[0].decision.as_ref().unwrap().reviews.contains(&ReviewReason::PathCollision));
+    assert!(record.collisions.iter().any(|path| PathBuf::from(path) == copy), "{:?}", record.collisions);
     assert!(!partial_of(&h, &id).exists());
+    assert_eq!(fs::read(&copy).unwrap(), b"late");
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
+    assert!(!next.exists());
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&next).unwrap(), b"lazymkv-test-mkv");
+    assert_eq!(fs::read(&copy).unwrap(), b"late");
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
 }
 
 /// Phase 3 design, part 6.7: "replace" moves the existing file into `<staging>/<job>/replaced/`, byte for byte under

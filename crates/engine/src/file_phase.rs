@@ -415,6 +415,22 @@ fn namer_cut(name: &str, film: &str, style: EditionStyle) -> Option<Cut> {
     Some(Cut::Edition(edition.to_string()))
 }
 
+/// The film's folder of the namer's path (Ruling W22, R-B1): `<root>/<components[0]>`, or `path.path` without
+/// components. Def: T24, P3-T11b. Use: T24, P3-T11b.
+fn film_folder(path: &NamedPath) -> PathBuf {
+    match path.components.first() {
+        Some(film) => Path::new(&path.root).join(film),
+        None => PathBuf::from(&path.path),
+    }
+}
+
+/// `the library folder <folder> could not be read: <error>`, `<folder>` being `path`'s film folder (`film_folder`):
+/// the one sentence for a library read that fails other than NotFound, `library_facts`' and `title_doc`'s probe of a
+/// copy-labelled path's (Ruling W22; phase 3 design, part 6.7). Def: T24, P3-T11b. Use: T24, P3-T11b.
+pub(crate) fn library_unread(path: &NamedPath, error: &io::Error) -> String {
+    format!("the library folder {} could not be read: {error}", film_folder(path).display())
+}
+
 /// LibraryFacts at the namer's path (design part 6.4): `path_collision` when `path.path` exists, and the edition facts
 /// from one listing of the film's folder `<root>/<components[0]>` (Ruling R24.5); a missing folder gives no facts.
 /// The names are read in byte order and the first wins a key: a plain copy gives `theatrical` the name "", and an
@@ -427,11 +443,8 @@ fn namer_cut(name: &str, film: &str, style: EditionStyle) -> Option<Cut> {
 /// reads as absent, as before, so inputs that read without error give the same facts and decide's output is unchanged.
 /// Def: T24, its errors T3-18. Use: T24.
 pub(crate) fn library_facts(path: &NamedPath, style: EditionStyle) -> Result<LibraryFacts, String> {
-    let folder = match path.components.first() {
-        Some(film) => Path::new(&path.root).join(film),
-        None => PathBuf::from(&path.path),
-    };
-    let unread = |error: io::Error| format!("the library folder {} could not be read: {error}", folder.display());
+    let folder = film_folder(path);
+    let unread = |error: io::Error| library_unread(path, &error);
     let path_collision = match fs::metadata(&path.path) {
         Ok(_) => true,
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -933,6 +946,7 @@ mod tests {
                 folder_has_edition_named_file: true,
                 earlier_edition_names: [("extended cut".to_string(), "Extended Cut".to_string())].into(),
                 path_collision: false,
+                copy_labels_taken: 0,
             }
         );
         assert_eq!(library_facts(&path, EditionStyle::Combined).unwrap(), LibraryFacts::default());

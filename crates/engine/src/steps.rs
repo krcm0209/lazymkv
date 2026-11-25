@@ -18,7 +18,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::audio::rule::RULE_VERSION;
-use lazymkv_core::decision::{same_path_reviews, Disposition, FileDecision};
+use lazymkv_core::decision::{same_path_reviews, Disposition, FileDecision, COPY_LABEL_MAX, KEEP_BOTH_COPY};
 use lazymkv_core::disc::{disc, same_scan_title, Disc, Title};
 use lazymkv_core::ipc::{job_summary, OutputStream, CANCELLED};
 use lazymkv_core::job::{classify_title_failure, decision_done, Action, Event, Failure, FailureClass, State, Tool};
@@ -41,7 +41,7 @@ use lazymkv_core::ustar::{ustar_entry, DEFAULT_PROFILE_NAME};
 use lazymkv_core::verify::{
     failure_reviews, removed_scan_streams, rip_title, selected_streams, verify_final, verify_rip, VerifyReport,
 };
-use lazymkv_dev::cmd::decide::{decide_doc, DecideDoc, DecisionEntry, EngineDecideDoc};
+use lazymkv_dev::cmd::decide::{decide_doc, DecideDoc, DecideInputs, DecisionEntry, EngineDecideDoc};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_platform::{
@@ -57,8 +57,8 @@ use serde_json::{json, Value};
 
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
-    engine_decide_inputs, library_facts, lookup_word, move_aside, partial_path, read_back_inputs, refetch_stale,
-    refreshed_plan, replaced_dir, staged_text, OwedCheck, Refetched,
+    engine_decide_inputs, library_facts, library_unread, lookup_word, move_aside, partial_path, read_back_inputs,
+    refetch_stale, refreshed_plan, replaced_dir, staged_text, OwedCheck, Refetched,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
@@ -1696,8 +1696,10 @@ impl Step<'_> {
     /// facts, then rendered again with the `library_facts` of the path the last render chose while they differ from
     /// the facts it was rendered with (Ruling R24.c2: the facts can lead to an edition-named path, whose own facts may
     /// hold a collision). The film folder does not change with the edition, so this settles at once; facts seen before
-    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs, the library facts
-    /// (`library_facts`' error, Ruling W22) or the decision could not be made.
+    /// end it too. A keep-both answer for the plain path whose facts were read ends it at the copy-labelled path decide
+    /// gives from that plain path, through `free_copy`'s probe for the next free copy label (phase 3 design, part 6.7;
+    /// P3-T11b). The decision fed is the document's (Ruling R24.3). Err is the reason the inputs, the library facts
+    /// (`library_facts`' error, Ruling W22, or `free_copy`'s) or the decision could not be made.
     fn title_doc(&self, ctx: &Ctx, plan: &Plan, key: &str) -> Result<DecideDoc, String> {
         let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
         let mut inputs = match &probes {
@@ -1718,14 +1720,17 @@ impl Step<'_> {
                 DecisionEntry::Results(found) => found.decision.path.clone(),
                 DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
             };
-            // Phase 3 design, part 6.7 (P3-T11): a keep-both answer for the colliding path whose facts were read gives
-            // the copy-labelled path, which is no new edition, so those facts stand; reading the copy's own facts
-            // would decide the plain path again and never settle.
+            // Phase 3 design, part 6.7 (P3-T11, P3-T11b): a keep-both answer for the colliding path whose facts were
+            // read gives a copy-labelled path, which is no new edition, so those facts stand; reading the copy's own
+            // facts would decide the plain path again and never settle. Only a path the keep-both rule made from that
+            // plain path goes to the probe for the next free copy label.
             let answered = |read: &String| inputs.overrides.as_ref().and_then(|given| given.collision_for(read));
             let kept_both =
                 inputs.library.path_collision && read_at.as_ref().and_then(answered) == Some(Collision::KeepBoth);
-            if kept_both && path.as_ref().map(|named| &named.path) != read_at.as_ref() {
-                return Ok(doc);
+            if let (true, Some(named), Some(plain)) = (kept_both, &path, &read_at) {
+                if named.path != *plain && plain_path_of(&mut inputs).as_ref() == Some(plain) {
+                    return free_copy(&mut inputs, doc, named.clone());
+                }
             }
             let style = self.job.settings.edition_style;
             read_at = path.as_ref().map(|named| named.path.clone());
@@ -2291,6 +2296,51 @@ impl Step<'_> {
             }
         }
         Ok(StepResult { event: None, message: None })
+    }
+}
+
+/// The path of `doc`'s decision; None when it built none or the decision was skipped.
+fn path_of_doc(doc: &DecideDoc) -> Option<NamedPath> {
+    match &doc.decision {
+        DecisionEntry::Results(found) => found.decision.path.clone(),
+        DecisionEntry::Skipped { .. } => None,
+    }
+}
+
+/// The plain final path decide gives with `inputs`' library facts but no collision (phase 3 design, part 6.7): the
+/// path keep both labels, since the keep-both rule is the only place `path_collision` changes the path. `inputs` is
+/// as it was on return. Def: P3-T11b. Use: `title_doc`.
+fn plain_path_of(inputs: &mut DecideInputs) -> Option<String> {
+    let facts = inputs.library.clone();
+    inputs.library = LibraryFacts { path_collision: false, copy_labels_taken: 0, ..facts.clone() };
+    let plain = path_of_doc(&decide_doc(inputs)).map(|named| named.path);
+    inputs.library = facts;
+    plain
+}
+
+/// Phase 3 design, part 6.7 ("Keep both" files under the next free copy label; P3-T11b): `doc` decides the
+/// copy-labelled path `copy` for a keep-both answer; `fs::symlink_metadata` looks at it, and while something stands
+/// there (a file, a folder, a link) `inputs.library.copy_labels_taken` grows by 1 and decide runs again, the plain
+/// path's other facts standing (no `library_facts` read of a copy path). NotFound gives the document deciding that
+/// path; with copy `COPY_LABEL_MAX` taken too it gives that last document, and the never-replacing rename then holds
+/// the job. Any other read error is `library_unread`'s sentence, as `library_facts` gives it (Ruling W22); a skipped
+/// decision is its sentence. It runs in the Decide step, never on the owner thread. Def: P3-T11b. Use: `title_doc`.
+fn free_copy(inputs: &mut DecideInputs, mut doc: DecideDoc, mut copy: NamedPath) -> Result<DecideDoc, String> {
+    loop {
+        match fs::symlink_metadata(&copy.path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(doc),
+            Err(error) => return Err(library_unread(&copy, &error)),
+            Ok(_) if KEEP_BOTH_COPY + inputs.library.copy_labels_taken >= COPY_LABEL_MAX => return Ok(doc),
+            Ok(_) => inputs.library.copy_labels_taken += 1,
+        }
+        doc = decide_doc(inputs);
+        copy = match &doc.decision {
+            DecisionEntry::Results(found) => match &found.decision.path {
+                Some(path) => path.clone(),
+                None => return Ok(doc),
+            },
+            DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
+        };
     }
 }
 

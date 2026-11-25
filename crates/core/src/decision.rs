@@ -163,8 +163,14 @@ pub struct FileDecision {
     pub disposition: Disposition,
 }
 
-/// Spec 11's Resolve collision "keep both": the new file's distinguishing label (`- 2160p 2`).
-const KEEP_BOTH_COPY: u32 = 2;
+/// Spec 11's Resolve collision "keep both": the first distinguishing label (`- 2160p 2`); phase 3 design, part 6.7
+/// takes the next free one, `KEEP_BOTH_COPY + LibraryFacts.copy_labels_taken`. Def: T13, P3-T11b. Use: T13, P3-T11b
+/// (`title_doc`'s probe).
+pub const KEEP_BOTH_COPY: u32 = 2;
+
+/// Phase 3 design, part 6.7: the highest copy number the engine's `title_doc` tries for "keep both"; with that path
+/// taken too, the never-replacing rename holds the job. Def: P3-T11b. Use: P3-T11b.
+pub const COPY_LABEL_MAX: u32 = 99;
 
 /// 6.4 step 11 and 8.8: decide_audio (with the wanted languages of the identity the job is filed under: whenever that
 /// identity's TMDb record is given, `wanted_languages` of the record's original language, so a record fetched after
@@ -176,8 +182,9 @@ const KEEP_BOTH_COPY: u32 = 2;
 /// record's kind does not match the role (a movie record for a feature, a show record for an episode); resolution from
 /// title.video_height, the edition through edition_names and edition_label; a planned Episode with season None builds no
 /// path (path None) and adds tv_unmapped;
-/// a Resolve collision answer (`overrides.collision`) for the decision's own plain final path, KeepBoth (copy Some(2)
-/// while the collision exists) or Replace, leaves path_collision unraised, and an answer for any other path resolves
+/// a Resolve collision answer (`overrides.collision`) for the decision's own plain final path, KeepBoth (copy
+/// Some(2 + library.copy_labels_taken) while the collision exists: the next free copy label, phase 3 design, part 6.7)
+/// or Replace, leaves path_collision unraised, and an answer for any other path resolves
 /// nothing (spec 7); Discard never reaches decide, the engine discards the job), the three confidences (identity and
 /// title from the plan; identity 1.00 when overrides.identity is Some, title 1.00 when overrides.titles is not empty; track
 /// = min(audio, subtitle) after the remembered and review overrides set the parts they cover to 1.00), reviews = plan's
@@ -240,8 +247,8 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
     let subtitles = decide_subtitles(title, &subtitle_facts, settings);
     let track_layout = layout(title, &audio, &subtitles);
 
-    // 8.9: the resolution label, the edition (8.4), the final path; spec 11's keep both adds the copy label while the
-    // collision exists (with the colliding file gone, the plain path is free).
+    // 8.9: the resolution label, the edition (8.4), the final path; spec 11's keep both adds the next free copy label
+    // while the collision exists (phase 3 design, part 6.7; with the colliding file gone, the plain path is free).
     let resolution = title.video_height().map(|height| resolution_label(height).to_string());
     let edition = match &role {
         PlannedRole::Feature { .. } => filed_edition(plan, inputs.disc, planned.title, overrides, inputs.library),
@@ -256,7 +263,8 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
     };
     let Filing { path, notes: path_notes, unmapped } =
         if answered_collision == Some(Collision::KeepBoth) && inputs.library.path_collision {
-            filing(&role, record, resolution.as_deref(), edition.as_deref(), Some(KEEP_BOTH_COPY), settings)
+            let copy = KEEP_BOTH_COPY + inputs.library.copy_labels_taken;
+            filing(&role, record, resolution.as_deref(), edition.as_deref(), Some(copy), settings)
         } else {
             plain
         };
@@ -1449,6 +1457,70 @@ mod tests {
             r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p.mkv"
         );
         assert!(plain.reviews.is_empty(), "{:?}", plain.reviews);
+    }
+
+    #[test]
+    fn keep_both_takes_the_next_free_copy_label() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let settings = settings();
+        let overrides = answered(FILM_PATH, Collision::KeepBoth);
+        let taken = LibraryFacts { path_collision: true, copy_labels_taken: 1, ..LibraryFacts::default() };
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &taken, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(
+            path_of(&decision),
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p 3.mkv"
+        );
+        assert!(!decision.reviews.contains(&ReviewReason::PathCollision), "{:?}", decision.reviews);
+        let none = LibraryFacts { path_collision: true, copy_labels_taken: 0, ..LibraryFacts::default() };
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &none, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(
+            path_of(&decision),
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p 2.mkv"
+        );
+    }
+
+    #[test]
+    fn copy_labels_taken_without_a_keep_both_answer_changes_nothing() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let settings = settings();
+        let counted = LibraryFacts { path_collision: true, copy_labels_taken: 3, ..LibraryFacts::default() };
+        let uncounted = LibraryFacts { path_collision: true, ..LibraryFacts::default() };
+        let replace = answered(FILM_PATH, Collision::Replace);
+        for overrides in [None, Some(&replace)] {
+            let mut with = inputs(&plan, &disc, 0, Some(&record), &counted, &settings);
+            with.overrides = overrides;
+            let mut without = inputs(&plan, &disc, 0, Some(&record), &uncounted, &settings);
+            without.overrides = overrides;
+            assert_eq!(decide(&with), decide(&without), "{overrides:?}");
+        }
+    }
+
+    #[test]
+    fn library_facts_without_taken_copies_serialise_as_before() {
+        let collided = LibraryFacts { path_collision: true, ..LibraryFacts::default() };
+        for facts in [LibraryFacts::default(), collided.clone()] {
+            let value = serde_json::to_value(&facts).unwrap();
+            assert!(value.get("copy_labels_taken").is_none(), "{value}");
+        }
+        let read: LibraryFacts = serde_json::from_value(serde_json::json!({
+            "folder_has_edition_named_file": false,
+            "earlier_edition_names": {},
+            "path_collision": true
+        }))
+        .unwrap();
+        assert_eq!(read, collided);
+        let two = LibraryFacts { copy_labels_taken: 2, ..collided };
+        let value = serde_json::to_value(&two).unwrap();
+        assert_eq!(value["copy_labels_taken"], serde_json::json!(2));
+        assert_eq!(serde_json::from_value::<LibraryFacts>(value).unwrap(), two);
     }
 
     #[test]
