@@ -33,6 +33,9 @@ fix-after is merged (the owner's order, EO-16).
 - EP-7: `would_leave_none` stays as a guard. Through `decide --menu` it can no longer be reached: with a reference the
   reference stays, and without one nothing is dropped unless Play's own stream is kept, which is never a candidate
   (MR-17). Its test hands `decide_audio` a confirmation the wiring never gives.
+  Amended at the final review (2026-11-24, Ruling FR-1): `decide_audio` itself refuses to drop the stream Play
+  selects on a title without a reference, so the guard cannot be reached by a direct call either, and its two tests
+  show `no_reference`.
 - EP-8: the title-level outcomes are tested in this order: `reference_disputed`, `no_reference`, `would_leave_none`,
   `reference_would_change`, else `dropped`.
 - EP-9: the acceptance scripts read the owner's private data and are not committed. The repository gets counts only.

@@ -246,7 +246,8 @@ pub struct RolesReport {
     pub audio: Vec<StreamRole>,
     /// The audio choices that label no stream, in map order.
     pub unplaced: Vec<Unplaced>,
-    /// The off-decisions that name no audio choice with a role word, in id order.
+    /// The off-decisions that are not stale and name no audio choice with a role word, in id order; the stale ids are
+    /// left out, being in `off_stale`.
     pub off_unused: Vec<String>,
     /// The off-decisions whose line text differs from the wording of the audio choice they name, in id order.
     pub off_stale: Vec<String>,
@@ -1339,6 +1340,28 @@ mod tests {
             let role = &report.audio[0];
             assert_eq!((role.stream, role.tie, role.play, role.why.as_str()), (1, tie, false, ""), "{play:?}");
             assert_eq!(role.confirms(), Some(AudioRole::Commentary), "{play:?}");
+        }
+    }
+
+    /// A Play effect that cannot be placed leaves the block acting on a matching identity, with `play` None.
+    #[test]
+    fn a_block_whose_play_effect_cannot_be_placed_acts_with_no_play_stream() {
+        let block_audio = [(0x1100, 0x83, "eng"), (0x1101, 0x81, "fra"), (0x1102, 0x81, "fra")];
+        let lists = playlists(vec![
+            ("00800", Ok(playlist(&[("00001", 0, 900)], &block_audio))),
+            ("00801", Ok(playlist(&[("00001", 0, 900)], &[(0x1100, 0x83, "eng"), (0x1105, 0x81, "eng")]))),
+        ]);
+        let scan = scan_title(
+            "00800.mpls",
+            &[("eng", "TrueHD", "0"), ("eng", "AC3", "256"), ("fra", "AC3", "0"), ("fra", "AC3", "0")],
+        );
+        for play in [Option::None, Some(effect("00800", Option::None)), Some(effect("00900", Some(1)))] {
+            let choice = audio("c010", "Commentary English", "00800", 1, Level::Replayed);
+            let report = roles(&map(play.clone(), vec![choice]), &scan, &lists);
+            assert_eq!(report.play, Option::None, "{play:?}");
+            let block = report.block(&Identity::Matches("0123".to_string()));
+            assert_eq!((block.acts, block.why.as_str(), block.play), (true, "", Option::None), "{play:?}");
+            assert_eq!(block.audio.len(), 1, "{play:?}");
         }
     }
 

@@ -17,10 +17,12 @@ them. Every example here is made up.
 - A map holds disc titles and readings of the disc's own text, so maps live outside every repository. Repository
   files name a disc by its slug only.
 - Making a map never needs the owner to type or photograph a menu.
-- A map changes one decision of lazymkv, and only where `lazymkv-dev decide --menu` gives it (the engine gives no
-  map): an audio track the menu calls a commentary or an audio description, with a strong tie, on a map whose identity
-  matches, is dropped, whatever the content rule says of it and also without a verdict (The rule; design 5.4a). Every
-  other label is evidence shown beside the decisions.
+- A map changes the audio decision of lazymkv, and only where `lazymkv-dev decide --menu` gives it (the engine gives
+  no map): an audio track the menu calls a commentary or an audio description, with a strong tie, on a map whose
+  identity matches, is dropped under the guards of The rule, whatever the content rule says of it and also without a
+  verdict (design 5.4a). Amended on 2026-11-24: a map can also hold the job with `audio_reference_unclear`, when it
+  calls the programme reference a commentary or an audio description or when its drop would move the reference
+  (EO-5), and it adds notes to the decision (The rule). Every other label is evidence shown beside the decisions.
 
 ## The folder and the file
 
@@ -295,25 +297,28 @@ evidence clone, or a bare scan file, which carries no disc ID):
 Since 2026-11-24 (engine menu maps design parts 8 and 9), also `lazymkv-dev menu off <map>` and `lazymkv-dev menu
 publish <map> --to ROOT` (`<map>` as for `menu show`; the off-decisions beside it are read as `decide --menu` reads
 them, The off-decisions file):
-- `menu off`: 0 when the lines are printed, 2 for an argument problem, or a map or off file that cannot be read or does
-  not pass the rules. It prints one line for each audio choice, in map order, whose text (`role_text`, Roles) holds a
-  role word and that the net catches or a decision of the off file names: `<state><TAB><id><TAB><text>`, `<text>` the
-  choice's text and `<state>` one of `off` or `role` (a decision fits the text), `stale` (a decision names the id with
-  another text) or `undecided`. A line saved in `menu-off.tsv` with its first field `off` or `role` decides that
-  choice (a `stale` one in place of the old line). Made up: `undecided<TAB>c012<TAB>COMMENTARY: Off`.
-- `menu publish`: 0 when the map is published, 2 for an argument problem or when anything is refused. Nothing is
-  written unless every check passes. The checks, every problem one refusal line, in this order: the map's size, then
-  its read and format problems as `menu show` prints them; the off file's size, then its read and parse problems as
-  `decide --menu` prints them; `<map path>: the map has no disc ID, so no job could find it` when `disc_folder` gives
-  none; `<off path>: <id> is stale: the map's text is <text>, the line's is <text>` for each stale line, ascending id,
-  the two texts quoted as Python's `repr` writes them (EO-12, EM-19); `<ROOT>: not a folder` (ROOT as given, which must
-  exist: it is never made); `<ROOT>/<ID>: not a folder` when that name is a file. A file over its limit is refused as
-  `<path>: <n> bytes is over the limit of <limit>` (its size read from the file system, the file not read). An unused
-  line is no refusal and is published as it is (EO-13, EM-22). When every check passes it makes `<ROOT>/<ID>/` when it
-  is missing, writes the map's bytes unchanged to `<ROOT>/<ID>/menu-map.json` and, when the map has an off file, its
-  bytes to `<ROOT>/<ID>/menu-off.tsv`, each to a temporary file in that folder and then put in place
-  (`lazymkv_platform::write_atomic`), removes a `menu-off.tsv` there when the map has none, and prints one line,
-  counts and the ID only, never a label:
+- `menu off`: 0 when the lines are printed, 2 for an argument problem, or a map or off file that cannot be read or
+  does not pass the rules. It prints one line for each audio choice, in map order, that a decision of the off file
+  names with another text, whatever its role words (the lines `menu publish` refuses as stale; since 2026-11-24,
+  Ruling FR-2), or whose text (`role_text`, Roles) holds a role word and that the net catches or a decision of the off
+  file names: `<state><TAB><id><TAB><text>`, `<text>` the choice's text and `<state>` one of `off` or `role` (a
+  decision fits the text), `stale` (a decision names the id with another text) or `undecided`. A line saved in
+  `menu-off.tsv` with its first field `off` or `role` decides that choice (a `stale` one in place of the old line).
+  Made up: `undecided<TAB>c012<TAB>COMMENTARY: Off`.
+- `menu publish`: 0 when the map is published, 2 for an argument problem, when a check fails, or when a write fails
+  after the checks. Nothing is written when a check fails; a write that fails after the checks may leave
+  `<ROOT>/<ID>/` or the new map in place (amended on 2026-11-24). The checks, every problem one refusal line, in this
+  order: the map's size, then its read and format problems as `menu show` prints them; the off file's size, then its
+  read and parse problems as `decide --menu` prints them; `<map path>: the map has no disc ID, so no job could find
+  it` when `disc_folder` gives none; `<off path>: <id> is stale: the map's text is <text>, the line's is <text>` for
+  each stale line, ascending id, the two texts quoted as Python's `repr` writes them (EO-12, EM-19); `<ROOT>: not a
+  folder` (ROOT as given, which must exist: it is never made); `<ROOT>/<ID>: not a folder` when that name is a file. A
+  file over its limit is refused as `<path>: <n> bytes is over the limit of <limit>` (its size read from the file
+  system, the file not read). An unused line is no refusal and is published as it is (EO-13, EM-22). When every check
+  passes it makes `<ROOT>/<ID>/` when it is missing, writes the map's bytes unchanged to `<ROOT>/<ID>/menu-map.json`
+  and, when the map has an off file, its bytes to `<ROOT>/<ID>/menu-off.tsv`, each to a temporary file in that folder
+  and then put in place (`lazymkv_platform::write_atomic`), removes a `menu-off.tsv` there when the map has none, and
+  prints one line, counts and the ID only, never a label:
 
       PUBLISHED 0123456789ABCDEF0123456789ABCDEF01234567 choices=12 decisions=2 undecided=0
 
@@ -660,10 +665,13 @@ Then every candidate gets the same outcome, the first that holds of these five, 
    about the film's own audio and none is dropped (EO-11). A confirmation on a reference that has a Keep override is
    `overridden` and disputes nothing.
 5. `no_reference`: the first arrangement has no programme reference (every kept audio track has no language code, or
-   `und`), and Play's stream is not known or is not among the kept tracks, so none is dropped (EO-3, EM-10). On such a
-   title Play's stream stands in for the reference: it is never a candidate (MR-17), so it stays.
+   `und`), and Play's stream is not known, or is not among the kept tracks, or is itself confirmed as a candidate, so
+   none is dropped (EO-3, EM-10; since 2026-11-24, Ruling FR-1). Candidates are dropped only when Play's stream is
+   known, is among the kept tracks and is not itself a candidate. On such a title Play's stream stands in for the
+   reference: it is never a candidate (MR-17), so it stays.
 6. `would_leave_none`: the kept streams without the candidates, arranged again by the same steps 2 to 6 and
-   "Content", keep no track, so none is dropped (MA-2);
+   "Content", keep no track, so none is dropped (MA-2). It can no longer be reached, through `decide --menu` or by a
+   direct call; it stays as a guard (Ruling FR-1, 2026-11-24);
 7. `reference_would_change`: that arrangement's programme reference differs from the first arrangement's, so none is
    dropped (MR-4). The decision adds the review reason `audio_reference_unclear` and one note
    `menu_reference_conflict` naming no stream (EO-5);
@@ -671,9 +679,10 @@ Then every candidate gets the same outcome, the first that holds of these five, 
    note `menu_dropped` naming it (EO-2).
 
 The kept streams are arranged again only when neither `reference_disputed` nor `no_reference` holds.
-`would_leave_none` stays as a guard, but `decide --menu` can no longer reach it (EP-7): with a reference the reference
-stays, and without one nothing is dropped unless Play's own stream is kept, which is never a candidate (MR-17). Only a
-confirmation that the wiring never gives, handed to `decide_audio` directly, reaches it.
+`would_leave_none` stays as a guard, but it can no longer be reached, through `decide --menu` or by a direct call
+(EP-7; amended on 2026-11-24, Ruling FR-1): with a reference the reference stays, and without one nothing is dropped
+unless Play's own stream is kept and is not itself a candidate, so it stays. A confirmation that the wiring never gives,
+on Play's own stream and handed to `decide_audio` directly, gets `no_reference`.
 
 **The review.** A menu drop raises no review, as a flag or a description raises none (MR-11's "no review" stands), so a
 job with a menu drop and nothing else to hold it files. Only `reference` and `reference_would_change` add a review
@@ -716,7 +725,8 @@ be held with `audio_reference_unclear`, and the note would read `the disc's menu
 reference, a commentary ("AUDIO: Commentary by Person B"); nothing was dropped on the menu's word`. On a title whose
 only kept audio streams have no language code (so no reference), with both confirmed, neither is dropped and both are
 listed with the outcome `no_reference`: Play's stream, which would stand in for the reference, cannot be either of
-them (MR-17), so it is not known or not kept. With a third kept stream without a language code that plain Play
+them (MR-17), so it is not known or not kept; handed to `decide_audio` directly with Play's stream one of them, both
+would still be `no_reference` (Ruling FR-1). With a third kept stream without a language code that plain Play
 selects, both would be dropped, with a `menu_dropped` note each.
 
 ## Known reader differences
@@ -945,6 +955,9 @@ they are rulings of the plan that the owner can correct:
 - EP-7: `would_leave_none` stays as a guard. Through `decide --menu` it can no longer be reached: with a reference the
   reference stays, and without one nothing is dropped unless Play's own stream is kept, which is never a candidate
   (MR-17). Its test hands `decide_audio` a confirmation the wiring never gives.
+  - Amended at the final review (2026-11-24, Ruling FR-1): `decide_audio` itself refuses to drop the stream Play
+    selects on a title without a reference, so the guard cannot be reached by a direct call either, and its two tests
+    show `no_reference`.
 - EP-8: the title-level outcomes are tested in this order: `reference_disputed`, `no_reference`, `would_leave_none`,
   `reference_would_change`, else `dropped`.
 - EP-9: the acceptance scripts read the owner's private data and are not committed. The repository gets counts only.

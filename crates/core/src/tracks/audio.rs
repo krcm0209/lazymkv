@@ -122,8 +122,10 @@ pub enum AudioDrop {
 /// in the order listed, the first that holds being the outcome; a confirmation none of them holds for is a candidate,
 /// whatever the content rule's verdict (MA-1). The candidates of a title all end alike, the first that holds: every
 /// one is `ReferenceDisputed` when a confirmation of the title is `Reference` (EO-11); `NoReference` when the title
-/// has no programme reference and Play's stream is not known or not kept (EO-3); `WouldLeaveNone` when dropping them
-/// would leave no kept track (MA-2); `ReferenceWouldChange` when it would move the reference (MR-4); else `Dropped`.
+/// has no programme reference and Play's stream is not known, not kept or itself a candidate (EO-3, Ruling FR-1);
+/// `WouldLeaveNone` when dropping them would leave no kept track (MA-2), which can no longer be reached since EO-3
+/// keeps Play's stream, and stays as a guard; `ReferenceWouldChange` when it would move the reference (MR-4); else
+/// `Dropped`.
 /// Def: menu-role Task 4, menu-alone Task 1, engine menu maps Task 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,12 +142,15 @@ pub enum MenuOutcome {
     /// The menu also confirms the title's programme reference as a commentary or an audio description, so no
     /// candidate of the title is dropped (EO-11).
     ReferenceDisputed,
-    /// The title has no programme reference and Play's stream is not known or not kept, so none is dropped (EO-3).
+    /// The title has no programme reference and Play's stream is not known, not kept or itself a candidate, so none is
+    /// dropped (EO-3, Ruling FR-1).
     NoReference,
     /// Dropping the confirmed streams would change the programme reference, so none is dropped (MR-4); the job is held
     /// with audio_reference_unclear and the note `menu_reference_conflict` (EO-5).
     ReferenceWouldChange,
-    /// Dropping the confirmed streams would leave the title no kept audio track, so none is dropped (MA-2).
+    /// Dropping the confirmed streams would leave the title no kept audio track, so none is dropped (MA-2). It can no
+    /// longer be reached, through `decide --menu` or by a direct call, since `NoReference` refuses first whenever
+    /// Play's stream is not a kept track left beside the candidates (Ruling FR-1); it stays as a guard.
     WouldLeaveNone,
 }
 
@@ -552,17 +557,18 @@ const DROPPED_DESCRIPTIONS: [DescriptionKind; 4] = [
 /// is not the reference, whatever its language group and whatever the content rule's verdicts, D21's veto or the
 /// measured reference say (MA-1); otherwise its outcome says why not (`MenuOutcome`). The candidates are then refused
 /// together, the first that holds: when a confirmation is on the reference, each is `ReferenceDisputed` (EO-11); when
-/// the first arrangement has no reference and `facts.menu_play` is None or not a kept stream, each is `NoReference`
-/// (EO-3). Otherwise the kept streams without the candidates are arranged again by the same steps 2 to 6 and
-/// "Content": when that keeps no track, nothing is dropped (MA-2); else when its reference differs from the first's,
-/// nothing is dropped (MR-4); else it is the decision and each candidate is dropped as `AudioDrop::Menu`, and when the
-/// first arrangement raised audio_reference_unclear the decision keeps it (EO-4; a dropped stream's
-/// commentary_detected goes with it). A confirmation on the reference, and a drop that would move the reference, add
-/// audio_reference_unclear (EO-5). Notes follow the arrangement's own, ascending stream: `menu_dropped` for each
-/// dropped stream (EO-2), `menu_reference_conflict` for a confirmation on the reference and one, naming no stream, for
-/// a drop that would move it (EO-5); the other outcomes raise none. Step 1, D13's duplicates and the confidence are
-/// untouched (MR-14), and the verdicts apply to the tracks that remain as they do to any title. Without confirmations
-/// the decision is the one without the menu, `menu` empty. Def: T8. Use: T13, T16.
+/// the first arrangement has no reference and `facts.menu_play` is None, not a kept stream or itself a candidate, each
+/// is `NoReference` (EO-3, Ruling FR-1). Otherwise the kept streams without the candidates are arranged again by the
+/// same steps 2 to 6 and "Content": when that keeps no track, nothing is dropped (MA-2, a guard that can no longer be
+/// reached); else when its reference differs from the first's, nothing is dropped (MR-4); else it is the decision and
+/// each candidate is dropped as `AudioDrop::Menu`, and when the first arrangement raised audio_reference_unclear the
+/// decision keeps it (EO-4; a dropped stream's commentary_detected goes with it). A confirmation on the reference, and
+/// a drop that would move the reference, add audio_reference_unclear (EO-5). Notes follow the arrangement's own,
+/// ascending stream: `menu_dropped` for each dropped stream (EO-2), `menu_reference_conflict` for a confirmation on the
+/// reference and one, naming no stream, for a drop that would move it (EO-5); the other outcomes raise none. Step 1,
+/// D13's duplicates and the confidence are untouched (MR-14), and the verdicts apply to the tracks that remain as they
+/// do to any title. Without confirmations the decision is the one without the menu, `menu` empty. Def: T8. Use: T13,
+/// T16.
 pub fn decide_audio(title: &Title, wanted: &Wanted, facts: &AudioFacts<'_>, settings: &Settings) -> AudioDecision {
     let audio = title.streams_of(StreamKind::Audio);
     let (description_alignment, described) = descriptions(title, facts.discdb);
@@ -589,13 +595,18 @@ pub fn decide_audio(title: &Title, wanted: &Wanted, facts: &AudioFacts<'_>, sett
     // The note naming no stream for a drop that would move the reference (EO-5), with the reasons the menu adds.
     let mut moved: Option<Noted> = None;
     let mut menu_reviews: Vec<ReviewReason> = Vec::new();
-    if menu.iter().any(|applied| applied.outcome == MenuOutcome::Reference) {
+    // The menu disputes the reference (EO-5, EO-11).
+    let disputed = menu.iter().any(|applied| applied.outcome == MenuOutcome::Reference);
+    if disputed {
         menu_reviews.push(ReviewReason::AudioReferenceUnclear);
     }
     if !candidates.is_empty() {
-        let play_kept = facts.menu_play.is_some_and(|play| arranged.kept.iter().any(|track| track.stream == play));
+        // Play's stream counts only when it is kept and is not itself a candidate (EO-3, Ruling FR-1).
+        let play_kept = facts.menu_play.is_some_and(|play| {
+            !candidates.contains(&play) && arranged.kept.iter().any(|track| track.stream == play)
+        });
         // EO-11 first, then EO-3; the second arrangement is made only when neither refuses.
-        let refused = if !menu_reviews.is_empty() {
+        let refused = if disputed {
             Some(MenuOutcome::ReferenceDisputed)
         } else if arranged.reference.is_none() && !play_kept {
             Some(MenuOutcome::NoReference)
@@ -604,6 +615,9 @@ pub fn decide_audio(title: &Title, wanted: &Wanted, facts: &AudioFacts<'_>, sett
                 kept_streams.iter().copied().filter(|stream| !candidates.contains(&stream.number)).collect();
             let second = arrange(&remaining, wanted, facts, settings, &overrides);
             // MA-2 before MR-4: a title without a reference has None in both arrangements, so only this protects it.
+            // It can no longer be reached (Ruling FR-1): a title with a reference keeps it, which is never a candidate,
+            // and one without keeps Play's stream, which EO-3 has made sure is kept and not a candidate. It stays as a
+            // guard (MA-2).
             if second.kept.is_empty() {
                 Some(MenuOutcome::WouldLeaveNone)
             } else if second.reference != arranged.reference {

@@ -5,9 +5,10 @@
 //! state; `publish` checks a map and copies it and its off-decisions into a maps folder under the disc's ID. Exit:
 //! show and off 0, or 2; check 0 when nothing failed, 1 otherwise; publish 0, or 2; 2 for an argument, map or scan
 //! problem; 3 for a slug without the evidence clone. Refusals print `lazymkv-dev menu: error: <line>`, one per
-//! problem. Only `publish` writes, and only when nothing is refused. `decide --menu` reads a map with `read_map`, the off-decisions beside it with `read_off` and the recording's
-//! playlists with `read_playlists`, and its decision drops a commentary or audio description the map confirms
-//! (design 5.4a).
+//! problem. Only `publish` writes: nothing when a check fails, while a write that fails after the checks (exit 2) may
+//! leave the disc's folder or the new map in place. `decide --menu` reads a map with `read_map`, the off-decisions
+//! beside it with `read_off` and the recording's playlists with `read_playlists`, and its decision drops a commentary
+//! or audio description the map confirms (design 5.4a).
 
 use crate::evidence::{os_error_text, read_file_text, resolve_recording, Ctx, Recording, Refused};
 use crate::{usage_error, Args};
@@ -104,8 +105,8 @@ not pass the rules (every problem is printed on its own line).
 const PUBLISH_HELP: &str = "
 Checks a map and its off-decisions, then copies their files, byte for byte, to ROOT/ID/menu-map.json and
 ROOT/ID/menu-off.tsv, ID being the map's disc ID in upper case. A menu-off.tsv left in ROOT/ID by an earlier publish
-is removed when the map has none. Nothing is written unless every check passes. Prints
-PUBLISHED ID choices=N decisions=M undecided=K.
+is removed when the map has none. Nothing is written when a check fails; a write that fails after the checks may leave
+ROOT/ID or the new map in place. Prints PUBLISHED ID choices=N decisions=M undecided=K.
 
 positional arguments:
   map         a map folder (its menu-map.json and menu-off.tsv are read) or a map file
@@ -114,8 +115,9 @@ optional arguments:
   -h, --help  show this help message and exit
   --to ROOT   the maps folder, which must exist; ID is made inside it when missing
 
-exit status: 0 when the map is published; 2 for an argument error, or when anything is refused (every problem is
-printed on its own line, and nothing is written).
+exit status: 0 when the map is published; 2 for an argument error, when a check fails (every problem is printed on its
+own line, and nothing is written), or when a write fails after the checks (which may leave ROOT/ID or the new map in
+place).
 ";
 
 /// A refusal with exit code 2.
@@ -368,7 +370,8 @@ fn run_show(ctx: &Ctx, rest: &[String], out: &mut dyn Write, err: &mut dyn Write
     }
 }
 
-/// The lines `menu off` prints for a map: for each audio choice, in map order, whose `role_text` holds a role word and
+/// The lines `menu off` prints for a map: for each audio choice, in map order, that a decision names with another text
+/// (whatever its role words: the lines `menu publish` refuses as stale), or whose `role_text` holds a role word and
 /// that the net catches or a decision names, its state (`off` or `role` when a decision fits, `stale` when a decision
 /// names the id with another text, else `undecided`), its id and its `role_text`.
 fn off_rows(map: &MenuMap, off: &OffDecisions) -> Vec<(&'static str, String, String)> {
@@ -376,15 +379,16 @@ fn off_rows(map: &MenuMap, off: &OffDecisions) -> Vec<(&'static str, String, Str
     for choice in map.choices.iter().filter(|choice| choice.kind == Kind::Audio) {
         let text = role_text(&choice.section, &choice.label);
         let named = off.text(&choice.id).is_some();
-        if audio_roles_in(&text).is_empty() || !(named || needs_decision(&text)) {
-            continue;
-        }
         let state = match off.fits(&choice.id, &text) {
             Some(OffDecision::Off) => "off",
             Some(OffDecision::Role) => "role",
             None if named => "stale",
             None => "undecided",
         };
+        let stale = state == "stale";
+        if !stale && (audio_roles_in(&text).is_empty() || !(named || needs_decision(&text))) {
+            continue;
+        }
         rows.push((state, choice.id.clone(), text));
     }
     rows
@@ -480,8 +484,10 @@ fn check_publish(ctx: &Ctx, given: &str, to: &str) -> Result<Checked, Refused> {
         .as_deref()
         .and_then(|bytes| collect(decode(bytes, &map_shown).and_then(|text| parse_map(&text, &map_shown)), &mut lines));
     // No off file is no decisions; one too large to read or with problems is refused, and no decision is known.
-    let off_bytes = if off_file.exists() { read_source(&off_file, &off_shown, OFF_MAX_BYTES, &mut lines) } else { None };
-    let off = match (&off_bytes, off_file.exists()) {
+    // Asked once, so the read and the meaning of its result rest on the same answer.
+    let off_exists = off_file.exists();
+    let off_bytes = if off_exists { read_source(&off_file, &off_shown, OFF_MAX_BYTES, &mut lines) } else { None };
+    let off = match (&off_bytes, off_exists) {
         (Some(bytes), _) => collect(decode(bytes, &off_shown).and_then(|text| parse_off_text(&text, &off_shown)), &mut lines),
         (None, true) => None,
         (None, false) => Some(OffDecisions::default()),
@@ -1157,6 +1163,22 @@ mod tests {
     }
 
     #[test]
+    fn menu_off_lists_as_stale_a_decision_on_a_choice_without_a_role_word_that_publish_refuses() {
+        // The made-up map's c001 (Language A 5.1) holds no role word; a decision naming it with another text is stale.
+        let tmp = world("menu-off-stale-plain", None);
+        tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "role\tc001\tAUDIO: Other\n");
+        let (code, out, err) = menu_run(&tmp, &["off", MAP_DIR]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "stale\tc001\tAUDIO: Language A 5.1\n", ""));
+        fs::create_dir_all(tmp.0.join("root")).unwrap();
+        assert_publish_refused(
+            &tmp,
+            &[&format!(
+                "{MAP_DIR}/{OFF_FILE_NAME}: c001 is stale: the map's text is 'AUDIO: Language A 5.1', the line's is 'AUDIO: Other'"
+            )],
+        );
+    }
+
+    #[test]
     fn menu_off_refuses_a_map_or_an_off_file_it_cannot_read_with_exit_2() {
         let tmp = world("menu-off-refused", None);
         let (code, out, err) = menu_run(&tmp, &["off", "missing"]);
@@ -1184,12 +1206,18 @@ mod tests {
         tmp.write(&format!("{MAP_DIR}/{OFF_FILE_NAME}"), "off\tc002\tAUDIO: Commentary / Été Off\noff\tc099\tAUDIO: Gone\n");
         fs::create_dir_all(tmp.0.join("root/OTHER")).unwrap();
         tmp.write("root/OTHER/menu-map.json", "untouched");
+        // An earlier publish left other bytes in the disc's folder: both files are replaced.
+        tmp.write(&format!("root/{FIXTURE_ID}/{FILE_NAME}"), "an older map");
+        tmp.write(&format!("root/{FIXTURE_ID}/{OFF_FILE_NAME}"), "off\tc003\tAUDIO: Older\n");
         let (code, out, err) = menu_run(&tmp, &["publish", MAP_DIR, "--to", "root"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert_eq!(out, format!("PUBLISHED {FIXTURE_ID} choices=9 decisions=1 undecided=1\n"));
         let folder = tmp.0.join("root").join(FIXTURE_ID);
         assert_eq!(fs::read(folder.join(FILE_NAME)).unwrap(), fs::read(tmp.0.join(MAP_DIR).join(FILE_NAME)).unwrap());
         assert_eq!(fs::read(folder.join(OFF_FILE_NAME)).unwrap(), fs::read(tmp.0.join(MAP_DIR).join(OFF_FILE_NAME)).unwrap());
+        let mut names: Vec<String> = fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, [FILE_NAME, OFF_FILE_NAME]);
         assert_eq!(fs::read_to_string(tmp.0.join("root/OTHER/menu-map.json")).unwrap(), "untouched");
         // Again, now without an off file: the map is replaced, the old off file goes, and nothing else is left behind.
         fs::remove_file(tmp.0.join(MAP_DIR).join(OFF_FILE_NAME)).unwrap();

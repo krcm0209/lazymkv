@@ -1886,10 +1886,10 @@ fn dropping_a_stream_recomputes_first_of_language_and_the_notes() {
 }
 
 #[test]
-fn a_drop_that_would_leave_no_audio_is_not_made() {
-    // MA-2: a title whose only audio stream has no language code has no reference, so MR-4 cannot protect it; the
-    // drop would leave no kept track, so nothing is dropped and the first arrangement stands. Play's stream is set to
-    // the confirmed stream so that EO-3's rule lets the guard be reached (EP-7); the wiring never gives such a
+fn a_confirmation_on_plays_own_stream_drops_nothing_on_a_title_without_a_reference() {
+    // A title whose only audio stream has no language code has no reference, so MR-4 cannot protect it. Play's stream
+    // is the confirmed stream, which EO-3's rule refuses (Ruling FR-1): every candidate is `NoReference` and the
+    // decision is today's, so MA-2's guard is not reached by a direct call either. The wiring never gives such a
     // confirmation, since Play's own stream is never a candidate (MR-17).
     let title = title_of(&[video(), dd("und", "2", "192 Kb/s")]);
     let menu = BTreeMap::from([(1, confirmed(AudioRole::Commentary, &["c010"], &["AUDIO: Commentary by Person A"]))]);
@@ -1900,9 +1900,13 @@ fn a_drop_that_would_leave_no_audio_is_not_made() {
     let decision = decide_with(&title, &facts);
     assert!(decision.dropped.iter().all(|(_, why)| !matches!(why, AudioDrop::Menu { .. })), "{:?}", decision.dropped);
     assert_eq!(decision, AudioDecision { menu: decision.menu.clone(), ..today });
-    assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::WouldLeaveNone)]);
-    // Two streams without a language code, both confirmed: dropping both would leave none, so neither is dropped.
-    // Play's stream is again a confirmed one (EP-7; the wiring never gives this).
+    assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::NoReference)]);
+}
+
+#[test]
+fn two_confirmations_one_on_plays_own_stream_drop_nothing_on_a_title_without_a_reference() {
+    // Two streams without a language code, both confirmed, and Play's stream is one of them (the wiring never gives
+    // this, MR-17): EO-3's rule refuses both (Ruling FR-1), so neither is dropped and the decision is today's.
     let two = title_of(&[video(), dd("und", "2", "192 Kb/s"), dd("und", "2", "224 Kb/s")]);
     let facts = AudioFacts {
         menu: BTreeMap::from([
@@ -1916,7 +1920,7 @@ fn a_drop_that_would_leave_no_audio_is_not_made() {
     assert_eq!(order_of(&today).len(), 2);
     let decision = decide_with(&two, &facts);
     assert_eq!(decision, AudioDecision { menu: decision.menu.clone(), ..today });
-    assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::WouldLeaveNone), (2, MenuOutcome::WouldLeaveNone)]);
+    assert_eq!(outcomes(&decision), vec![(1, MenuOutcome::NoReference), (2, MenuOutcome::NoReference)]);
 }
 
 #[test]
@@ -1985,6 +1989,8 @@ fn a_title_without_a_reference_drops_only_when_plays_stream_is_known_and_kept() 
     for (play, outcome, kept) in [
         (Option::None, MenuOutcome::NoReference, vec![1, 2]),
         (Some(9), MenuOutcome::NoReference, vec![1, 2]),
+        // Play's stream is the confirmed one: not a stream Play leaves kept beside it (Ruling FR-1).
+        (Some(2), MenuOutcome::NoReference, vec![1, 2]),
         (Some(1), MenuOutcome::Dropped, vec![1]),
     ] {
         let decision =
@@ -2018,8 +2024,11 @@ fn a_confirmation_on_the_reference_holds_the_job_and_drops_nothing_on_the_title(
     );
     assert_eq!(order_of(&decision), vec![1, 2, 3]);
     assert!(decision.dropped.iter().all(|(_, why)| !matches!(why, AudioDrop::Menu { .. })));
-    assert!(decision.reviews.contains(&ReviewReason::AudioReferenceUnclear));
-    let note = decision.notes.iter().find(|noted| noted.note == Note::MenuReferenceConflict).unwrap();
+    assert_eq!(decision.reviews, vec![ReviewReason::AudioReferenceUnclear]);
+    let conflicts: Vec<&Noted> =
+        decision.notes.iter().filter(|noted| noted.note == Note::MenuReferenceConflict).collect();
+    assert_eq!(conflicts.len(), 1, "{:?}", decision.notes);
+    let note = conflicts[0];
     assert_eq!(note.stream, Some(1));
     assert_eq!(
         note.detail,
