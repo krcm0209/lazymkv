@@ -3,8 +3,9 @@
 //! which the owner thread never reads. Subtitle lines go into the document only: nothing here logs them or puts them in
 //! an error. Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +59,7 @@ struct Read {
     lines: BTreeMap<(String, u32), Vec<String>>,
     unread: BTreeMap<(String, u32), String>,
     collisions: BTreeMap<String, String>,
+    nothing_at: BTreeSet<String>,
 }
 
 /// The document of `job` (phase 3 design, part 6.2): `review_doc::build` over the job folder's scan and what `read`
@@ -85,6 +87,7 @@ fn inputs<'a>(record: &'a JobRecord, scanned: &'a Disc, read: &'a Read, all: boo
         lines: &read.lines,
         unread: &read.unread,
         collisions: &read.collisions,
+        nothing_at: &read.nothing_at,
         all,
     }
 }
@@ -136,7 +139,7 @@ fn read_evidence(job: &JobContext, scanned: &Disc, shares: &dyn ShareConnector) 
             }
         }
     }
-    read.collisions = collision_files(job, shares);
+    (read.collisions, read.nothing_at) = collision_files(job, shares);
     read
 }
 
@@ -220,19 +223,32 @@ fn lines_of(job: &JobContext, key: &str, seconds: f64, tuning: &mut TuningShare<
     }
 }
 
-/// The file at each of `record.collisions` (phase 3 design, parts 6.2, 6.7): under the library root of the job's own
-/// settings (`movies_root` or `tv_root`) that holds it, once that root answers, `<bytes> bytes, <YYYY-MM-DD>` of its
-/// size and modification day (UTC). A path no longer there, under no configured root, or under a root that does not
-/// answer is left out.
-fn collision_files(job: &JobContext, shares: &dyn ShareConnector) -> BTreeMap<String, String> {
+/// The file at each of `record.collisions` and the paths with nothing at them (phase 3 design, parts 6.2, 6.7): under
+/// the library root of the job's own settings (`movies_root` or `tv_root`) that holds it, once that root answers, a
+/// path that is a file (or a link to one) gives `<bytes> bytes, <YYYY-MM-DD>` of its size and modification day (UTC),
+/// and a path that `fs::symlink_metadata` says is not found goes in the set (a folder the share would not open has
+/// opened since, and the title files there). A path that holds a folder or a link to anything else, is under no
+/// configured root or under a root that does not answer, or whose read fails any other way is in neither. Runs on the
+/// review worker's thread, never the owner's.
+fn collision_files(job: &JobContext, shares: &dyn ShareConnector) -> (BTreeMap<String, String>, BTreeSet<String>) {
     let roots: Vec<&str> =
         [&job.settings.movies_root, &job.settings.tv_root].into_iter().filter_map(|root| configured_root(root.as_deref())).collect();
     let mut answered: BTreeMap<&str, bool> = BTreeMap::new();
     let mut files = BTreeMap::new();
+    let mut nothing_at = BTreeSet::new();
     for path in &job.record.collisions {
         let Some(root) = roots.iter().copied().find(|root| Path::new(path).starts_with(root)) else { continue };
         if !*answered.entry(root).or_insert_with(|| shares.reach(root) == Reach::Reachable) {
             continue;
+        }
+        // `symlink_metadata` first: a link is something at the path even when its target is gone.
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                nothing_at.insert(path.clone());
+                continue;
+            }
+            Err(_) => continue,
+            Ok(_) => {}
         }
         let meta = match fs::metadata(path) {
             Ok(meta) if meta.is_file() => meta,
@@ -242,5 +258,5 @@ fn collision_files(job: &JobContext, shares: &dyn ShareConnector) -> BTreeMap<St
         let (year, month, day) = civil_date(secs);
         files.insert(path.clone(), format!("{} bytes, {year:04}-{month:02}-{day:02}", meta.len()));
     }
-    files
+    (files, nothing_at)
 }

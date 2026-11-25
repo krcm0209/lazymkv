@@ -2080,6 +2080,24 @@ fn review_returns_the_document_of_a_held_job_with_its_subtitle_lines() {
     assert_eq!(c.err("review", json!({"job": "nope-1"})), "no job nope-1");
 }
 
+/// A file still at the final path keeps the ordinary collision item (phase 3 design, part 6.7; ruling T32-E10): only a
+/// path the engine found nothing at loses it.
+#[test]
+fn review_of_a_collision_with_the_file_still_there_keeps_the_item() {
+    let (_h, mut c, id, target) = held_two_subs();
+    assert!(target.is_file());
+    let doc = c.ok("review", json!({"job": id}));
+    let points: Vec<&Value> = doc["points"].as_array().unwrap().iter().filter(|p| p["kind"] == json!("collision")).collect();
+    assert_eq!(points.len(), 1, "{doc}");
+    let key = points[0]["title_key"].as_str().unwrap();
+    assert_eq!((&points[0]["answerable"], &points[0]["items"]), (&json!(true), &json!([format!("{key} collision")])), "{doc}");
+    assert!(!points[0]["sentence"].as_str().unwrap().contains("Nothing is at"), "{doc}");
+    let item = doc["titles"][0]["items"].as_array().unwrap().iter().find(|i| i["kind"] == json!("collision")).cloned();
+    let item = item.expect("a collision item");
+    assert_eq!(item["answers"], json!(["keep_both", "replace"]), "{doc}");
+    assert_eq!(evidence(&item, "file").len(), 1, "{doc}");
+}
+
 #[test]
 fn review_of_a_job_whose_staging_share_is_down_still_answers() {
     let (h, mut c, id, _) = held_two_subs();

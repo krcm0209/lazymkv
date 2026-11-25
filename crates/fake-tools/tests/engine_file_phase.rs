@@ -1953,6 +1953,49 @@ fn an_approval_after_the_folder_opens_files_the_title() {
     assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
 }
 
+/// L7 (phase 3 design, part 6.7; ruling T32-E10): the `review` request of a job held for a folder that would not open
+/// is the ordinary collision item while the folder is closed (nothing can be said of the path), and once the folder
+/// opens with nothing at the path, a collision point with no item that says so; approving with no answers files it.
+#[test]
+fn review_of_a_job_held_for_a_folder_that_would_not_open_says_nothing_is_there() {
+    let h = harness(&[], json!({}));
+    let (id, closed, target) = run_with_the_film_folder_closed(&h);
+    if !closed.holds() {
+        return; // root on Unix opens a folder of mode 0o000
+    }
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let collision_ids = |doc: &Value| -> Vec<Value> {
+        let items = doc["titles"][0]["items"].as_array().unwrap();
+        items.iter().filter(|item| item["kind"] == json!("collision")).cloned().collect()
+    };
+    // Closed: the share cannot say what is at the path, so the ordinary item stands, with no file to describe.
+    let shut = c.ok("review", json!({"job": id}));
+    let items = collision_ids(&shut);
+    assert_eq!(items.len(), 1, "{shut}");
+    assert_eq!(shut["points"][0]["answerable"], json!(true), "{shut}");
+    assert_eq!(items[0]["evidence"], json!([]), "{shut}");
+    closed.open();
+    let doc = c.ok("review", json!({"job": id}));
+    let points = doc["points"].as_array().unwrap();
+    assert_eq!(points.len(), 1, "{doc}");
+    let point = &points[0];
+    assert_eq!((&point["kind"], &point["title_key"]), (&json!("collision"), &json!(KEY)), "{doc}");
+    assert_eq!((&point["answerable"], &point["items"]), (&json!(false), &json!([])), "{doc}");
+    assert_eq!(point["reasons"], json!(["path_collision"]), "{doc}");
+    let sentence = format!(
+        "Nothing is at {} now. A folder the share could not open clears by itself within minutes, so approving tries \
+         to file again.",
+        target.display()
+    );
+    assert_eq!(point["sentence"], json!(sentence), "{doc}");
+    assert!(collision_ids(&doc).is_empty(), "{doc}");
+    // The answer is the approval itself.
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+}
+
 #[test]
 fn a_first_decide_with_a_stale_copy_it_cannot_fetch_waits_for_its_lookup() {
     let h = harness(&[], json!({}));

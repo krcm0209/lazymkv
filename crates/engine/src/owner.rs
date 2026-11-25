@@ -847,8 +847,8 @@ fn is_empty_value(value: Option<&Value>) -> bool {
 /// An approval's answers and labels checked against the held job's review document (phase 3 design, parts 6.2, 6.4,
 /// 6.6), giving the labels' entries at `time_unix`. The document is built from local files only: the record and the
 /// job folder's `scan.txt` (read as `Step::planned_scan` reads it), with no staged paths, subtitle lines, unread
-/// reasons or colliding files, since the owner thread never reads a share; a collision item needs only the decision's
-/// path and its `path_collision` reason. Err is `build`'s, `check`'s or `label_entries`' refusal, or `<scan.txt>:
+/// reasons, colliding files or empty paths, since the owner thread never reads a share; a collision item needs only the
+/// decision's path and its `path_collision` reason. Err is `build`'s, `check`'s or `label_entries`' refusal, or `<scan.txt>:
 /// <reason>`. Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
 fn review_answers(
     record: &JobRecord,
@@ -862,6 +862,7 @@ fn review_answers(
     let scanned = disc(&parse(&String::from_utf8_lossy(&bytes))).map_err(|error| format!("{}: {error}", path.display()))?;
     let (staged, collisions) = (BTreeMap::new(), BTreeMap::new());
     let (lines, unread) = (BTreeMap::new(), BTreeMap::new());
+    let nothing_at = BTreeSet::new();
     let inputs = DocInputs {
         record,
         disc: &scanned,
@@ -869,6 +870,7 @@ fn review_answers(
         lines: &lines,
         unread: &unread,
         collisions: &collisions,
+        nothing_at: &nothing_at,
         all: false,
     };
     let doc = review_doc::build(&inputs)?;

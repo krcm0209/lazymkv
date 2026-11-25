@@ -186,6 +186,9 @@ pub struct DocInputs<'a> {
     pub unread: &'a BTreeMap<(String, u32), String>,
     /// Colliding final path to the file there, "<bytes> bytes, <date>".
     pub collisions: &'a BTreeMap<String, String>,
+    /// The collision paths the engine looked at and found nothing at (a folder the share could not open has since
+    /// opened): such a path has no collision item.
+    pub nothing_at: &'a BTreeSet<String>,
     /// Every title gets an audio and a subtitles point, not only those a reason raised.
     pub all: bool,
 }
@@ -253,6 +256,10 @@ const READ_ERRORS: &str =
 const RIP_CHOICE: &str = "Filing it accepts the rip as it is; the other way is to discard the job and rip the disc again.";
 /// After an identity or titles point's reasons (ruling T32-R1).
 const NOT_ON_THIS_SHEET: &str = "This sheet cannot answer it yet.";
+/// What a collision point says when nothing is at the path, after "Nothing is at <path> now." (phase 3 design, part
+/// 6.7: the folder the share could not open clears by itself, and the only answer is to try again).
+pub const NOTHING_AT_PATH: &str =
+    "A folder the share could not open clears by itself within minutes, so approving tries to file again.";
 /// A point that no reason raised (`all`, or a filed job).
 const NOTHING_OPEN: &str = "nothing is open here, and each track can still be changed.";
 
@@ -558,6 +565,13 @@ fn collision_item(inputs: &DocInputs<'_>, key: &str, title: u32, path: &str) -> 
     }
 }
 
+/// Whether the engine looked at `path` and found nothing there: it is in `nothing_at`, and no file is found at it
+/// (a path in both sets cannot happen; the file wins).
+fn is_empty_spot(inputs: &DocInputs<'_>, path: &str) -> bool {
+    inputs.nothing_at.iter().any(|other| same_path(other, path))
+        && !inputs.collisions.keys().any(|other| same_path(other, path))
+}
+
 /// The item kind that answers a point kind; None for the points that have no item.
 fn item_kind(kind: PointKind) -> Option<ItemKind> {
     match kind {
@@ -579,7 +593,9 @@ fn title_reasons(title: &TitleRecord) -> Vec<ReviewReason> {
 /// T32-R4): its points in spec 8.8's order of reasons (a held job's only for the reasons it carries; with `all`, or for
 /// a filed job, every title also gets an audio and a subtitles point listing all its items), and every ripped title with
 /// its items. Err `job <id> is <state>: there is nothing to review` for any other state, and Err for a job with no plan
-/// or a title or stream the scan lacks. Def: P3-T4. Use: P3-T5, P3-T8, P3-T9, P3-T14.
+/// or a title or stream the scan lacks. A title whose final path is in `nothing_at` (and holds no file) has its
+/// collision point without an item and says nothing is there (phase 3 design, part 6.7). Def: P3-T4. Use: P3-T5, P3-T8,
+/// P3-T9, P3-T14.
 pub fn build(inputs: &DocInputs<'_>) -> Result<ReviewDoc, String> {
     let record = inputs.record;
     let (held, since_unix) = match &record.state {
@@ -600,11 +616,17 @@ pub fn build(inputs: &DocInputs<'_>) -> Result<ReviewDoc, String> {
         job_reasons.extend(reasons.iter().copied());
         let scanned = inputs.disc.title(title.scan_title)?;
         let mut items = Vec::new();
+        // The final path of a title whose collision point has nothing at it: no collision item, only the sentence.
+        let mut nothing_at: Option<String> = None;
         if let Some(decision) = &title.decision {
             items.extend(audio_items(&title.key, scanned, decision)?);
             items.extend(subtitle_items(inputs, &title.key, scanned, decision)?);
             if let Some(path) = decision.path.as_ref().filter(|_| reasons.contains(&ReviewReason::PathCollision)) {
-                items.push(collision_item(inputs, &title.key, scanned.number, &path.path));
+                if is_empty_spot(inputs, &path.path) {
+                    nothing_at = Some(path.path.clone());
+                } else {
+                    items.push(collision_item(inputs, &title.key, scanned.number, &path.path));
+                }
             }
         }
         for kind in [PointKind::Audio, PointKind::Subtitles, PointKind::Collision, PointKind::Rip] {
@@ -618,9 +640,13 @@ pub fn build(inputs: &DocInputs<'_>) -> Result<ReviewDoc, String> {
             if raised.is_empty() && !shown_anyway {
                 continue;
             }
+            let sentence = match (&nothing_at, kind) {
+                (Some(path), PointKind::Collision) => format!("Nothing is at {path} now. {NOTHING_AT_PATH}"),
+                _ => point_sentence(kind, &raised),
+            };
             points.push(Point {
                 kind,
-                sentence: point_sentence(kind, &raised),
+                sentence,
                 reasons: raised,
                 title_key: Some(title.key.clone()),
                 answerable: !ids.is_empty(),
@@ -1275,7 +1301,7 @@ mod tests {
         let staged = BTreeMap::from([(KEY.to_string(), "S:/staging/job-1/title_t00.mkv".to_string())]);
         let lines = BTreeMap::from([((KEY.to_string(), 9), vec!["Where are you going?".to_string(), "Wait.".to_string()])]);
         let unread = BTreeMap::from([((KEY.to_string(), 33), "the time cap was reached".to_string())]);
-        build(&DocInputs { record, disc, staged: &staged, lines: &lines, unread: &unread, collisions, all })
+        build(&DocInputs { record, disc, staged: &staged, lines: &lines, unread: &unread, collisions, nothing_at: &BTreeSet::new(), all })
     }
 
     fn sheet(record: &JobRecord, disc: &Disc, all: bool) -> ReviewDoc {
@@ -1411,6 +1437,94 @@ mod tests {
         assert_eq!(collision.stands, "");
         assert_eq!((collision.path.as_deref(), collision.describe.as_str(), collision.stream), (Some(FINAL), FINAL, None));
         assert_eq!(collision.evidence, vec![Evidence { kind: "file".to_string(), text: "40000000000 bytes, 2026-11-01".to_string() }]);
+    }
+
+    /// The fixture's held job with a path collision, and the document of it when the engine looked at its final path
+    /// and found nothing there (or, with `collisions`, a file).
+    fn nothing_at_the_path(disc: &Disc, collisions: &BTreeMap<String, String>, nothing_at: &BTreeSet<String>) -> ReviewDoc {
+        let mut held = record(disc);
+        decided(&mut held).reviews = vec![ReviewReason::PathCollision];
+        let staged = BTreeMap::new();
+        let (lines, unread) = (BTreeMap::new(), BTreeMap::new());
+        build(&DocInputs { record: &held, disc, staged: &staged, lines: &lines, unread: &unread, collisions, nothing_at, all: false })
+            .unwrap()
+    }
+
+    fn only_the_final_path() -> BTreeSet<String> {
+        BTreeSet::from([FINAL.to_string()])
+    }
+
+    #[test]
+    fn a_collision_with_nothing_at_the_path_is_a_point_without_an_item() {
+        let disc = film_disc();
+        let doc = nothing_at_the_path(&disc, &BTreeMap::new(), &only_the_final_path());
+        assert_eq!(doc.points.len(), 1, "{:?}", doc.points);
+        let point = &doc.points[0];
+        assert_eq!((point.kind, point.title_key.as_deref()), (PointKind::Collision, Some(KEY)));
+        assert_eq!(point.reasons, vec![ReviewReason::PathCollision]);
+        assert!(!point.answerable && point.items.is_empty());
+        assert_eq!(
+            point.sentence,
+            format!(
+                "Nothing is at {FINAL} now. A folder the share could not open clears by itself within minutes, so \
+                 approving tries to file again."
+            )
+        );
+        assert_eq!(point.sentence, format!("Nothing is at {FINAL} now. {NOTHING_AT_PATH}"));
+        assert!(doc.titles[0].items.iter().all(|item| item.kind != ItemKind::Collision), "{:?}", doc.titles[0].items);
+        // The reason still stands on the job, and the path is still the one the title files as.
+        assert_eq!(doc.reasons, vec![ReviewReason::PathCollision]);
+        assert_eq!(doc.titles[0].final_path.as_deref(), Some(FINAL));
+    }
+
+    #[test]
+    fn the_sheet_says_nothing_is_at_the_path_and_asks_nothing() {
+        let disc = film_disc();
+        let text = render(&nothing_at_the_path(&disc, &BTreeMap::new(), &only_the_final_path()));
+        println!("{text}");
+        // One sentence per line, as every point's sentences are shown.
+        let sentence = format!(
+            "1. Nothing is at {FINAL} now.\n   A folder the share could not open clears by itself within minutes, so approving \
+             tries to file again.\n"
+        );
+        assert_eq!(text.matches(&sentence).count(), 1, "{text}");
+        assert_eq!(text.matches("Nothing is at").count(), 1, "{text}");
+        assert!(text.contains("One point needs your answer.\n"), "{text}");
+        assert!(!text.contains("not answered"), "{text}");
+        assert!(!text.contains("later version of lazymkv"), "{text}");
+        assert!(!text.contains("As it stands"), "{text}");
+    }
+
+    #[test]
+    fn a_collision_answer_for_a_path_with_nothing_at_it_is_refused() {
+        let disc = film_disc();
+        let doc = nothing_at_the_path(&disc, &BTreeMap::new(), &only_the_final_path());
+        let keep_both = Overrides {
+            collision: vec![CollisionAnswer { path: FINAL.to_string(), action: Collision::KeepBoth }],
+            ..Overrides::default()
+        };
+        assert_eq!(check(&doc, &keep_both), Err(format!("no collision with \"{FINAL}\" on this sheet")));
+        assert_eq!(
+            answers_of(&doc, &words(&[("t00-00801 collision", "keep_both")])),
+            Err("no item \"t00-00801 collision\" on this sheet".to_string())
+        );
+        // No answers at all is fine: approving is the answer.
+        assert_eq!(check(&doc, &Overrides::default()), Ok(()));
+    }
+
+    #[test]
+    fn a_file_at_the_path_still_gives_the_ordinary_item() {
+        let disc = film_disc();
+        let collisions = BTreeMap::from([(FINAL.to_string(), "40000000000 bytes, 2026-11-01".to_string())]);
+        let doc = nothing_at_the_path(&disc, &collisions, &BTreeSet::new());
+        let point = &doc.points[0];
+        assert_eq!((point.kind, point.answerable), (PointKind::Collision, true));
+        assert_eq!(point.items, vec!["t00-00801 collision"]);
+        assert!(!point.sentence.contains("Nothing is at"), "{}", point.sentence);
+        assert_eq!(item(&doc, "t00-00801 collision").answers, vec!["keep_both", "replace"]);
+        // A path in both sets cannot happen; the file wins.
+        let both = nothing_at_the_path(&disc, &collisions, &only_the_final_path());
+        assert_eq!(both, doc);
     }
 
     #[test]
@@ -1689,7 +1803,18 @@ mod tests {
         ]);
         let unread = BTreeMap::new();
         let none = BTreeMap::new();
-        build(&DocInputs { record: held, disc, staged: &staged, lines: &lines, unread: &unread, collisions: &none, all: false }).unwrap()
+        let nowhere = BTreeSet::new();
+        build(&DocInputs {
+            record: held,
+            disc,
+            staged: &staged,
+            lines: &lines,
+            unread: &unread,
+            collisions: &none,
+            nothing_at: &nowhere,
+            all: false,
+        })
+        .unwrap()
     }
 
     #[test]
