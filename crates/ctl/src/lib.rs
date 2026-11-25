@@ -105,6 +105,9 @@ pub fn run(argv: &[String], env: Env) -> i32 {
     if name == "review" {
         return review_cmd::run(argv, env);
     }
+    if name == "discard" {
+        return review_cmd::discard(argv, env);
+    }
     if engine_cmds::ENGINE_COMMANDS.iter().any(|(command, _)| command == name) {
         return engine_cmds::run(argv, env);
     }

@@ -232,12 +232,16 @@ struct Session<'a> {
 impl Session<'_> {
     /// The sheet, then a blank line. Standard output only: the sheet holds the owner's subtitle lines.
     fn print_sheet(&mut self) {
-        let _ = write!(self.out, "{}\n", review_doc::render(&self.doc));
+        let _ = writeln!(self.out, "{}", review_doc::render(&self.doc));
     }
 
     /// No terminal and no answers: the sheet, and how to answer it.
     fn sheet_only(mut self) -> i32 {
         self.print_sheet();
+        if self.doc.held == HeldAs::Filed {
+            let _ = writeln!(self.out, "{NOT_HELD}");
+            return 0;
+        }
         let _ = writeln!(self.out, "To answer it, run lazymkvctl review {} at a terminal, or give --answer ID=WORD and --yes.", self.job);
         0
     }
@@ -411,20 +415,66 @@ impl Session<'_> {
 
     /// `x`: asks the engine what a discard deletes, asks the owner to type `discard`, and only then sends it.
     fn discard(&mut self) -> i32 {
-        let preview = match self.peer.ask("discard_preview", json!({"job": self.job})) {
+        discard_job(&mut self.peer, &self.job, Some(&mut self.input), &mut *self.out, &mut *self.err)
+    }
+}
+
+/// `lazymkvctl discard JOB [--yes]` (`argv[0]` is `discard`): frees a job's data. At a terminal it asks the engine
+/// what a discard deletes, asks the owner to type `discard`, and only then sends it; with `--yes` it sends only
+/// `discard`. Without a terminal and without `--yes` nothing is sent. Exits 0 when the engine accepted or the owner
+/// did not type the word; 1 when the engine refused; 2 for an argument error; 4 when no engine answered.
+pub(crate) fn discard(argv: &[String], env: Env) -> i32 {
+    let Env { connector, stdin, out, err, interactive, .. } = env;
+    let mut args = Args::new(&argv[1..], &["--yes"]);
+    let yes = args.switch("--yes");
+    let parsed = args.positionals().and_then(|mut left| match left.len() {
+        0 => Err("the following arguments are required: JOB".to_string()),
+        1 => Ok(left.remove(0)),
+        _ => Err(format!("unrecognized arguments: {}", left[1..].join(" "))),
+    });
+    let job = match parsed {
+        Ok(job) if yes || interactive => job,
+        Ok(_) => {
+            let message = "discard asks you to type the word discard, which needs a terminal; to discard without \
+                           asking, add --yes";
+            return argument_error(err, "discard", message);
+        }
+        Err(message) => {
+            let synopsis = ENGINE_COMMANDS.iter().find(|(command, _)| *command == "discard").map_or("discard", |(_, text)| text);
+            let _ = writeln!(err, "usage: lazymkvctl {synopsis}");
+            return argument_error(err, "discard", &message);
+        }
+    };
+    let mut peer = match Peer::connect(connector) {
+        Ok(peer) => peer,
+        Err(message) => {
+            let _ = writeln!(err, "{message}");
+            return 4;
+        }
+    };
+    let mut input = BufReader::new(stdin);
+    discard_job(&mut peer, &job, if yes { None } else { Some(&mut input) }, out, err)
+}
+
+/// The discard of `job` on `peer`: with `input`, the preview and the question first, and nothing is sent unless the
+/// owner types the word; without it (`--yes`), `discard` alone.
+fn discard_job(peer: &mut Peer, job: &str, input: Option<&mut dyn BufRead>, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    if let Some(input) = input {
+        let preview = match peer.ask("discard_preview", json!({"job": job})) {
             Ok(preview) => preview,
-            Err(failure) => return failure.report(self.err),
+            Err(failure) => return failure.report(err),
         };
-        if !confirm_discard(&self.job, &preview, &mut self.input, &mut *self.out) {
-            return self.nothing_changed();
+        if !confirm_discard(job, &preview, input, &mut *out) {
+            let _ = writeln!(out, "{NOTHING_CHANGED}");
+            return 0;
         }
-        match self.peer.ask("discard", json!({"job": self.job})) {
-            Ok(_) => {
-                let _ = writeln!(self.out, "{DISCARDED}");
-                0
-            }
-            Err(failure) => failure.report(self.err),
+    }
+    match peer.ask("discard", json!({"job": job})) {
+        Ok(_) => {
+            let _ = writeln!(out, "{DISCARDED}");
+            0
         }
+        Err(failure) => failure.report(err),
     }
 }
 
@@ -1063,6 +1113,139 @@ mod tests {
                      The disc would have to be ripped again. Type discard to go on:\n";
         assert_eq!(confirmed(unknown.clone(), "discard\n"), (true, asked.to_string()));
         assert_eq!(confirmed(unknown, "stop\n"), (false, asked.to_string()));
+    }
+
+    /// `argv` run against a scripted engine that answers each of `then` (no review document first).
+    fn discarding(argv: &[&str], then: Vec<Say>, stdin: &str, interactive: bool) -> (i32, String, String, Vec<Value>) {
+        let (ipc, connector) = MemoryIpc::new();
+        let server = peer(ipc, then);
+        let (code, out, err) = call(argv, &connector, stdin, interactive);
+        (code, out, err, finish(server, connector))
+    }
+
+    fn discard_requests(requests: &[Value]) -> Vec<Value> {
+        requests.iter().map(|request| json!({"type": request["type"], "payload": request["payload"]})).collect()
+    }
+
+    const ASKED_KNOWN: &str =
+        "Discard deletes this job's rip: 3 files, 41.3 GB. The disc would have to be ripped again. Type discard to go on:\n";
+
+    #[test]
+    fn discard_asks_with_the_size_and_sends_on_the_word() {
+        let preview = json!({"bytes": 41_300_000_000u64, "files": 3});
+        let (code, out, err, requests) =
+            discarding(&["discard", JOB], vec![Say::Ok(preview), Say::Ok(Value::Null)], "discard\n", true);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(kinds(&requests), ["discard_preview", "discard"]);
+        assert_eq!(requests[0]["id"], 1);
+        assert_eq!(requests[1]["id"], 2);
+        assert_eq!(requests[1]["payload"], json!({"job": JOB}));
+        assert_eq!(out, format!("{ASKED_KNOWN}Discarded. The job's rip is being deleted.\n"));
+    }
+
+    #[test]
+    fn any_other_word_sends_nothing_and_exits_0() {
+        let preview = json!({"bytes": 41_300_000_000u64, "files": 3});
+        for typed in ["no\n", "\n", "", "Discard\n", "y\n"] {
+            let (code, out, err, requests) = discarding(&["discard", JOB], vec![Say::Ok(preview.clone())], typed, true);
+            assert_eq!((code, err.as_str()), (0, ""), "{typed:?}");
+            assert_eq!(discard_requests(&requests), vec![json!({"type": "discard_preview", "payload": {"job": JOB}})],
+                       "{typed:?}: only the read-only preview goes out");
+            assert_eq!(out, format!("{ASKED_KNOWN}Nothing was changed.\n"), "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn yes_skips_the_question() {
+        let (code, out, err, requests) =
+            discarding(&["discard", JOB, "--yes"], vec![Say::Ok(Value::Null)], "", false);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(discard_requests(&requests), vec![json!({"type": "discard", "payload": {"job": JOB}})]);
+        assert_eq!(out, "Discarded. The job's rip is being deleted.\n");
+        // The same at a terminal: no question either.
+        let (code, out, _, requests) = discarding(&["discard", "--yes", JOB], vec![Say::Ok(Value::Null)], "", true);
+        assert_eq!((code, kinds(&requests)), (0, vec!["discard"]));
+        assert!(!out.contains("Type discard"), "{out}");
+    }
+
+    #[test]
+    fn an_unknown_size_says_so() {
+        let preview = json!({"unknown": "the staging share did not answer: cable out"});
+        let (code, out, err, requests) =
+            discarding(&["discard", JOB], vec![Say::Ok(preview), Say::Ok(Value::Null)], "discard\n", true);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(kinds(&requests), ["discard_preview", "discard"]);
+        assert!(out.starts_with("Discard deletes this job's rip: its size is unknown (the staging share did not answer: cable out). \
+                                 The disc would have to be ripped again. Type discard to go on:\n"), "{out}");
+    }
+
+    #[test]
+    fn without_a_terminal_and_without_yes_it_exits_2_saying_so() {
+        let refusing = MemoryConnector::failing(ConnectError::NotRunning);
+        let (code, out, err) = call(&["discard", JOB], &refusing, "discard\n", false);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("lazymkvctl discard: error: ") && err.contains("--yes"), "{err}");
+        assert!(!err.contains("no engine"), "nothing was connected to: {err}");
+        // Through a scripted engine: not even the preview is asked for.
+        let (ipc, connector) = MemoryIpc::new();
+        let server = peer(ipc, vec![]);
+        let (code, out, _) = call(&["discard", JOB], &connector, "discard\n", false);
+        drop(connector);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(server.join().unwrap().is_none_or(|requests| requests.is_empty()));
+    }
+
+    #[test]
+    fn discard_exit_codes_follow_review() {
+        // A refused preview (an unknown job) exits 1 with the engine's words and asks nothing.
+        let (code, out, err, requests) = discarding(&["discard", JOB], vec![Say::Error("no job made-up-1")], "discard\n", true);
+        assert_eq!((code, out.as_str(), err.as_str()), (1, "", "lazymkvctl: no job made-up-1\n"));
+        assert_eq!(kinds(&requests), ["discard_preview"]);
+        // A refused discard exits 1 and does not say it discarded.
+        let (code, out, err, _) = discarding(&["discard", JOB, "--yes"], vec![Say::Error("job made-up-1 is running")], "", false);
+        assert_eq!((code, err.as_str()), (1, "lazymkvctl: job made-up-1 is running\n"));
+        assert!(!out.contains("Discarded"), "{out}");
+        // A closed connection exits 4.
+        let (code, _, err, _) = discarding(&["discard", JOB, "--yes"], vec![Say::Hangup], "", false);
+        assert_eq!((code, err.as_str()), (4, "lazymkvctl: the engine closed the connection before replying\n"));
+        // Argument errors exit 2 before any connection.
+        let refusing = MemoryConnector::failing(ConnectError::NotRunning);
+        for argv in [&["discard"][..], &["discard", "a", "b"], &["discard", JOB, "--now"]] {
+            let (code, out, err) = call(argv, &refusing, "", true);
+            assert_eq!((code, out.as_str()), (2, ""), "{argv:?}");
+            assert!(err.starts_with("usage: lazymkvctl discard JOB [--yes]\n"), "{argv:?}: {err}");
+            assert!(!err.contains("no engine"), "{argv:?}: {err}");
+        }
+        let (code, _, err) = call(&["discard", JOB], &refusing, "discard\n", true);
+        assert_eq!((code, err.as_str()), (4, "lazymkvctl: no engine is running\n"));
+    }
+
+    #[test]
+    fn an_empty_line_at_file_it_now_does_not_approve() {
+        let doc = subtitles_doc();
+        let (code, out, err, requests) =
+            review(&["review", JOB], &doc, vec![Say::Ok(Value::Null)], "\n\n\ny\n", true);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(out.matches("File it now?").count(), 2, "{out}");
+        assert_eq!(kinds(&requests), ["review", "review_action"]);
+        let (code, out, _, requests) = review(&["review", JOB], &doc, vec![], "\n\n\nn\n", true);
+        assert_eq!(code, 0);
+        assert_eq!(out.matches("File it now?").count(), 2, "{out}");
+        assert_eq!(requests, vec![review_request()]);
+    }
+
+    #[test]
+    fn a_job_that_is_not_held_gets_no_hint_to_answer_it() {
+        let mut doc = subtitles_doc();
+        doc.held = HeldAs::Filed;
+        let (code, out, err, requests) = review(&["review", JOB], &doc, vec![], "", false);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(requests, vec![review_request()]);
+        assert!(out.ends_with("This job is not held, so there is nothing to answer.\n"), "{out}");
+        assert!(!out.contains("To answer it"), "{out}");
+        // A held job still gets the hint.
+        let (_, out, _, _) = review(&["review", JOB], &subtitles_doc(), vec![], "", false);
+        assert!(out.contains("To answer it, run lazymkvctl review"), "{out}");
     }
 
     #[test]

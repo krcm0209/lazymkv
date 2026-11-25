@@ -17,11 +17,12 @@ use crate::{argument_error, relayed_paths, retune_spec, Env, NOT_ELEVATED, NOT_R
 
 /// Design part 9.6's engine commands as (name, synopsis after "usage: lazymkvctl "), in its table order.
 /// Def: T28. Use: T28.
-pub(crate) const ENGINE_COMMANDS: [(&str, &str); 12] = [
+pub(crate) const ENGINE_COMMANDS: [(&str, &str); 13] = [
     ("status", "status"), ("watch", "watch"), ("history", "history [--before JOB]"),
     ("settings", "settings get | settings set FILE"), ("secret", "secret set NAME"), ("selftest", "selftest"),
     ("retry", "retry JOB"), ("cancel", "cancel JOB"), ("rip-again", "rip-again JOB"), ("approve", "approve JOB"),
     ("stop", "stop [--force]"), ("review", "review JOB [--all] [--json] [--answer ID=WORD ...] [--yes]"),
+    ("discard", "discard JOB [--yes]"),
 ];
 
 /// The argument error of a request whose line, newline excluded, is longer than MAX_LINE_BYTES (engine.md "Pull
