@@ -8,9 +8,10 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::Client;
+use common::{file_with_one_subtitle, first_kept_subtitle, hold_two_subs, subtitle_item_id, Client};
 use lazymkv_core::ipc::Reply;
 use lazymkv_core::record::TuningCopy;
+use lazymkv_core::review_doc::{answers_of, ReviewDoc};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_engine::testkit::Harness;
 use lazymkv_platform::Spawn;
@@ -149,4 +150,38 @@ fn a_lookup_pending_job_compares_its_identity_only_through_the_relays_words() {
         compared(&h, &id, &plan, &decide),
         (0, format!("{pending}\ncompare-job: no difference\n"), String::new())
     );
+}
+
+/// A job held with two English subtitle streams, reviewed with an answer for one track (no collision answer: a replay
+/// does not look at the library) and filed: its tuning copy lands and the engine restarts, so no step runs.
+fn reviewed_with_a_track_answer() -> (Harness, String) {
+    let h = harness(&["movie-direct-two-subs"]);
+    let (id, target) = hold_two_subs(&h);
+    let mut c = client(&h);
+    let doc: ReviewDoc = serde_json::from_value(c.ok("review", json!({"job": id}))).unwrap();
+    let item = subtitle_item_id(&doc, first_kept_subtitle(&h, &id));
+    let answers = answers_of(&doc, &[(item, "drop".to_string())]).unwrap();
+    assert_eq!(answers.overrides.subtitles.len(), 1);
+    fs::remove_file(&target).unwrap();
+    file_with_one_subtitle(&h, &id);
+    let overrides = serde_json::to_value(&answers.overrides).unwrap();
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": overrides}));
+    h.wait("Filed or Failed", |h| ["Filed", "Failed"].contains(&h.state_of(&id).as_str()));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    h.wait("the copy's state", |h| h.record(&id).tuning_copy == Some(TuningCopy::Done));
+    drop(c);
+    h.restart();
+    (h, id)
+}
+
+/// A job filed after a review with a track answer: the relayed `decide --job` is run with the job's review.json as its
+/// `--overrides`, so its output agrees with the decide.json the engine's own Decide wrote with that answer.
+#[test]
+fn a_reviewed_jobs_relayed_decide_equals_its_decide_json() {
+    let (h, id) = reviewed_with_a_track_answer();
+    let (plan, decide, words) = outputs(&h, &id);
+    let at = words.iter().position(|word| word == "--overrides").unwrap_or_else(|| panic!("no --overrides in {words:?}"));
+    assert_eq!(words[at + 1], h.job_dir(&id).join("review.json").display().to_string());
+    assert!(fs::read_to_string(h.job_dir(&id).join("review.json")).unwrap().contains("\"drop\""));
+    assert_eq!(compared(&h, &id, &plan, &decide), (0, "compare-job: no difference\n".to_string(), String::new()));
 }

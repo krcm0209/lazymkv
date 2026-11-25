@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
-use common::{Client, WAIT};
+use common::{file_with_one_subtitle, Client, WAIT};
 use lazymkv_clients::{record_url, search_url, OFFLINE};
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
@@ -1593,19 +1593,6 @@ fn kept_subtitle(h: &Harness, id: &str) -> (String, u32, u32, String) {
     assert_eq!(decision.subtitles.kept.len(), 2, "both subtitle streams are kept before the answer");
     let kept = &decision.subtitles.kept[0];
     (title.key, title.scan_title, kept.stream, kept.role.as_str().to_string())
-}
-
-/// The stand-in mkvmerge's identification of the remuxed file, made to hold the video, the audio and the second kept
-/// subtitle track of the held job's decision, as the file is once the first is dropped (the scenario's own lists none).
-fn file_with_one_subtitle(h: &Harness, id: &str) {
-    let decision = h.record(id).titles[0].decision.clone().unwrap();
-    let other = &decision.subtitles.kept[1];
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/partial-ident.json");
-    let mut ident: Value = serde_json::from_str(&fs::read_to_string(base).unwrap()).unwrap();
-    let sdh = other.role == lazymkv_core::tracks::SubtitleRole::Sdh;
-    ident["tracks"].as_array_mut().unwrap().push(json!({"id": 2, "type": "subtitles", "codec": "HDMV PGS", "properties": {
-        "language": "eng", "track_name": other.name, "forced_track": other.forced, "flag_hearing_impaired": sdh}}));
-    fs::write(h.tools().join("partial-ident.json"), ident.to_string()).unwrap();
 }
 
 /// Asserts that a refused approval left the held job as it was: still held, no new transition, and no answers file.

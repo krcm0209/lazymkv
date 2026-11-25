@@ -5,11 +5,14 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
+use std::fs;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use lazymkv_core::ipc::{read_reply, Envelope, Reply};
+use lazymkv_core::review_doc::{ItemKind, ReviewDoc};
 use lazymkv_engine::testkit::{ci_factor, Harness};
 use lazymkv_platform::IpcConnector;
 use serde_json::{json, Value};
@@ -156,4 +159,60 @@ impl Client {
             }
         }
     }
+}
+
+/// The final path, under the library, of the stand-in film `movie-direct` is filed as.
+pub const FINAL: &str = "Synthetic Movie (2001) {tmdb-900001}/Synthetic Movie (2001) {tmdb-900001} - 1080p.mkv";
+
+/// Inserts `movie-direct` (with `movie-direct-two-subs` among the harness's scenarios) after putting a file at its final
+/// path, and waits until the job is held at the disposition gate for that path_collision: the job's ID and the colliding
+/// file's path.
+pub fn hold_two_subs(h: &Harness) -> (String, PathBuf) {
+    let target = h.library().join(FINAL);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"owner's").unwrap();
+    h.insert("tok0", "movie-direct");
+    let id = format!("{}-1", h.fingerprint("movie-direct").to_ascii_lowercase());
+    h.wait("the job is held", |h| h.state_of(&id) == "NeedsReview");
+    (id, target)
+}
+
+/// The stand-in mkvmerge's identification of the remuxed file, made to hold the video, the audio and the second kept
+/// subtitle track of the held job's decision, as the file is once the first is dropped (the scenario's own lists none).
+pub fn file_with_one_subtitle(h: &Harness, id: &str) {
+    let decision = h.record(id).titles[0].decision.clone().unwrap();
+    let other = &decision.subtitles.kept[1];
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/partial-ident.json");
+    let mut ident: Value = serde_json::from_str(&fs::read_to_string(base).unwrap()).unwrap();
+    let sdh = other.role == lazymkv_core::tracks::SubtitleRole::Sdh;
+    ident["tracks"].as_array_mut().unwrap().push(json!({"id": 2, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+        "language": "eng", "track_name": other.name, "forced_track": other.forced, "flag_hearing_impaired": sdh}}));
+    fs::write(h.tools().join("partial-ident.json"), ident.to_string()).unwrap();
+}
+
+/// The id, in `doc`, of the subtitle item of scan stream `stream`.
+pub fn subtitle_item_id(doc: &ReviewDoc, stream: u32) -> String {
+    let items = doc.titles.iter().flat_map(|title| title.items.iter());
+    let found = items.filter(|item| item.kind == ItemKind::Subtitle && item.stream == Some(stream)).next();
+    found.unwrap_or_else(|| panic!("no subtitle item for stream {stream}")).id.clone()
+}
+
+/// The first kept subtitle stream of the held job's decision: the one the tests' answers drop.
+pub fn first_kept_subtitle(h: &Harness, id: &str) -> u32 {
+    h.record(id).titles[0].decision.clone().unwrap().subtitles.kept[0].stream
+}
+
+/// What each remux asked to keep (a remux is the mkvmerge run whose arguments hold `--track-order`; the subtitle
+/// extraction's hold none): the value after `--subtitle-tracks`, or "" when the arguments have none. One entry per
+/// remux, in order; a value with a comma keeps more than one subtitle track.
+pub fn remux_subtitle_tracks(h: &Harness) -> Vec<String> {
+    let remuxes = h.spawns().into_iter().filter(|spawn| {
+        spawn.program.file_stem().is_some_and(|stem| stem == "mkvmerge") && spawn.args.iter().any(|arg| arg == "--track-order")
+    });
+    remuxes
+        .map(|spawn| match spawn.args.iter().position(|arg| arg == "--subtitle-tracks") {
+            Some(at) => spawn.args[at + 1].clone(),
+            None => String::new(),
+        })
+        .collect()
 }
