@@ -1041,4 +1041,32 @@ after pull request #35; MA-1 to MA-4).
 
 ### Engine menu maps, pull request 1 (2026-11-24)
 
-The record is added with the acceptance run.
+Recorded on 2026-11-24 for the branch that binds an off-decision to the wording of its choice, gives the `roles` block
+`off_stale` and `play`, adds the menu's two notes and the reference rules to the rule, and adds `menu off` and
+`menu publish` (EP-1 to EP-9; Rulings FR-1 and FR-2 of its final review).
+
+- Tests: `cargo test --workspace --exclude lazymkv-ocr --locked --offline --no-fail-fast`, run on this Mac with
+  toolchain 1.100.0 and two test threads: 3537 passed, 0 failed, 5 ignored, in 58 result lines, with no warning. 48
+  tests print `skipped:` because the evidence clone is absent. `main` 8afcd97 has 3509 tests with the same command, so
+  the branch adds 28: 9 in the `menu` command, 7 in `tracks::audio`, 3 in `menu::role`, 3 in `menu::tie`, 3 in decide, 2
+  in `review` and 1 in `core::menu`'s own tests. The run is of the final code; the commit that adds this record changes
+  this document only. Nothing has run on Windows or Linux yet; that is CI's part once the branch is pushed.
+- Acceptance on the 13 real maps (counts only), with a release build of the final code, on the same copies as the
+  records above. It was run twice, before and after the final review's fixes, with the same counts.
+- The off-decisions: the 14 carried decisions were written again in the three-field form, each with the text `menu off`
+  prints for its id (8 `off`, 6 `role`). `menu off` then lists no `stale` line and 1 `undecided` text, the one the
+  record above left undecided. `off_stale` and `off_unused` are empty on 13 of 13.
+- Publishing: `menu publish` into a local folder standing in for the maps folder exits 0 on 13 of 13. The 13 folders
+  are named by 40 upper-case hex digits; 5 hold a map and an off-decisions file and 8, whose source has no decision, a
+  map alone, and each published file is byte-equal to its source. The maps were not published to the real maps folder;
+  that follows at the owner's word.
+- `decide` without and with `--menu`, the map taken from its published folder: the exit codes are equal on 13 of 13;
+  every key but `decision` and `menu` is byte-equal on 13 of 13; `roles.acts` is true and `roles.play` is known on 13
+  of 13; 79 `roles.audio` rows.
+- The rule: 30 confirmations, 30 `dropped`, on 11 maps, as in the record above. The programme reference is the same
+  before and after on each of the 11. There are 30 `menu_dropped` notes, one for each drop, and no
+  `menu_reference_conflict`. `commentary_detected` leaves the review reasons on 4 maps and no other review reason
+  changes. No confirmation met a guard: there is no `reference`, `reference_disputed`, `no_reference`,
+  `reference_would_change`, `overridden` or `not_kept` on any map, so the reference rules are shown by the tests alone.
+- Not part of this record: the engine does not read a map yet (the design's second pull request), and nothing ran on
+  the Windows machine.
