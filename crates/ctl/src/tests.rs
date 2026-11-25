@@ -9,7 +9,7 @@ fn words(text: &[&str]) -> Vec<String> { text.iter().map(|w| w.to_string()).coll
 fn ctl(ctx: &Ctx, argv: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let mut stdin: &[u8] = b"";
-    let code = run(&words(argv), Env { ctx, connector: None, stdin: &mut stdin, out: &mut out, err: &mut err });
+    let code = run(&words(argv), Env { ctx, connector: None, stdin: &mut stdin, out: &mut out, err: &mut err, interactive: false });
     (code, out, err)
 }
 
@@ -165,12 +165,12 @@ fn the_local_commands_are_the_three_of_design_part_9_5() {
 fn the_relay_reads_plans_and_decides_own_flag_lists() {
     assert_eq!(
         lazymkv_dev::cmd::plan::FLAGS,
-        ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered"]
+        ["--evidence", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--overrides"]
     );
     assert_eq!(
         lazymkv_dev::cmd::decide::FLAGS,
-        ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence",
-         "--menu"]
+        ["--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--overrides",
+         "--evidence", "--menu"]
     );
 }
 

@@ -140,6 +140,7 @@ fn assert_dev_renders_decide_json(h: &Harness, id: &str) {
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     let mut written = json_of(&dir.join(KEY).join("decide.json"));
@@ -226,6 +227,7 @@ fn replay_files(dir: &Path) -> PlanOptions {
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     }
 }
 
@@ -711,6 +713,7 @@ fn the_engines_decide_inputs_render_as_read_decide_inputs_over_the_finished_job_
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     let mut written = json_of(&dir.join(KEY).join("decide.json"));
@@ -815,6 +818,7 @@ fn a_remembered_decisions_track_overrides_reach_decide_json() {
         tmdb_search: given("tmdb-search.json"),
         tmdb_record: given("tmdb-record.json"),
         remembered: given("remembered.json"),
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, None, None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     let mut written = doc.clone();
@@ -1383,8 +1387,55 @@ fn a_collision_at_the_path_the_library_facts_lead_to_holds_the_job() {
     assert_eq!(fs::read_dir(h.library().join(".lazymkv-partial")).map(|d| d.count()).unwrap_or(0), 0);
 }
 
+/// `<library>/.lazymkv-partial/<job id>-<KEY>.mkv.partial`, the job's partial file (design part 5.7 step 13).
+fn partial_of(h: &Harness, id: &str) -> PathBuf {
+    h.library().join(".lazymkv-partial").join(format!("{id}-{KEY}.mkv.partial"))
+}
+
+/// `<staging>/<job id>/replaced`, where "replace" moves the existing file (phase 3 design, part 6.7).
+fn replaced_of(h: &Harness, id: &str) -> PathBuf {
+    h.staging().join(id).join("replaced")
+}
+
+/// Asserts the job is held at the gate for a collision found at filing (phase 3 design, part 6.7): FileCollided with
+/// path_collision, the title's decision and the last needs_review notification holding it, `target` in
+/// `record.collisions`, and no partial file left.
+fn assert_held_at_filing(h: &Harness, id: &str, target: &Path) {
+    h.settle();
+    let record = h.record(id);
+    assert_eq!(record.state, State::NeedsReview { held: Held::DispositionGate });
+    let collided = |e: &Event| matches!(e, Event::FileCollided { reasons } if reasons.contains(&ReviewReason::PathCollision));
+    assert!(events(h, id).iter().any(collided), "{:?}", events(h, id));
+    assert!(record.titles[0].decision.as_ref().unwrap().reviews.contains(&ReviewReason::PathCollision));
+    assert_eq!(record.collisions.iter().map(PathBuf::from).collect::<Vec<_>>(), vec![target.to_path_buf()]);
+    let last = h.notifications().into_iter().last().unwrap();
+    assert!(
+        matches!(&last.event, NotifyEvent::NeedsReview { reasons } if reasons.contains(&ReviewReason::PathCollision)),
+        "{:?}",
+        last.event
+    );
+    assert!(!partial_of(h, id).exists());
+    assert_eq!(fs::read_dir(h.library().join(".lazymkv-partial")).map(|d| d.count()).unwrap_or(0), 0);
+}
+
+/// Approves the held job with `overrides` (phase 3 design, part 6.7) and waits until it is Filed or Failed.
+fn approve_and_finish(h: &Harness, id: &str, overrides: Value) {
+    let mut c = Client::open(h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": overrides}));
+    h.wait("Filed or Failed", |h| ["Filed", "Failed"].contains(&h.state_of(id).as_str()));
+    h.settle();
+}
+
+/// The held job's final path, as its decision gives it.
+fn decided_path(h: &Harness, id: &str) -> String {
+    h.record(id).titles[0].decision.clone().unwrap().path.unwrap().path
+}
+
+/// LIB-8 (phase 3 design, part 6.7; P3-T11): a file written at the final path while the job is in Remuxing holds the
+/// job with path_collision at filing instead of failing it; the partial file is deleted and the file found is kept.
 #[test]
-fn an_existing_final_file_fails_file_failed_unknown_and_keeps_the_partial() {
+fn a_file_that_appears_before_the_rename_holds_the_job_with_path_collision() {
     let h = harness(&[], json!({}));
     let target = final_path(&h);
     let late = target.clone();
@@ -1392,14 +1443,228 @@ fn an_existing_final_file_fails_file_failed_unknown_and_keeps_the_partial() {
         fs::create_dir_all(late.parent().unwrap()).unwrap();
         fs::write(&late, b"late").unwrap();
     });
-    let id = run_to(&h, "Failed");
+    let id = run_to(&h, "NeedsReview");
+    assert_held_at_filing(&h, &id, &target);
+    assert_eq!(fs::read(&target).unwrap(), b"late");
+}
+
+/// Phase 3 design, part 6.7: "keep both" files the new copy under the next copy label and leaves the existing file.
+#[test]
+fn keep_both_files_under_the_copy_label() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "keep_both"}]}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    let folder = "Synthetic Movie (2001) {tmdb-900001}";
+    let copy = h.library().join(folder).join(format!("{folder} - 1080p 2.mkv"));
+    assert_eq!(fs::read(&copy).unwrap(), b"lazymkv-test-mkv");
+    assert_eq!(fs::read(&target).unwrap(), b"already here");
+    assert!(!replaced_of(&h, &id).exists());
+}
+
+/// `<library>/<film folder>/<film folder> - 1080p <n>.mkv`, the stand-in film's copy-labelled path `n` (phase 3 design,
+/// part 6.7).
+fn copy_path(h: &Harness, n: u32) -> PathBuf {
+    let folder = "Synthetic Movie (2001) {tmdb-900001}";
+    h.library().join(folder).join(format!("{folder} - 1080p {n}.mkv"))
+}
+
+/// Phase 3 design, part 6.7 (P3-T11b): "keep both" with the copy-2 path taken too files under the next free copy
+/// label, copy 3, and leaves both earlier files as they were.
+#[test]
+fn keep_both_with_copy_2_taken_files_as_copy_3() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let (copy, next) = (copy_path(&h, 2), copy_path(&h, 3));
+    fs::write(&copy, b"second").unwrap();
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "keep_both"}]}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(PathBuf::from(decided_path(&h, &id)), next);
+    assert_eq!(fs::read(&next).unwrap(), b"lazymkv-test-mkv");
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
+    assert_eq!(fs::read(&copy).unwrap(), b"second");
+    assert_eq!(h.record(&id).titles[0].filed.as_ref().map(|filed| PathBuf::from(&filed.path)), Some(next));
+    assert!(!partial_of(&h, &id).exists());
+}
+
+/// Phase 3 design, part 6.7 (P3-T11b, LIB-8's hook): a file written at the copy-2 path after a keep-both Decide and
+/// before the rename holds the job with path_collision and is kept; the second approval, with the keep-both answer
+/// still in review.json, files under copy 3.
+#[test]
+fn a_file_that_appears_at_the_copy_path_before_the_rename_holds_the_job() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let (copy, next) = (copy_path(&h, 2), copy_path(&h, 3));
+    let late = copy.clone();
+    h.on_spawn(&["-J", ".partial"], move || {
+        if !late.exists() {
+            fs::write(&late, b"late").unwrap();
+        }
+    });
+    let answer = json!({"collision": [{"path": decided_path(&h, &id), "action": "keep_both"}]});
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer}));
+    let collided = |h: &Harness| events(h, &id).iter().any(|e| matches!(e, Event::FileCollided { .. }));
+    h.wait("FileCollided", collided);
+    h.settle();
+    // The hold at Decide recorded the plain path first; the hold at filing adds the copy-2 path.
+    let record = h.record(&id);
+    assert_eq!(record.state, State::NeedsReview { held: Held::DispositionGate });
+    let held_by =
+        |e: &Event| matches!(e, Event::FileCollided { reasons } if reasons.contains(&ReviewReason::PathCollision));
+    assert!(events(&h, &id).iter().any(held_by), "{:?}", events(&h, &id));
+    assert!(record.titles[0].decision.as_ref().unwrap().reviews.contains(&ReviewReason::PathCollision));
+    assert!(record.collisions.iter().any(|path| PathBuf::from(path) == copy), "{:?}", record.collisions);
+    assert!(!partial_of(&h, &id).exists());
+    assert_eq!(fs::read(&copy).unwrap(), b"late");
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
+    assert!(!next.exists());
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&next).unwrap(), b"lazymkv-test-mkv");
+    assert_eq!(fs::read(&copy).unwrap(), b"late");
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"already here");
+}
+
+/// Phase 3 design, part 6.7: "replace" moves the existing file into `<staging>/<job>/replaced/`, byte for byte under
+/// its own name, then files the job's file at the final path.
+#[test]
+fn replace_moves_the_existing_file_into_the_jobs_staging_folder_and_files() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    assert_eq!(files_under(&replaced_of(&h, &id)), set(&[&name]));
+    assert_eq!(fs::read(replaced_of(&h, &id).join(&name)).unwrap(), b"already here");
+}
+
+/// Phase 3 design, part 6.7: a "replace" answer with nothing at the final path any more files the job and makes no
+/// `replaced` folder.
+#[test]
+fn replace_with_nothing_at_the_path_any_more_just_files() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    fs::remove_file(&target).unwrap();
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+    assert!(!replaced_of(&h, &id).exists());
+}
+
+/// Phase 3 design, part 6.7: a move into `replaced` that fails (here a file stands where the folder goes) gives
+/// FileFailed { Unknown } naming both paths, and the library file and the partial file are as they were.
+#[test]
+fn a_replaced_file_that_cannot_be_moved_fails_the_step_and_leaves_both_files() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    let replaced = replaced_of(&h, &id);
+    fs::create_dir_all(replaced.parent().unwrap()).unwrap();
+    fs::write(&replaced, b"in the way").unwrap();
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
     let record = h.record(&id);
     assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
-    assert!(record.message.unwrap().contains(&target.display().to_string()));
+    let failed = |e: &Event| matches!(e, Event::FileFailed { failure } if failure.class == FailureClass::Unknown);
+    assert!(events(&h, &id).iter().any(failed), "{:?}", events(&h, &id));
+    let message = record.message.unwrap_or_default();
+    assert!(message.contains(&target.display().to_string()), "{message}");
+    assert!(message.contains(&replaced.display().to_string()), "{message}");
+    assert_eq!(fs::read(&target).unwrap(), b"already here");
+    assert_eq!(fs::read(partial_of(&h, &id)).unwrap(), b"lazymkv-test-mkv");
+    assert_eq!(fs::read(&replaced).unwrap(), b"in the way");
+}
+
+/// Whether `from` is a file in a `replaced` folder: the put-back's rename, not the partial file's.
+fn from_replaced(from: &Path) -> bool {
+    from.parent().and_then(Path::file_name).is_some_and(|name| name == "replaced")
+}
+
+/// Ruling T32-E22: the rename of the job's file fails (not for a file at the path) after "replace" moved the library
+/// file aside; the library file is put back at its path, byte for byte, with one job.log line, `replaced` holds
+/// nothing, and the step fails as before.
+#[test]
+fn a_rename_that_fails_after_the_move_puts_the_library_file_back() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    h.file_rename_with(|from, _| (!from_replaced(from)).then(|| Err(std::io::Error::other("the share hiccuped"))));
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let message = record.message.unwrap_or_default();
+    let partial = partial_of(&h, &id);
+    let head = format!("{} could not be renamed to {}: the share hiccuped", partial.display(), decided_path(&h, &id));
+    assert_eq!(message, head);
+    assert_eq!(fs::read(&target).unwrap(), b"already here");
+    assert!(replaced_of(&h, &id).is_dir());
+    assert_eq!(files_under(&replaced_of(&h, &id)), set(&[]));
+    assert_eq!(fs::read(&partial).unwrap(), b"lazymkv-test-mkv");
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    let moved = replaced_of(&h, &id).join(&name);
+    let line = format!(
+        "{KEY}: the rename failed, so the library file moved to {} was put back at {}",
+        moved.display(),
+        decided_path(&h, &id)
+    );
+    assert_eq!(job_log(&h, &id).lines().filter(|l| *l == line).count(), 1, "{}", job_log(&h, &id));
+}
+
+/// Ruling T32-E22: when the put-back fails too, the library file stays in `replaced`, and the failure sentence and
+/// job.log end with where it is.
+#[test]
+fn a_put_back_that_fails_says_where_the_library_file_is() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    h.file_rename_with(|_, _| Some(Err(std::io::Error::other("the share hiccuped"))));
+    approve_and_finish(&h, &id, json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]}));
+    let record = h.record(&id);
+    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    let moved = replaced_of(&h, &id).join(&name);
+    let tail = format!("The library file that was at {} is now at {}.", decided_path(&h, &id), moved.display());
+    let message = record.message.unwrap_or_default();
+    assert!(message.ends_with(&tail), "{message}");
+    assert!(job_log(&h, &id).lines().any(|line| line.ends_with(&tail)), "{}", job_log(&h, &id));
+    assert!(!target.exists());
+    assert_eq!(fs::read(&moved).unwrap(), b"already here");
+    assert_eq!(fs::read(partial_of(&h, &id)).unwrap(), b"lazymkv-test-mkv");
+}
+
+/// Ruling T32-E22: a file that appears at the path after the move holds the job (the library file cannot be put back
+/// without replacing it), and the hold's job.log line ends with where the library file is.
+#[test]
+fn a_file_that_appears_after_the_move_holds_the_job_and_says_where_the_library_file_is() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    let target = final_path(&h);
+    h.file_rename_with(|from, to| {
+        if !from_replaced(from) && !to.exists() {
+            fs::write(to, b"late").unwrap();
+        }
+        None
+    });
+    let answer = json!({"collision": [{"path": decided_path(&h, &id), "action": "replace"}]});
+    let mut c = Client::open(&h);
+    c.snapshot();
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer}));
+    h.wait("FileCollided", |h| events(h, &id).iter().any(|e| matches!(e, Event::FileCollided { .. })));
+    h.settle();
+    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate });
+    let name = target.file_name().unwrap().to_str().unwrap().to_string();
+    let moved = replaced_of(&h, &id).join(&name);
+    let tail = format!("The library file that was at {} is now at {}.", decided_path(&h, &id), moved.display());
+    let log = job_log(&h, &id);
+    let held_line = log.lines().rev().find(|line| line.contains("the job is held for review with path_collision"));
+    assert!(held_line.is_some_and(|line| line.ends_with(&tail)), "{log}");
     assert_eq!(fs::read(&target).unwrap(), b"late");
-    let partial = h.library().join(".lazymkv-partial").join(format!("{id}-{KEY}.mkv.partial"));
-    assert_eq!(fs::read(partial).unwrap(), b"lazymkv-test-mkv");
-    assert!(record.collisions.iter().any(|path| PathBuf::from(path) == target));
+    assert_eq!(fs::read(&moved).unwrap(), b"already here");
 }
 
 #[test]
@@ -1656,7 +1921,7 @@ impl Drop for Closed {
     }
 }
 
-/// Runs movie-direct to Failed with its film folder closed just before File (the hook fires on VerifyFile's
+/// Runs movie-direct to NeedsReview with its film folder closed just before File (the hook fires on VerifyFile's
 /// `mkvmerge -J <partial>`, after Decide read the library). Returns the job, the guard and the final path.
 fn run_with_the_film_folder_closed(h: &Harness) -> (String, Arc<Closed>, PathBuf) {
     let target = final_path(h);
@@ -1667,7 +1932,7 @@ fn run_with_the_film_folder_closed(h: &Harness) -> (String, Arc<Closed>, PathBuf
             closed.close();
         }
     });
-    let id = run_to(h, "Failed");
+    let id = run_to(h, "NeedsReview");
     (id, closed, target)
 }
 
@@ -1743,42 +2008,214 @@ fn a_library_share_that_stops_answering_during_decide_fails_it_and_writes_nothin
     assert_eq!(record.titles[0].decision, None);
 }
 
-/// L7 (design parts 2.10, 6.5; Ruling W28): the title's folder is present but cannot be opened, so File fails as
-/// Unknown naming that folder (never the library root, so LIB-7 stands), the partial file stays in
-/// `.lazymkv-partial`, and nothing is renamed.
+/// L7 (design parts 2.10, 6.5; Ruling W28; phase 3 design, part 6.7, P3-T11): the title's folder is present but
+/// cannot be opened, so File holds the job with path_collision at the gate instead of failing it, the partial file is
+/// deleted, and nothing is renamed. The folder named is the title's, never the library root, so LIB-7 stands.
 #[test]
-fn a_present_but_inaccessible_folder_fails_filing_and_keeps_the_partial() {
+fn a_final_folder_that_cannot_be_opened_holds_the_job_too() {
     let h = harness(&[], json!({}));
     let (id, closed, target) = run_with_the_film_folder_closed(&h);
     if !closed.holds() {
         return; // root on Unix opens a folder of mode 0o000
     }
-    let record = h.record(&id);
-    assert_eq!(record.state, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Verified) });
-    let partial = h.library().join(".lazymkv-partial").join(format!("{id}-{KEY}.mkv.partial"));
-    let film = target.parent().unwrap();
-    let message = record.message.unwrap_or_default();
-    let head = format!("{} is present but cannot be opened (", film.display());
-    let tail = format!("); the partial file stays at {}, and a retry tries again", partial.display());
-    assert!(message.starts_with(&head) && message.ends_with(&tail), "{message}");
-    assert_eq!(fs::read(&partial).unwrap(), b"lazymkv-test-mkv");
-    assert!(record.collisions.is_empty(), "{:?}", record.collisions);
+    assert_held_at_filing(&h, &id, &target);
+    let film = target.parent().unwrap().display().to_string();
+    let line = format!("{KEY}: {film} is present but cannot be opened (");
+    assert!(job_log(&h, &id).contains(&line), "{}", job_log(&h, &id));
     closed.open();
     assert!(!target.exists());
 }
 
-/// L7 (design part 6.5): a `retry` once the folder opens files the title.
+/// L7 (phase 3 design, part 6.7): an approval once the folder opens remuxes again and files the title.
 #[test]
-fn a_retry_after_the_folder_opens_files_the_title() {
+fn an_approval_after_the_folder_opens_files_the_title() {
     let h = harness(&[], json!({}));
     let (id, closed, target) = run_with_the_film_folder_closed(&h);
     if !closed.holds() {
         return; // root on Unix opens a folder of mode 0o000
     }
     closed.open();
-    Client::open(&h).ok("retry", json!({"job": id}));
-    h.wait("Filed", |h| h.state_of(&id) == "Filed");
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
     assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+}
+
+/// L7 (phase 3 design, part 6.7; ruling T32-E10): the `review` request of a job held for a folder that would not open
+/// is the ordinary collision item while the folder is closed (nothing can be said of the path), and once the folder
+/// opens with nothing at the path, a collision point with no item that says so; approving with no answers files it.
+#[test]
+fn review_of_a_job_held_for_a_folder_that_would_not_open_says_nothing_is_there() {
+    let h = harness(&[], json!({}));
+    let (id, closed, target) = run_with_the_film_folder_closed(&h);
+    if !closed.holds() {
+        return; // root on Unix opens a folder of mode 0o000
+    }
+    let mut c = Client::open(&h);
+    c.snapshot();
+    let collision_ids = |doc: &Value| -> Vec<Value> {
+        let items = doc["titles"][0]["items"].as_array().unwrap();
+        items.iter().filter(|item| item["kind"] == json!("collision")).cloned().collect()
+    };
+    // Closed: the share cannot say what is at the path, so the ordinary item stands, with no file to describe. That
+    // holds on Unix only, where a folder of mode 0o000 makes the stat of the final path a permission error. Windows
+    // closes the folder with a handle of share mode 0, which stops a listing and a rename but not the stat of a child,
+    // so the stat says nothing is there and the document already holds the nothing-at-the-path point. The product is
+    // right on both; on Windows the closed state makes no claim about collision items, and the request answers `ok`.
+    let shut = c.ok("review", json!({"job": id}));
+    #[cfg(unix)]
+    {
+        let items = collision_ids(&shut);
+        assert_eq!(items.len(), 1, "{shut}");
+        assert_eq!(shut["points"][0]["answerable"], json!(true), "{shut}");
+        assert_eq!(items[0]["evidence"], json!([]), "{shut}");
+    }
+    #[cfg(not(unix))]
+    let _ = shut;
+    closed.open();
+    let doc = c.ok("review", json!({"job": id}));
+    let points = doc["points"].as_array().unwrap();
+    assert_eq!(points.len(), 1, "{doc}");
+    let point = &points[0];
+    assert_eq!((&point["kind"], &point["title_key"]), (&json!("collision"), &json!(KEY)), "{doc}");
+    assert_eq!((&point["answerable"], &point["items"]), (&json!(false), &json!([])), "{doc}");
+    assert_eq!(point["reasons"], json!(["path_collision"]), "{doc}");
+    let sentence = format!(
+        "Nothing is at {} now. A folder the share could not open clears by itself within minutes, so approving tries \
+         to file again.",
+        target.display()
+    );
+    assert_eq!(point["sentence"], json!(sentence), "{doc}");
+    assert!(collision_ids(&doc).is_empty(), "{doc}");
+    // The answer is the approval itself.
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+}
+
+// ---- Remember after filing (phase 3 design, part 6.6; Task 12; ruling T32-E14) ----
+
+/// A job held for a file at its final path with both English subtitle streams kept, and the answer that drops the
+/// first of them: the held job's ID, the dropped stream's scan title and number, and the answer. The colliding file is
+/// removed, so the approval files, and the stand-in's identification of the remuxed file holds the one subtitle
+/// track that stays.
+fn held_two_subs_with_a_drop(h: &Harness) -> (String, u32, u32, Value) {
+    let id = held(h);
+    let title = h.record(&id).titles[0].clone();
+    let decision = title.decision.expect("the held title was decided");
+    assert_eq!(decision.subtitles.kept.len(), 2, "both subtitle streams are kept before the answer");
+    let (dropped, other) = (&decision.subtitles.kept[0], &decision.subtitles.kept[1]);
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/scenarios/movie-direct/partial-ident.json");
+    let mut ident: Value = serde_json::from_str(&fs::read_to_string(base).unwrap()).unwrap();
+    let sdh = other.role == lazymkv_core::tracks::SubtitleRole::Sdh;
+    ident["tracks"].as_array_mut().unwrap().push(json!({"id": 2, "type": "subtitles", "codec": "HDMV PGS", "properties": {
+        "language": "eng", "track_name": other.name, "forced_track": other.forced, "flag_hearing_impaired": sdh}}));
+    fs::write(h.tools().join("partial-ident.json"), ident.to_string()).unwrap();
+    fs::remove_file(final_path(h)).unwrap();
+    let answer = json!({"subtitles": [{"title": title.scan_title, "stream": dropped.stream, "action": "drop"}]});
+    (id, title.scan_title, dropped.stream, answer)
+}
+
+/// `<data>/remembered/<fingerprint>.json` of the stand-in disc.
+fn remembered_path(h: &Harness) -> PathBuf {
+    h.data().join("remembered").join(format!("{}.json", h.fingerprint("movie-direct")))
+}
+
+/// The signature of the scan's stream `stream` of title `title`, read from the job's scan the way the engine reads it.
+fn signature_in_scan(h: &Harness, id: &str, title: u32, stream: u32) -> lazymkv_core::remembered::StreamSignature {
+    let text = fs::read(h.job_dir(id).join("scan.txt")).unwrap();
+    let typed = lazymkv_core::disc::disc(&lazymkv_core::robot::parse(&String::from_utf8_lossy(&text))).unwrap();
+    let streams = &typed.title(title).unwrap().streams;
+    let index = streams.iter().position(|candidate| candidate.number == stream).unwrap();
+    lazymkv_core::remembered::signature(streams, index)
+}
+
+/// Phase 3 design, part 6.6: a job approved with an answer writes the disc's remembered decision when it files, with
+/// the dropped subtitle stream's signature and `drop`, and the file is the one the store reads (format v1, this disc).
+#[test]
+fn a_reviewed_job_is_remembered_when_it_files() {
+    let h = two_subs(&[], json!({}));
+    let (id, title, stream, answer) = held_two_subs_with_a_drop(&h);
+    assert!(!remembered_path(&h).exists());
+    approve_and_finish(&h, &id, answer);
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    let text = fs::read_to_string(remembered_path(&h)).unwrap();
+    let remembered: lazymkv_core::remembered::Remembered = serde_json::from_str(&text).unwrap();
+    assert_eq!(json_of(&remembered_path(&h))["format"], json!("lazymkv remembered v1"));
+    assert!(remembered.fingerprint.eq_ignore_ascii_case(&h.fingerprint("movie-direct")), "{text}");
+    assert_eq!(remembered.titles.len(), 1, "{text}");
+    let dropped = signature_in_scan(&h, &id, title, stream);
+    let drops: Vec<_> = remembered.titles[0]
+        .subtitles
+        .iter()
+        .filter(|entry| entry.action == lazymkv_core::remembered::SubtitleOverride::Drop)
+        .collect();
+    assert_eq!(drops.len(), 1, "{text}");
+    assert_eq!(drops[0].signature, dropped, "{text}");
+    assert_eq!(remembered.titles[0].subtitles.len(), 2, "the stream that stays is remembered too: {text}");
+    let log = job_log(&h, &id);
+    assert!(!log.contains("remember:"), "{log}");
+}
+
+/// Phase 3 design, part 6.6: a second rip of the same disc applies the remembered answers and files without a hold,
+/// with no needs_review notification of its own.
+#[test]
+fn the_same_disc_ripped_again_files_without_a_hold() {
+    let h = two_subs(&[], json!({}));
+    let (id, _, _, answer) = held_two_subs_with_a_drop(&h);
+    approve_and_finish(&h, &id, answer);
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert!(remembered_path(&h).is_file());
+    // The first job's filed file would collide with the second job's path.
+    fs::remove_file(final_path(&h)).unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.ok("rip_again", json!({"job": id})), Value::Null);
+    let earlier = h.notifications().len();
+    h.remove("tok0");
+    h.insert("tok0", "movie-direct");
+    let second = id.replace("-1", "-2");
+    h.wait("the second job Filed", |h| h.job_ids().contains(&second) && h.state_of(&second) == "Filed");
+    h.settle();
+    assert_eq!(h.state_of(&second), "Filed", "{:?}", h.record(&second).message);
+    let notified = h.notifications().split_off(earlier);
+    assert!(notified.iter().all(|sent| !matches!(sent.event, NotifyEvent::NeedsReview { .. })), "{notified:?}");
+    assert!(!h.transitions(&second).iter().any(|line| line.new.as_str() == "NeedsReview"));
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"lazymkv-test-mkv");
+    // The remembered answer was applied: the second job keeps one subtitle track, as the first did after its drop.
+    let decision = h.record(&second).titles[0].decision.clone().unwrap();
+    assert_eq!(decision.subtitles.kept.len(), 1, "{decision:?}");
+    assert!(!h.job_dir(&second).join("review.json").exists());
+}
+
+/// Ruling T32-E14: a job approved with no answer writes no remembered file.
+#[test]
+fn a_job_approved_unchanged_writes_no_remembered_file() {
+    let h = harness(&[], json!({}));
+    let id = held(&h);
+    fs::remove_file(final_path(&h)).unwrap();
+    approve_and_finish(&h, &id, json!({}));
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert!(!h.data().join("remembered").exists(), "{:?}", files_under(h.data()));
+    assert!(!job_log(&h, &id).contains("remember:"));
+}
+
+/// Design part 6.6: a remembered file that cannot be written (a plain file stands where the folder should be) is one
+/// `remember: <error>` line in job.log and never fails the job.
+#[test]
+fn a_remembered_file_that_cannot_be_written_is_logged_and_the_job_stays_filed() {
+    let h = two_subs(&[], json!({}));
+    let (id, _, _, answer) = held_two_subs_with_a_drop(&h);
+    let blocker = h.data().join("remembered");
+    fs::write(&blocker, b"not a folder").unwrap();
+    approve_and_finish(&h, &id, answer);
+    assert_eq!(h.state_of(&id), "Filed", "{:?}", h.record(&id).message);
+    assert_eq!(fs::read(&blocker).unwrap(), b"not a folder");
+    let log = job_log(&h, &id);
+    let lines: Vec<&str> = log.lines().filter(|line| line.starts_with("remember: ")).collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(!lines[0].contains(SENTINEL));
+    assert_eq!(fs::read(final_path(&h)).unwrap(), b"lazymkv-test-mkv");
+    assert!(h.transitions(&id).iter().all(|line| line.new.as_str() != "Failed"));
 }
 
 #[test]

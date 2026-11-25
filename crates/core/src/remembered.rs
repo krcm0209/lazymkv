@@ -7,7 +7,7 @@
 //! 8.8). Persistence is phase 2. Used by the planner (Task 7), the audio and subtitle rules (Tasks 8 and 10), the
 //! decision (Task 13) and the job reducer (Task 14).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use crate::codec::Family;
@@ -298,6 +298,7 @@ pub struct SubtitleTrackOverride {
 /// because `Event::ReviewApproved` carries them inside an internally tagged enum, whose buffered content cannot give an
 /// integer map key (the interfaces' "Keyed collections"). Def: T6. Use: T7, T13, T14.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Overrides {
     /// Set identity.
     pub identity: Option<TmdbIdentity>,
@@ -311,6 +312,30 @@ pub struct Overrides {
     /// Resolve collision: one answer per colliding final path the owner was shown, sorted by path (a list of entries,
     /// as the other keyed collections here).
     pub collision: Vec<CollisionAnswer>,
+}
+
+/// The keys of an answers object, in the order the refusal names them (phase 3 design, part 6.4). Def: P3-T2. Use: P3-T7,
+/// P3-T8.
+pub const OVERRIDE_KEYS: [&str; 6] = ["identity", "season", "titles", "audio", "subtitles", "collision"];
+
+/// Reads an answers object arriving as JSON over a pipe: strictly, so a misspelt key is refused naming it rather than
+/// ignored (a key left out is the empty answer), and any other defect is refused with serde's text. Every refusal starts
+/// "overrides: ". Phase 3 design, part 6.4. Def: P3-T2. Use: P3-T7, P3-T8.
+pub fn overrides_from_value(value: &serde_json::Value) -> Result<Overrides, String> {
+    let object = value.as_object().ok_or_else(|| "overrides: not an object".to_string())?;
+    if let Some(key) = object.keys().find(|key| !OVERRIDE_KEYS.contains(&key.as_str())) {
+        return Err(format!("overrides: unknown key {key:?} ({})", OVERRIDE_KEYS.join(", ")));
+    }
+    serde_json::from_value(value.clone()).map_err(|error| format!("overrides: {error}"))
+}
+
+/// The entries of `earlier` and `later` with one entry per key: a `later` entry replaces the `earlier` one with the same
+/// key (`same` says when two keys are one), the rest are kept, and the result is sorted by `key`.
+fn merge_entries<T: Clone, K: Ord>(earlier: &[T], later: &[T], key: impl Fn(&T) -> K, same: impl Fn(&T, &T) -> bool) -> Vec<T> {
+    let mut merged: Vec<T> = earlier.iter().filter(|old| !later.iter().any(|new| same(old, new))).cloned().collect();
+    merged.extend(later.iter().cloned());
+    merged.sort_by_key(key);
+    merged
 }
 
 impl Overrides {
@@ -344,6 +369,50 @@ impl Overrides {
         self.collision.iter().find(|answer| same_path(&answer.path, path)).map(|answer| answer.action)
     }
 
+    /// The answers after a later round: `later`'s identity and season when it has them, and each of its entries replacing the
+    /// earlier entry for the same thing (titles by title, audio and subtitles by title and stream, collision by
+    /// `settings::same_path`), the rest kept, every list sorted by its key. A title whose later audio answers hold a
+    /// `Keep { default: true }` has one default: each earlier audio entry of that title with `default: true` becomes
+    /// `default: false`, kept at its order (final review, K-I1). Phase 3 design, part 6.4. Def: P3-T2. Use: P3-T7,
+    /// P3-T8.
+    pub fn merged(&self, later: &Overrides) -> Overrides {
+        let new_default: BTreeSet<u32> = later
+            .audio
+            .iter()
+            .filter(|entry| matches!(entry.action, AudioOverride::Keep { default: true, .. }))
+            .map(|entry| entry.title)
+            .collect();
+        let mut earlier_audio = self.audio.clone();
+        for entry in earlier_audio.iter_mut().filter(|entry| new_default.contains(&entry.title)) {
+            if let AudioOverride::Keep { default, .. } = &mut entry.action {
+                *default = false;
+            }
+        }
+        Overrides {
+            identity: later.identity.clone().or_else(|| self.identity.clone()),
+            season: later.season.or(self.season),
+            titles: merge_entries(&self.titles, &later.titles, |e| e.title, |a, b| a.title == b.title),
+            audio: merge_entries(
+                &earlier_audio,
+                &later.audio,
+                |e| (e.title, e.stream),
+                |a, b| (a.title, a.stream) == (b.title, b.stream),
+            ),
+            subtitles: merge_entries(
+                &self.subtitles,
+                &later.subtitles,
+                |e| (e.title, e.stream),
+                |a, b| (a.title, a.stream) == (b.title, b.stream),
+            ),
+            collision: merge_entries(&self.collision, &later.collision, |e| e.path.clone(), |a, b| same_path(&a.path, &b.path)),
+        }
+    }
+
+    /// Whether no answer is given (equal to `Overrides::default()`). Phase 3 design, part 6.4. Def: P3-T2. Use: P3-T7, P3-T8.
+    pub fn is_empty(&self) -> bool {
+        *self == Overrides::default()
+    }
+
     /// The same for subtitles (`SubtitleFacts.reviewed`). Spec 11. Def: T6. Use: T13.
     pub fn subtitles_of(&self, title: u32) -> Option<BTreeMap<u32, SubtitleOverride>> {
         let streams: BTreeMap<u32, SubtitleOverride> = self
@@ -365,6 +434,79 @@ mod tests {
     use crate::plan::fixtures::{pinned, CHERNOBYL_1, ENG_AC3, ENG_AC3_2CH, ENG_PGS, FIREFLY_1_API, FIREFLY_2, VIDEO};
     use crate::robot::parse;
     use crate::testsupport::scan_text;
+
+    #[test]
+    fn an_unknown_key_in_the_answers_is_refused_naming_it() {
+        let refused = overrides_from_value(&serde_json::json!({"subtitle": []})).unwrap_err();
+        assert_eq!(refused, "overrides: unknown key \"subtitle\" (identity, season, titles, audio, subtitles, collision)");
+        assert_eq!(overrides_from_value(&serde_json::json!([1])).unwrap_err(), "overrides: not an object");
+        assert_eq!(overrides_from_value(&serde_json::json!({})).unwrap(), Overrides::default());
+        assert!(overrides_from_value(&serde_json::json!({"audio": [{"title": 0, "stream": 1, "action": "louder"}]}))
+            .unwrap_err()
+            .starts_with("overrides: "));
+    }
+
+    #[test]
+    fn a_later_answer_replaces_the_earlier_one_for_the_same_track_and_keeps_the_rest() {
+        let json = |value| overrides_from_value(&value).unwrap();
+        let first = json(serde_json::json!({"subtitles": [
+            {"title": 0, "stream": 9, "action": "keep", "role": "sdh"},
+            {"title": 0, "stream": 33, "action": "drop"}]}));
+        let later = json(serde_json::json!({"subtitles": [{"title": 0, "stream": 9, "action": "keep", "role": "regular"}],
+            "collision": [{"path": "M:/Movies/F (2000)/F (2000) - 2160p.mkv", "action": "keep_both"}]}));
+        let merged = first.merged(&later);
+        assert_eq!(merged.subtitles_of(0).unwrap()[&9], SubtitleOverride::Keep { role: SubtitleRole::Regular });
+        assert_eq!(merged.subtitles_of(0).unwrap()[&33], SubtitleOverride::Drop);
+        assert_eq!(merged.collision_for("m:\\movies\\f (2000)\\f (2000) - 2160p.mkv"), Some(Collision::KeepBoth));
+        assert!(Overrides::default().is_empty() && !merged.is_empty());
+    }
+
+    /// Ledger line 86: `merged` takes the later identity and season when it has them and keeps the earlier ones when it
+    /// has none, replaces titles by title and audio by title and stream, keeps the rest, and sorts every list by its key.
+    #[test]
+    fn merged_takes_identity_titles_and_audio_from_the_later_round_and_sorts_them() {
+        let json = |value| overrides_from_value(&value).unwrap();
+        let first = json(serde_json::json!({
+            "identity": {"kind": "movie", "id": 900001},
+            "season": 2,
+            "titles": [{"title": 3, "role": "ignored"}, {"title": 1, "role": "feature"}],
+            "audio": [{"title": 1, "stream": 4, "action": "drop"}, {"title": 0, "stream": 2, "action": "commentary"}]}));
+        let later = json(serde_json::json!({
+            "titles": [{"title": 1, "role": "ignored"}, {"title": 2, "role": "feature"}],
+            "audio": [{"title": 1, "stream": 4, "action": "keep", "order": 0, "default": false},
+                      {"title": 0, "stream": 1, "action": "drop"}]}));
+        let merged = first.merged(&later);
+        assert_eq!(merged.identity, Some(TmdbIdentity { kind: TmdbKind::Movie, id: 900001 }));
+        assert_eq!(merged.season, Some(2));
+        let titles: Vec<(u32, TitleRole)> = merged.titles.iter().map(|entry| (entry.title, entry.role.clone())).collect();
+        assert_eq!(titles, vec![(1, TitleRole::Ignored), (2, TitleRole::Feature), (3, TitleRole::Ignored)]);
+        let audio: Vec<(u32, u32, AudioOverride)> =
+            merged.audio.iter().map(|entry| (entry.title, entry.stream, entry.action.clone())).collect();
+        let expected = vec![
+            (0, 1, AudioOverride::Drop),
+            (0, 2, AudioOverride::Commentary),
+            (1, 4, AudioOverride::Keep { order: 0, default: false }),
+        ];
+        assert_eq!(audio, expected);
+        let identity = json(serde_json::json!({"identity": {"kind": "tv", "id": 1437}, "season": 1}));
+        let replaced = merged.merged(&identity);
+        assert_eq!((replaced.identity, replaced.season), (Some(TmdbIdentity { kind: TmdbKind::Tv, id: 1437 }), Some(1)));
+    }
+
+    /// Final review (K-I1): a later round's `default` answer for a title takes the default from every earlier answer of
+    /// that title, which stays kept at its order; another title's default is left.
+    #[test]
+    fn a_later_default_answer_clears_the_earlier_defaults_of_its_title() {
+        let json = |value| overrides_from_value(&value).unwrap();
+        let first = json(serde_json::json!({"audio": [
+            {"title": 0, "stream": 2, "action": "keep", "order": 0, "default": true},
+            {"title": 1, "stream": 2, "action": "keep", "order": 0, "default": true}]}));
+        let later = json(serde_json::json!({"audio": [{"title": 0, "stream": 3, "action": "keep", "order": 1, "default": true}]}));
+        let merged = first.merged(&later);
+        assert_eq!(merged.audio_of(0).unwrap()[&2], AudioOverride::Keep { order: 0, default: false });
+        assert_eq!(merged.audio_of(0).unwrap()[&3], AudioOverride::Keep { order: 1, default: true });
+        assert_eq!(merged.audio_of(1).unwrap()[&2], AudioOverride::Keep { order: 0, default: true });
+    }
 
     fn json_of<T: serde::Serialize>(value: &T) -> String {
         serde_json::to_string(value).unwrap()

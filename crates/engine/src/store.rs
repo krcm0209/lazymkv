@@ -250,6 +250,27 @@ impl Store {
         remembered_file(&path, fingerprint)
     }
 
+    /// Replaces `<data>/remembered/<fingerprint>.json` (phase 3 design, part 6.6; design part 7.4) with `remembered`,
+    /// the path `remembered` reads: the folder made, then `write_atomic` of `to_vec_pretty` plus "\n", with the key
+    /// `format` ("lazymkv remembered v1") first. An existing file for the fingerprint is replaced. Every error names
+    /// the folder or file, `<path>: <reason>`, with its `ErrorKind` kept. Def: P3-T12. Use: `Step::file`.
+    pub(crate) fn write_remembered(&self, remembered: &Remembered) -> io::Result<()> {
+        /// `Remembered` with its format key, which the type itself does not hold.
+        #[derive(Serialize)]
+        struct Written<'a> {
+            format: &'static str,
+            #[serde(flatten)]
+            remembered: &'a Remembered,
+        }
+        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = self.data.join(REMEMBERED_DIR);
+        let path = dir.join(format!("{}.json", remembered.fingerprint));
+        let named = |error: io::Error| located(&path, error);
+        fs::create_dir_all(&dir).map_err(|error| located(&dir, error))?;
+        let bytes = pretty(&Written { format: REMEMBERED_FORMAT, remembered }).map_err(named)?;
+        write_atomic(&path, &bytes).map_err(named)
+    }
+
     /// `<data>/settings.json` through `Settings::from_json` (design parts 3.5, 7.4). Absent gives
     /// `Settings::default()` with its `validate()`. An unreadable file gives `Settings::default()` and one problem
     /// { key: "settings.json", problem: "<path>: <error>" } (Task 21's ruling), which is `settings_file`'s Err.
@@ -891,6 +912,31 @@ mod tests {
         assert!(error.contains("lazymkv drives v2"), "{error}");
         assert_eq!(store.write_drives(&empty_drives()).unwrap_err().kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(tmp.0.join("drives.json")).unwrap(), text);
+    }
+
+    #[test]
+    fn a_written_remembered_file_reads_back_and_a_second_write_replaces_it() {
+        let tmp = Temp::new("remembered-write");
+        let store = store_in(&tmp.0);
+        let mut remembered = Remembered {
+            fingerprint: "ABC".to_string(),
+            tmdb: TmdbIdentity { kind: TmdbKind::Movie, id: 900001 },
+            titles: Vec::new(),
+        };
+        store.write_remembered(&remembered).unwrap();
+        let path = tmp.0.join("remembered/ABC.json");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("{\n  \"format\": \"lazymkv remembered v1\",\n"), "{text}");
+        assert!(text.ends_with("}\n"), "{text}");
+        assert_eq!(store.remembered("ABC").unwrap().map(|(read, _)| read), Some(remembered.clone()));
+        remembered.tmdb.id = 2;
+        store.write_remembered(&remembered).unwrap();
+        assert_eq!(store.remembered("ABC").unwrap().map(|(read, _)| read.tmdb.id), Some(2));
+        assert_eq!(fs::read_dir(tmp.0.join("remembered")).unwrap().count(), 1);
+        let blocked = Temp::new("remembered-blocked");
+        fs::write(blocked.0.join("remembered"), "a file").unwrap();
+        let error = store_in(&blocked.0).write_remembered(&remembered).unwrap_err();
+        assert!(error.to_string().starts_with(&format!("{}: ", blocked.0.join("remembered").display())), "{error}");
     }
 
     #[test]

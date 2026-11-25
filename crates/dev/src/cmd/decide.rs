@@ -1,7 +1,8 @@
 //! `lazymkv-dev decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE]
-//! [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--menu MAP] [--evidence DIR]` (port spec 3.4;
-//! `--settings FILE`, spec 14's settings for the plan and decision sections and the subtitles section's event
-//! threshold, is phase 1's; the three replay flags are phase 2's; `--menu MAP` is menu maps increment 3's): the first
+//! [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--overrides FILE] [--menu MAP] [--evidence DIR]`
+//! (port spec 3.4; `--settings FILE`, spec 14's settings for the plan and decision sections and the subtitles section's
+//! event threshold, is phase 1's; the three replay flags are phase 2's; `--menu MAP` is menu maps increment 3's;
+//! `--overrides FILE` is phase 3's): the first
 //! form of the design spec's phase 1 command that reads a recording and prints its decisions.
 //! For one rip label it prints one JSON document, `DecideDoc`: `reconcile` (the scan's streams against
 //! mkvmerge.json, spec 3.3), `audio` (the content rule over every audio-levels-20ms-* folder of the label, or why a
@@ -45,6 +46,11 @@
 //! The roles a block that acts confirms (a commentary or an audio description with a strong tie, MR-5) reach the
 //! decision, which drops such a track whatever the content rule's verdict (the owner's rulings of 2026-11-24, MA-1):
 //! with a map, the `decision` key and the `menu` key are the only keys that can differ.
+//!
+//! Phase 3 (phase 3 design, part 6.4; ruling T32-R9) adds `--overrides FILE`, a job folder's review.json: its
+//! `overrides`, the owner's answers, read strictly by `cmd::plan::replay_overrides`, reach the plan section and the
+//! decision (`DecideInputs.overrides`). A file the flag names that cannot be read or that the strict reader refuses
+//! exits 2 naming it; without the flag every key is what it was.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -80,7 +86,8 @@ use lazymkv_core::verify::{
 
 use crate::cmd::menu::{disc_id_of, read_map, read_off, read_playlists};
 use crate::cmd::plan::{
-    option_text, parse_record, plan_doc, recorded_answers, PlanDoc, PlanOptions, PlanSource, RecordedAnswers,
+    option_text, parse_record, plan_doc, recorded_answers, replay_overrides, PlanDoc, PlanOptions, PlanSource,
+    RecordedAnswers,
 };
 use crate::evidence::{ocr_text_dir, pathlib_split, read_scan_in, resolve_recording, Ctx, DiskTree, Recording, Refused};
 use crate::pyjson::{dumps, Style};
@@ -90,12 +97,14 @@ use crate::{usage_error, Args};
 const NAME: &str = "decide";
 /// The usage line, under the command's name: spec 3.4's synopsis with the --evidence flag every slug command takes.
 const USAGE: &str = "decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] \
-                     [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--menu MAP] [--evidence DIR]";
+                     [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] [--overrides FILE] [--menu MAP] \
+                     [--evidence DIR]";
 /// decide's long flags, as `run` declares them; lazymkvctl reads a relayed decide's words with them (V10's ruling).
-/// Def: PR #14 review round 1 (V10). Use: T19, PR #14 review round 1 (V10), menu maps increment 3 (`--menu`).
-pub const FLAGS: [&str; 9] = [
-    "--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence",
-    "--menu",
+/// `--overrides` is phase 3's (phase 3 design, part 6.4). Def: PR #14 review round 1 (V10), P3-T7. Use: T19, PR #14
+/// review round 1 (V10), menu maps increment 3 (`--menu`), P3-T8, P3-T12, P3-T16.
+pub const FLAGS: [&str; 10] = [
+    "--rec", "--text", "--selection", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--overrides",
+    "--evidence", "--menu",
 ];
 /// What -h prints after the usage line.
 const HELP: &str = "
@@ -123,17 +132,19 @@ arguments:
                         section and names the decision's file
   --remembered FILE     a remembered decision for the disc's fingerprint, for the plan section and the
                         decision's track overrides (spec 5)
+  --overrides FILE      a job's review.json: the owner's answers, for the plan section and the decision (phase 3
+                        design, 6.4)
   --menu MAP            a menu map, its folder or its menu-map.json: adds the menu key, and a commentary or
                         audio description it confirms is dropped (docs/menu-maps/format.md)
   --evidence DIR        the evidence clone (default: LAZYMKV_EVIDENCE, else corpus/owner)
 
 exit status: 0; 1 when a reconcile verdict is no; 2 for an argument error, an unreadable scan.txt or
-mkvmerge.json, a label that is not a rip label, a menu map that cannot be read or does not pass the format's
-rules, a menu-off.tsv beside it that cannot be read or parsed, or a library root in the settings file that is not
-absolute (a map never changes the exit code otherwise: with a meta.json that cannot be read the menu key says so and
-decide exits as without a map); 3 when the evidence clone is not there; 3 when a TMDb copy of the folder is more
-than six months old and cannot be fetched again (TMDB_TOKEN unset, or the fetch failed; design part 8.4, K15); an
-engine job folder is read as it is.
+mkvmerge.json, a label that is not a rip label, a review file that cannot be read or is refused, a menu map that
+cannot be read or does not pass the format's rules, a menu-off.tsv beside it that cannot be read or parsed, or a
+library root in the settings file that is not absolute (a map never changes the exit code otherwise: with a
+meta.json that cannot be read the menu key says so and decide exits as without a map); 3 when the evidence clone is
+not there; 3 when a TMDb copy of the folder is more than six months old and cannot be fetched again (TMDB_TOKEN
+unset, or the fetch failed; design part 8.4, K15); an engine job folder is read as it is.
 ";
 /// The level folders of a label: the folders the tuning harness measures. Py: audio_dataset.find_folders' glob.
 const LEVEL_FOLDERS: &str = "audio-levels-20ms-*";
@@ -371,7 +382,8 @@ pub struct DecideInputs {
     pub file: FileFacts,
     /// The readers' are `LibraryFacts::default()`.
     pub library: LibraryFacts,
-    /// The readers' are None.
+    /// The owner's answers: `replay_overrides` of `--overrides` in the readers, of the job's review.json in the engine
+    /// (phase 3 design, part 6.4); None without them.
     pub overrides: Option<remembered::Overrides>,
     /// The map of `--menu` with the recording's disc ID, its off-decisions and the recording's playlists (menu maps
     /// design 5.4, 5.4a): `read_decide_inputs` and the engine give None and `run` fills it, so R-B1 keeps one renderer
@@ -399,7 +411,9 @@ pub struct EngineDecideDoc {
 /// compare_tracks.main reads them. `text` is taken against ctx.cwd when relative, and so are the files of `options`.
 /// The library roots of `options.settings` are checked first, before the rip label (`check_library_roots`, design part
 /// 9.5, OR13), `answers` are `replay_answers`: the recording's, with `--tmdb-record`'s record in place of tmdb.json's,
-/// and `remembered` is `replay_remembered`: `--remembered`'s decision. The subtitles section counts events at the plan
+/// `remembered` is `replay_remembered`: `--remembered`'s decision, and `overrides` is `replay_overrides`: the owner's
+/// answers of `--overrides` (phase 3 design, part 6.4), whose refusal is the readers' (exit 2, naming the file), checked
+/// after the library roots. The subtitles section counts events at the plan
 /// section's `settings.sub_clear_max_bytes`, spec 14's 64 without `--settings` or when the plan is skipped (T5-R59 as
 /// amended at the review of pull request 16). Def: T19. Use: T19, T20, T25, T27.
 pub fn read_decide_inputs(
@@ -412,6 +426,7 @@ pub fn read_decide_inputs(
 ) -> Result<DecideInputs, Refused> {
     let refused = |line: String| Refused { code: 2, line };
     check_library_roots(ctx, options)?;
+    let overrides = replay_overrides(ctx, options)?;
     let tree: &dyn Tree = &rec.tree;
     let rip = rip_label(tree, &rec.dir, label).map_err(refused)?;
     let label_dir = rec.dir.join(label);
@@ -463,7 +478,7 @@ pub fn read_decide_inputs(
         remembered,
         file,
         library: LibraryFacts::default(),
-        overrides: None,
+        overrides,
         menu: None,
     })
 }
@@ -785,6 +800,10 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         Ok(value) => value,
         Err(message) => return usage_error(err, NAME, USAGE, &message),
     };
+    let overrides = match parsed.flag("--overrides") {
+        Ok(value) => value,
+        Err(message) => return usage_error(err, NAME, USAGE, &message),
+    };
     let evidence = match parsed.flag("--evidence") {
         Ok(value) => value,
         Err(message) => return usage_error(err, NAME, USAGE, &message),
@@ -854,6 +873,7 @@ pub fn run(ctx: &Ctx, args: &[String], out: &mut dyn Write, err: &mut dyn Write)
         tmdb_search: tmdb_search.map(PathBuf::from),
         tmdb_record: tmdb_record.map(PathBuf::from),
         remembered: remembered.map(PathBuf::from),
+        overrides: overrides.map(PathBuf::from),
     };
     let mut inputs = match read_decide_inputs(ctx, &rec, &label, text.as_deref(), selection, &options) {
         Ok(inputs) => inputs,
@@ -1367,6 +1387,7 @@ mod tests {
         TitleRole,
     };
     use lazymkv_core::review::{Note, ReviewReason};
+    use lazymkv_core::review_doc::{REVIEW_FILE, REVIEW_FORMAT};
     use lazymkv_core::robot::parse;
     use lazymkv_core::settings::Settings;
     use lazymkv_core::subtitle::text::{Class, Decision, Role, SubsStreamJson};
@@ -1979,7 +2000,7 @@ SINFO:0,4,6,0,"PGS"
         let root = tmp.0.clone();
         let usage = "usage: lazymkv-dev decide (<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] \
                      [--settings FILE] [--tmdb-search FILE] [--tmdb-record FILE] [--remembered FILE] \
-                     [--menu MAP] [--evidence DIR]\n";
+                     [--overrides FILE] [--menu MAP] [--evidence DIR]\n";
         let cases: [(&[&str], &str); 9] = [
             (&[], "the following arguments are required: slug, label"),
             (&["recs/disc-a"], "the following arguments are required: label"),
@@ -2008,6 +2029,7 @@ SINFO:0,4,6,0,"PGS"
         assert!(out.starts_with(usage), "{}", out);
         assert!(out.contains("  --rec DIR "), "{}", out);
         assert!(out.contains("  --remembered FILE "), "{}", out);
+        assert!(out.contains("  --overrides FILE "), "{}", out);
         assert!(out.contains("  --menu MAP "), "{}", out);
     }
 
@@ -3130,6 +3152,7 @@ SINFO:0,4,6,0,"PGS"
             tmdb_search: Some("search.json".into()),
             tmdb_record: Some("record.json".into()),
             remembered: Some("remembered.json".into()),
+            overrides: None,
         };
         let planned = plan_doc(&ctx, &PlanSource::Recording(&rec), &options).unwrap();
         assert_eq!(value["plan"], serde_json::to_value(&planned).unwrap());
@@ -3243,6 +3266,42 @@ SINFO:0,4,6,0,"PGS"
         let plain = &results_of(&plain.decision).decision;
         assert_eq!(kept_audio(plain), [(1, true)]);
         assert_eq!((plain.audio.confidence, plain.subtitles.confidence), (0.95, 0.90));
+    }
+
+    /// Phase 3 design, part 6.4 (T32-R9): `--overrides FILE` reads a review.json's `overrides` and hands them to the
+    /// decision. The owner's answer drops the one English subtitle stream 5 the rules keep, so the decision keeps one
+    /// subtitle track fewer, and drops 5 as `reviewed`; a file the flag names that is not there exits 2 naming it.
+    #[test]
+    fn overrides_from_a_review_file_reach_the_decision() {
+        let tmp = Scratch::new("review-overrides");
+        let root = tmp.0.clone();
+        disc_b(&root);
+        let answers = remembered::Overrides {
+            subtitles: vec![remembered::SubtitleTrackOverride { title: 0, stream: 5, action: SubtitleOverride::Drop }],
+            ..remembered::Overrides::default()
+        };
+        let review = json!({"format": REVIEW_FORMAT, "overrides": answers, "reviews": []});
+        write(&root.join(REVIEW_FILE), review.to_string());
+        let ctx = Ctx::for_test(&root);
+        let rec = resolve_recording(&ctx, None, "recs/disc-b").unwrap();
+        let options = PlanOptions { overrides: Some(REVIEW_FILE.into()), ..PlanOptions::default() };
+        let inputs = read_decide_inputs(&ctx, &rec, "all-tracks", None, None, &options).unwrap();
+        assert_eq!(inputs.overrides.as_ref(), Some(&answers));
+        let doc = decide_doc(&inputs);
+        let decision = &results_of(&doc.decision).decision;
+        let plain = doc_b(&root, "all-tracks");
+        let plain = &results_of(&plain.decision).decision;
+        assert!(kept_subtitles(plain).iter().any(|(stream, _, _)| *stream == 5), "{:?}", kept_subtitles(plain));
+        assert_eq!(decision.subtitles.kept.len() + 1, plain.subtitles.kept.len());
+        assert!(decision.subtitles.dropped.contains(&(5, SubtitleDrop::Reviewed)), "{:?}", decision.subtitles.dropped);
+        // The command prints the rendering of the same inputs.
+        let printed = dumps(&serde_json::to_value(&doc).unwrap(), Style::INDENT1_ASCII);
+        let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--overrides", REVIEW_FILE]);
+        assert_eq!((code, out, err.as_str()), (0, format!("{printed}\n"), ""));
+        // A file the flag names that is not there is an argument error naming it.
+        let (code, out, err) = run_in(&root, &["recs/disc-b", "all-tracks", "--overrides", "missing.json"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("missing.json"), "{err}");
     }
 
     /// Stream 1 of recs/disc-c's title 0: English stereo AC-3 flagged visually impaired (flag 4), so the eng selection
@@ -3423,7 +3482,7 @@ SINFO:0,4,6,0,"PGS"
             row.map(|(_, _, synopsis)| *synopsis),
             Some(
                 "(<slug> <label> | --rec DIR) [--text DIR] [--selection all|eng] [--settings FILE] [--tmdb-search FILE] \
-                 [--tmdb-record FILE] [--remembered FILE] [--menu MAP]"
+                 [--tmdb-record FILE] [--remembered FILE] [--overrides FILE] [--menu MAP]"
             )
         );
     }

@@ -1,10 +1,15 @@
 //! lazymkvctl's engine commands against the real engine over the in-memory transport (design part 9.6, Task 28).
 
+mod common;
+
+use common::{file_with_one_subtitle, first_kept_subtitle, hold_two_subs, remux_subtitle_tracks, subtitle_item_id};
+use lazymkv_core::review_doc::ReviewDoc;
 use lazymkv_core::testsupport::{Scratch, ScratchExt};
 use lazymkv_ctl::{run, Env};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_engine::testkit::Harness;
 use serde_json::{json, Value};
+use std::fs;
 use std::path::Path;
 
 /// An engine on the movie-direct scenario; with `filed_job`, its disc is taken to Filed and the engine restarted, so
@@ -32,7 +37,7 @@ fn ctl(harness: &Harness, argv: &[&str], stdin: &[u8]) -> (i32, String, String) 
     let mut input = stdin;
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let argv: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
-    let code = run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut input, out: &mut out, err: &mut err });
+    let code = run(&argv, Env { ctx: &ctx, connector: Some(&connector), stdin: &mut input, out: &mut out, err: &mut err, interactive: false });
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
 
@@ -161,4 +166,68 @@ fn plan_job_with_a_refused_command_exits_2() {
     let (code, out, err) = ctl(&harness, &["plan", "--job", "nosuch-1"], b"");
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.starts_with("lazymkvctl: "), "{err}");
+}
+
+/// An engine over `scenarios`, with the settings the movie-direct engine above runs on.
+fn engine_over(scenarios: &[&str]) -> Harness {
+    let settings = json!({"keep_tuning_evidence": false, "drive_settle_s": 0, "drive_ready_timeout_s": 1});
+    Harness::new(Path::new(env!("CARGO_BIN_EXE_fake-tool")), scenarios, settings)
+}
+
+/// `lazymkvctl review JOB --answer ID=drop --yes` over the test pipe: the held job's id is taken from `review --json`'s
+/// document, the answer is the whole `Overrides` value lazymkvctl serialises, the engine accepts it and the job files
+/// with one of its two subtitle tracks.
+#[test]
+fn review_over_the_test_pipe_files_a_held_job() {
+    let harness = engine_over(&["movie-direct", "movie-direct-two-subs"]);
+    let (id, target) = hold_two_subs(&harness);
+    let (code, out, err) = ctl(&harness, &["review", id.as_str(), "--json"], b"");
+    assert_eq!((code, err.as_str()), (0, ""));
+    let doc: ReviewDoc = serde_json::from_value(json_of(&out)).unwrap();
+    let dropped = first_kept_subtitle(&harness, &id);
+    let item = subtitle_item_id(&doc, dropped);
+    fs::remove_file(&target).unwrap();
+    file_with_one_subtitle(&harness, &id);
+    // Without --yes nothing is sent.
+    let answer = format!("{item}=drop");
+    let (code, out, err) = ctl(&harness, &["review", id.as_str(), "--answer", answer.as_str()], b"");
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert!(out.starts_with("Nothing was sent."), "{out}");
+    assert_eq!(harness.state_of(&id), "NeedsReview");
+    let (code, out, err) = ctl(&harness, &["review", id.as_str(), "--answer", answer.as_str(), "--yes"], b"");
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(out, "Accepted. The job is filing; watch it with: lazymkvctl watch\n");
+    harness.wait("Filed or Failed", |h| ["Filed", "Failed"].contains(&h.state_of(&id).as_str()));
+    assert_eq!(harness.state_of(&id), "Filed", "{:?}", harness.record(&id).message);
+    assert_eq!(fs::read(&target).unwrap(), b"lazymkv-test-mkv");
+    // The engine took the answer as lazymkvctl serialised it, and it was applied.
+    let review = json_of(&fs::read_to_string(harness.job_dir(&id).join("review.json")).unwrap());
+    let title = harness.record(&id).titles[0].scan_title;
+    assert_eq!(review["overrides"]["subtitles"], json!([{"title": title, "stream": dropped, "action": "drop"}]));
+    assert_eq!(harness.record(&id).titles[0].decision.as_ref().unwrap().subtitles.kept.len(), 1);
+    let kept = remux_subtitle_tracks(&harness);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(!kept[0].is_empty() && !kept[0].contains(','), "one subtitle track kept: {kept:?}");
+}
+
+/// `lazymkvctl discard JOB --yes` over the test pipe: a job that failed in its remux becomes Discarded, and the cleanup
+/// pass the discard starts deletes its staging data.
+#[test]
+fn discard_over_the_test_pipe_frees_a_failed_job() {
+    // The remux's stand-in exits 2, so the job fails with the raw rip still in its staging folder.
+    let harness = engine_over(&["movie-direct", "movie-direct-remux-error"]);
+    harness.insert("tok0", "movie-direct");
+    let id = format!("{}-1", harness.fingerprint("movie-direct").to_ascii_lowercase());
+    harness.wait("Failed", |h| h.state_of(&id) == "Failed");
+    let staged = harness.staging().join(&id);
+    assert!(staged.join("rip").is_dir(), "the failed job's rip is in staging");
+    let (code, out, err) = ctl(&harness, &["discard", id.as_str(), "--yes"], b"");
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(out, "Discarded. The job's rip is being deleted.\n");
+    assert_eq!(harness.state_of(&id), "Discarded");
+    let deleted = format!("cleanup: {id}: deleted its staging folder");
+    harness.wait("the cleanup pass", |h| h.engine_log().contains(&deleted));
+    harness.wait("the pass's end", |h| !h.busy());
+    assert!(!staged.exists());
+    assert!(harness.staging().is_dir());
 }

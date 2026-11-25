@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 mod engine_cmds;
 pub mod licenses;
 pub mod models;
+mod review_cmd;
 
 /// What lazymkvctl reads and writes: the dev context, the engine connector (the named pipe's client on Windows, design
 /// part 3.3; None on Linux and macOS, S38), and the three streams (design parts 9.5, 9.6). Def: T27, T3-12.
@@ -26,6 +27,8 @@ pub struct Env<'a> {
     pub out: &'a mut dyn Write,
     /// Standard error.
     pub err: &'a mut dyn Write,
+    /// Whether standard input is a terminal: only then does `review` ask its questions (phase 3 design, part 6.3).
+    pub interactive: bool,
 }
 
 /// The commands lazymkvctl runs itself through lazymkv-dev's dispatcher (design part 9.5, P23). Def: T27. Use: T27, T28.
@@ -98,6 +101,12 @@ pub fn run(argv: &[String], env: Env) -> i32 {
     }
     if LOCAL_COMMANDS.contains(&name.as_str()) {
         return local(argv, env);
+    }
+    if name == "review" {
+        return review_cmd::run(argv, env);
+    }
+    if name == "discard" {
+        return review_cmd::discard(argv, env);
     }
     if engine_cmds::ENGINE_COMMANDS.iter().any(|(command, _)| command == name) {
         return engine_cmds::run(argv, env);
@@ -198,10 +207,13 @@ pub(crate) fn retune_spec(ctx: &Ctx, words: &[String]) -> Result<PathBuf, String
 }
 
 /// decide's path flags: `decide::FLAGS` without `--selection`, whose value is a choice, not a path (V10's ruling).
-/// plan's path flags are all of `plan::FLAGS`. `--menu`, a map folder or file, is a path (menu maps increment 3).
-/// Def: PR #14 review round 1 (V10). Use: PR #14 review round 1 (V10).
-pub(crate) const DECIDE_PATH_FLAGS: [&str; 8] =
-    ["--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--evidence", "--menu"];
+/// plan's path flags are all of `plan::FLAGS`. `--menu`, a map folder or file, is a path (menu maps increment 3), and so
+/// is `--overrides`, a review.json (phase 3 design, part 6.4). Def: PR #14 review round 1 (V10), P3-T7. Use: PR #14
+/// review round 1 (V10), P3-T8, P3-T12, P3-T16.
+pub(crate) const DECIDE_PATH_FLAGS: [&str; 9] = [
+    "--rec", "--text", "--settings", "--tmdb-search", "--tmdb-record", "--remembered", "--overrides", "--evidence",
+    "--menu",
+];
 
 /// retune's path flags that take one path, sent again made absolute (V10). Def: T5-22. Use: T5-22.
 pub(crate) const RETUNE_PATH_FLAGS: [&str; 3] = ["--snapshot", "--compare", "--text"];

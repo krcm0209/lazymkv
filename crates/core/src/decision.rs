@@ -163,8 +163,14 @@ pub struct FileDecision {
     pub disposition: Disposition,
 }
 
-/// Spec 11's Resolve collision "keep both": the new file's distinguishing label (`- 2160p 2`).
-const KEEP_BOTH_COPY: u32 = 2;
+/// Spec 11's Resolve collision "keep both": the first distinguishing label (`- 2160p 2`); phase 3 design, part 6.7
+/// takes the next free one, `KEEP_BOTH_COPY + LibraryFacts.copy_labels_taken`. Def: T13, P3-T11b. Use: T13, P3-T11b
+/// (`title_doc`'s probe).
+pub const KEEP_BOTH_COPY: u32 = 2;
+
+/// Phase 3 design, part 6.7: the highest copy number the engine's `title_doc` tries for "keep both"; with that path
+/// taken too, the never-replacing rename holds the job. Def: P3-T11b. Use: P3-T11b.
+pub const COPY_LABEL_MAX: u32 = 99;
 
 /// 6.4 step 11 and 8.8: decide_audio (with the wanted languages of the identity the job is filed under: whenever that
 /// identity's TMDb record is given, `wanted_languages` of the record's original language, so a record fetched after
@@ -176,8 +182,9 @@ const KEEP_BOTH_COPY: u32 = 2;
 /// record's kind does not match the role (a movie record for a feature, a show record for an episode); resolution from
 /// title.video_height, the edition through edition_names and edition_label; a planned Episode with season None builds no
 /// path (path None) and adds tv_unmapped;
-/// a Resolve collision answer (`overrides.collision`) for the decision's own plain final path, KeepBoth (copy Some(2)
-/// while the collision exists) or Replace, leaves path_collision unraised, and an answer for any other path resolves
+/// a Resolve collision answer (`overrides.collision`) for the decision's own plain final path, KeepBoth (copy
+/// Some(2 + library.copy_labels_taken) while the collision exists: the next free copy label, phase 3 design, part 6.7)
+/// or Replace, leaves path_collision unraised, and an answer for any other path resolves
 /// nothing (spec 7); Discard never reaches decide, the engine discards the job), the three confidences (identity and
 /// title from the plan; identity 1.00 when overrides.identity is Some, title 1.00 when overrides.titles is not empty; track
 /// = min(audio, subtitle) after the remembered and review overrides set the parts they cover to 1.00), reviews = plan's
@@ -240,8 +247,8 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
     let subtitles = decide_subtitles(title, &subtitle_facts, settings);
     let track_layout = layout(title, &audio, &subtitles);
 
-    // 8.9: the resolution label, the edition (8.4), the final path; spec 11's keep both adds the copy label while the
-    // collision exists (with the colliding file gone, the plain path is free).
+    // 8.9: the resolution label, the edition (8.4), the final path; spec 11's keep both adds the next free copy label
+    // while the collision exists (phase 3 design, part 6.7; with the colliding file gone, the plain path is free).
     let resolution = title.video_height().map(|height| resolution_label(height).to_string());
     let edition = match &role {
         PlannedRole::Feature { .. } => filed_edition(plan, inputs.disc, planned.title, overrides, inputs.library),
@@ -256,7 +263,8 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Result<FileDecision, String> {
     };
     let Filing { path, notes: path_notes, unmapped } =
         if answered_collision == Some(Collision::KeepBoth) && inputs.library.path_collision {
-            filing(&role, record, resolution.as_deref(), edition.as_deref(), Some(KEEP_BOTH_COPY), settings)
+            let copy = KEEP_BOTH_COPY + inputs.library.copy_labels_taken;
+            filing(&role, record, resolution.as_deref(), edition.as_deref(), Some(copy), settings)
         } else {
             plain
         };
@@ -1453,6 +1461,70 @@ mod tests {
     }
 
     #[test]
+    fn keep_both_takes_the_next_free_copy_label() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let settings = settings();
+        let overrides = answered(FILM_PATH, Collision::KeepBoth);
+        let taken = LibraryFacts { path_collision: true, copy_labels_taken: 1, ..LibraryFacts::default() };
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &taken, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(
+            path_of(&decision),
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p 3.mkv"
+        );
+        assert!(!decision.reviews.contains(&ReviewReason::PathCollision), "{:?}", decision.reviews);
+        let none = LibraryFacts { path_collision: true, copy_labels_taken: 0, ..LibraryFacts::default() };
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &none, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(
+            path_of(&decision),
+            r"\\nas\media\Movies\Film (2010) {tmdb-12345}\Film (2010) {tmdb-12345} - 2160p 2.mkv"
+        );
+    }
+
+    #[test]
+    fn copy_labels_taken_without_a_keep_both_answer_changes_nothing() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let settings = settings();
+        let counted = LibraryFacts { path_collision: true, copy_labels_taken: 3, ..LibraryFacts::default() };
+        let uncounted = LibraryFacts { path_collision: true, ..LibraryFacts::default() };
+        let replace = answered(FILM_PATH, Collision::Replace);
+        for overrides in [None, Some(&replace)] {
+            let mut with = inputs(&plan, &disc, 0, Some(&record), &counted, &settings);
+            with.overrides = overrides;
+            let mut without = inputs(&plan, &disc, 0, Some(&record), &uncounted, &settings);
+            without.overrides = overrides;
+            assert_eq!(decide(&with), decide(&without), "{overrides:?}");
+        }
+    }
+
+    #[test]
+    fn library_facts_without_taken_copies_serialise_as_before() {
+        let collided = LibraryFacts { path_collision: true, ..LibraryFacts::default() };
+        for facts in [LibraryFacts::default(), collided.clone()] {
+            let value = serde_json::to_value(&facts).unwrap();
+            assert!(value.get("copy_labels_taken").is_none(), "{value}");
+        }
+        let read: LibraryFacts = serde_json::from_value(serde_json::json!({
+            "folder_has_edition_named_file": false,
+            "earlier_edition_names": {},
+            "path_collision": true
+        }))
+        .unwrap();
+        assert_eq!(read, collided);
+        let two = LibraryFacts { copy_labels_taken: 2, ..collided };
+        let value = serde_json::to_value(&two).unwrap();
+        assert_eq!(value["copy_labels_taken"], serde_json::json!(2));
+        assert_eq!(serde_json::from_value::<LibraryFacts>(value).unwrap(), two);
+    }
+
+    #[test]
     fn replace_files_at_the_same_path_without_path_collision() {
         let disc = film_disc();
         let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(0, feature_role(None))]);
@@ -1729,6 +1801,27 @@ mod tests {
         assert_eq!(decision.reviews, vec![ReviewReason::NoWantedAudio]);
         assert_eq!(decision.resolution.as_deref(), Some("1080p"));
         assert_eq!(decision.disposition, Disposition::NeedsReview);
+    }
+
+    /// Ruling T32-E25: the owner's `keep` answer for a track dropped as unwanted_language keeps it, and
+    /// no_wanted_audio is not raised.
+    #[test]
+    fn a_keep_answer_settles_no_wanted_audio() {
+        let disc = film_disc();
+        let plan = plan_of(&disc, Kind::Movie, Some(FILM), &[(3, feature_role(None))]);
+        let record = film_record(12345, "Film", 2010, Some("tt0012345"));
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let overrides = Overrides {
+            audio: vec![AudioTrackOverride { title: 3, stream: 1, action: AudioOverride::Keep { order: 0, default: false } }],
+            ..Overrides::default()
+        };
+        let mut input = inputs(&plan, &disc, 3, Some(&record), &library, &settings);
+        input.overrides = Some(&overrides);
+        let decision = decide(&input).unwrap();
+        assert_eq!(decision.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1]);
+        assert!(decision.audio.dropped.is_empty(), "{:?}", decision.audio.dropped);
+        assert!(!decision.reviews.contains(&ReviewReason::NoWantedAudio), "{:?}", decision.reviews);
     }
 
     #[test]
@@ -2305,6 +2398,97 @@ mod tests {
         let mut input = inputs(plan, disc, number, Some(record), &library, &settings);
         input.overrides = overrides;
         decide(&input).unwrap()
+    }
+
+    /// Title 0 of `two_episodes` (English DTS-HD MA 5.1 as stream 1, English Dolby Digital 2.0 as stream 2) decided
+    /// with a menu map confirming stream 2 as a commentary, as the menu-alone tests of `tracks::audio` have the menu
+    /// drop a confirmed commentary, and with `overrides`.
+    fn decided_with_the_menu(overrides: Option<&Overrides>) -> FileDecision {
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_DTS_HD_MA_6CH), (2, ENG_AC3_2CH)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &library, &settings);
+        input.audio.menu = BTreeMap::from([(
+            2,
+            crate::tracks::audio::MenuConfirmation {
+                role: crate::menu::AudioRole::Commentary,
+                choices: vec!["c010".to_string()],
+                labels: vec!["AUDIO: Commentary by Person A".to_string()],
+            },
+        )]);
+        input.overrides = overrides;
+        decide(&input).unwrap()
+    }
+
+    /// The menu's outcome for each listed confirmation, as (stream, outcome).
+    fn menu_outcomes(decision: &FileDecision) -> Vec<(u32, crate::tracks::audio::MenuOutcome)> {
+        decision.audio.menu.iter().map(|applied| (applied.stream, applied.outcome)).collect()
+    }
+
+    #[test]
+    fn an_owners_keep_answer_outranks_the_menus_word() {
+        use crate::tracks::audio::MenuOutcome;
+        // Without an answer the menu's word drops stream 2, as on main.
+        let unanswered = decided_with_the_menu(None);
+        assert_eq!(unanswered.audio.dropped, vec![(2, AudioDrop::Menu { role: crate::menu::AudioRole::Commentary })]);
+        assert_eq!(unanswered.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1]);
+        assert_eq!(menu_outcomes(&unanswered), vec![(2, MenuOutcome::Dropped)]);
+        // The owner's keep, and the owner's default, keep it though the menu confirms it as a commentary.
+        for action in [AudioOverride::Keep { order: 1, default: false }, AudioOverride::Keep { order: 0, default: true }] {
+            let overrides = Overrides {
+                audio: vec![AudioTrackOverride { title: 0, stream: 2, action: action.clone() }],
+                ..Overrides::default()
+            };
+            let answered = decided_with_the_menu(Some(&overrides));
+            assert_eq!(answered.audio.dropped, Vec::new(), "{action:?}");
+            let mut kept: Vec<u32> = answered.audio.kept.iter().map(|track| track.stream).collect();
+            kept.sort();
+            assert_eq!(kept, vec![1, 2], "{action:?}");
+            assert_eq!(menu_outcomes(&answered), vec![(2, MenuOutcome::Overridden)], "{action:?}");
+            if action == (AudioOverride::Keep { order: 0, default: true }) {
+                let default: Vec<u32> = answered.audio.kept.iter().filter(|track| track.default).map(|track| track.stream).collect();
+                assert_eq!(default, vec![2], "the stream answered default is the default track");
+            }
+        }
+    }
+
+    /// Final review (K-I1): a round that answers `default` on stream 1, then a later round that answers `default` on
+    /// stream 2, both through `merged` as review.json keeps them: `decide` makes stream 2 the default track.
+    #[test]
+    fn a_later_default_answer_moves_the_default() {
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_DTS_HD_MA_6CH), (2, ENG_AC3_2CH)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let round = |stream, order| Overrides {
+            audio: vec![AudioTrackOverride { title: 0, stream, action: AudioOverride::Keep { order, default: true } }],
+            ..Overrides::default()
+        };
+        let saved = Overrides::default().merged(&round(1, 0)).merged(&round(2, 1));
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &library, &settings);
+        input.overrides = Some(&saved);
+        let decided = decide(&input).unwrap();
+        let default: Vec<u32> = decided.audio.kept.iter().filter(|track| track.default).map(|track| track.stream).collect();
+        assert_eq!(default, vec![2]);
+    }
+
+    #[test]
+    fn an_owners_drop_answer_and_the_menus_word_agree() {
+        use crate::tracks::audio::MenuOutcome;
+        // The owner's drop, and the owner's commentary, drop stream 2 with the owner's reason, not the menu's.
+        for action in [AudioOverride::Drop, AudioOverride::Commentary] {
+            let overrides = Overrides {
+                audio: vec![AudioTrackOverride { title: 0, stream: 2, action: action.clone() }],
+                ..Overrides::default()
+            };
+            let answered = decided_with_the_menu(Some(&overrides));
+            assert_eq!(answered.audio.dropped, vec![(2, AudioDrop::Reviewed)], "{action:?}");
+            assert_eq!(answered.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1], "{action:?}");
+            assert_eq!(menu_outcomes(&answered), vec![(2, MenuOutcome::NotKept)], "{action:?}");
+        }
     }
 
     #[test]

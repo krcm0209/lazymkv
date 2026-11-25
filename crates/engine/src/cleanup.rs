@@ -1,8 +1,12 @@
 //! The cleanup task (design part 5.9, S40, P4, R-B4, L11; Rulings T4-R11, FR-1): one pass over every job the owner
 //! holds, run on a thread of its own. It deletes the TMDb copies past TMDb's six-month limit in every job's folder,
 //! whatever the job's state, and the staging folder of each filed job past its retention whose dataset copy is not
-//! pending (C2). It never touches `tuning_root`, never touches anything under `jobs/` but the three TMDb copies, and
-//! never follows a link out of a staging folder.
+//! pending (C2). A discarded job's staging folder and its own partial files in its library roots' `.lazymkv-partial`
+//! folders go at any pass, whatever its age (phase 3 design, part 6.8), but a non-empty `replaced` folder, which holds
+//! a library file a "replace" moved aside, is kept until the job's own retention has passed (part 6.7, Z27; Ruling
+//! T32-E11). It never touches `tuning_root`, never touches
+//! anything under `jobs/` but the three TMDb copies, never touches a library file, and never follows a link out of a
+//! staging folder or a partial folder.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -14,7 +18,10 @@ use lazymkv_clients::LookupBook;
 use lazymkv_core::job::State;
 use lazymkv_core::lookup::stale::{add_months, fetched_at, is_stale, TMDB_COPIES};
 use lazymkv_core::record::{JobRecord, TuningCopy};
+use lazymkv_core::settings::configured_root;
 use lazymkv_platform::{Reach, ShareConnector};
+
+use crate::file_phase::{PARTIAL_FOLDER, REPLACED_FOLDER};
 
 /// The seconds of one day of `retention_days`.
 const DAY_SECONDS: u64 = 86_400;
@@ -29,6 +36,10 @@ pub(crate) struct CleanupJob {
     pub(crate) record: JobRecord,
     /// The staging root of the job's own settings.
     pub(crate) staging_root: Option<String>,
+    /// The library roots of the job's own settings, its `movies_root` and `tv_root` that are set, whose
+    /// `.lazymkv-partial` folders a discard empties of the job's partial files (phase 3 design, part 6.8). Def: P3-T10.
+    /// Use: P3-T15, P3-T16.
+    pub(crate) library_roots: Vec<String>,
     /// The retention_days of the job's own settings.
     pub(crate) retention_days: u32,
     /// The job's lookup book; a pass skips the job while another holder has it locked.
@@ -61,18 +72,36 @@ pub(crate) fn retention_due(job: &CleanupJob, now_unix: u64) -> bool {
         && record.tuning_copy != Some(TuningCopy::Pending)
 }
 
-/// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each
-/// job the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
-/// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book
-/// another holder has locked is skipped this pass, and the pass holds the book only while it deletes the job's TMDb
-/// copies, never across the share's reach or the staging deletion (PR #15 review round 1, R6); each TMDb copy in
+/// Whether `job`'s staging data and partial files are due for deletion (phase 3 design, part 6.8): its record is
+/// Discarded, at any pass and whatever its age or its dataset copy. Def: P3-T10. Use: P3-T15, P3-T16.
+pub(crate) fn discard_due(job: &CleanupJob) -> bool {
+    job.record.state == State::Discarded
+}
+
+/// The roots a pass may use for `job` (phase 3 design, part 6.8; fix round 1): its staging root and its library roots,
+/// each through `configured_root`, so an absent, blank or whitespace root and `/` are none and nothing is ever asked or
+/// deleted under them. Def: P3-T10. Use: P3-T15, P3-T16.
+pub(crate) fn pass_roots(job: &CleanupJob) -> (Option<&str>, Vec<&str>) {
+    let staging = configured_root(job.staging_root.as_deref());
+    (staging, job.library_roots.iter().filter_map(|root| configured_root(Some(root))).collect())
+}
+
+/// One cleanup pass over `jobs`, in the order given (design part 5.9, S40, R-B4; Rulings T4-R11, FR-1). Before each job
+/// the pass reads `stop`, the engine's stop flag, and ends when it is raised, so a stop waits on at most one share
+/// call. For each job: a name not shaped like a job ID is left alone (`job_id_shaped`); a job whose lookup book another
+/// holder has locked is skipped this pass, and the pass holds the book only while it deletes the job's TMDb copies,
+/// never across the share's reach or the staging deletion (PR #15 review round 1, R6); each TMDb copy in
 /// `<data>/jobs/<id>/` whose `fetched_at` is a real date past the six-month limit on `today` is deleted (a copy without
-/// one is left to the refetch, Ruling T4-R7); and when `retention_due` holds, the job's staging folder is
-/// deleted once its share answers, without following any link inside it. The share of each staging root is asked
-/// once per pass and its answer kept for the pass's other jobs. Every deletion and failure gives `log` one engine.log
-/// line, and each root not reached gives one line at the pass's end with the count of jobs it skipped. It returns the
-/// ids of the jobs whose TMDb copies it deleted, in the pass's order, each once, for the refresh's mirror (design part
-/// 7.5). Def: T4-11; the ids: T5-20. Use: T4-11, T5-20.
+/// one is left to the refetch, Ruling T4-R7); and when `retention_due` or `discard_due` holds, the job's staging folder
+/// is deleted once its share answers, without following any link inside it (a root that is absent or blank, `/`
+/// included, is none: `pass_roots`); for a Discarded job within `replaced_kept_for`, everything but a `replaced` folder
+/// `keeps_replaced` keeps (`delete_staging_but_replaced`; Ruling T32-E11). When `discard_due` holds, the job's partial
+/// files in each of its library roots are deleted once that root's share answers (`delete_partial_files`; phase 3
+/// design, part 6.8). The share of each root is asked once per pass and its answer kept for the pass's other jobs.
+/// Every deletion and failure gives `log` one engine.log line, and each root not reached gives one line at the pass's
+/// end with the count of jobs it skipped, naming it a staging or a library root (P3-T10). It returns the ids of the
+/// jobs whose TMDb copies it deleted, in the pass's order, each once, for the refresh's mirror (design part 7.5). Def:
+/// T4-11; the ids: T5-20; the discard: P3-T10. Use: T4-11, T5-20, P3-T15, P3-T16.
 pub(crate) fn run_pass(
     jobs: Vec<CleanupJob>,
     data: &Path,
@@ -106,34 +135,53 @@ pub(crate) fn run_pass(
                 deleted.push(id.to_string());
             }
         }
-        if !retention_due(&job, now_unix) {
+        let discarded = discard_due(&job);
+        if !discarded && !retention_due(&job, now_unix) {
             continue;
         }
-        if let Some(root) = &job.staging_root {
-            if reached(&mut roots, root, shares) {
-                delete_staging_folder(root, id, log);
+        let (staging_root, library_roots) = pass_roots(&job);
+        if let Some(root) = staging_root {
+            if reached(&mut roots, root, STAGING_ROOT, shares) {
+                match replaced_kept_for(&job, now_unix).filter(|_| discarded) {
+                    Some(seconds) => delete_staging_but_replaced(root, id, seconds, log),
+                    None => delete_staging_folder(root, id, log),
+                }
+            }
+        }
+        if !discarded {
+            continue;
+        }
+        for root in library_roots {
+            if reached(&mut roots, root, LIBRARY_ROOT, shares) {
+                delete_partial_files(root, id, log);
             }
         }
     }
-    for RootReach { root, failure, skipped } in roots {
+    for RootReach { root, kind, failure, skipped } in roots {
         if let Some(why) = failure {
-            log(format!("cleanup: the staging root {root} was not reached: {why}; {skipped} job(s) skipped"));
+            log(format!("cleanup: the {kind} {root} was not reached: {why}; {skipped} job(s) skipped"));
         }
     }
     deleted
 }
 
-/// One staging root as a pass found it (Ruling FR-1): the failure text when its share did not answer, and how many
-/// jobs it skipped for that.
+/// The name a pass's line gives a staging root it did not reach.
+const STAGING_ROOT: &str = "staging root";
+/// The name a pass's line gives a library root it did not reach (phase 3 design, part 6.8).
+const LIBRARY_ROOT: &str = "library root";
+
+/// One root as a pass found it (Ruling FR-1): what kind of root its line names (`STAGING_ROOT` or `LIBRARY_ROOT`, the
+/// kind of its first job's ask), the failure text when its share did not answer, and how many jobs it skipped for that.
 struct RootReach {
     root: String,
+    kind: &'static str,
     failure: Option<String>,
     skipped: usize,
 }
 
 /// Whether the share of `root` answered this pass: asked on the root's first job only, its answer kept in `roots`,
 /// and a job under a root that did not answer counted as skipped.
-fn reached(roots: &mut Vec<RootReach>, root: &str, shares: &dyn ShareConnector) -> bool {
+fn reached(roots: &mut Vec<RootReach>, root: &str, kind: &'static str, shares: &dyn ShareConnector) -> bool {
     let index = match roots.iter().position(|known| known.root == root) {
         Some(index) => index,
         None => {
@@ -141,7 +189,7 @@ fn reached(roots: &mut Vec<RootReach>, root: &str, shares: &dyn ShareConnector) 
                 Reach::Unreachable(why) => Some(why),
                 Reach::Reachable => None,
             };
-            roots.push(RootReach { root: root.to_string(), failure, skipped: 0 });
+            roots.push(RootReach { root: root.to_string(), kind, failure, skipped: 0 });
             roots.len() - 1
         }
     };
@@ -183,6 +231,85 @@ fn delete_stale_copies(folder: &Path, id: &str, today: &str, log: &dyn Fn(String
     removed
 }
 
+/// The seconds a Discarded `job`'s kept `replaced` folder still has before it is due (Ruling T32-E11, rule 2; phase 3
+/// design, part 6.7, Z27): Some while `now_unix` is not later than `record.updated_unix` plus the job's own
+/// `retention_days`, None once it is. `updated_unix` is never earlier than the move, so a moved file is kept at least
+/// `retention_days` from the day it was replaced; the moved file's own modification time, the old library file's
+/// date, is never read. Def: P3-T11 fix round 1. Use: P3-T16.
+fn replaced_kept_for(job: &CleanupJob, now_unix: u64) -> Option<u64> {
+    let due = job.record.updated_unix.saturating_add(u64::from(job.retention_days) * DAY_SECONDS);
+    (now_unix <= due).then(|| due - now_unix)
+}
+
+/// Whether `folder` (a job's staging folder) holds a `REPLACED_FOLDER` that a discard keeps (Ruling T32-E11, rule 1;
+/// phase 3 design, part 6.7): an entry of that name that is a real folder by `symlink_metadata` (a link is never one)
+/// and is not empty. A folder that cannot be listed is kept too, since what it holds is not known. Def: P3-T11 fix
+/// round 1. Use: P3-T16.
+pub(crate) fn keeps_replaced(folder: &Path) -> bool {
+    let replaced = folder.join(REPLACED_FOLDER);
+    match fs::symlink_metadata(&replaced) {
+        Ok(metadata) if metadata.is_dir() => {}
+        _ => return false,
+    }
+    match fs::read_dir(&replaced) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(_) => true,
+    }
+}
+
+/// A Discarded job's staging folder `<root>/<id>` emptied of everything but its kept `replaced` folder, `kept` seconds
+/// before that folder is due (Ruling T32-E11, rules 1, 2 and 4): when `keeps_replaced` holds, each entry directly
+/// inside the folder but `REPLACED_FOLDER` is deleted by its own type, never through a link (a folder with
+/// `remove_dir_all`, anything else with `remove_file`, a Windows folder link with `remove_dir`), then one line says
+/// so and one line that the `replaced` folder is kept and in how many days it is due; each failure gives its own
+/// line. Otherwise the whole folder goes as `delete_staging_folder` deletes it. Def: P3-T11 fix round 1. Use: P3-T16.
+fn delete_staging_but_replaced(root: &str, id: &str, kept: u64, log: &dyn Fn(String)) {
+    let folder = Path::new(root).join(id);
+    match fs::symlink_metadata(&folder) {
+        Ok(metadata) if metadata.is_dir() && keeps_replaced(&folder) => {}
+        _ => return delete_staging_folder(root, id, log),
+    }
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(error) => return log(format!("cleanup: {id}: the staging folder could not be read: {error}")),
+    };
+    let mut whole = true;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                whole = false;
+                log(format!("cleanup: {id}: the staging folder could not be read: {error}"));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if name == REPLACED_FOLDER {
+            continue;
+        }
+        let path = entry.path();
+        // `DirEntry::file_type` does not follow a link.
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => fs::remove_dir_all(&path),
+            Ok(_) => fs::remove_file(&path).or_else(|error| fs::remove_dir(&path).map_err(|_| error)),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = removed {
+            whole = false;
+            let shown = name.to_string_lossy();
+            log(format!("cleanup: {id}: {shown} in its staging folder could not be deleted: {error}"));
+        }
+    }
+    if whole {
+        log(format!("cleanup: {id}: deleted its staging folder but its {REPLACED_FOLDER} folder"));
+    }
+    let days = kept.div_ceil(DAY_SECONDS);
+    log(format!(
+        "cleanup: {id}: kept its {REPLACED_FOLDER} folder, which holds a replaced library file; it is due for deletion \
+         in {days} day(s)"
+    ));
+}
+
 /// Deletes `<root>/<id>`, the share holding `root` having answered this pass. `fs::remove_dir_all` removes a symbolic
 /// link or a junction inside the folder without following it.
 fn delete_staging_folder(root: &str, id: &str, log: &dyn Fn(String)) {
@@ -195,6 +322,60 @@ fn delete_staging_folder(root: &str, id: &str, log: &dyn Fn(String)) {
         Err(error) => log(format!("cleanup: {id}: the staging folder could not be deleted: {error}")),
     }
 }
+
+/// Deletes the partial files of job `id` in `<root>/.lazymkv-partial/`, the share holding `root` having answered this
+/// pass (phase 3 design, part 6.8): each entry directly inside that folder whose name starts with `<id>-` and ends with
+/// `.mkv.partial` and which is a regular file, by its own type, never by a link's target. A partial folder that is
+/// itself a link, or no folder, is left alone; a link, a folder or a deeper entry in it is never deleted or followed;
+/// another job's file is left, since its name starts with its own id and a dash. Each deletion and failure gives `log`
+/// one line. The caller has checked that `id` is shaped like a job ID and that `root` is set. Def: P3-T10. Use:
+/// P3-T15, P3-T16.
+fn delete_partial_files(root: &str, id: &str, log: &dyn Fn(String)) {
+    let folder = Path::new(root).join(PARTIAL_FOLDER);
+    match fs::symlink_metadata(&folder) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return log(format!("cleanup: {id}: {} was left alone: it is not a folder", folder.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => return log(format!("cleanup: {id}: {} could not be read: {error}", folder.display())),
+    }
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(error) => return log(format!("cleanup: {id}: {} could not be read: {error}", folder.display())),
+    };
+    let prefix = format!("{id}-");
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                log(format!("cleanup: {id}: {} could not be read: {error}", folder.display()));
+                continue;
+            }
+        };
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(PARTIAL_SUFFIX) {
+            continue;
+        }
+        // `DirEntry::file_type` does not follow a link, so a link to a file or a folder is never a regular file here.
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            Ok(_) => continue,
+            Err(error) => {
+                log(format!("cleanup: {id}: the partial file {name} could not be read: {error}"));
+                continue;
+            }
+        }
+        match fs::remove_file(folder.join(name)) {
+            Ok(()) => log(format!("cleanup: {id}: deleted the partial file {name}")),
+            Err(error) => log(format!("cleanup: {id}: the partial file {name} could not be deleted: {error}")),
+        }
+    }
+}
+
+/// The end of a partial file's name (`file_phase::partial_path`).
+const PARTIAL_SUFFIX: &str = ".mkv.partial";
 
 #[cfg(test)]
 mod tests {
@@ -232,9 +413,317 @@ mod tests {
             tuning_copy: None,
         };
         CleanupJob {
-            id, record, staging_root: None, retention_days: 7,
+            id, record, staging_root: None, library_roots: vec![], retention_days: 7,
             lookups: Arc::new(Mutex::new(LookupBook::default())),
         }
+    }
+
+    const UNANSWERED: &str = "the share did not answer";
+
+    fn library(folders: &Scratch) -> String {
+        folders.0.join("library").display().to_string()
+    }
+
+    /// A Discarded job (phase 3 design, part 6.8) updated `NOW`, so no age holds it, whose library root is the
+    /// scratch `library` folder.
+    fn discarded(n: u64) -> CleanupJob {
+        let mut job = job(n, State::Discarded, None);
+        job.record.updated_unix = NOW;
+        job
+    }
+
+    /// `pass` with each job's library roots set to the scratch `library` folder (phase 3 design, part 6.8).
+    fn pass_with_library(folders: &Scratch, jobs: Vec<CleanupJob>, shares: &FakeShares) -> Vec<String> {
+        let root = library(folders);
+        let jobs = jobs.into_iter().map(|job| CleanupJob { library_roots: vec![root.clone()], ..job }).collect();
+        pass(folders, jobs, shares, TODAY, NOW)
+    }
+
+    /// Phase 3 design, part 6.8: a discard deletes at any pass, whatever the job's age, and nothing but its staging
+    /// folder and its own partial files; the job folder, the library's files and the tuning root stay.
+    #[test]
+    fn a_discarded_job_has_its_staging_folder_and_partial_files_deleted_at_any_age() {
+        let folders = Scratch::new("cleanup-discarded");
+        let id = id(1);
+        let state = folders.write_path(&format!("data/jobs/{id}/state.json"), "x");
+        folders.write(&format!("staging/{id}/rip/t00-00800/title_t00.mkv"), "b");
+        folders.write(&format!("staging/{id}/tuning/t00-00800/audio-proxy.mka"), "mka");
+        let partial = format!("{id}-t00-00800.mkv.partial");
+        folders.write(&format!("library/.lazymkv-partial/{partial}"), "p");
+        let film = folders.write_path("library/Film (2001)/Film (2001) - 1080p.mkv", "film");
+        let tuning = folders.write_path(&format!("tuning/dataset/{id}/a.txt"), "t");
+        let mut pending = discarded(1);
+        pending.record.tuning_copy = Some(TuningCopy::Dropped);
+        assert!(discard_due(&pending));
+        assert!(!retention_due(&pending, NOW));
+        let lines = pass_with_library(&folders, vec![pending], &FakeShares::new());
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert!(folders.0.join("staging").is_dir());
+        assert!(!folders.0.join("library/.lazymkv-partial").join(&partial).exists());
+        assert!(folders.0.join("library/.lazymkv-partial").is_dir(), "the partial folder itself stays");
+        assert_eq!(fs::read(&state).unwrap(), b"x");
+        assert_eq!(fs::read(&film).unwrap(), b"film");
+        assert_eq!(fs::read(&tuning).unwrap(), b"t");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted its staging folder"),
+                format!("cleanup: {id}: deleted the partial file {partial}"),
+            ]
+        );
+        for state in [held(), failed(), State::Filed, State::Ripping] {
+            assert!(!discard_due(&job(2, state, Some(NOW - 30 * DAY))));
+        }
+    }
+
+    /// A Discarded job's staging folder holding `replaced/Film - 1080p.mkv` (the library file a "replace" moved aside)
+    /// and other data; gives the moved file's path.
+    fn replaced_and_other(folders: &Scratch, id: &str) -> PathBuf {
+        folders.write(&format!("staging/{id}/rip/t00-00800/title_t00.mkv"), "b");
+        folders.write(&format!("staging/{id}/evidence/t00-00800.mks"), "e");
+        folders.write(&format!("staging/{id}/notes.txt"), "n");
+        folders.write_path(&format!("staging/{id}/{REPLACED_FOLDER}/Film - 1080p.mkv"), "owner's film")
+    }
+
+    /// Ruling T32-E11, rule 1 (phase 3 design, part 6.7, Z27): a discard deletes everything in the job's staging
+    /// folder but a non-empty `replaced` folder, whose file is kept byte for byte, and says until when it is kept.
+    #[test]
+    fn a_discarded_job_keeps_its_replaced_folder_and_loses_the_rest() {
+        let folders = Scratch::new("cleanup-discarded-replaced");
+        let id = id(1);
+        let moved = replaced_and_other(&folders, &id);
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW);
+        let job_folder = folders.0.join("staging").join(&id);
+        let left: Vec<String> =
+            fs::read_dir(&job_folder).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(left, [REPLACED_FOLDER]);
+        assert_eq!(fs::read(&moved).unwrap(), b"owner's film");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted its staging folder but its {REPLACED_FOLDER} folder"),
+                format!(
+                    "cleanup: {id}: kept its {REPLACED_FOLDER} folder, which holds a replaced library file; it is due \
+                     for deletion in 7 day(s)"
+                ),
+            ]
+        );
+        // A second pass deletes nothing more and says the folder is kept.
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW + DAY);
+        assert_eq!(fs::read(&moved).unwrap(), b"owner's film");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted its staging folder but its {REPLACED_FOLDER} folder"),
+                format!(
+                    "cleanup: {id}: kept its {REPLACED_FOLDER} folder, which holds a replaced library file; it is due \
+                     for deletion in 6 day(s)"
+                ),
+            ]
+        );
+    }
+
+    /// Ruling T32-E11, rule 2: past `updated_unix + retention_days` the `replaced` folder and the job's staging folder
+    /// go.
+    #[test]
+    fn a_discarded_jobs_replaced_folder_goes_once_its_retention_has_passed() {
+        let folders = Scratch::new("cleanup-discarded-replaced-old");
+        let id = id(1);
+        replaced_and_other(&folders, &id);
+        let at_limit = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW + 7 * DAY);
+        assert!(folders.0.join("staging").join(&id).join(REPLACED_FOLDER).is_dir(), "{at_limit:?}");
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW + 7 * DAY + 1);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Ruling T32-E11, rule 1: an empty `replaced` folder keeps nothing, so the job's staging folder goes whole.
+    #[test]
+    fn a_discarded_job_with_an_empty_replaced_folder_loses_its_whole_staging_folder() {
+        let folders = Scratch::new("cleanup-discarded-replaced-empty");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/rip/t00/b.mkv"), "b");
+        fs::create_dir_all(folders.0.join("staging").join(&id).join(REPLACED_FOLDER)).unwrap();
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Ruling T32-E11, rule 1: a `replaced` that is a link to a folder outside staging keeps nothing: the job's staging
+    /// folder goes whole, the link is removed and never followed, and its target's file stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_discarded_job_whose_replaced_is_a_link_loses_its_staging_folder_and_not_the_target() {
+        let folders = Scratch::new("cleanup-discarded-replaced-link");
+        let id = id(1);
+        folders.write(&format!("staging/{id}/rip/t00/b.mkv"), "b");
+        let outside = folders.write_path("elsewhere/Film - 1080p.mkv", "not staging's");
+        std::os::unix::fs::symlink(outside.parent().unwrap(), folders.0.join("staging").join(&id).join(REPLACED_FOLDER))
+            .unwrap();
+        let lines = pass(&folders, vec![discarded(1)], &FakeShares::new(), TODAY, NOW);
+        assert!(fs::symlink_metadata(folders.0.join("staging").join(&id)).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"not staging's");
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Ruling T32-E11, rule 3: a Filed job past its retention loses its whole staging folder, `replaced` included.
+    #[test]
+    fn a_filed_job_past_its_retention_loses_its_replaced_folder_too() {
+        let folders = Scratch::new("cleanup-filed-replaced");
+        let id = id(1);
+        replaced_and_other(&folders, &id);
+        let lines = pass(&folders, vec![job(1, State::Filed, Some(NOW - 8 * DAY))], &FakeShares::new(), TODAY, NOW);
+        assert!(!folders.0.join("staging").join(&id).exists());
+        assert_eq!(lines, [format!("cleanup: {id}: deleted its staging folder")]);
+    }
+
+    /// Phase 3 design, part 6.8: nothing is deleted under a root whose share does not answer, and each such root
+    /// gets its line at the pass's end.
+    #[test]
+    fn a_discarded_job_under_an_unreached_root_keeps_its_data_and_is_logged() {
+        let folders = Scratch::new("cleanup-discarded-unreached");
+        let id = id(1);
+        let staged = folders.write_path(&format!("staging/{id}/rip/t00/b.mkv"), "b");
+        let partial = folders.write_path(&format!("library/.lazymkv-partial/{id}-t00.mkv.partial"), "p");
+        let (staging_root, library_root) = (staging(&folders), library(&folders));
+        let shares = FakeShares::new();
+        shares.set_reach(&staging_root, Reach::Unreachable(UNANSWERED.into()));
+        shares.set_reach(&library_root, Reach::Unreachable("cable out".into()));
+        let lines = pass_with_library(&folders, vec![discarded(1)], &shares);
+        assert_eq!(fs::read(&staged).unwrap(), b"b");
+        assert_eq!(fs::read(&partial).unwrap(), b"p");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: the staging root {staging_root} was not reached: {UNANSWERED}; 1 job(s) skipped"),
+                format!("cleanup: the library root {library_root} was not reached: cable out; 1 job(s) skipped"),
+            ]
+        );
+        // The library answers: its partial file goes, and the staging data waits for its own share.
+        shares.set_reach(&library_root, Reach::Reachable);
+        let lines = pass_with_library(&folders, vec![discarded(1)], &shares);
+        assert_eq!(fs::read(&staged).unwrap(), b"b");
+        assert!(!partial.exists());
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted the partial file {id}-t00.mkv.partial"),
+                format!("cleanup: the staging root {staging_root} was not reached: {UNANSWERED}; 1 job(s) skipped"),
+            ]
+        );
+    }
+
+    /// The roots a pass may use (phase 3 design, part 6.8; fix round 1): an absent, blank or whitespace root and `/`
+    /// are none, for a staging root and for a library root. This checks the guard at a level that deletes nothing, since
+    /// a literal `/` cannot be placed inside the scratch folder.
+    #[test]
+    fn a_blank_or_slash_root_is_no_root_a_pass_may_use() {
+        let mut job = discarded(1);
+        for root in ["", "  ", "/", " / ", "//"] {
+            job.staging_root = Some(root.to_string());
+            job.library_roots = vec![root.to_string(), "/srv/media/Movies".to_string()];
+            assert_eq!(pass_roots(&job), (None, vec!["/srv/media/Movies"]), "{root:?}");
+        }
+        job.staging_root = None;
+        job.library_roots = vec![];
+        assert_eq!(pass_roots(&job), (None, vec![]));
+        job.staging_root = Some("/srv/staging".to_string());
+        assert_eq!(pass_roots(&job), (Some("/srv/staging"), vec![]));
+    }
+
+    /// Fix round 1: a pass never asks or deletes under a blank, whitespace or `/` root, for a discarded job's staging
+    /// and library roots or a filed job's staging root past its retention. Each such root is set unreachable in the
+    /// fake, so a missing guard would show as a "was not reached" line and a reach, never as a deletion: a pass whose
+    /// share does not answer deletes nothing, so the test cannot act on the real `/` or the working folder even then.
+    #[test]
+    fn a_pass_never_uses_a_blank_or_slash_root() {
+        let folders = Scratch::new("cleanup-blank-roots");
+        let shares = FakeShares::new();
+        let roots = ["", "  ", "/"];
+        for root in roots {
+            shares.set_reach(root, Reach::Unreachable("the guard is missing".into()));
+        }
+        let mut jobs = Vec::new();
+        for (n, root) in (1..).zip(roots) {
+            let mut staging = discarded(n);
+            staging.staging_root = Some(root.to_string());
+            let mut filed = job(n + 10, State::Filed, Some(NOW - 30 * DAY));
+            filed.staging_root = Some(root.to_string());
+            let mut library = discarded(n + 20);
+            library.library_roots = vec![root.to_string()];
+            jobs.extend([staging, filed, library]);
+        }
+        let lines = RefCell::new(Vec::new());
+        let stop = AtomicBool::new(false);
+        run_pass(jobs, &folders.0.join("data"), &shares, TODAY, NOW, &stop, &|line| lines.borrow_mut().push(line));
+        for root in roots {
+            assert_eq!(shares.reaches(root), 0, "{root:?} was asked");
+        }
+        assert_eq!(lines.into_inner(), Vec::<String>::new());
+    }
+
+    /// Phase 3 design, part 6.8: only the regular files `<job id>-*.mkv.partial` directly inside `.lazymkv-partial`
+    /// go. Another job's file (one whose number begins with this job's included), a name without the suffix, a folder,
+    /// a file outside the partial folder and a link are left, and no link is followed.
+    #[test]
+    fn a_partial_file_of_another_job_is_left_alone() {
+        let folders = Scratch::new("cleanup-partial-others");
+        let other = id(2);
+        let id = id(1);
+        let own = folders.write_path(&format!("library/.lazymkv-partial/{id}-t00.mkv.partial"), "p");
+        let kept = [
+            folders.write_path(&format!("library/.lazymkv-partial/{other}-t00.mkv.partial"), "other"),
+            folders.write_path(&format!("library/.lazymkv-partial/{:032x}-12-t00.mkv.partial", 1), "twelve"),
+            folders.write_path(&format!("library/.lazymkv-partial/{id}-t00.mkv"), "no suffix"),
+            folders.write_path(&format!("library/.lazymkv-partial/{id}-t01.mkv.partial/inner.mkv.partial"), "inside"),
+            folders.write_path(&format!("library/{id}-t00.mkv.partial"), "outside"),
+            folders.write_path(&format!("library/.lazymkv-partial/sub/{id}-t00.mkv.partial"), "deeper"),
+        ];
+        let film = folders.write_path("elsewhere/film.mkv", "film");
+        let elsewhere = folders.0.join("elsewhere");
+        // A second library root whose partial folder is a link to a folder holding this job's name.
+        let linked = folders.write_path(&format!("target/{id}-t00.mkv.partial"), "linked");
+        let second = folders.0.join("second");
+        fs::create_dir_all(&second).unwrap();
+        #[cfg(unix)]
+        {
+            let folder = folders.0.join("library/.lazymkv-partial");
+            std::os::unix::fs::symlink(&film, folder.join(format!("{id}-link.mkv.partial"))).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, folder.join(format!("{id}-dirlink.mkv.partial"))).unwrap();
+            std::os::unix::fs::symlink(folders.0.join("target"), second.join(".lazymkv-partial")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let junction = |link: &Path, target: &Path| {
+                let made = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target)
+                    .output().unwrap();
+                assert!(made.status.success(), "mklink /J failed");
+            };
+            let folder = folders.0.join("library/.lazymkv-partial");
+            junction(&folder.join(format!("{id}-dirlink.mkv.partial")), &elsewhere);
+            junction(&second.join(".lazymkv-partial"), &folders.0.join("target"));
+        }
+        let mut job = discarded(1);
+        job.library_roots = vec![library(&folders), second.display().to_string()];
+        let partials = folders.0.join("library/.lazymkv-partial");
+        let lines = pass(&folders, vec![job], &FakeShares::new(), TODAY, NOW);
+        assert!(!own.exists());
+        for path in &kept {
+            assert!(path.is_file(), "{}", path.display());
+        }
+        assert_eq!(fs::read(&film).unwrap(), b"film");
+        assert_eq!(fs::read(&linked).unwrap(), b"linked");
+        assert!(fs::symlink_metadata(partials.join(format!("{id}-dirlink.mkv.partial"))).is_ok());
+        #[cfg(unix)]
+        assert!(fs::symlink_metadata(partials.join(format!("{id}-link.mkv.partial"))).is_ok());
+        let linked_folder = second.join(".lazymkv-partial");
+        assert_eq!(
+            lines,
+            [
+                format!("cleanup: {id}: deleted the partial file {id}-t00.mkv.partial"),
+                format!("cleanup: {id}: {} was left alone: it is not a folder", linked_folder.display()),
+            ]
+        );
     }
 
     fn staging(folders: &Scratch) -> String {

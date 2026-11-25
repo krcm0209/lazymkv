@@ -18,6 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use lazymkv_clients::{reason_text, webhook_target, HttpTransport, LookupBook, LookupState, PendingReason};
+use lazymkv_core::disc::disc;
 use lazymkv_core::ipc::{
     is_secret_name, job_summary, push_line, reply_error, reply_ok, share_credential, JobSummary, JobUpdate,
     Notification, OutputStream, Progress, Push, Request, SelfTest, Snapshot, CANCELLED, SECRET_NAMES,
@@ -28,8 +29,10 @@ use lazymkv_core::job::{
 };
 use lazymkv_core::profile::JOB_PROFILE_FILE;
 use lazymkv_core::record::{DriveRecord, DrivesFile, JobRecord, Transition, TuningCopy, DRIVES_FORMAT, JOB_FORMAT};
-use lazymkv_core::remembered::Overrides;
+use lazymkv_core::remembered::{overrides_from_value, Overrides};
 use lazymkv_core::review::{Note, Noted};
+use lazymkv_core::review_doc::{self, DocInputs, ReviewLabel};
+use lazymkv_core::robot::parse;
 use lazymkv_core::settings::{configured_root, Settings, SettingsProblem};
 use lazymkv_core::snapshot::DiscMeta;
 use lazymkv_core::subtitle::text::READING;
@@ -42,12 +45,13 @@ use serde_json::{json, Map, Value};
 
 use crate::arrival::{read_arrival, spawn_arrival, spawn_recording, Arrival};
 use crate::cleanup::{run_pass, CleanupJob};
-use crate::file_phase::{refreshed_plan, waiting_message, SlotQueue, PARTIAL_FOLDER};
+use crate::discard::spawn_preview;
+use crate::file_phase::{refreshed_plan, waiting_message, RenameFn, SlotQueue, PARTIAL_FOLDER};
 use crate::ipc_server::{
-    cancel_event, cancel_not_persisted, failure_event, history_page, main_tag, no_job, no_retry, no_rip_again,
-    no_running_step, not_a_secret, not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs,
-    spawn_reader, spawn_serve, staging_unset, steps_running, waits_for_review, Clients, ProgressGate, CLIENT_DRAIN,
-    DISCARD_REFUSED, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
+    cancel_event, cancel_not_persisted, discard_not_persisted, discard_running, failure_event, history_page, main_tag,
+    no_discard, no_job, no_retry, no_rip_again, no_running_step, not_a_review_action, not_a_secret, not_answered_yet,
+    not_cancellable, not_held, secret_states, settings_refused, snapshot_jobs, spawn_reader, spawn_serve, staging_unset,
+    steps_running, Clients, ProgressGate, CLIENT_DRAIN, NO_CLIENT, STOPPING, UI_QUIT_REFUSED,
 };
 use crate::notify::{self, spawn_notifier, NotifySink, NOTIFY_DRAIN_S};
 use crate::relay::{
@@ -56,6 +60,8 @@ use crate::relay::{
     COMMAND_WRITABLE, STALE_EXIT,
 };
 use crate::restart::{holds_slot, plan_restart, reads_drive, rebuild_book};
+use crate::review_build::spawn_review;
+use crate::review_store::{self, label_entries, LabelEntry, Reviewed};
 use crate::selftest::{first_selftest, not_checked, CheckEnv, MakeMkv, MakeMkvState, RecheckJob};
 use crate::space::{rebuild_promises, released_steps, Promises, PromisedStep};
 use crate::staged;
@@ -183,6 +189,9 @@ pub(crate) struct TestHooks {
     /// The copy step every copy thread passes to `copy_dataset`; None copies with `staged::copy_checked`. Def: T5-19.
     /// Use: T5-19.
     pub(crate) copy_with: Option<CopyFn>,
+    /// The rename File makes into a title's final path; None renames with `rename_no_replace` (ruling T32-E22).
+    /// Def: T32-E22. Use: T32-E22.
+    pub(crate) file_rename: Option<RenameFn>,
     /// Sent the job's id once at the end of each refresh of its tuning recordings, whatever its end (design part 7.5).
     /// Def: T5-20. Use: T5-20.
     pub(crate) refresh_done: Option<Sender<String>>,
@@ -252,6 +261,13 @@ pub(crate) enum Msg {
     /// A refresh of the job's tuning recordings ended (design part 7.5): the job, and whether `tuning_root` was not
     /// reached or `refresh_recordings` failed. Def: T5-20. Use: T5-20.
     Refreshed { job: String, failed: bool },
+    /// A `review` worker ended (phase 3 design, part 6.2): the answer to the `review` request `id` of `client`, the
+    /// serialised document or the refusal. It holds subtitle lines, so it goes to that client only, never to a log.
+    /// Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+    ReviewBuilt { client: u64, id: Option<u64>, answer: Result<Value, String> },
+    /// A `discard_preview` worker ended (phase 3 design, part 6.8; ruling T32-R7): the answer to the request `id` of
+    /// `client`, `{"bytes": n, "files": n}` or `{"unknown": "<reason>"}`. Def: P3-T10. Use: P3-T15, P3-T16.
+    DiscardPreviewed { client: u64, id: Option<u64>, answer: Value },
 }
 
 /// How a self-test or a retry's re-check ended (design part 9.4, S81). Def: T26. Use: T26.
@@ -300,6 +316,7 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     let cleanup_done = hooks.cleanup_done;
     let (copy_done, copy_with) = (hooks.copy_done, hooks.copy_with);
     let refresh_done = hooks.refresh_done;
+    let file_rename = hooks.file_rename;
     store.log(&format!("engine started (lazymkv {})", env!("CARGO_PKG_VERSION")));
     remove_work_folder(&store, &config.data);
     let outbox = Outbox::default();
@@ -325,7 +342,8 @@ pub(crate) fn start_until(mut config: EngineConfig, services: Services, hooks: T
     let steps = steps.unwrap_or_else(|| {
         let (store, outbox, promises) = (Arc::clone(&store), outbox.clone(), Arc::clone(&promises));
         let (http, java_in_use, makemkv) = (Arc::clone(&http), Arc::clone(&java_in_use), Arc::clone(&makemkv));
-        Arc::new(RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv))
+        let real = RealSteps::new(&config, &platform, http, store, outbox, promises, java_in_use, makemkv);
+        Arc::new(real.with_file_rename(file_rename))
     });
     let Platform { drives, ejector, awake, host, secrets, shares, ipc, .. } = platform;
     let notify_stop = notify.stop_flag();
@@ -529,11 +547,12 @@ impl EngineHandle {
     /// queued, such as `shutdown`'s `ok` (design parts 3.8, 9.4), writes `engine stopped`, then waits at most
     /// CONSOLE_DRAIN for the console mirror (review round 1 of pull request 3, V5). An arrival still waiting for its
     /// volume is not waited for: it only reads, and its late result goes nowhere. The relay's refetch thread
-    /// is not waited for either (PR #15 review round 1, R1). A step, recording or eject that
+    /// is not waited for either (PR #15 review round 1, R1), nor a `review` worker, which only reads (phase 3 design,
+    /// part 6.2). A step, recording or eject that
     /// panics still reports (R22.11), so stop never waits on one. A notifier still retrying when the drain bound passes
     /// may append its `was not delivered` lines after `engine stopped`. Err when the serve, drive or owner thread
     /// panicked.
-    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12. Use: T22 to T29, T3-23, T4-11, T4-12.
+    /// Def: T22, T3-10, PR #14 review round 1 (V5), T4-11, T4-12, P3-T9. Use: T22 to T29, T3-23, T4-11, T4-12.
     pub fn stop(self) -> io::Result<()> {
         let EngineHandle {
             sender,
@@ -690,6 +709,15 @@ impl DiscToken {
         self.queue.len() != before
     }
 
+    /// Takes every queued Retry or return of `job` out of the queue, so none is delivered later (phase 3 design, part
+    /// 6.8: a discarded job leaves the queue); an arrival stays. Def: P3-T10. Use: P3-T15, P3-T16.
+    pub(crate) fn forget(&mut self, job: &str) {
+        self.queue.retain(|waiting| match waiting {
+            Waiting::Retry(id) | Waiting::Return(id, _) => id != job,
+            Waiting::Arrival(_) => true,
+        });
+    }
+
     /// Whether a Retry or return of `job` waits in the queue (design part 5.4). Def: T26. Use: T26.
     pub(crate) fn queued_job(&self, job: &str) -> bool {
         self.queue.iter().any(|waiting| match waiting {
@@ -808,6 +836,51 @@ fn new_record(id: &str, meta: &DiscMeta, drive: &str, now: u64) -> JobRecord {
         notes: Vec::new(),
         tuning_copy: None,
     }
+}
+
+/// Whether a `review_action` field gives nothing: absent, null, or an empty object or array (design part 9.4, as phase
+/// 2 read `overrides`). Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+fn is_empty_value(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(fields)) => fields.is_empty(),
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// An approval's answers and labels checked against the held job's review document (phase 3 design, parts 6.2, 6.4,
+/// 6.6), giving the labels' entries at `time_unix`. The document is built from local files only: the record and the
+/// job folder's `scan.txt` (read as `Step::planned_scan` reads it), with no staged paths, subtitle lines, unread
+/// reasons, colliding files or empty paths, since the owner thread never reads a share; a collision item needs only the
+/// decision's path and its `path_collision` reason. Err is `build`'s, `check`'s or `label_entries`' refusal, or `<scan.txt>:
+/// <reason>`. Def: P3-T8. Use: P3-T12, P3-T14, P3-T16.
+fn review_answers(
+    record: &JobRecord,
+    job_dir: &Path,
+    answers: &Overrides,
+    labels: &[ReviewLabel],
+    time_unix: u64,
+) -> Result<Vec<LabelEntry>, String> {
+    let path = job_dir.join("scan.txt");
+    let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let scanned = disc(&parse(&String::from_utf8_lossy(&bytes))).map_err(|error| format!("{}: {error}", path.display()))?;
+    let (staged, collisions) = (BTreeMap::new(), BTreeMap::new());
+    let (lines, unread) = (BTreeMap::new(), BTreeMap::new());
+    let nothing_at = BTreeSet::new();
+    let inputs = DocInputs {
+        record,
+        disc: &scanned,
+        staged: &staged,
+        lines: &lines,
+        unread: &unread,
+        collisions: &collisions,
+        nothing_at: &nothing_at,
+        all: false,
+    };
+    let doc = review_doc::build(&inputs)?;
+    review_doc::check(&doc, answers)?;
+    label_entries(&doc, labels, time_unix)
 }
 
 /// The plan's identity title, the `title` of a job's notifications (S42).
@@ -1080,6 +1153,10 @@ struct Owner {
     command: Option<RunningCommand>,
     /// Whether a cleanup pass runs (design part 5.9): set by `Msg::Cleanup`, cleared by `Msg::CleanupDone`.
     cleanup_running: bool,
+    /// Set when a discard asked for a pass while one ran, or when a discarded job's running copy ended (phase 3 design,
+    /// part 6.8): the running pass read the record before the discard, so another pass starts at its end. Def: P3-T10.
+    /// Use: P3-T15, P3-T16.
+    cleanup_again: bool,
     /// Sent once at the end of each cleanup pass, for the testkit (`TestHooks::cleanup_done`).
     cleanup_done: Option<Sender<()>>,
     /// The jobs with a dataset copy thread running (design part 7.5).
@@ -1097,6 +1174,10 @@ struct Owner {
     refresh_failed: BTreeSet<String>,
     /// Sent the job's id at the end of each refresh, for the testkit (`TestHooks::refresh_done`).
     refresh_done: Option<Sender<String>>,
+    /// The running `review` workers (phase 3 design, part 6.2), dropped when they end and left running by a stop,
+    /// which does not wait for them: they only read, and a share can stall a read (design part 4.4). Def: P3-T9.
+    /// Use: P3-T13, P3-T14, P3-T16.
+    reviews: Vec<JoinHandle<()>>,
 }
 
 impl Owner {
@@ -1202,6 +1283,7 @@ impl Owner {
             refeed_armed: BTreeSet::new(),
             command: None,
             cleanup_running: false,
+            cleanup_again: false,
             cleanup_done,
             copies: BTreeSet::new(),
             copy_done,
@@ -1210,6 +1292,7 @@ impl Owner {
             refresh_again: BTreeSet::new(),
             refresh_failed: BTreeSet::new(),
             refresh_done,
+            reviews: Vec::new(),
         };
         owner.restart(present);
         owner
@@ -1432,6 +1515,8 @@ impl Owner {
             Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
             Msg::Refresh { job } => self.request_refresh(&job),
             Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
+            Msg::ReviewBuilt { client, id, answer } => self.reply(client, id, answer),
+            Msg::DiscardPreviewed { client, id, answer } => self.reply(client, id, Ok(answer)),
         }
     }
 
@@ -1466,6 +1551,10 @@ impl Owner {
             Msg::CleanupDone => self.cleanup_ended(),
             Msg::TuningCopied { job, retry, end } => self.copy_ended(&job, retry, end),
             Msg::Refreshed { job, failed } => self.refresh_ended(&job, failed),
+            // A document built before the shutdown began still answers its request (phase 3 design, part 6.2).
+            Msg::ReviewBuilt { client, id, answer } => self.reply(client, id, answer),
+            // A preview counted before the shutdown began still answers its request, as a review does.
+            Msg::DiscardPreviewed { client, id, answer } => self.reply(client, id, Ok(answer)),
             Msg::Drive(_)
             | Msg::Arrival(_)
             | Msg::Timer { .. }
@@ -1484,7 +1573,10 @@ impl Owner {
     /// deleted (design part 7.5), then `Msg::CleanupDone` at its end. First, whether a pass runs or not, every pending
     /// dataset copy is retried (`start_copies`, call 10), and every failed recordings refresh (design part 7.5), so on
     /// an idle engine a copy waits for `tuning_root` at most a cleanup period; the pass reads each record as it is when
-    /// it starts, so a copy that lands during it frees the staging data at the next pass (C2).
+    /// it starts, so a copy that lands during it frees the staging data at the next pass (C2). Each job's
+    /// `library_roots` are its own settings' `movies_root` and `tv_root` that are set (phase 3 design, part 6.8). A
+    /// Discarded job whose dataset copy thread still runs is left out of the pass, so its staging folder is never
+    /// deleted under a running copy; `copy_ended` starts another pass for it (P3-T10).
     fn start_cleanup(&mut self) {
         self.start_copies();
         for id in std::mem::take(&mut self.refresh_failed) {
@@ -1493,13 +1585,19 @@ impl Owner {
         if self.cleanup_running {
             return;
         }
+        let copies = &self.copies;
         let jobs: Vec<CleanupJob> = self
             .jobs
             .values()
+            .filter(|job| !(job.record.state == State::Discarded && copies.contains(&job.record.id)))
             .map(|job| CleanupJob {
                 id: job.record.id.clone(),
                 record: job.record.clone(),
                 staging_root: job.settings.staging_root.clone(),
+                library_roots: [&job.settings.movies_root, &job.settings.tv_root]
+                    .into_iter()
+                    .filter_map(|root| configured_root(root.as_deref()).map(str::to_string))
+                    .collect(),
                 retention_days: job.settings.retention_days,
                 lookups: Arc::clone(&job.lookups),
             })
@@ -1521,11 +1619,31 @@ impl Owner {
         }));
     }
 
-    /// `Msg::CleanupDone` (design part 5.9): no pass runs any more, and the testkit hears of it.
+    /// `Msg::CleanupDone` (design part 5.9): no pass runs any more, and the testkit hears of it. When `cleanup_again`
+    /// is set, another pass starts at once, except during a stop or a forced shutdown (phase 3 design, part 6.8;
+    /// P3-T10).
     fn cleanup_ended(&mut self) {
         self.cleanup_running = false;
         if let Some(done) = &self.cleanup_done {
             let _ = done.send(());
+        }
+        if self.cleanup_again && !self.stopping && self.quiet.is_none() {
+            self.cleanup_again = false;
+            self.start_cleanup();
+        }
+    }
+
+    /// A pass for a discarded job's data (phase 3 design, part 6.8: the first runs at once): started now, or, while a
+    /// pass runs that read the records before the discard, at its end (`cleanup_again`). Nothing starts during a stop
+    /// or a forced shutdown. Def: P3-T10. Use: P3-T15, P3-T16.
+    fn cleanup_for_discard(&mut self) {
+        if self.stopping || self.quiet.is_some() {
+            return;
+        }
+        if self.cleanup_running {
+            self.cleanup_again = true;
+        } else {
+            self.start_cleanup();
         }
     }
 
@@ -1660,10 +1778,18 @@ impl Owner {
     /// pending and runs again at the next trigger. Once a `Landed` record, or any record of a job in Filed,
     /// NeedsReview or Failed, is written, the job's recordings are refreshed (design part 7.5). Last, the testkit hears
     /// of the attempt.
+    /// A copy of a job discarded while it ran changes no record, since its `tuning_copy` says dropped: its end
+    /// writes `tuning copy: ended after the discard, so the record keeps dropped` and starts a pass for the job's data,
+    /// which `start_cleanup` held back while the copy ran (phase 3 design, part 6.8; P3-T10).
     fn copy_ended(&mut self, id: &str, retry: bool, end: CopyEnd) {
         self.copies.remove(id);
         let landed = end == CopyEnd::Landed;
-        if let Some(job) = self.jobs.get(id) {
+        let dropped = self.jobs.get(id).is_some_and(|job| job.record.tuning_copy == Some(TuningCopy::Dropped));
+        if dropped {
+            self.store.job_log(id, "tuning copy: ended after the discard, so the record keeps dropped");
+            self.cleanup_for_discard();
+        }
+        if let Some(job) = self.jobs.get(id).filter(|_| !dropped) {
             let mut record = job.record.clone();
             let changed = match end {
                 CopyEnd::Landed => {
@@ -1725,6 +1851,7 @@ impl Owner {
     /// (design part 7.5) counting.
     fn after_message(&mut self) {
         self.threads.retain(|thread| !thread.is_finished());
+        self.reviews.retain(|thread| !thread.is_finished());
         self.keep_awake();
         let busy = !self.workers.is_empty()
             || !self.rounds_running.is_empty()
@@ -1763,6 +1890,9 @@ impl Owner {
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+        // A review worker only reads, so it is not waited for: a stalled share would hold the stop (phase 3 design,
+        // part 6.2). Its late answer goes nowhere, as a lookup round's does.
+        self.reviews.clear();
         if self.awake_held {
             self.parts.awake.release();
             self.awake_held = false;
@@ -2053,7 +2183,8 @@ impl Owner {
 
     /// A transition persisted before any of its actions runs (design part 7.3, R22.3, R24.2): the edits the job's
     /// step posted with it applied in order (`Job::edits`), then the record actions (RefreshIdentity's refreshed plan
-    /// among them), `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`; then the
+    /// among them, and DeleteJobData's pending dataset copy made `TuningCopy::Dropped`, phase 3 design, part 6.8),
+    /// `filed_unix` on entering Filed, `updated_unix`, the message, then `Store::persist`; then the
     /// promises released or rebuilt and the stop hook. None when it could not be persisted, or when the stop hook
     /// stopped the engine. All of it is applied to a copy of the record, which becomes the job's record only once
     /// persisted, so a transition that could not be persisted takes its posted edits with it (RR1-16). A transition
@@ -2085,6 +2216,10 @@ impl Owner {
                 Action::RecordNote { note } => add_note(&mut record.notes, *note),
                 Action::ArmRipAgain => record.rip_again = true,
                 Action::RefreshIdentity => self.refresh_identity(id, &mut record),
+                // Phase 3 design, part 6.8: a discard drops a pending dataset copy in the write of its transition.
+                Action::DeleteJobData if record.tuning_copy == Some(TuningCopy::Pending) => {
+                    record.tuning_copy = Some(TuningCopy::Dropped)
+                }
                 _ => {}
             }
         }
@@ -2464,8 +2599,8 @@ impl Owner {
     }
 
     /// Design part 5.2: Notify, StartTimer and WaitForDisc here (RecordNote, ArmRipAgain and RefreshIdentity were
-    /// applied before the persist); a new job's Fingerprint is its recording; every other action goes, in list order,
-    /// to one worker.
+    /// applied before the persist), and DeleteJobData (`delete_job_data`; phase 3 design, part 6.8); a new job's
+    /// Fingerprint is its recording; every other action goes, in list order, to one worker.
     fn perform(&mut self, id: &str, actions: &[Action], recording: Option<(Arrival, PathBuf)>) {
         let mut recording = recording;
         let mut handed = Vec::new();
@@ -2479,6 +2614,7 @@ impl Owner {
                     }
                 }
                 Action::RecordNote { .. } | Action::ArmRipAgain | Action::RefreshIdentity => {}
+                Action::DeleteJobData => self.delete_job_data(id),
                 Action::Fingerprint => match recording.take() {
                     Some((arrival, job_dir)) => self.start_recording(id, arrival, job_dir),
                     None => handed.push(Action::Fingerprint),
@@ -2558,17 +2694,8 @@ impl Owner {
     fn hand(&mut self, id: &str, actions: Vec<Action>) {
         // Design part 7.5: a pending dataset copy is retried before another step, any job's step.
         self.start_copies();
-        let Some(job) = self.jobs.get(id) else {
+        let (Some(job), Some(context)) = (self.jobs.get(id), self.context(id)) else {
             return;
-        };
-        let drive_root =
-            job.disc.as_ref().and_then(|drive| self.drives.get(drive)).and_then(|drive| drive.root.clone());
-        let context = JobContext {
-            record: job.record.clone(),
-            job_dir: self.store.job_dir(id),
-            settings: job.settings.clone(),
-            drive_root,
-            lookups: Arc::clone(&job.lookups),
         };
         let generation = job.generation;
         let eject_drive = actions.contains(&Action::Eject).then(|| job.record.drive.clone());
@@ -2613,6 +2740,56 @@ impl Owner {
             });
             let _ = sender.send(Msg::StepDone { job, generation, result });
         }));
+    }
+
+    /// What a step or worker of `id` sees of its job (`JobContext`): a copy of its record, its folder, its own settings,
+    /// its drive's root while its disc is in, and its lookup book; None for a job the owner does not hold. Def: T22
+    /// (`hand`), P3-T9. Use: P3-T9, P3-T13, P3-T14, P3-T16.
+    fn context(&self, id: &str) -> Option<JobContext> {
+        let job = self.jobs.get(id)?;
+        let drive_root =
+            job.disc.as_ref().and_then(|drive| self.drives.get(drive)).and_then(|drive| drive.root.clone());
+        Some(JobContext {
+            record: job.record.clone(),
+            job_dir: self.store.job_dir(id),
+            settings: job.settings.clone(),
+            drive_root,
+            lookups: Arc::clone(&job.lookups),
+        })
+    }
+
+    /// `review` (phase 3 design, parts 6.2, 11): `no_job` for a job the owner does not hold; otherwise the job's
+    /// document is built by `spawn_review` on a thread of its own, since its reads touch shares the owner thread never
+    /// reads, kept in `reviews`, which a stop does not wait for; its answer, serialised there, comes back as
+    /// `Msg::ReviewBuilt` and goes to `client` only (a client that has gone gets nothing). A job with nothing to review
+    /// gets `review_doc::build`'s refusal. Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+    fn review(&mut self, client: u64, id: Option<u64>, job_id: &str, all: bool) {
+        let Some(context) = self.context(job_id) else {
+            return self.reply(client, id, Err(no_job(job_id)));
+        };
+        let sender = self.sender.clone();
+        let answer = move |built: Result<review_doc::ReviewDoc, String>| {
+            let answer = built.and_then(|doc| serde_json::to_value(doc).map_err(|error| error.to_string()));
+            let _ = sender.send(Msg::ReviewBuilt { client, id, answer });
+        };
+        self.reviews.push(spawn_review(context, all, Arc::clone(&self.parts.shares), answer));
+    }
+
+    /// `discard_preview` (phase 3 design, parts 6.8, 11; ruling T32-R7): `no_job` for a job the owner does not hold;
+    /// otherwise the job's staging folder is counted by `spawn_preview` on a thread of its own, since it reads the
+    /// staging share the owner thread never reads, kept in `reviews` with the review workers, which a stop does not
+    /// wait for; its answer comes back as `Msg::DiscardPreviewed` and goes to `client` only. It changes nothing.
+    /// Def: P3-T10. Use: P3-T15, P3-T16.
+    fn discard_preview(&mut self, client: u64, id: Option<u64>, job_id: &str) {
+        let Some(job) = self.jobs.get(job_id) else {
+            return self.reply(client, id, Err(no_job(job_id)));
+        };
+        let sender = self.sender.clone();
+        let answer = move |answer: Value| {
+            let _ = sender.send(Msg::DiscardPreviewed { client, id, answer });
+        };
+        let (staging_root, shares) = (job.settings.staging_root.clone(), Arc::clone(&self.parts.shares));
+        self.reviews.push(spawn_preview(job_id.to_string(), staging_root, shares, answer));
     }
 
     /// Takes the worker of (`id`, `generation`) off the list, clearing the ejecting mark of the drive it ejected.
@@ -2946,14 +3123,18 @@ impl Owner {
             Request::SecretSet { name, value } => self.secret_set(&name, &value),
             Request::Retry { job } => return self.retry(client, id, &job),
             Request::Cancel { job } => return self.cancel(client, id, &job),
-            Request::Discard { .. } => Err(DISCARD_REFUSED.to_string()),
+            Request::Discard { job } => self.discard(&job),
             Request::RipAgain { job } => self.rip_again(&job),
             Request::RunSelftest => return self.queue_check(client, id, CheckWork::Selftest),
             Request::History { before } => history_page(&self.records(), before.as_deref())
                 .map(|page| serde_json::to_value(page).unwrap_or(Value::Null)),
             Request::Shutdown { force } => return self.shutdown(client, id, force),
             Request::Command { words } => return self.command(client, id, words),
-            Request::ReviewAction { job, action, overrides } => self.review_action(&job, &action, overrides.as_ref()),
+            Request::ReviewAction { job, action, overrides, labels } => {
+                self.review_action(&job, &action, overrides.as_ref(), labels.as_ref())
+            }
+            Request::Review { job, all } => return self.review(client, id, &job, all),
+            Request::DiscardPreview { job } => return self.discard_preview(client, id, &job),
             Request::UiQuit => Err(UI_QUIT_REFUSED.to_string()),
         };
         self.reply(client, id, answer);
@@ -3355,6 +3536,49 @@ impl Owner {
         }
     }
 
+    /// `discard` (phase 3 design, part 6.8): refused, in this order, for a job the owner does not hold (`no_job`), for
+    /// a job with a step running, the worker of its current generation or one a `cancel` is stopping, as `cancel` finds
+    /// it (`discard_running`, which names `cancel`), and for a job whose state the reducer does not discard
+    /// (`no_discard`: only a held, a failed or a waiting job). Otherwise ReviewDiscarded is fed through `feed`, so
+    /// Discarded is persisted before anything else happens, and the reply is `ok` once it is; its DeleteJobData is
+    /// answered on this thread (`delete_job_data`). A transition that could not be persisted is answered with
+    /// `discard_not_persisted` and the job keeps its state. Def: P3-T10. Use: P3-T15, P3-T16.
+    fn discard(&mut self, job_id: &str) -> Result<Value, String> {
+        let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
+        let generation = job.generation;
+        let running =
+            |worker: &Worker| worker.job == job_id && (worker.generation == generation || worker.cancelled.is_some());
+        if self.workers.iter().any(running) {
+            return Err(discard_running(job_id));
+        }
+        if reduce(&job.record.state, &Event::ReviewDiscarded).is_err() {
+            return Err(no_discard(job_id, &job.record.state));
+        }
+        match self.feed(job_id, Event::ReviewDiscarded, None) {
+            Fed::Persisted => Ok(Value::Null),
+            Fed::NotPersisted | Fed::Rejected => Err(discard_not_persisted(job_id)),
+        }
+    }
+
+    /// DeleteJobData (phase 3 design, part 6.8), on the owner thread with no share read: the discarded job leaves the
+    /// disc-phase token's queue (`DiscToken::forget`) and the pending slot events, so no queued Retry, return or
+    /// approval of it is delivered later; its space promises are released; and a cleanup pass, which deletes its
+    /// staging folder and partial files, starts at once (`cleanup_for_discard`). Its place in the file-phase slot, held
+    /// or queued, is freed by `file_slot`, which the transition's `commit` runs next: Discarded leaves the slot
+    /// (`SlotQueue::after`) and the slot is granted again. A pending dataset copy was dropped in the transition's own
+    /// write (`persist_transition`). Def: P3-T10. Use: P3-T15, P3-T16.
+    fn delete_job_data(&mut self, id: &str) {
+        self.token.forget(id);
+        self.slot_events.remove(id);
+        self.rounds_done.remove(id);
+        {
+            let mut promises = lock(&self.parts.promises);
+            promises.release(id, PromisedStep::Rip);
+            promises.release(id, PromisedStep::Remux);
+        }
+        self.cleanup_for_discard();
+    }
+
     /// `rip_again` (design part 9.4): RipAgain for a job past its disc phase, which arms it; refused otherwise.
     fn rip_again(&mut self, job_id: &str) -> Result<Value, String> {
         let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
@@ -3365,25 +3589,62 @@ impl Owner {
         Ok(Value::Null)
     }
 
-    /// `review_action` (design part 9.4, P25, R-A8, S82): only `approve` with no overrides (absent, null or empty) of
-    /// a job held at the disposition gate, which waits for the slot with `ReviewApproved` of default overrides and the
-    /// job's summary's review reasons. Every other action, and `approve` with overrides, waits for phase 3.
-    fn review_action(&mut self, job_id: &str, action: &str, overrides: Option<&Value>) -> Result<Value, String> {
-        let empty = match overrides {
-            None | Some(Value::Null) => true,
-            Some(Value::Object(fields)) => fields.is_empty(),
-            Some(Value::Array(items)) => items.is_empty(),
-            Some(_) => false,
-        };
-        if action != "approve" || !empty {
-            return Err(waits_for_review(action));
+    /// `review_action` (design part 9.4, P25, S82; phase 3 design, parts 6.4 to 6.6; ruling T32-R1): only `approve`, of
+    /// a job held at the disposition gate, which waits for the slot with `ReviewApproved` and the job's summary's review
+    /// reasons. With no answers and no labels (each absent, null or empty) the event carries default overrides and no
+    /// file is written, as in phase 2. Otherwise the answers are read strictly, an identity, season or titles answer is
+    /// refused (T32-R1), the labels are read, and both are checked against the job's review document (`review_answers`);
+    /// only then is the review recorded in `review.json` (`review_store::record`), the labels appended to
+    /// `review-labels.json`, and the event given the merged answers. Every refusal comes before anything is written and
+    /// leaves the job as it was. Def: T26, P3-T8. Use: P3-T12, P3-T14, P3-T16.
+    fn review_action(
+        &mut self,
+        job_id: &str,
+        action: &str,
+        overrides: Option<&Value>,
+        labels: Option<&Value>,
+    ) -> Result<Value, String> {
+        if action != "approve" {
+            return Err(not_a_review_action(action));
         }
         let job = self.jobs.get(job_id).ok_or_else(|| no_job(job_id))?;
         if job.record.state != (State::NeedsReview { held: Held::DispositionGate }) {
             return Err(not_held(job_id, &job.record.state));
         }
         let approved_reasons = job_summary(&job.record).review_reasons;
-        self.wait_for_slot(job_id, Event::ReviewApproved { overrides: Overrides::default(), approved_reasons });
+        let answers = if is_empty_value(overrides) { None } else { overrides.map(overrides_from_value).transpose()? };
+        if let Some(answers) = &answers {
+            let held = [
+                ("identity", answers.identity.is_some()),
+                ("season", answers.season.is_some()),
+                ("titles", !answers.titles.is_empty()),
+            ];
+            if let Some((key, _)) = held.into_iter().find(|(_, holds)| *holds) {
+                return Err(not_answered_yet(key));
+            }
+        }
+        let labels: Vec<ReviewLabel> = match labels {
+            Some(given) if !is_empty_value(Some(given)) => {
+                serde_json::from_value(given.clone()).map_err(|error| format!("labels: {error}"))?
+            }
+            _ => Vec::new(),
+        };
+        let answers = answers.unwrap_or_default();
+        if answers.is_empty() && labels.is_empty() {
+            self.wait_for_slot(job_id, Event::ReviewApproved { overrides: Overrides::default(), approved_reasons });
+            return Ok(Value::Null);
+        }
+        let job_dir = self.store.job_dir(job_id);
+        let time_unix = self.parts.host.now_unix();
+        let entries = review_answers(&job.record, &job_dir, &answers, &labels, time_unix)?;
+        // A labels file that does not read is refused before review.json is written.
+        review_store::read_labels(&job_dir)?;
+        let reviewed = Reviewed { time_unix, action: action.to_string(), reasons: approved_reasons.clone() };
+        let file = review_store::record(&job_dir, &answers, reviewed)?;
+        if !entries.is_empty() {
+            review_store::append_labels(&job_dir, &entries)?;
+        }
+        self.wait_for_slot(job_id, Event::ReviewApproved { overrides: file.overrides, approved_reasons });
         Ok(Value::Null)
     }
 

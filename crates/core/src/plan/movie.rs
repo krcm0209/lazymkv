@@ -816,10 +816,22 @@ pub struct LibraryFacts {
     /// Earlier filed copies of this film: cut key ("theatrical", or the lower-cased edition name) to the edition name used
     /// ("" when that copy was filed without an edition name; this cut then gets None).
     pub earlier_edition_names: BTreeMap<String, String>,
-    /// Spec 7: the final path already exists and is not this job's file. Phase 2 checks the plain path (no copy label);
-    /// under the owner's Resolve collision "keep both" it must also check the copy-labelled path (`- 2160p 2`) before
-    /// filing and hold the job with path_collision when that one is taken too (Open point 39).
+    /// Spec 7: the final path already exists and is not this job's file. It is read at the plain path (no copy label);
+    /// under the owner's Resolve collision "keep both", `copy_labels_taken` says which copy label is free (phase 3
+    /// design, part 6.7).
     pub path_collision: bool,
+    /// Phase 3 design, part 6.7: how many copy-labelled paths of the decision's plain path (`- 2160p 2`, `- 2160p 3`,
+    /// ...), counted from copy 2 upward with no gap, already hold something. 0 when none, or when nobody looked; a 0 is
+    /// not written, and a document without the key reads as 0, so earlier bytes stay as they were. Def: P3-T11b. Use:
+    /// P3-T11b.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub copy_labels_taken: u32,
+}
+
+/// Whether a count is 0, for serde's `skip_serializing_if` on `LibraryFacts.copy_labels_taken`. Def: P3-T11b. Use:
+/// P3-T11b.
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 /// The cut key of the theatrical or main cut in `LibraryFacts.earlier_edition_names`.

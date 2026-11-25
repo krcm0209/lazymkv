@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
-use common::{Client, WAIT};
+use common::{file_with_one_subtitle, Client, WAIT};
 use lazymkv_clients::{record_url, search_url, OFFLINE};
 use lazymkv_core::decision::Disposition;
 use lazymkv_core::ipc::{read_reply, Reply, CANCELLED, MAX_LINE_BYTES};
@@ -16,7 +16,7 @@ use lazymkv_core::job::{Action, Event, Failure, FailureClass, Held, NotifyEvent,
 use lazymkv_core::lookup::name::disc_name;
 use lazymkv_core::lookup::tmdb::{TmdbIdentity, TmdbKind};
 use lazymkv_core::plan::Mode;
-use lazymkv_core::record::{JobRecord, JOB_FORMAT};
+use lazymkv_core::record::{JobRecord, TuningCopy, JOB_FORMAT};
 use lazymkv_core::review::ReviewReason;
 use lazymkv_engine::testkit::{ci_factor, Harness, StepScript};
 use lazymkv_engine::StepResult;
@@ -1552,6 +1552,9 @@ fn an_approved_job_decides_again_from_its_kept_inputs_and_files() {
     let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
     assert!(!log.contains("read back from the job folder"));
     assert_eq!(fs::read(&target).unwrap().len(), 16);
+    // An approval with no answers keeps no answers file and no labels file (phase 3 design, part 6.5).
+    assert!(!h.job_dir(&id).join("review.json").exists());
+    assert!(!h.job_dir(&id).join("review-labels.json").exists());
 }
 
 #[test]
@@ -1566,26 +1569,599 @@ fn approve_is_refused_outside_the_disposition_gate_naming_the_state() {
                format!("job {id} is Filed, not held at the disposition gate"));
 }
 
+// ---- Approval with answers (phase 3 design, parts 6.4 to 6.6; ruling T32-R1) ----
+
+/// movie-direct with `movie-direct-two-subs` held at the disposition gate by a file already at the final path
+/// (path_collision): the harness, a client that has had its snapshot, the held job's ID and the colliding file.
+fn held_two_subs() -> (Harness, Client, String, std::path::PathBuf) {
+    let h = stand_in(&["movie-direct", "movie-direct-two-subs"], settings());
+    let target = h.library().join(FINAL);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"owner's").unwrap();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    (h, c, id, target)
+}
+
+/// The held job's title key, scan title and first kept subtitle stream with its role's word, read from its record.
+fn kept_subtitle(h: &Harness, id: &str) -> (String, u32, u32, String) {
+    let title = h.record(id).titles[0].clone();
+    let decision = title.decision.expect("the held title was decided");
+    assert_eq!(decision.subtitles.kept.len(), 2, "both subtitle streams are kept before the answer");
+    let kept = &decision.subtitles.kept[0];
+    (title.key, title.scan_title, kept.stream, kept.role.as_str().to_string())
+}
+
+/// Asserts that a refused approval left the held job as it was: still held, no new transition, and no answers file.
+fn assert_unchanged(h: &Harness, id: &str, transitions: usize) {
+    assert_eq!(h.record(id).state, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(h.transitions(id).len(), transitions);
+    assert!(!h.job_dir(id).join("review.json").exists(), "no review.json was written");
+    assert!(!h.job_dir(id).join("review-labels.json").exists(), "no review-labels.json was written");
+}
+
 #[test]
-fn approve_with_overrides_is_refused_naming_phase_3() {
+fn approve_with_a_subtitle_answer_files_the_job_with_that_answer() {
+    let (h, mut c, id, target) = held_two_subs();
+    let (key, title, stream, verdict) = kept_subtitle(&h, &id);
+    let reasons = h.record(&id).titles[0].decision.clone().unwrap().reviews;
+    let shown = serde_json::to_value(lazymkv_core::ipc::job_summary(&h.record(&id)).review_reasons).unwrap();
+    fs::remove_file(&target).unwrap();
+    file_with_one_subtitle(&h, &id);
+    let answer = json!({"subtitles": [{"title": title, "stream": stream, "action": "drop"}]});
+    let label = json!([{"title": title, "stream": stream, "kind": "subtitle", "label": "commentary"}]);
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer, "labels": label}));
+    c.until_state(Some(&id), "Filed");
+    let dir = h.job_dir(&id);
+    // The decision keeps one subtitle track fewer and names the drop as the owner's.
+    let decided = h.record(&id).titles[0].decision.clone().unwrap();
+    assert_eq!(decided.subtitles.kept.len(), 1, "{decided:?}");
+    assert!(decided.subtitles.kept.iter().all(|track| track.stream != stream));
+    let decide: Value = serde_json::from_str(&fs::read_to_string(dir.join(&key).join("decide.json")).unwrap()).unwrap();
+    let subtitles = &decide["decision"]["decision"]["subtitles"];
+    assert_eq!(subtitles["kept"].as_array().unwrap().len(), 1, "{subtitles}");
+    assert!(subtitles["dropped"].as_array().unwrap().contains(&json!([stream, {"why": "reviewed"}])), "{subtitles}");
+    // review.json keeps the answer and the review with the reasons the owner was shown.
+    let review: Value = serde_json::from_str(&fs::read_to_string(dir.join("review.json")).unwrap()).unwrap();
+    assert_eq!(review["format"], json!("lazymkv review v1"));
+    assert_eq!(review["overrides"]["subtitles"], json!([{"title": title, "stream": stream, "action": "drop"}]));
+    let reviews = review["reviews"].as_array().unwrap();
+    assert_eq!(reviews.len(), 1, "{review}");
+    assert_eq!(reviews[0]["action"], json!("approve"));
+    assert_eq!(reviews[0]["reasons"], shown);
+    assert!(reasons.contains(&ReviewReason::PathCollision), "{reasons:?}");
+    // The ReviewApproved event carries the merged answers and the same reasons.
+    let approved = h.transitions(&id).into_iter().find(|t| matches!(t.event, Some(Event::ReviewApproved { .. }))).unwrap();
+    let event = serde_json::to_value(&approved.event).unwrap();
+    assert_eq!(event["approved_reasons"], shown);
+    assert_eq!(event["overrides"]["subtitles"], review["overrides"]["subtitles"]);
+    assert_eq!(reviews[0]["time_unix"], json!(approved.time_unix));
+    // review-labels.json holds the label, with the verdict the sheet showed.
+    let labels: Value = serde_json::from_str(&fs::read_to_string(dir.join("review-labels.json")).unwrap()).unwrap();
+    assert_eq!(labels, json!({"format": "lazymkv review labels v1", "labels": [{
+        "time_unix": approved.time_unix, "title_key": key, "stream": stream, "kind": "subtitle", "label": "commentary",
+        "verdict": verdict}]}));
+}
+
+#[test]
+fn an_answer_for_a_stream_the_job_lacks_is_refused_and_nothing_is_saved() {
+    let (h, mut c, id, _) = held_two_subs();
+    let (key, title, _, _) = kept_subtitle(&h, &id);
+    let before = h.transitions(&id).len();
+    let answer = json!({"subtitles": [{"title": title, "stream": 99, "action": "drop"}]});
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": answer})),
+               format!("no item \"{key} sub 99\" on this sheet"));
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn a_misspelt_key_is_refused_naming_it() {
+    let (h, mut c, id, _) = held_two_subs();
+    let before = h.transitions(&id).len();
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": {"subtitle": []}})),
+               "overrides: unknown key \"subtitle\" (identity, season, titles, audio, subtitles, collision)");
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn identity_and_titles_answers_wait_for_a_later_version() {
+    let (h, mut c, id, _) = held_two_subs();
+    let before = h.transitions(&id).len();
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": {"season": 2}})),
+               "this version does not take season answers yet");
+    let titles = json!({"titles": [{"title": 0, "role": "ignored"}], "season": 2});
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": titles})),
+               "this version does not take season answers yet");
+    // A whole serialised Overrides with nothing in those three keys is not refused for them.
+    let (_, title, stream, _) = kept_subtitle(&h, &id);
+    let whole = json!({"identity": null, "season": null, "titles": [], "audio": [], "collision": [],
+                       "subtitles": [{"title": title, "stream": stream, "action": "bogus"}]});
+    let refused = c.err("review_action", json!({"job": id, "action": "approve", "overrides": whole}));
+    assert!(refused.starts_with("overrides: "), "{refused}");
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn an_unknown_action_is_refused() {
+    let (h, mut c, id, _) = held_two_subs();
+    let before = h.transitions(&id).len();
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "set_identity"})),
+               "\"set_identity\" is not a review action (approve)");
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn a_label_for_a_track_the_sheet_lacks_or_a_word_that_is_no_label_is_refused() {
+    let (h, mut c, id, _) = held_two_subs();
+    let (key, title, stream, _) = kept_subtitle(&h, &id);
+    let before = h.transitions(&id).len();
+    let missing = json!([{"title": title, "stream": 99, "kind": "subtitle", "label": "sdh"}]);
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "labels": missing})),
+               format!("no item \"{key} sub 99\" on this sheet"));
+    let word = json!([{"title": title, "stream": stream, "kind": "subtitle", "label": "drop"}]);
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "labels": word})),
+               format!("\"drop\" is not a label for {key} sub {stream}"));
+    assert_unchanged(&h, &id, before);
+}
+
+#[test]
+fn a_collision_answer_for_the_held_path_is_accepted() {
+    let (h, mut c, id, target) = held_two_subs();
+    let path = h.record(&id).titles[0].decision.clone().unwrap().path.unwrap().path;
+    let answer = json!({"collision": [{"path": path, "action": "keep_both"}]});
+    c.ok("review_action", json!({"job": id, "action": "approve", "overrides": answer}));
+    let decisions = |h: &Harness| -> Vec<Event> {
+        h.transitions(&id).into_iter().filter_map(|t| t.event).filter(|e| matches!(e, Event::DecisionDone { .. })).collect()
+    };
+    h.wait("the approval decided again", |h| decisions(h).len() >= 2);
+    // The second decision, made with the answer, no longer holds the job for the collision.
+    let Event::DecisionDone { reasons, .. } = &decisions(&h)[1] else { unreachable!() };
+    assert!(!reasons.contains(&ReviewReason::PathCollision), "{reasons:?}");
+    let review: Value = serde_json::from_str(&fs::read_to_string(h.job_dir(&id).join("review.json")).unwrap()).unwrap();
+    assert_eq!(review["overrides"]["collision"], json!([{"path": path, "action": "keep_both"}]));
+    assert!(!h.job_dir(&id).join("review-labels.json").exists(), "a collision answer writes no label");
+    assert_eq!(fs::read(&target).unwrap(), b"owner's", "the existing file is kept");
+}
+
+#[test]
+fn a_corrupt_review_file_refuses_the_approval_naming_it() {
+    let (h, mut c, id, _) = held_two_subs();
+    let (_, title, stream, _) = kept_subtitle(&h, &id);
+    let path = h.job_dir(&id).join("review.json");
+    fs::write(&path, b"{").unwrap();
+    let before = h.transitions(&id).len();
+    let answer = json!({"subtitles": [{"title": title, "stream": stream, "action": "drop"}]});
+    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": answer})),
+               format!("{}: EOF while parsing an object at line 1 column 1", path.display()));
+    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate });
+    assert_eq!(h.transitions(&id).len(), before);
+    assert_eq!(fs::read(&path).unwrap(), b"{", "the file is left as it was");
+}
+
+// ---- Discard (phase 3 design, part 6.8; ruling T32-R7) ----
+
+/// A job held at the disposition gate in a scripted harness, with a client that has read its snapshot.
+fn held_job() -> (Harness, Client, String) {
     let h = scripted(held_script());
     let mut c = Client::open(&h);
     c.snapshot();
     h.insert("tok0", DISC_A);
     h.deliver();
     let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
-    assert_eq!(c.err("review_action", json!({"job": id, "action": "approve", "overrides": {"season": 2}})),
-               "approve waits for phase 3's review commands (R-A8)");
-    assert_eq!(c.err("review_action", json!({"job": id, "action": "set_identity"})),
-               "set_identity waits for phase 3's review commands (R-A8)");
+    (h, c, id)
+}
+
+/// Waits for the engine.log line `line`, then for the pass that wrote it to end (`busy` clears at `CleanupDone`).
+fn wait_for_pass(h: &Harness, line: &str) {
+    h.wait(line, |h| h.engine_log().contains(line));
+    h.wait("the pass's end", |h| !h.busy());
 }
 
 #[test]
-fn discard_is_refused_naming_phase_3() {
+fn a_held_job_is_discarded_and_its_data_goes() {
+    let (h, mut c, id) = held_job();
+    let staged = h.staging().join(&id);
+    fs::create_dir_all(staged.join("rip/t00-00800")).unwrap();
+    fs::write(staged.join("rip/t00-00800/title_t00.mkv"), b"rip").unwrap();
+    let partials = h.library().join(".lazymkv-partial");
+    fs::create_dir_all(&partials).unwrap();
+    let own = partials.join(format!("{id}-t00-00800.mkv.partial"));
+    fs::write(&own, b"partial").unwrap();
+    let other = partials.join(format!("{:032x}-1-t00-00800.mkv.partial", 0xabc));
+    fs::write(&other, b"another job's").unwrap();
+    let film = h.library().join(FINAL);
+    fs::create_dir_all(film.parent().unwrap()).unwrap();
+    fs::write(&film, b"owner's").unwrap();
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    assert_eq!(h.record(&id).state, State::Discarded, "persisted before the reply");
+    wait_for_pass(&h, &format!("cleanup: {id}: deleted its staging folder"));
+    assert!(!staged.exists());
+    assert!(h.staging().is_dir());
+    assert!(!own.exists());
+    assert_eq!(fs::read(&other).unwrap(), b"another job's");
+    assert_eq!(fs::read(&film).unwrap(), b"owner's");
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted the partial file {id}-t00-00800.mkv.partial")));
+    let state: JobRecord = serde_json::from_slice(&fs::read(h.job_dir(&id).join("state.json")).unwrap()).unwrap();
+    assert_eq!(state.state, State::Discarded);
+    let history = c.ok("history", json!({}));
+    let listed = history.as_array().unwrap().iter().find(|job| job["id"] == json!(id)).expect("history lists the job");
+    assert_eq!(listed["state"], json!({"state": "Discarded"}));
+    let discarded = h.transitions(&id).into_iter().last().unwrap();
+    assert_eq!(discarded.event, Some(Event::ReviewDiscarded));
+    assert_eq!(discarded.actions, vec![Action::DeleteJobData]);
+}
+
+#[test]
+fn a_failed_job_and_a_waiting_job_can_be_discarded() {
     let h = scripted(vec![]);
+    let failed = seed(&h, 3, State::Failed { class: FailureClass::Unknown, from: Box::new(State::Remuxing) });
+    h.restart();
     let mut c = Client::open(&h);
     c.snapshot();
-    assert_eq!(c.err("discard", json!({"job": "abc-1"})), "discard waits for phase 3's review commands (P2, R-A1)");
+    assert_eq!(c.ok("discard", json!({"job": failed})), Value::Null);
+    assert_eq!(h.record(&failed).state, State::Discarded);
+    drop((c, h));
+
+    let h = stand_in(&["movie-direct"], settings());
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("gone".to_string()));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    assert_eq!(h.record(&id).state, State::Discarded);
+    // A retry of the discarded job is refused, naming its state.
+    assert!(c.err("retry", json!({"job": id})).contains("is Discarded"));
+}
+
+#[test]
+fn discard_of_a_running_job_is_refused_naming_cancel() {
+    let h = scripted(hanging_at("RipTitle", 0));
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    wait_for_call(&h, "RipTitle", 1);
+    let id = id_of(&h, DISC_A);
+    let lines = h.transitions(&id).len();
+    assert_eq!(c.err("discard", json!({"job": id})), format!("job {id} has a step running: cancel it first"));
+    assert_eq!(h.record(&id).state, State::Ripping);
+    assert_eq!(h.transitions(&id).len(), lines);
+}
+
+#[test]
+fn discard_of_a_filed_job_is_refused_naming_its_state() {
+    let h = scripted(vec![]);
+    let id = seed_filed(&h, 4, 1_792_800_000 - 30 * 86_400);
+    fs::create_dir_all(h.staging().join(&id).join("rip")).unwrap();
+    h.restart();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(
+        c.err("discard", json!({"job": id})),
+        format!("job {id} is Filed: only a held, failed or waiting job can be discarded")
+    );
+    assert_eq!(c.err("discard", json!({"job": "nope-1"})), "no job nope-1");
+    h.settle();
+    assert_eq!(h.record(&id).state, State::Filed);
+    assert!(h.staging().join(&id).join("rip").is_dir(), "a refused discard starts no deletion");
+}
+
+/// Review Focus 3: a discard while the staging share is down is persisted at once and deletes nothing; a later pass
+/// deletes the data once the share answers.
+#[test]
+fn a_discard_while_the_share_is_down_deletes_at_a_later_pass() {
+    let (h, mut c, id) = held_job();
+    let staged = h.staging().join(&id).join("rip/t00-00800/title_t00.mkv");
+    fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    fs::write(&staged, b"rip").unwrap();
+    let root = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&root, Reach::Unreachable("cable out".to_string()));
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    assert_eq!(h.record(&id).state, State::Discarded);
+    wait_for_pass(&h, &format!("cleanup: the staging root {root} was not reached: cable out; 1 job(s) skipped"));
+    assert_eq!(fs::read(&staged).unwrap(), b"rip");
+    h.shares().set_reach(&root, Reach::Reachable);
+    h.run_cleanup();
+    assert!(!h.staging().join(&id).exists());
+    assert!(h.engine_log().contains(&format!("cleanup: {id}: deleted its staging folder")));
+}
+
+#[test]
+fn a_discarded_jobs_pending_tuning_copy_is_dropped() {
+    let h = scripted(vec![]);
+    let id = seed(&h, 5, State::NeedsReview { held: Held::DispositionGate });
+    let path = h.job_dir(&id).join("state.json");
+    let mut r: JobRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    r.tuning_copy = Some(TuningCopy::Pending);
+    fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
+    fs::create_dir_all(h.staging().join(&id).join("tuning/t00-00800")).unwrap();
+    let (staging, tuning) = (h.staging().to_str().unwrap().to_string(), h.tuning().to_str().unwrap().to_string());
+    // With neither share answering, the start's copy attempt waits for tuning_root and the copy stays pending.
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".to_string()));
+    h.shares().set_reach(&tuning, Reach::Unreachable("cable out".to_string()));
+    h.restart();
+    h.wait_copy();
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Pending));
+    h.shares().set_reach(&staging, Reach::Reachable);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    let record = h.record(&id);
+    assert_eq!((record.state, record.tuning_copy), (State::Discarded, Some(TuningCopy::Dropped)));
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(r#""tuning_copy": "dropped""#) || text.contains(r#""tuning_copy":"dropped""#), "{text}");
+    // The cleanup no longer waits for the copy, and the copy is not tried again.
+    wait_for_pass(&h, &format!("cleanup: {id}: deleted its staging folder"));
+    assert!(!h.staging().join(&id).exists());
+    assert_eq!(h.run_copies(), Vec::<String>::new());
+    h.shares().set_reach(&tuning, Reach::Reachable);
+    h.run_cleanup();
+    h.settle();
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Dropped));
+    assert!(!h.tuning().join("dataset").join(&id).exists());
+}
+
+#[test]
+fn discard_preview_counts_the_staging_folder() {
+    let (h, mut c, id) = held_job();
+    assert_eq!(c.ok("discard_preview", json!({"job": id})), json!({"bytes": 0, "files": 0}), "no folder yet");
+    let staged = h.staging().join(&id);
+    fs::create_dir_all(staged.join("rip/t00-00800")).unwrap();
+    fs::create_dir_all(staged.join("tuning/t00-00800/empty")).unwrap();
+    fs::write(staged.join("rip/t00-00800/title_t00.mkv"), b"12345").unwrap();
+    fs::write(staged.join("tuning/t00-00800/audio-proxy.mka"), b"123").unwrap();
+    let outside = h.library().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("big.mkv"), vec![0u8; 1000]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, staged.join("rip/link")).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(staged.join("rip/link"))
+            .arg(&outside).output().unwrap();
+        assert!(made.status.success(), "mklink /J failed");
+    }
+    assert_eq!(c.ok("discard_preview", json!({"job": id})), json!({"bytes": 8, "files": 2}));
+    let root = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&root, Reach::Unreachable("cable out".to_string()));
+    assert_eq!(
+        c.ok("discard_preview", json!({"job": id})),
+        json!({"unknown": "the staging share did not answer: cable out"})
+    );
+    assert_eq!(c.err("discard_preview", json!({"job": "nope-1"})), "no job nope-1");
+    assert_eq!(h.record(&id).state, State::NeedsReview { held: Held::DispositionGate }, "a preview changes nothing");
+    assert!(staged.join("rip/t00-00800/title_t00.mkv").is_file());
+}
+
+/// Fix round 1 (phase 3 design, part 6.8): a job held right after DecisionDone whose dataset copy still runs is
+/// discarded. No pass deletes its staging folder while the copy reads it; once the copy ends, the record keeps
+/// `dropped` and a pass deletes the folder.
+#[test]
+fn a_discard_while_the_dataset_copy_runs_keeps_the_staging_folder_until_the_copy_ends() {
+    let keeping = json!({"keep_tuning_evidence": true, "drive_settle_s": 0, "drive_ready_timeout_s": 1});
+    let h = stand_in(&["movie-direct"], keeping);
+    // The colliding file at the final path holds the job for review.
+    let film = h.library().join(FINAL);
+    fs::create_dir_all(film.parent().unwrap()).unwrap();
+    fs::write(&film, b"owner's").unwrap();
+    // The copy's first file waits for `released`, at most two minutes so a failing test cannot hang its stop.
+    let gate = std::sync::Arc::new((std::sync::Mutex::new((false, false)), std::sync::Condvar::new()));
+    let step = std::sync::Arc::clone(&gate);
+    h.copy_with(move |from: &Path, to: &Path| -> std::io::Result<u64> {
+        let (lock, signal) = &*step;
+        let mut state = lock.lock().unwrap();
+        state.0 = true; // entered
+        signal.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !state.1 && Instant::now() < deadline {
+            state = signal.wait_timeout(state, Duration::from_millis(50)).unwrap().0;
+        }
+        drop(state);
+        fs::copy(from, to)
+    });
+    let release = |gate: &std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>| {
+        gate.0.lock().unwrap().1 = true;
+        gate.1.notify_all();
+    };
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let id = c.until_state(None, "NeedsReview")["id"].as_str().unwrap().to_string();
+    h.wait("the copy runs", |_| gate.0.lock().unwrap().0);
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Pending));
+    let staged = h.staging().join(&id);
+    assert!(staged.is_dir());
+    assert_eq!(c.ok("discard", json!({"job": id})), Value::Null);
+    let record = h.record(&id);
+    assert_eq!((record.state, record.tuning_copy), (State::Discarded, Some(TuningCopy::Dropped)));
+    // The discard's pass, and one more, end while the copy runs: neither deletes the staging folder.
+    h.run_cleanup();
+    h.run_cleanup();
+    let deleted = format!("cleanup: {id}: deleted its staging folder");
+    let kept = staged.is_dir() && !h.engine_log().contains(&deleted);
+    release(&gate);
+    assert!(kept, "a pass deleted the staging folder under the running copy: {}", h.engine_log());
+    assert_eq!(h.wait_copy(), id);
+    h.wait(&deleted, |h| h.engine_log().contains(&deleted));
+    h.wait("the pass's end", |h| !h.busy());
+    assert!(!staged.exists());
+    assert_eq!(h.record(&id).tuning_copy, Some(TuningCopy::Dropped), "the copy's end keeps dropped");
+    let log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(log.contains("tuning copy: ended after the discard, so the record keeps dropped"), "{log}");
+    assert_eq!(fs::read(&film).unwrap(), b"owner's");
+}
+
+/// A job that waits in a state entered during its file phase holds the file-phase slot (design part 5.7); its discard
+/// frees the slot, and the next job in the queue gets it.
+#[test]
+fn a_job_discarded_while_it_holds_the_file_phase_slot_frees_it() {
+    let mut script: Vec<(&'static str, StepScript)> = main_line().into_iter().take(9).collect(); // A to Decided
+    script.push(("CheckSpace", step(Event::ShareLost))); // A waits, holding the slot
+    script.extend(main_line().into_iter().take(6)); // B's disc phase
+    script.push(("Probe", StepScript::Hang)); // B, once it has the slot
+    let h = scripted(script);
+    let mut c = Client::open(&h);
+    c.snapshot();
+    h.insert("tok0", DISC_A);
+    h.deliver();
+    let a = c.until_state(None, "AwaitingShare")["id"].as_str().unwrap().to_string();
+    assert!(matches!(h.record(&a).state, State::AwaitingShare { .. }));
+    h.insert("tok1", DISC_B);
+    let b = id_of(&h, DISC_B);
+    h.wait("B waits for the slot", |h| h.state_of(&b) == "Ejected");
+    h.settle();
+    assert_eq!(h.steps().calls().iter().filter(|call| *call == "Probe").count(), 1, "B waits while A holds the slot");
+    assert_eq!(c.ok("discard", json!({"job": a})), Value::Null);
+    wait_for_call(&h, "Probe", 2);
+    h.wait("B has the slot", |h| h.state_of(&b) == "Inspecting");
+}
+
+// ---- The review document (phase 3 design, part 6.2; ruling T32-R5) ----
+
+/// The made-up line of `movie-direct-two-subs`' stand-in OCR reading.
+const SENTINEL: &str = "text-sentinel-3e8f";
+
+/// The items of the document's one subtitles point, as the document's titles list them.
+fn subtitle_items(doc: &Value) -> Vec<Value> {
+    let points: Vec<&Value> = doc["points"].as_array().unwrap().iter().filter(|p| p["kind"] == json!("subtitles")).collect();
+    assert_eq!(points.len(), 1, "one subtitles point: {doc}");
+    let ids = points[0]["items"].as_array().unwrap();
+    let items = doc["titles"].as_array().unwrap().iter().flat_map(|t| t["items"].as_array().unwrap().iter());
+    items.filter(|item| ids.contains(&item["id"])).cloned().collect()
+}
+
+/// The evidence texts of `item` whose kind is `kind`.
+fn evidence(item: &Value, kind: &str) -> Vec<String> {
+    item["evidence"].as_array().unwrap().iter().filter(|e| e["kind"] == json!(kind))
+        .map(|e| e["text"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn review_returns_the_document_of_a_held_job_with_its_subtitle_lines() {
+    let (h, mut c, id, _) = held_two_subs();
+    let doc = c.ok("review", json!({"job": id}));
+    assert_eq!(doc["format"], json!("lazymkv review document v1"));
+    assert_eq!(doc["job"], json!(id));
+    let items = subtitle_items(&doc);
+    assert_eq!(items.len(), 2, "{doc}");
+    for item in &items {
+        let lines = evidence(item, "lines");
+        assert!(!lines.is_empty(), "{item}");
+        assert!(lines.iter().all(|line| line.split(' ').all(|word| word == SENTINEL)), "{lines:?}");
+        assert!(evidence(item, "unread").is_empty(), "{item}");
+    }
+    let staged = doc["titles"][0]["staged_path"].as_str().unwrap_or_else(|| panic!("a staged path: {doc}"));
+    assert!(Path::new(staged).starts_with(h.staging()), "{staged}");
+    assert!(staged.ends_with(".mkv"), "{staged}");
+    // The colliding file at the final path, its size and day.
+    let collision = doc["titles"][0]["items"].as_array().unwrap().iter().find(|i| i["kind"] == json!("collision")).cloned();
+    let file = evidence(&collision.expect("a collision item"), "file");
+    assert_eq!(file.len(), 1, "{doc}");
+    assert!(file[0].starts_with("7 bytes, "), "{file:?}");
+    assert_eq!(c.err("review", json!({"job": "nope-1"})), "no job nope-1");
+}
+
+/// A file still at the final path keeps the ordinary collision item (phase 3 design, part 6.7; ruling T32-E10): only a
+/// path the engine found nothing at loses it.
+#[test]
+fn review_of_a_collision_with_the_file_still_there_keeps_the_item() {
+    let (_h, mut c, id, target) = held_two_subs();
+    assert!(target.is_file());
+    let doc = c.ok("review", json!({"job": id}));
+    let points: Vec<&Value> = doc["points"].as_array().unwrap().iter().filter(|p| p["kind"] == json!("collision")).collect();
+    assert_eq!(points.len(), 1, "{doc}");
+    let key = points[0]["title_key"].as_str().unwrap();
+    assert_eq!((&points[0]["answerable"], &points[0]["items"]), (&json!(true), &json!([format!("{key} collision")])), "{doc}");
+    assert!(!points[0]["sentence"].as_str().unwrap().contains("Nothing is at"), "{doc}");
+    let item = doc["titles"][0]["items"].as_array().unwrap().iter().find(|i| i["kind"] == json!("collision")).cloned();
+    let item = item.expect("a collision item");
+    assert_eq!(item["answers"], json!(["keep_both", "replace"]), "{doc}");
+    assert_eq!(evidence(&item, "file").len(), 1, "{doc}");
+}
+
+#[test]
+fn review_of_a_job_whose_staging_share_is_down_still_answers() {
+    let (h, mut c, id, _) = held_two_subs();
+    let staging = h.staging().to_str().unwrap().to_string();
+    h.shares().set_reach(&staging, Reach::Unreachable("cable out".to_string()));
+    let doc = c.ok("review", json!({"job": id}));
+    assert_eq!(doc["titles"][0]["staged_path"], Value::Null, "{doc}");
+    let items = subtitle_items(&doc);
+    assert_eq!(items.len(), 2, "{doc}");
+    for item in &items {
+        assert!(evidence(item, "lines").is_empty(), "{item}");
+        assert_eq!(evidence(item, "unread"), vec!["the staging share did not answer: cable out".to_string()], "{item}");
+    }
+}
+
+/// A held job whose `scan.txt` is gone is refused with the scan's read error, naming the file, not with what an empty
+/// scan would say.
+#[test]
+fn review_of_a_held_job_whose_scan_is_gone_names_the_scan() {
+    let (h, mut c, id, _) = held_two_subs();
+    let scan = h.job_dir(&id).join("scan.txt");
+    std::fs::remove_file(&scan).unwrap();
+    let error = c.err("review", json!({"job": id}));
+    assert!(error.starts_with(&format!("{}: ", scan.display())), "{error}");
+    assert!(!error.contains("the scan lists no title"), "{error}");
+}
+
+#[test]
+fn review_of_a_job_with_nothing_to_review_is_an_error_naming_its_state() {
+    let h = scripted(vec![]);
+    let id = seed(&h, 7, State::Discarded);
+    h.restart();
+    let mut c = Client::open(&h);
+    c.snapshot();
+    assert_eq!(c.err("review", json!({"job": id})), format!("job {id} is Discarded: there is nothing to review"));
+}
+
+/// The owner thread never reads a share (design part 4.4): while the staging share stalls inside a review's worker,
+/// the engine answers other requests, and a stop does not wait for the worker.
+#[test]
+fn a_review_whose_staging_share_stalls_neither_blocks_the_engine_nor_its_stop() {
+    let (h, mut c, id, _) = held_two_subs();
+    let staging = h.staging().to_str().unwrap().to_string();
+    let gate = h.shares().stall(&staging);
+    c.send("review", json!({"job": id}));
+    assert!(gate.wait_for_caller(WAIT * ci_factor()), "the review never reached the staging share");
+    assert!(c.ok("history", json!({})).is_array(), "the engine answers while the review waits");
+    // The stall is released after 15 s; a stop that waited for the worker would take that long.
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(15));
+        gate.release();
+    });
+    let start = Instant::now();
+    h.restart();
+    let took = start.elapsed();
+    release.join().unwrap();
+    assert!(took < Duration::from_secs(10), "the stop waited {took:?} for the stalled review");
+}
+
+#[test]
+fn no_subtitle_line_reaches_a_log_or_a_push() {
+    let (h, mut c, id, _) = held_two_subs();
+    let mut other = Client::open(&h);
+    let mut pushed = vec![other.line().unwrap()];
+    let doc = c.ok("review", json!({"job": id, "all": true}));
+    assert!(doc.to_string().contains(SENTINEL), "the document holds the lines: {doc}");
+    // Every line the second client is sent until a quiet second has passed.
+    while let Ok(line) = other.lines.recv_timeout(Duration::from_secs(1)) {
+        pushed.push(line);
+    }
+    let pushes: Vec<String> = c.pushes.iter().map(|e| serde_json::to_string(&e.payload).unwrap()).collect();
+    let job_log = fs::read_to_string(h.job_dir(&id).join("job.log")).unwrap();
+    assert!(!job_log.contains(SENTINEL), "job.log holds a subtitle line");
+    assert!(!h.engine_log().contains(SENTINEL), "engine.log holds a subtitle line");
+    for line in pushed.iter().chain(&pushes) {
+        assert!(!line.contains(SENTINEL), "a push holds a subtitle line: {line}");
+    }
 }
 
 #[test]

@@ -326,8 +326,10 @@ fn a_restart_in_verified_with_the_file_already_filed_feeds_file_done() {
     assert!(record.filed_unix.is_some());
 }
 
+/// Ruling T32-E8 (phase 3 design, part 6.7; P3-T11): after a restart in Verified with the partial file gone and a file
+/// of another size at the final path, the job is held with path_collision instead of failing, and that file is kept.
 #[test]
-fn a_restart_in_verified_with_another_size_at_the_final_path_fails_as_unknown() {
+fn a_restart_in_verified_with_another_size_at_the_final_path_holds_with_path_collision() {
     let h = harness(&["movie-direct"], settings());
     h.insert("tok0", DISC);
     h.run_until("Verified");
@@ -337,9 +339,15 @@ fn a_restart_in_verified_with_another_size_at_the_final_path_fails_as_unknown() 
     fs::create_dir_all(final_path(&h).parent().unwrap()).unwrap();
     fs::write(final_path(&h), b"abc").unwrap();
     h.restart();
-    h.run_until("Failed");
+    h.run_until("NeedsReview");
     let last = transitions(&h.job_dir(&id)).pop().unwrap();
-    assert!(matches!(last.event, Some(Event::FileFailed { failure }) if failure.class == FailureClass::Unknown));
+    assert!(
+        matches!(&last.event, Some(Event::FileCollided { reasons }) if reasons.contains(&ReviewReason::PathCollision)),
+        "{:?}",
+        last.event
+    );
+    let record = state_json(&h.job_dir(&id));
+    assert_eq!(record.collisions.iter().map(PathBuf::from).collect::<Vec<_>>(), vec![final_path(&h)]);
     assert_eq!(fs::read(final_path(&h)).unwrap(), b"abc");
 }
 
@@ -1116,6 +1124,7 @@ fn a_held_job_approved_after_a_restart_reads_the_staged_text_and_the_unread_stre
         tmdb_search: Some(dir.join("tmdb-search.json")),
         tmdb_record: Some(dir.join("tmdb-record.json")),
         remembered: None,
+        overrides: None,
     };
     let read = read_decide_inputs(&ctx, &rec, &label, Some(&staged), None, &options).unwrap_or_else(|r| panic!("{}", r.line));
     assert_eq!(read.file.unread, Ok(vec![(1, "lazymkv-ocr exited with code 101".to_string())]));

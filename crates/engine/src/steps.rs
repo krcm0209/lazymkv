@@ -18,9 +18,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use lazymkv_clients::{run_round, HttpTransport, LookupBook, LookupState, PendingReason};
 use lazymkv_core::audio::rule::RULE_VERSION;
-use lazymkv_core::decision::{same_path_reviews, FileDecision};
+use lazymkv_core::decision::{remember, same_path_reviews, Disposition, FileDecision, COPY_LABEL_MAX, KEEP_BOTH_COPY};
 use lazymkv_core::disc::{disc, same_scan_title, Disc, Title};
-use lazymkv_core::ipc::{OutputStream, CANCELLED};
+use lazymkv_core::ipc::{job_summary, OutputStream, CANCELLED};
 use lazymkv_core::job::{classify_title_failure, decision_done, Action, Event, Failure, FailureClass, State, Tool};
 use lazymkv_core::naming::NamedPath;
 use lazymkv_core::plan::movie::LibraryFacts;
@@ -30,7 +30,8 @@ use lazymkv_core::profile::{
 };
 use lazymkv_core::record::{FiledFile, JobRecord, TitleRecord};
 use lazymkv_core::recording::files::{FfprobeStreams, MkvmergeIdent, Selection};
-use lazymkv_core::review::{Note, ReviewReason};
+use lazymkv_core::remembered::{Collision, Overrides, Remembered};
+use lazymkv_core::review::{sorted_unique, Note, ReviewReason};
 use lazymkv_core::robot::lines::RunSummary;
 use lazymkv_core::robot::{parse, Scan};
 use lazymkv_core::settings::version_triple;
@@ -40,7 +41,7 @@ use lazymkv_core::ustar::{ustar_entry, DEFAULT_PROFILE_NAME};
 use lazymkv_core::verify::{
     failure_reviews, removed_scan_streams, rip_title, selected_streams, verify_final, verify_rip, VerifyReport,
 };
-use lazymkv_dev::cmd::decide::{decide_doc, DecideDoc, DecisionEntry, EngineDecideDoc};
+use lazymkv_dev::cmd::decide::{decide_doc, DecideDoc, DecideInputs, DecisionEntry, EngineDecideDoc};
 use lazymkv_dev::evidence::Ctx;
 use lazymkv_dev::pyjson::{dumps, Style};
 use lazymkv_platform::{
@@ -56,19 +57,20 @@ use serde_json::{json, Value};
 
 use crate::arrival::{chain_inputs, round_inputs};
 use crate::file_phase::{
-    engine_decide_inputs, library_facts, lookup_word, partial_path, read_back_inputs, refetch_stale, refreshed_plan,
-    staged_text, OwedCheck, Refetched,
+    engine_decide_inputs, library_facts, library_unread, lookup_word, move_aside, partial_path, put_back_with,
+    read_back_inputs, refetch_stale, refreshed_plan, replaced_dir, staged_text, OwedCheck, Refetched, RenameFn,
 };
 use crate::owner::{action_tag, panic_text, JobContext, Outbox, StepResult, StepRunner};
 use crate::restart::READ_BACK_LINE;
+use crate::review_store;
 use crate::selftest::MakeMkv;
 use crate::space::{
     library_root, make_root, planned_remux_promise, refine_remux_promise, rip_check_reached, rip_promise, staged_bytes,
     staged_remux_check, unreachable, Promises,
 };
 use crate::staged::{
-    clear_incomplete, evidence_file, staged_state, tuning_dir, unit_outputs_left, work_dir, Staged, UnitError,
-    CLEARED_INCOMPLETE, SKIPPED_COMPLETE, WORK,
+    clear_incomplete, copy_checked, evidence_file, staged_state, tuning_dir, unit_outputs_left, work_dir, Staged,
+    UnitError, CLEARED_INCOMPLETE, SKIPPED_COMPLETE, WORK,
 };
 use crate::step10;
 use crate::step10::{read_streams, stream_cap, OCR_MISSING};
@@ -172,6 +174,21 @@ fn add_collision(record: &mut JobRecord, path: String) {
         record.collisions.push(path);
         record.collisions.sort();
     }
+}
+
+/// The record edit of a collision found at filing (phase 3 design, part 6.7): `path_collision` added to the title
+/// `key`'s decision reviews, kept sorted and unique, its disposition NeedsReview as `same_path_reviews` makes it for a
+/// shared path, and `path` added to the record's collisions [ENG-22]. Every other field, a `filed` record included,
+/// is left as it is. Def: P3-T11. Use: P3-T16.
+fn hold_for_collision(record: &mut JobRecord, key: &str, path: String) {
+    let decision = record.titles.iter_mut().find(|title| title.key == key).and_then(|title| title.decision.as_mut());
+    if let Some(decision) = decision {
+        let mut reviews = std::mem::take(&mut decision.reviews);
+        reviews.push(ReviewReason::PathCollision);
+        decision.reviews = sorted_unique(reviews);
+        decision.disposition = Disposition::NeedsReview;
+    }
+    add_collision(record, path);
 }
 
 /// Whether `a` and `b` name one file, as both names of a rename stopped between its hard link and its remove do: both
@@ -522,6 +539,9 @@ pub(crate) struct RealSteps {
     ocr: Option<PathBuf>,
     /// The harness's cap, for tests only (T5-R58).
     ocr_cap_override: Option<Duration>,
+    /// The rename File makes into a title's final path, for tests only (`TestHooks::file_rename`); None renames with
+    /// `rename_no_replace`. Def: T32-E22. Use: T32-E22.
+    file_rename: Option<RenameFn>,
 }
 
 impl RealSteps {
@@ -559,6 +579,23 @@ impl RealSteps {
             work_root: config.data.join(WORK),
             ocr: config.ocr.clone(),
             ocr_cap_override: config.ocr_cap_override,
+            file_rename: None,
+        }
+    }
+
+    /// The runner with `rename` in place of `rename_no_replace` for File's renames into a title's final path, for
+    /// tests only (`TestHooks::file_rename`). Def: T32-E22. Use: T32-E22.
+    pub(crate) fn with_file_rename(mut self, rename: Option<RenameFn>) -> RealSteps {
+        self.file_rename = rename;
+        self
+    }
+
+    /// `from` renamed to `to` by the testkit's rename when one is set, else by `rename_no_replace`; neither replaces a
+    /// file at `to`. Def: T32-E22. Use: T32-E22.
+    fn rename_into_place(&self, from: &Path, to: &Path) -> io::Result<()> {
+        match &self.file_rename {
+            Some(rename) => rename(from, to),
+            None => rename_no_replace(from, to),
         }
     }
 }
@@ -1679,8 +1716,10 @@ impl Step<'_> {
     /// facts, then rendered again with the `library_facts` of the path the last render chose while they differ from
     /// the facts it was rendered with (Ruling R24.c2: the facts can lead to an edition-named path, whose own facts may
     /// hold a collision). The film folder does not change with the edition, so this settles at once; facts seen before
-    /// end it too. The decision fed is the document's (Ruling R24.3). Err is the reason the inputs, the library facts
-    /// (`library_facts`' error, Ruling W22) or the decision could not be made.
+    /// end it too. A keep-both answer for the plain path whose facts were read ends it at the copy-labelled path decide
+    /// gives from that plain path, through `free_copy`'s probe for the next free copy label (phase 3 design, part 6.7;
+    /// P3-T11b). The decision fed is the document's (Ruling R24.3). Err is the reason the inputs, the library facts
+    /// (`library_facts`' error, Ruling W22, or `free_copy`'s) or the decision could not be made.
     fn title_doc(&self, ctx: &Ctx, plan: &Plan, key: &str) -> Result<DecideDoc, String> {
         let probes = lock(&self.steps.probes).get(&(self.id.to_string(), key.to_string())).cloned();
         let mut inputs = match &probes {
@@ -1694,13 +1733,27 @@ impl Step<'_> {
             }
         };
         let mut seen = vec![inputs.library.clone()];
+        let mut read_at: Option<String> = None; // the path whose facts `inputs.library` holds
         loop {
             let doc = decide_doc(&inputs);
             let path = match &doc.decision {
                 DecisionEntry::Results(found) => found.decision.path.clone(),
                 DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
             };
+            // Phase 3 design, part 6.7 (P3-T11, P3-T11b): a keep-both answer for the colliding path whose facts were
+            // read gives a copy-labelled path, which is no new edition, so those facts stand; reading the copy's own
+            // facts would decide the plain path again and never settle. Only a path the keep-both rule made from that
+            // plain path goes to the probe for the next free copy label.
+            let answered = |read: &String| inputs.overrides.as_ref().and_then(|given| given.collision_for(read));
+            let kept_both =
+                inputs.library.path_collision && read_at.as_ref().and_then(answered) == Some(Collision::KeepBoth);
+            if let (true, Some(named), Some(plain)) = (kept_both, &path, &read_at) {
+                if named.path != *plain && plain_path_of(&mut inputs).as_ref() == Some(plain) {
+                    return free_copy(&mut inputs, doc, named.clone());
+                }
+            }
             let style = self.job.settings.edition_style;
+            read_at = path.as_ref().map(|named| named.path.clone());
             let facts = path.map(|path| library_facts(&path, style)).transpose()?.unwrap_or_default();
             if seen.contains(&facts) {
                 return Ok(doc);
@@ -2008,22 +2061,34 @@ impl Step<'_> {
 
     /// File (design parts 5.7 step 14, 6.5): for each planned title in plan order, the final path's missing folders
     /// made, then the partial file renamed into it with `rename_no_replace`, and the filed file's path, size and
-    /// modification time recorded. A file already at the final path gives FileFailed { Unknown } with `<final> already
-    /// exists; the partial file stays at <partial>`, and the record keeps the colliding path [ENG-22]. An earlier
+    /// modification time recorded. A file already at the final path (LIB-8: it appeared between the decision and the
+    /// rename) holds the job with `collided` (phase 3 design, part 6.7; Def: P3-T11. Use: P3-T16): FileCollided, whose
+    /// row deletes the partial file, and the record keeps the colliding path [ENG-22]. An earlier
     /// rename is taken as done, as design part 6.5 says after a restart in Verified, when the partial file is gone and
-    /// the final path holds a file of the verified size (the title's `filed` size, RP-7); a partial file that is gone
-    /// otherwise gives FileFailed { Unknown }. Off Windows, where `rename_no_replace` is a hard link then a remove
-    /// (S13), a rename stopped between the two leaves both names on one file (`one_file`): its partial name is then
+    /// the final path holds a file of the verified size (the title's `filed` size, RP-7). A partial file that is gone
+    /// with any other file at the final path (another size, or no verified size recorded) is a collision and holds the
+    /// job with `collided` (Ruling T32-E8: the row deletes the partial file anyway and the approval remuxes again); a
+    /// partial file that is gone with nothing at the final path gives FileFailed { Unknown }. Off Windows, where
+    /// `rename_no_replace` is a hard link then a remove (S13), a rename stopped between the two leaves both names on one file (`one_file`): its partial name is then
     /// removed and the rename taken as done, and a remove that fails after the link gives FileFailed { Unknown } with a
     /// message saying the final path holds the file. On Windows `MoveFileExW` renames in one step, so that half state
     /// cannot arise and those branches are not compiled (Ruling T3-4-b).
     ///
     /// L7 (design part 6.5, Ruling W28): once `create_dir_all` of the final path's folder returns Ok or
     /// `AlreadyExists`, that folder is opened with `fs::read_dir` before the rename. A folder that is present but
-    /// cannot be opened, as phase 0's experiment 9 met on the share, gives FileFailed { Unknown } with `<folder> is
-    /// present but cannot be opened (<error>); the partial file stays at <partial>, and a retry tries again`, records
-    /// no collision, and renames nothing. The folder opened is the title's own, never the library root, so LIB-7
-    /// stands. Any other `create_dir_all` error gives FileFailed { Unknown } with `<folder>: <error>`.
+    /// cannot be opened, as phase 0's experiment 9 met on the share, holds the job with `collided` (phase 3 design,
+    /// part 6.7: it clears by itself within minutes, and the approval remuxes again), and renames nothing. The folder
+    /// opened is the title's own, never the library root, so LIB-7 stands. Any other `create_dir_all` error gives
+    /// FileFailed { Unknown } with `<folder>: <error>`.
+    ///
+    /// Replace (phase 3 design, part 6.7; Def: P3-T11. Use: P3-T16): for a title whose final path has a `Replace`
+    /// answer in the job's review.json, and only then, `replace_existing` moves the file found at exactly that path
+    /// into the job's `replaced` folder just before the rename; a rename that still finds a file is a collision. A
+    /// review.json that cannot be read gives FileFailed { Unknown } with its error, before anything is renamed.
+    /// Ruling T32-E22: once a file was moved aside, a rename that fails for any reason but a file at the path puts it
+    /// back with `put_back_with` (never replacing) and logs one job.log line, and the step fails as before; a put-back
+    /// that fails, and a hold for a file that appeared at the path after the move, end their sentence and job.log line
+    /// with `The library file that was at <final path> is now at <path under replaced>.`
     ///
     /// Each title first asks `reach` of its library root, the call that connects with the stored credential (design
     /// part 6.1), and asks again before it reports a partial file gone, because std reads Windows' ERROR_BAD_NETPATH
@@ -2031,9 +2096,14 @@ impl Step<'_> {
     /// final path holding no file. A root that does not answer, or any other metadata error, gives FileFailed
     /// { Unknown } naming the title, the root or path, and the error (design part 5.2 keeps the class; review round
     /// 1, V7 and RR1-9).
+    ///
+    /// Once every title is filed, `remember_answers` writes the job's answers as the disc's remembered decision (phase 3
+    /// design, part 6.6); it feeds no event and never changes the outcome.
     fn file(&self) -> Outcome {
         let failed = |failure| Event::FileFailed { failure };
         let plan = self.job_plan(failed)?;
+        let answers = review_store::read(&self.job.job_dir).map_err(|error| unknown(failed, error))?;
+        let answers = answers.map(|file| file.overrides).unwrap_or_default();
         for planned in &plan.titles {
             let key = planned.key.as_str();
             let (_, path) = self.decided(key).map_err(|error| unknown(failed, error))?;
@@ -2082,16 +2152,13 @@ impl Step<'_> {
                         continue;
                     }
                     (Some(_), _) => {
-                        let collision = path.path.clone();
-                        if !self.post_edit(move |record| add_collision(record, collision)) {
-                            return Err(cancelled());
-                        }
-                        let message = format!(
-                            "{} already exists and is not the verified file; the partial file {} is gone",
+                        // Ruling T32-E8: a file at the final path that is not the job's is a collision, partial or not.
+                        let sentence = format!(
+                            "{} already exists and is not the verified file, and the partial file {} is gone",
                             path.path,
                             partial.display()
                         );
-                        return Ok(unknown(failed, message));
+                        return self.collided(key, &path.path, &sentence);
                     }
                     (None, _) => {
                         // A share that stopped answering since the first `reach` reports a missing path as NotFound.
@@ -2112,18 +2179,23 @@ impl Step<'_> {
                 }
                 // L7 (Ruling W28): a folder that is present but cannot be opened stops the rename.
                 if let Err(error) = fs::read_dir(folder) {
-                    let (shown, stays) = (folder.display(), partial.display());
-                    return Ok(unknown(
-                        failed,
-                        format!(
-                            "{shown} is present but cannot be opened ({error}); the partial file stays at {stays}, \
-                             and a retry tries again"
-                        ),
-                    ));
+                    let sentence = format!(
+                        "{} is present but cannot be opened ({error}); this clears by itself within minutes",
+                        folder.display()
+                    );
+                    return self.collided(key, &path.path, &sentence);
                 }
             }
             self.check_cancel()?;
-            match rename_no_replace(&partial, target) {
+            let moved = match answers.collision_for(&path.path) {
+                Some(Collision::Replace) => self.replace_existing(key, &path.root, target, &partial)?,
+                _ => None,
+            };
+            // Ruling T32-E22: once the library file was moved aside, a rename that fails puts it back, or says where
+            // it is when it cannot be put back.
+            let now_at =
+                |moved: &Path| format!("The library file that was at {} is now at {}.", path.path, moved.display());
+            match self.steps.rename_into_place(&partial, target) {
                 Ok(()) => {}
                 #[cfg(not(windows))]
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists && one_file(&partial, target) => {
@@ -2135,12 +2207,10 @@ impl Step<'_> {
                     self.log(&format!("{key}: {shown} already held the partial file, so the rename was finished"));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let collision = path.path.clone();
-                    if !self.post_edit(move |record| add_collision(record, collision)) {
-                        return Err(cancelled());
-                    }
-                    let (shown, stays) = (&path.path, partial.display());
-                    return Ok(unknown(failed, format!("{shown} already exists; the partial file stays at {stays}")));
+                    let sentence = format!("{} already exists", path.path);
+                    // Something appeared at the path after the move: putting the library file back would replace it.
+                    let note = moved.as_deref().map(now_at).unwrap_or_default();
+                    return self.collided_noting(key, &path.path, &sentence, &note);
                 }
                 #[cfg(not(windows))]
                 Err(error) if one_file(&partial, target) => {
@@ -2148,13 +2218,138 @@ impl Step<'_> {
                     return Ok(unknown(failed, half_done(&partial, &path.path, &error)));
                 }
                 Err(error) => {
-                    let message = format!("{} could not be renamed to {}: {error}", partial.display(), path.path);
+                    let mut message = format!("{} could not be renamed to {}: {error}", partial.display(), path.path);
+                    if let Some(moved) = moved.as_deref() {
+                        let rename = |from: &Path, to: &Path| self.steps.rename_into_place(from, to);
+                        match put_back_with(moved, target, &rename, &|from, to| copy_checked(from, to)) {
+                            Ok(()) => {
+                                let shown = moved.display();
+                                self.log(&format!(
+                                    "{key}: the rename failed, so the library file moved to {shown} was put back at {}",
+                                    path.path
+                                ));
+                            }
+                            Err(refused) => {
+                                message = format!("{message}; {refused}. {}", now_at(moved));
+                                self.log(&format!("{key}: {message}"));
+                            }
+                        }
+                    }
                     return Ok(unknown(failed, message));
                 }
             }
             self.record_filed(key, &path.path)?;
         }
+        self.remember_answers(plan, &answers);
         Ok(event(Event::FileDone))
+    }
+
+    /// Phase 3 design, part 6.6 (Def: P3-T12): once every title is filed, the job's review answers `answers` (any answer
+    /// at all, a collision answer included: ruling T32-E14) become the disc's remembered decision,
+    /// `<data>/remembered/<fingerprint>.json`, which a later job of the same disc applies. `remember` of the plan, the
+    /// scan the plan was made from and the titles' decisions builds it, `Store::write_remembered` replaces the file.
+    /// No answer writes nothing. An Err of either is the one job.log line `remember: <error>` and nothing else: the
+    /// job is filed whether or not the file is written, and no event or record edit follows from it.
+    fn remember_answers(&self, plan: &Plan, answers: &Overrides) {
+        if answers.is_empty() {
+            return;
+        }
+        let built = self.remembered_decision(plan, answers);
+        if let Err(error) = built.and_then(|remembered| {
+            self.steps.store.write_remembered(&remembered).map_err(|error| error.to_string())
+        }) {
+            self.log(&format!("remember: {error}"));
+        }
+    }
+
+    /// `remember`'s file for the job's decisions with `answers`: the titles' decisions in the plan's order.
+    fn remembered_decision(&self, plan: &Plan, answers: &Overrides) -> Result<Remembered, String> {
+        let (_, typed) = self.planned_scan()?;
+        let decisions: Vec<FileDecision> = plan
+            .titles
+            .iter()
+            .filter_map(|planned| self.decided(&planned.key).ok().map(|(decision, _)| decision.clone()))
+            .collect();
+        remember(&self.job.record.fingerprint, &typed, plan, &decisions, answers)
+    }
+
+    /// A collision found at filing for the title `key` at `path` (phase 3 design, part 6.7; LIB-8 and L7): the job.log
+    /// line `<key>: <sentence>; the job is held for review with path_collision and its partial file is deleted`, then
+    /// `hold_for_collision`'s record edit posted with FileCollided, whose reasons are the job summary's review reasons
+    /// after that edit (the job's reasons with `path_collision`), sorted and unique. Titles renamed earlier in this run
+    /// keep their `filed` record. Err is the cancelled result. Def: P3-T11. Use: P3-T16.
+    fn collided(&self, key: &str, path: &str, sentence: &str) -> Outcome {
+        self.collided_noting(key, path, sentence, "")
+    }
+
+    /// `collided` with `note`, when it is not empty, after the job.log line's end: `... is deleted. <note>` (ruling
+    /// T32-E22: where a library file moved aside now is). Def: T32-E22. Use: T32-E22.
+    fn collided_noting(&self, key: &str, path: &str, sentence: &str, note: &str) -> Outcome {
+        let note = if note.is_empty() { String::new() } else { format!(". {note}") };
+        self.log(&format!(
+            "{key}: {sentence}; the job is held for review with path_collision and its partial file is deleted{note}"
+        ));
+        let mut after = self.job.record.clone();
+        hold_for_collision(&mut after, key, path.to_string());
+        let mut reasons = job_summary(&after).review_reasons;
+        reasons.push(ReviewReason::PathCollision);
+        let reasons = sorted_unique(reasons);
+        let (key, path) = (key.to_string(), path.to_string());
+        if !self.post_edit(move |record| hold_for_collision(record, &key, path)) {
+            return Err(cancelled());
+        }
+        Ok(event(Event::FileCollided { reasons }))
+    }
+
+    /// Replace (phase 3 design, part 6.7): the file at exactly `target`, the title `key`'s final path under the library
+    /// root `root`, moved by `move_aside` into `<staging root>\<job id>\replaced\`, before the partial file `partial`
+    /// is renamed in. Only a regular file is moved: nothing at `target` (a NotFound on a library share that still
+    /// answers `reach`) moves nothing and makes no folder, and anything else there is left for the rename to meet as a
+    /// collision. The staging share is asked `reach` first, as `file` asks the library's. Every failure is FileFailed
+    /// { Unknown } naming the paths, and leaves the library file and the partial file as they were (`move_aside`'s
+    /// errors). The moved file is never deleted here. Ok is the moved file's path, None when nothing was moved.
+    /// Def: P3-T11. Use: P3-T16.
+    fn replace_existing(
+        &self,
+        key: &str,
+        root: &str,
+        target: &Path,
+        partial: &Path,
+    ) -> Result<Option<PathBuf>, StepResult> {
+        let failed = |failure| Event::FileFailed { failure };
+        let (shown, stays) = (target.display(), partial.display());
+        let tail = format!("{shown} was not moved and the partial file {stays} was not renamed");
+        match fs::symlink_metadata(target) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // A share that stopped answering reports a missing path as NotFound.
+                if let Reach::Unreachable(why) = self.steps.shares.reach(root) {
+                    let head = library_unanswered(root, &why);
+                    let message = format!("{key}: {head}; {tail}, and a retry once the share answers files it");
+                    return Err(unknown(failed, message));
+                }
+                return Ok(None);
+            }
+            Err(error) => return Err(unknown(failed, format!("{key}: {shown}: {error}; {tail}"))),
+        }
+        let Some(staging) = self.job.settings.staging_root.as_deref() else {
+            return Err(unknown(failed, format!("{key}: staging_root is unset; {tail}")));
+        };
+        if let Reach::Unreachable(why) = self.steps.shares.reach(staging) {
+            let message = format!(
+                "{key}: the staging share holding {staging} does not answer ({why}); {tail}, and a retry once the \
+                 share answers files it"
+            );
+            return Err(unknown(failed, message));
+        }
+        match move_aside(target, &replaced_dir(staging, self.id)) {
+            Ok(moved) => {
+                self.log(&format!("{key}: {shown} was moved to {} before filing (replace)", moved.display()));
+                Ok(Some(moved))
+            }
+            Err(error) => Err(unknown(failed, format!("{key}: {error}; the partial file {stays} was not renamed"))),
+        }
     }
 
     /// Records the file at `path` as the title `key`'s filed file: its path, size and modification time (design part
@@ -2196,6 +2391,51 @@ impl Step<'_> {
             }
         }
         Ok(StepResult { event: None, message: None })
+    }
+}
+
+/// The path of `doc`'s decision; None when it built none or the decision was skipped.
+fn path_of_doc(doc: &DecideDoc) -> Option<NamedPath> {
+    match &doc.decision {
+        DecisionEntry::Results(found) => found.decision.path.clone(),
+        DecisionEntry::Skipped { .. } => None,
+    }
+}
+
+/// The plain final path decide gives with `inputs`' library facts but no collision (phase 3 design, part 6.7): the
+/// path keep both labels, since the keep-both rule is the only place `path_collision` changes the path. `inputs` is
+/// as it was on return. Def: P3-T11b. Use: `title_doc`.
+fn plain_path_of(inputs: &mut DecideInputs) -> Option<String> {
+    let facts = inputs.library.clone();
+    inputs.library = LibraryFacts { path_collision: false, copy_labels_taken: 0, ..facts.clone() };
+    let plain = path_of_doc(&decide_doc(inputs)).map(|named| named.path);
+    inputs.library = facts;
+    plain
+}
+
+/// Phase 3 design, part 6.7 ("Keep both" files under the next free copy label; P3-T11b): `doc` decides the
+/// copy-labelled path `copy` for a keep-both answer; `fs::symlink_metadata` looks at it, and while something stands
+/// there (a file, a folder, a link) `inputs.library.copy_labels_taken` grows by 1 and decide runs again, the plain
+/// path's other facts standing (no `library_facts` read of a copy path). NotFound gives the document deciding that
+/// path; with copy `COPY_LABEL_MAX` taken too it gives that last document, and the never-replacing rename then holds
+/// the job. Any other read error is `library_unread`'s sentence, as `library_facts` gives it (Ruling W22); a skipped
+/// decision is its sentence. It runs in the Decide step, never on the owner thread. Def: P3-T11b. Use: `title_doc`.
+fn free_copy(inputs: &mut DecideInputs, mut doc: DecideDoc, mut copy: NamedPath) -> Result<DecideDoc, String> {
+    loop {
+        match fs::symlink_metadata(&copy.path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(doc),
+            Err(error) => return Err(library_unread(&copy, &error)),
+            Ok(_) if KEEP_BOTH_COPY + inputs.library.copy_labels_taken >= COPY_LABEL_MAX => return Ok(doc),
+            Ok(_) => inputs.library.copy_labels_taken += 1,
+        }
+        doc = decide_doc(inputs);
+        copy = match &doc.decision {
+            DecisionEntry::Results(found) => match &found.decision.path {
+                Some(path) => path.clone(),
+                None => return Ok(doc),
+            },
+            DecisionEntry::Skipped { skipped } => return Err(skipped.clone()),
+        };
     }
 }
 

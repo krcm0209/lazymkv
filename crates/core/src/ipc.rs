@@ -143,6 +143,22 @@ pub enum Request {
         action: String,
         /// The owner's overrides, or None.
         overrides: Option<Value>,
+        /// The owner's answers to the review sheet's labels (phase 3 design, part 11), or None.
+        labels: Option<Value>,
+    },
+    /// `review`: asks for a job's review document (phase 3 design, part 11). Def: P3-T6. Use: P3-T8, P3-T9, P3-T10,
+    /// P3-T14.
+    Review {
+        /// The job's ID.
+        job: String,
+        /// Whether the document lists every item, not only those awaiting an answer (phase 3 design, part 11).
+        all: bool,
+    },
+    /// `discard_preview`: asks how much data a discard would delete (phase 3 design, part 11). Def: P3-T6. Use:
+    /// P3-T8, P3-T9, P3-T10, P3-T14.
+    DiscardPreview {
+        /// The job's ID.
+        job: String,
     },
     /// `ui_quit`: the UI closed its window.
     UiQuit,
@@ -187,6 +203,16 @@ struct ReviewPayload {
     action: String,
     #[serde(default)]
     overrides: Option<Value>,
+    #[serde(default)]
+    labels: Option<Value>,
+}
+
+/// The payload of `review`: `all` is optional and reads as false (phase 3 design, part 11).
+#[derive(serde::Deserialize)]
+struct ReviewDocPayload {
+    job: String,
+    #[serde(default)]
+    all: bool,
 }
 
 /// Decodes `payload` as the request type `kind`'s payload `T`; Err is the refusal text.
@@ -225,7 +251,7 @@ pub fn parse_request(line: &str) -> Result<(Option<u64>, Request), String> {
         "run_selftest" => Request::RunSelftest,
         "ui_quit" => Request::UiQuit,
         "settings_set" | "secret_set" | "retry" | "cancel" | "discard" | "rip_again" | "history" | "shutdown"
-        | "command" | "review_action" => {
+        | "command" | "review_action" | "review" | "discard_preview" => {
             let payload = match payload {
                 Value::Null if kind != "settings_set" => Value::Object(Map::new()),
                 other => other,
@@ -259,9 +285,14 @@ fn decode_request(kind: &str, payload: Value) -> Result<Request, String> {
         "shutdown" => Request::Shutdown { force: decode::<ShutdownPayload>(kind, payload)?.force },
         "command" => Request::Command { words: decode::<CommandPayload>(kind, payload)?.words },
         "review_action" => {
-            let ReviewPayload { job, action, overrides } = decode(kind, payload)?;
-            Request::ReviewAction { job, action, overrides }
+            let ReviewPayload { job, action, overrides, labels } = decode(kind, payload)?;
+            Request::ReviewAction { job, action, overrides, labels }
         }
+        "review" => {
+            let ReviewDocPayload { job, all } = decode(kind, payload)?;
+            Request::Review { job, all }
+        }
+        "discard_preview" => Request::DiscardPreview { job: decode::<JobPayload>(kind, payload)?.job },
         _ => return Err(format!("unknown message type \"{kind}\"")),
     })
 }
@@ -674,9 +705,14 @@ mod tests {
             (r#"{"v":1,"type":"command","id":2,"payload":{"words":["plan","--job","a-1"]}}"#,
                 Request::Command { words: vec!["plan".to_string(), "--job".to_string(), job()] }),
             (r#"{"v":1,"type":"review_action","id":2,"payload":{"job":"a-1","action":"approve"}}"#,
-                Request::ReviewAction { job: job(), action: "approve".to_string(), overrides: None }),
+                Request::ReviewAction { job: job(), action: "approve".to_string(), overrides: None, labels: None }),
             (r#"{"v":1,"type":"review_action","id":2,"payload":{"job":"a-1","action":"approve","overrides":{}}}"#,
-                Request::ReviewAction { job: job(), action: "approve".to_string(), overrides: Some(json!({})) }),
+                Request::ReviewAction { job: job(), action: "approve".to_string(), overrides: Some(json!({})), labels: None }),
+            (r#"{"v":1,"type":"review","id":2,"payload":{"job":"a-1"}}"#, Request::Review { job: job(), all: false }),
+            (r#"{"v":1,"type":"review","id":2,"payload":{"job":"a-1","all":true}}"#, Request::Review { job: job(), all: true }),
+            (r#"{"v":1,"type":"discard_preview","id":2,"payload":{"job":"a-1"}}"#, Request::DiscardPreview { job: job() }),
+            (r#"{"v":1,"type":"review_action","id":2,"payload":{"job":"a-1","action":"approve","labels":[]}}"#,
+                Request::ReviewAction { job: job(), action: "approve".to_string(), overrides: None, labels: Some(json!([])) }),
             (r#"{"v":1,"type":"ui_quit","id":2,"payload":null}"#, Request::UiQuit),
         ];
         for (line, expected) in cases {

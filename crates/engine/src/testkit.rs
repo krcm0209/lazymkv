@@ -43,7 +43,9 @@ use lazymkv_platform::fakes::{
     CountingKeepAwake, DriveScript, FakeHost, FakeShares, MemoryConnector, MemoryIpc, MemorySecrets, RecordingEjector,
     ScriptedDrives,
 };
-use lazymkv_platform::{native_guard, DriveEvent, DriveWatcher, GuardedChild, Platform, ProcessGuard, Spawn};
+use lazymkv_platform::{
+    native_guard, rename_no_replace, DriveEvent, DriveWatcher, GuardedChild, Platform, ProcessGuard, Spawn,
+};
 use lazymkv_tools::{exe_name, list_files, CancelToken, Limits};
 use serde_json::{json, Value};
 
@@ -61,6 +63,7 @@ use lazymkv_platform::win::{own_token, protect_data_folder, PipeConnector};
 #[cfg(windows)]
 use lazymkv_platform::{ConnectError, IpcConnector};
 
+use crate::file_phase::RenameFn;
 #[cfg(windows)]
 use crate::native::{run_with, NativeOptions};
 #[cfg(windows)]
@@ -71,6 +74,9 @@ use crate::tuning::CopyFn;
 use crate::{
     EngineConfig, JobContext, NotifySink, Services, ShutdownHandle, StepResult, StepRunner, Timers, WebhookSink,
 };
+
+/// A rename `Harness::file_rename_with` armed: Some is the rename's result, None leaves it to `rename_no_replace`.
+type ArmedRename = Arc<dyn Fn(&Path, &Path) -> Option<io::Result<()>> + Send + Sync>;
 
 /// How often the harness looks again while it waits.
 const POLL: Duration = Duration::from_millis(20);
@@ -504,6 +510,8 @@ pub struct Harness {
     refreshed: Mutex<BTreeMap<String, usize>>,
     /// The copy step `copy_with` armed, shared with every engine the harness starts (Review Focus 1).
     copy_fault: Arc<Mutex<Option<CopyFn>>>,
+    /// The rename `file_rename_with` armed, shared with every engine the harness starts (ruling T32-E22).
+    rename_fault: Arc<Mutex<Option<ArmedRename>>>,
     /// The native run's thread, which returns `run_with`'s exit code (`new_native`); None for every other harness and
     /// once `native_exit`, `stop` or the drop took it.
     #[cfg(windows)]
@@ -719,6 +727,11 @@ impl Harness {
             Some(copy) => copy(from, to),
             None => fs::copy(from, to),
         });
+        let armed_rename = Arc::clone(&self.rename_fault);
+        let file_rename: RenameFn = Arc::new(move |from: &Path, to: &Path| {
+            let armed = lock(&armed_rename).clone();
+            armed.and_then(|rename| rename(from, to)).unwrap_or_else(|| rename_no_replace(from, to))
+        });
         let hooks = TestHooks {
             stop_after: Some(stop_after),
             persist_faults: Some(persist_faults),
@@ -726,6 +739,7 @@ impl Harness {
             cleanup_period: *lock(&self.cleanup_period),
             copy_done: Some(copy_done),
             copy_with: Some(copy_with),
+            file_rename: Some(file_rename),
             refresh_done: Some(refresh_done),
         };
         let engine = start_until(config, services, hooks).expect("the harness's engine starts");
@@ -1207,6 +1221,13 @@ impl Harness {
         *lock(&self.copy_fault) = Some(Arc::new(copy));
     }
 
+    /// Puts `rename` before every rename File makes into a title's final path (the partial file's, and a library file
+    /// put back), from the next rename on (ruling T32-E22): Some is that rename's result, and None renames with
+    /// `rename_no_replace`. Def: T32-E22. Use: T32-E22.
+    pub fn file_rename_with(&self, rename: impl Fn(&Path, &Path) -> Option<io::Result<()>> + Send + Sync + 'static) {
+        *lock(&self.rename_fault) = Some(Arc::new(rename));
+    }
+
     /// From the next `start`, `cleanup_minutes: Some(1)` with its period replaced by `period` (design part 5.9).
     /// Def: T4-11. Use: T4-11.
     pub fn schedule_cleanup(&self, period: Duration) {
@@ -1634,6 +1655,7 @@ impl Folders {
             refresh_done: Mutex::default(),
             refreshed: Mutex::default(),
             copy_fault: Arc::default(),
+            rename_fault: Arc::default(),
             #[cfg(windows)]
             native: Mutex::default(),
             #[cfg(windows)]

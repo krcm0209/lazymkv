@@ -2,6 +2,9 @@
 
 mod arrival;
 mod cleanup;
+/// The `discard_preview` request's worker, which counts a job's staging folder off the owner thread (phase 3 design,
+/// part 6.8; ruling T32-R7). Def: P3-T10. Use: P3-T15, P3-T16.
+mod discard;
 mod file_phase;
 mod ipc_server;
 /// The engine on Windows (design parts 3.1 to 3.8). Def: T3-23. Use: T3-23.
@@ -11,6 +14,12 @@ mod notify;
 mod owner;
 mod relay;
 mod restart;
+/// The `review` request's worker, which builds the job's review document off the owner thread (phase 3 design, part
+/// 6.2). Def: P3-T9. Use: P3-T13, P3-T14, P3-T16.
+mod review_build;
+/// The job's review answers, `review.json`, and its review labels, `review-labels.json` (phase 3 design, parts 6.4,
+/// 6.6). Def: P3-T7. Use: P3-T8, P3-T12, P3-T16.
+mod review_store;
 mod selftest;
 mod space;
 mod staged;

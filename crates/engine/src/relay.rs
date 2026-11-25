@@ -92,8 +92,10 @@ pub(crate) struct CommandJob {
 /// replay flags (call 14), over the job's own settings' `tuning_root` (ENG-19), but only for a title whose step 10 ran
 /// (`text_keys`; pull request 7's notes, call 9): the engine wrote any other title's subtitle section as "no OCR
 /// text", and `decide` with `--text` would skip it with another sentence. lazymkvctl sends a relative path
-/// flag's value again, made absolute (V10's ruling); the engine resolves nothing and passes the words unchanged.
-/// Def: T3-22, T5-22. Use: T3-22, T5-22.
+/// flag's value again, made absolute (V10's ruling); the engine resolves nothing and passes the words unchanged. The
+/// replay flags are `replay_options`' files in its order, the job's review.json last as `--overrides` (phase 3 design,
+/// part 6.4), so the relayed documents read the answers the engine's Decide read.
+/// Def: T3-22, T5-22, P3-T7. Use: T3-22, T5-22, P3-T8.
 pub(crate) fn child_words(
     words: &[String],
     job: &dyn Fn(&str) -> Option<CommandJob>,
@@ -135,6 +137,7 @@ pub(crate) fn child_words(
         ("--tmdb-search", replay.tmdb_search),
         ("--tmdb-record", replay.tmdb_record),
         ("--remembered", replay.remembered),
+        ("--overrides", replay.overrides),
     ];
     for (flag, path) in flags {
         if let Some(path) = path {
@@ -514,6 +517,7 @@ mod tests {
     use crate::ipc_server::held_writer::{lines_of, open, Held};
     use crate::ipc_server::{CLIENT_QUEUE, COMMAND_HEADROOM};
     use crate::testkit::ci_factor;
+    use lazymkv_core::review_doc::REVIEW_FILE;
     use lazymkv_core::testsupport::{Scratch, ScratchExt};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -553,6 +557,31 @@ mod tests {
         let mut decide = vec!["decide".to_string(), "--rec".to_string(), text(folder.join("t00-00800"))];
         decide.extend(flags);
         assert_eq!(child_words(&words(&["decide", "--job", "a-1", "--t", "t00-00800"]), &job, None), Ok(decide));
+    }
+
+    /// Phase 3 design, part 6.4: the relayed `plan --job` and `decide --job` hand the child the job's review.json as
+    /// `--overrides`, after `--remembered`, only when the file is there.
+    #[test]
+    fn a_job_with_a_review_file_gets_overrides_in_the_childs_words() {
+        let s = Scratch::new("relay-review");
+        s.write("a-1/remembered.json", "{}");
+        let folder = s.0.join("a-1");
+        let job = rooted_job(folder.clone(), false, None);
+        let plan = words(&["plan", "--job", "a-1"]);
+        let decide = words(&["decide", "--job", "a-1", "--title", "t00-00800"]);
+        let remembered = vec!["--remembered".to_string(), text(folder.join("remembered.json"))];
+        let mut plan_child = vec!["plan".to_string(), text(folder.clone())];
+        plan_child.extend(remembered.clone());
+        let mut decide_child = vec!["decide".to_string(), "--rec".to_string(), text(folder.join("t00-00800"))];
+        decide_child.extend(remembered);
+        assert_eq!(child_words(&plan, &job, None), Ok(plan_child.clone()));
+        assert_eq!(child_words(&decide, &job, None), Ok(decide_child.clone()));
+        s.write(&format!("a-1/{REVIEW_FILE}"), "{}");
+        let overrides = ["--overrides".to_string(), text(folder.join(REVIEW_FILE))];
+        plan_child.extend(overrides.clone());
+        decide_child.extend(overrides);
+        assert_eq!(child_words(&plan, &job, None), Ok(plan_child));
+        assert_eq!(child_words(&decide, &job, None), Ok(decide_child));
     }
 
     #[test]
