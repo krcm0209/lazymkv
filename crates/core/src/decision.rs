@@ -724,6 +724,7 @@ mod tests {
             reviews: Vec::new(),
             confidence,
             description_alignment: None,
+            menu: Vec::new(),
         }
     }
 
@@ -2376,6 +2377,72 @@ mod tests {
         let mut input = inputs(plan, disc, number, Some(record), &library, &settings);
         input.overrides = overrides;
         decide(&input).unwrap()
+    }
+
+    /// Title 0 of `two_episodes` (English DTS-HD MA 5.1 as stream 1, English Dolby Digital 2.0 as stream 2) decided
+    /// with a menu map confirming stream 2 as a commentary, as the menu-alone tests of `tracks::audio` have the menu
+    /// drop a confirmed commentary, and with `overrides`.
+    fn decided_with_the_menu(overrides: Option<&Overrides>) -> FileDecision {
+        let disc = two_episodes(&[(0, HD_VIDEO), (1, ENG_DTS_HD_MA_6CH), (2, ENG_AC3_2CH)]);
+        let plan = two_episode_plan(&disc);
+        let record = office_record();
+        let library = LibraryFacts::default();
+        let settings = settings();
+        let mut input = inputs(&plan, &disc, 0, Some(&record), &library, &settings);
+        input.audio.menu = BTreeMap::from([(
+            2,
+            crate::tracks::audio::MenuConfirmation {
+                role: crate::menu::AudioRole::Commentary,
+                choices: vec!["c010".to_string()],
+                labels: vec!["AUDIO: Commentary by Person A".to_string()],
+            },
+        )]);
+        input.overrides = overrides;
+        decide(&input).unwrap()
+    }
+
+    /// The menu's outcome for each listed confirmation, as (stream, outcome).
+    fn menu_outcomes(decision: &FileDecision) -> Vec<(u32, crate::tracks::audio::MenuOutcome)> {
+        decision.audio.menu.iter().map(|applied| (applied.stream, applied.outcome)).collect()
+    }
+
+    #[test]
+    fn an_owners_keep_answer_outranks_the_menus_word() {
+        use crate::tracks::audio::MenuOutcome;
+        // Without an answer the menu's word drops stream 2, as on main.
+        let unanswered = decided_with_the_menu(None);
+        assert_eq!(unanswered.audio.dropped, vec![(2, AudioDrop::Menu { role: crate::menu::AudioRole::Commentary })]);
+        assert_eq!(unanswered.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1]);
+        assert_eq!(menu_outcomes(&unanswered), vec![(2, MenuOutcome::Dropped)]);
+        // The owner's keep, and the owner's default, keep it though the menu confirms it as a commentary.
+        for action in [AudioOverride::Keep { order: 1, default: false }, AudioOverride::Keep { order: 0, default: true }] {
+            let overrides = Overrides {
+                audio: vec![AudioTrackOverride { title: 0, stream: 2, action: action.clone() }],
+                ..Overrides::default()
+            };
+            let answered = decided_with_the_menu(Some(&overrides));
+            assert_eq!(answered.audio.dropped, Vec::new(), "{action:?}");
+            let mut kept: Vec<u32> = answered.audio.kept.iter().map(|track| track.stream).collect();
+            kept.sort();
+            assert_eq!(kept, vec![1, 2], "{action:?}");
+            assert_eq!(menu_outcomes(&answered), vec![(2, MenuOutcome::Overridden)], "{action:?}");
+        }
+    }
+
+    #[test]
+    fn an_owners_drop_answer_and_the_menus_word_agree() {
+        use crate::tracks::audio::MenuOutcome;
+        // The owner's drop, and the owner's commentary, drop stream 2 with the owner's reason, not the menu's.
+        for action in [AudioOverride::Drop, AudioOverride::Commentary] {
+            let overrides = Overrides {
+                audio: vec![AudioTrackOverride { title: 0, stream: 2, action: action.clone() }],
+                ..Overrides::default()
+            };
+            let answered = decided_with_the_menu(Some(&overrides));
+            assert_eq!(answered.audio.dropped, vec![(2, AudioDrop::Reviewed)], "{action:?}");
+            assert_eq!(answered.audio.kept.iter().map(|track| track.stream).collect::<Vec<u32>>(), vec![1], "{action:?}");
+            assert_eq!(menu_outcomes(&answered), vec![(2, MenuOutcome::NotKept)], "{action:?}");
+        }
     }
 
     #[test]

@@ -148,11 +148,21 @@ pub enum Note {
     /// The detail states only that fact, naming the title and its label as the scan wrote it ("title 54's label
     /// FPL_MainFeature_R names a cut TheDiscDB does not list as a main movie", ruling H3).
     UnlistedLabelCut,
+    /// Engine menu maps design part 12 (EO-2): `tracks::audio::decide_audio` dropped a stream on the disc's menu's
+    /// word. Names the stream; the detail is one sentence with the menu's role and the shown labels of the choices
+    /// that carry it, in map order. It raises no review.
+    MenuDropped,
+    /// Engine menu maps design parts 12 and 13.3 (EO-5): the menu disagrees with the programme reference, so nothing
+    /// was dropped on the menu's word. Names the reference when the menu confirms it as a commentary or an audio
+    /// description; names no stream when dropping the confirmed tracks would change the reference. It goes with the
+    /// review reason audio_reference_unclear.
+    MenuReferenceConflict,
 }
 
 impl Note {
-    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7, 8.3 rule 1 (OR5, OR16), design part 10.8.
-    pub const ALL: [Note; 14] = [
+    /// Every note, in the order of the enum. Spec 8.6, 8.7, 8.9, 7, 8.3 rule 1 (OR5, OR16), design part 10.8, engine
+    /// menu maps design part 12.
+    pub const ALL: [Note; 16] = [
         Note::PossibleCommentary,
         Note::PossibleAudioDescription,
         Note::LosslessOriginalAvailable,
@@ -167,6 +177,8 @@ impl Note {
         Note::DirectModeFallback,
         Note::LabelRuleUnavailable,
         Note::UnlistedLabelCut,
+        Note::MenuDropped,
+        Note::MenuReferenceConflict,
     ];
 
     /// The snake_case spelling, the same string serde writes. Spec 8.6, 8.7, 8.9, 7.
@@ -186,6 +198,8 @@ impl Note {
             Note::DirectModeFallback => "direct_mode_fallback",
             Note::LabelRuleUnavailable => "label_rule_unavailable",
             Note::UnlistedLabelCut => "unlisted_label_cut",
+            Note::MenuDropped => "menu_dropped",
+            Note::MenuReferenceConflict => "menu_reference_conflict",
         }
     }
 }
@@ -292,6 +306,8 @@ mod tests {
         note_direct_mode_fallback_round_trips: Note::DirectModeFallback => "direct_mode_fallback",
         note_label_rule_unavailable_round_trips: Note::LabelRuleUnavailable => "label_rule_unavailable",
         note_unlisted_label_cut_round_trips: Note::UnlistedLabelCut => "unlisted_label_cut",
+        note_menu_dropped_round_trips: Note::MenuDropped => "menu_dropped",
+        note_menu_reference_conflict_round_trips: Note::MenuReferenceConflict => "menu_reference_conflict",
     });
 
     #[test]
@@ -332,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn note_all_holds_fourteen_notes_with_subtitle_text_unread_after_subtitle_text_disagrees() {
+    fn note_all_holds_sixteen_notes_with_subtitle_text_unread_after_subtitle_text_disagrees() {
         let spellings: Vec<&str> = Note::ALL.iter().map(|note| note.as_str()).collect();
         assert_eq!(
             spellings,
@@ -351,6 +367,8 @@ mod tests {
                 "direct_mode_fallback",
                 "label_rule_unavailable",
                 "unlisted_label_cut",
+                "menu_dropped",
+                "menu_reference_conflict",
             ]
         );
         assert!(Note::ALL.windows(2).all(|pair| pair[0] < pair[1]), "ALL is in the enum's order");

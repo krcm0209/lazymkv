@@ -11,6 +11,7 @@ use crate::ipc::job_summary;
 use crate::job::{Held, State};
 use crate::lang::is_english;
 use crate::lookup::DescriptionKind;
+use crate::menu::AudioRole;
 use crate::record::{JobRecord, TitleRecord};
 use crate::remembered::{
     AudioOverride, AudioTrackOverride, Collision, CollisionAnswer, Overrides, SubtitleOverride, SubtitleTrackOverride,
@@ -396,6 +397,14 @@ fn audio_drop(why: &AudioDrop) -> Option<String> {
         AudioDrop::Described { kind } => format!("dropped: TheDiscDB describes it as {}", described(*kind)),
         AudioDrop::Remembered => "dropped: an earlier answer for this disc said so".to_string(),
         AudioDrop::Reviewed => "dropped: an earlier answer to this review said so".to_string(),
+        // Menu maps design 5.4a (MA-1): the menu's word alone dropped it, which the owner's answer outranks.
+        AudioDrop::Menu { role } => match role {
+            AudioRole::Commentary => "dropped: the disc's menu calls it a commentary".to_string(),
+            AudioRole::AudioDescription => {
+                "dropped: the disc's menu calls it a description for people who cannot see the picture".to_string()
+            }
+            AudioRole::Programme => "dropped: the disc's menu said so".to_string(),
+        },
     };
     Some(text)
 }
@@ -1177,6 +1186,7 @@ mod tests {
             reviews: vec![],
             confidence: 0.95,
             description_alignment: None,
+            menu: Vec::new(),
         };
         let subtitles = SubtitleDecision {
             kept: vec![kept_subtitle(9, 1224), kept_subtitle(33, 1410)],
@@ -1424,6 +1434,28 @@ mod tests {
         let mut derived = held.clone();
         decided(&mut derived).audio.dropped = vec![(8, crate::tracks::audio::AudioDrop::Derived)];
         assert!(doc_with(&derived, &disc, true, &BTreeMap::new()).unwrap().points[0].items == vec!["t00-00801 audio 1"]);
+    }
+
+    #[test]
+    fn a_track_the_menu_dropped_is_an_item() {
+        // Ruling T32-R2: a track dropped on the menu's word is one the owner can overrule, so it is an item.
+        let disc = film_disc();
+        let mut held = record(&disc);
+        let audio = &mut decided(&mut held).audio;
+        audio.kept.truncate(1);
+        audio.dropped = vec![(8, crate::tracks::audio::AudioDrop::Menu { role: crate::menu::AudioRole::Commentary })];
+        let doc = sheet(&held, &disc, true);
+        assert_eq!(doc.points[0].items, vec!["t00-00801 audio 1", "t00-00801 audio 8"]);
+        let eight = item(&doc, "t00-00801 audio 8");
+        assert_eq!(eight.kind, ItemKind::Audio);
+        assert_eq!(eight.answers, AUDIO_ANSWERS.iter().map(|answer| answer.to_string()).collect::<Vec<String>>());
+        assert_eq!((eight.stands.as_str(), eight.order_if_kept), ("drop", Some(1)));
+        assert_eq!(eight.describe, "English  Dolby Digital, 2 channels");
+        assert!(
+            eight.evidence.iter().any(|e| e.kind == "verdict" && e.text == "dropped: the disc's menu calls it a commentary"),
+            "{:?}",
+            eight.evidence
+        );
     }
 
     #[test]

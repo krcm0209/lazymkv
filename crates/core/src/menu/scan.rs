@@ -1,11 +1,12 @@
 //! Menu maps against a scan (menu maps design 5.3 and 5.4, rulings M3-1 to M3-6 of `docs/menu-maps/format.md`):
 //! which scan stream a map's stream number means, whether a map belongs to the scanned disc, the check `menu check`
-//! prints, and the per-title block of labels decide shows beside its decisions. Evidence only: nothing here changes a
-//! verdict, role, plan or decision. No I/O.
+//! prints, and the per-title block of labels decide shows beside its decisions. Nothing here changes a verdict, role,
+//! plan or decision: the block is only shown, and its `roles` (`tie.rs`) are what the decision reads (design 5.4a).
+//! No I/O.
 
 use crate::disc::{Disc, Flags, StreamKind, Title};
 
-use super::{map_level, Effect, Kind, Level, MenuMap};
+use super::{map_level, Effect, Kind, Level, MenuMap, RolesBlock};
 
 /// Why a disc's ID is unknown: a scan file was given, not the recording folder (M3-6).
 pub const NO_ID_IN_SCAN_FILE: &str = "a scan file carries no disc ID; give the recording folder";
@@ -93,6 +94,13 @@ pub fn line_text(text: &str) -> String {
 /// `playlist` plays (two titles may share one source file). Empty for a playlist that is no title of the scan (M3-2).
 pub fn titles_for<'a>(disc: &'a Disc, playlist: &str) -> Vec<&'a Title> {
     disc.titles.values().filter(|title| plays(title, playlist)).collect()
+}
+
+/// The folder name of a disc ID in a maps folder: `id` trimmed, in upper case, when it is exactly 40 ASCII hex digits;
+/// None otherwise. The only part of a map a path is built from.
+pub fn disc_folder(id: &str) -> Option<String> {
+    let id = id.trim();
+    (id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| id.to_ascii_uppercase())
 }
 
 /// The scanned disc's ID (a recording's `meta.json` `disc_id`), or the reason it is not known (M3-6).
@@ -283,12 +291,13 @@ pub struct OtherPlaylist {
     pub in_scan: bool,
 }
 
-/// Decide's `menu` block for one title (design 5.3, 5.4; evidence only, no decision reads it): the map's slug and
-/// level, the identity's text, the title's playlist (its source file without `.mpls`; None without a source file),
+/// Decide's `menu` block for one title (design 5.3, 5.4; shown only, the decision reads only `roles`): the map's slug
+/// and level, the identity's text, the title's playlist (its source file without `.mpls`; None without a source file),
 /// what starts the title (play and the version, bonus and other choices on its playlist), the audio and shown
 /// subtitle choices by the scan stream of their own number, the subtitle choices that turn subtitles off, every other
 /// playlist the map's effects name, the own-kind choices whose own number labels no stream, and the entries without an
-/// effect.
+/// effect. `roles` is the menu-role increment's reading of the audio choices (design 5.4a, `tie.rs`); `title_block`
+/// sets it to None, and None is not printed, so a block without it prints as before.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MenuBlock {
     pub map: String,
@@ -302,10 +311,13 @@ pub struct MenuBlock {
     pub other_playlists: Vec<OtherPlaylist>,
     pub out_of_range: Vec<String>,
     pub no_effect: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<RolesBlock>,
 }
 
-/// `file` without a final `.mpls` (ASCII case ignored); a source file of another kind is kept whole.
-fn playlist_of(file: &str) -> String {
+/// `file` without a final `.mpls` (ASCII case ignored); a source file of another kind is kept whole. A title's
+/// playlist name as `tie.rs` looks it up; public so that `decide --menu` asks for the same name (MR-8).
+pub fn playlist_of(file: &str) -> String {
     match file.len().checked_sub(5) {
         Some(at) if file.is_char_boundary(at) && file[at..].eq_ignore_ascii_case(".mpls") => file[..at].to_string(),
         _ => file.to_string(),
@@ -354,6 +366,7 @@ pub fn title_block(map: &MenuMap, disc: &Disc, title: &Title, identity: &Identit
         other_playlists: Vec::new(),
         out_of_range: Vec::new(),
         no_effect: Vec::new(),
+        roles: None,
     };
     match &map.play.effect {
         None => block.no_effect.push("play".to_string()),

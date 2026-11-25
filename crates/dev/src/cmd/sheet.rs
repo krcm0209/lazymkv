@@ -413,6 +413,7 @@ SINFO:0,3,6,0,"PGS"
             reviews: vec![],
             confidence: 0.95,
             description_alignment: None,
+            menu: Vec::new(),
         };
         let subtitles = SubtitleDecision {
             kept: vec![kept_subtitle(2), kept_subtitle(3)],
