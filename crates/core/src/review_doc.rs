@@ -1006,8 +1006,14 @@ pub fn render(doc: &ReviewDoc) -> String {
         let indent = " ".repeat(label.len());
         // The closing line below says what NOT_ON_THIS_SHEET says, so it is not shown twice.
         let body = point.sentence.strip_suffix(NOT_ON_THIS_SHEET).unwrap_or(&point.sentence);
-        // One sentence per line; `split_inclusive` keeps each sentence's own full stop.
-        for (at, text) in body.split_inclusive(". ").enumerate() {
+        // One sentence per line; `split_inclusive` keeps each sentence's own full stop. The nothing-at-the-path sentence
+        // holds a path, which may hold ". " ("Dr. X"), so its path part is kept whole and only its fixed part is split off.
+        let (whole, rest) = match body.strip_suffix(NOTHING_AT_PATH) {
+            Some(path_part) if path_part.starts_with("Nothing is at ") => (path_part.trim_end(), NOTHING_AT_PATH),
+            _ => ("", body),
+        };
+        let sentences = Some(whole).filter(|text| !text.is_empty()).into_iter().chain(rest.split_inclusive(". "));
+        for (at, text) in sentences.enumerate() {
             out.push_str(if at == 0 { &label } else { &indent });
             out.push_str(text.trim_end());
             out.push('\n');
@@ -1481,7 +1487,6 @@ mod tests {
     fn the_sheet_says_nothing_is_at_the_path_and_asks_nothing() {
         let disc = film_disc();
         let text = render(&nothing_at_the_path(&disc, &BTreeMap::new(), &only_the_final_path()));
-        println!("{text}");
         // One sentence per line, as every point's sentences are shown.
         let sentence = format!(
             "1. Nothing is at {FINAL} now.\n   A folder the share could not open clears by itself within minutes, so approving \
@@ -1493,6 +1498,34 @@ mod tests {
         assert!(!text.contains("not answered"), "{text}");
         assert!(!text.contains("later version of lazymkv"), "{text}");
         assert!(!text.contains("As it stands"), "{text}");
+    }
+
+    /// A path with a full stop and a space in it ("Dr. Nobody") is not a sentence end: the sheet prints it whole.
+    #[test]
+    fn the_sheet_keeps_a_path_with_a_full_stop_in_one_piece() {
+        let disc = film_disc();
+        let dotted = "M:/Movies/Dr. Nobody (1964)/Dr. Nobody (1964) - 2160p.mkv";
+        let mut held = record(&disc);
+        decided(&mut held).reviews = vec![ReviewReason::PathCollision];
+        decided(&mut held).path.as_mut().unwrap().path = dotted.to_string();
+        let (staged, lines, unread) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+        let nothing_at = BTreeSet::from([dotted.to_string()]);
+        let doc = build(&DocInputs {
+            record: &held,
+            disc: &disc,
+            staged: &staged,
+            lines: &lines,
+            unread: &unread,
+            collisions: &BTreeMap::new(),
+            nothing_at: &nothing_at,
+            all: false,
+        })
+        .unwrap();
+        assert_eq!(doc.points[0].sentence, format!("Nothing is at {dotted} now. {NOTHING_AT_PATH}"));
+        let text = render(&doc);
+        assert!(text.contains(&format!("1. Nothing is at {dotted} now.\n")), "{text}");
+        assert_eq!(text.matches(NOTHING_AT_PATH).count(), 1, "{text}");
+        assert!(text.contains(&format!("\n   {NOTHING_AT_PATH}\n")), "{text}");
     }
 
     #[test]
