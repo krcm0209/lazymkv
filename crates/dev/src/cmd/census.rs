@@ -373,11 +373,12 @@ mod tests {
     fn census_is_reached_through_its_row_of_the_command_table() {
         let row = crate::COMMANDS.iter().find(|(name, _, _)| *name == "census").map(|(_, _, synopsis)| *synopsis);
         assert_eq!(row, Some("[--evidence DIR]"));
-        // The rows after census are menu and compare-job, the last default rows (ocr-trial's, behind its feature, comes after).
+        // The rows after census are menu, compare-job and sheet, the last default rows (ocr-trial's, behind its feature, comes after).
         let at = crate::COMMANDS.iter().position(|(name, _, _)| *name == "census").unwrap();
         assert_eq!(crate::COMMANDS.get(at + 1).map(|(name, _, _)| *name), Some("menu"));
         assert_eq!(crate::COMMANDS.get(at + 2).map(|(name, _, _)| *name), Some("compare-job"));
-        assert_eq!(crate::COMMANDS.len(), at + 3 + usize::from(cfg!(feature = "ocr-trial")));
+        assert_eq!(crate::COMMANDS.get(at + 3).map(|(name, _, _)| *name), Some("sheet"));
+        assert_eq!(crate::COMMANDS.len(), at + 4 + usize::from(cfg!(feature = "ocr-trial")));
         let tmp = Scratch::new("census-dispatch");
         public_recordings(&tmp);
         let argv: Vec<String> = ["census", "--evidence", &tmp.0.to_string_lossy()].iter().map(|w| w.to_string()).collect();
