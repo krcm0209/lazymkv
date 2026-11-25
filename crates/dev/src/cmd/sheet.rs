@@ -97,13 +97,16 @@ fn sheet(ctx: &Ctx, job: &str, text: Option<&str>, held: bool, all: bool) -> Res
             // A job with nothing to review may have no scan: `build`'s refusal comes first, as the engine's does.
             let empty = disc(&parse(""))?;
             let none = Read::default();
-            review_doc::build(&inputs(&record, &empty, &none, all))?;
-            return Err(error);
+            // Any other failure of that build is the empty scan's, so the scan's own error is the one to give.
+            return match review_doc::build(&inputs(&record, &empty, &none, all)) {
+                Err(refusal) if refusal.ends_with("there is nothing to review") => Err(refusal),
+                _ => Err(error),
+            };
         }
     };
     let mut read = Read::default();
     if let Some(text) = text {
-        read_lines(ctx, &job_dir, &record, &scanned, Path::new(text), &mut read);
+        read_lines(ctx, &job_dir, &record, &scanned, &ctx.abs(text), &mut read);
     }
     let doc = review_doc::build(&inputs(&record, &scanned, &read, all))?;
     Ok(review_doc::render(&doc))
@@ -612,6 +615,72 @@ SINFO:0,3,6,0,"PGS"
         let row = |stream: u32| out.lines().find(|line| line.trim_start().starts_with(&format!("track {stream} "))).unwrap_or("");
         assert!(row(2).contains("made-up line c") && !row(2).contains("line a"), "{out}");
         assert!(row(3).contains("made-up line a") && row(3).contains("made-up line b"), "{out}");
+    }
+
+    #[test]
+    fn a_job_with_nothing_to_review_exits_2_naming_it() {
+        let tmp = Scratch::new("sheet-nothing");
+        // A job that is neither held nor filed has nothing to review.
+        let (job, _) = job_folder(&tmp.0, State::Ripping);
+        let (code, out, err) = run_sheet(&tmp.0, &[&job.display().to_string()]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "lazymkv-dev sheet: job job-a is Ripping: there is nothing to review\n");
+        // With no scan.txt the same refusal comes first.
+        std::fs::remove_file(job.join("scan.txt")).unwrap();
+        let (code, out, err) = run_sheet(&tmp.0, &[&job.display().to_string()]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("there is nothing to review"), "{err}");
+    }
+
+    #[test]
+    fn an_argument_error_exits_2() {
+        let tmp = Scratch::new("sheet-args");
+        let (job, _) = job_folder(&tmp.0, State::NeedsReview { held: Held::DispositionGate });
+        let folder = job.display().to_string();
+        for args in [vec![], vec![folder.as_str(), "extra"], vec![folder.as_str(), "--nonsense"], vec![folder.as_str(), "--text"]] {
+            let (code, out, err) = run_sheet(&tmp.0, &args);
+            assert_eq!((code, out.as_str()), (2, ""), "{args:?}: {err}");
+            assert!(err.contains("lazymkv-dev sheet: error: "), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_held_job_without_a_scan_exits_2_naming_the_scan() {
+        let tmp = Scratch::new("sheet-noscan");
+        let (job, _) = job_folder(&tmp.0, State::NeedsReview { held: Held::DispositionGate });
+        std::fs::remove_file(job.join("scan.txt")).unwrap();
+        let (code, out, err) = run_sheet(&tmp.0, &[&job.display().to_string()]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("scan.txt"), "{err}");
+        assert!(!err.contains("nothing to review"), "{err}");
+    }
+
+    #[test]
+    fn text_that_cannot_be_read_says_so_on_the_sheet() {
+        let tmp = Scratch::new("sheet-badtext");
+        let (job, _) = job_folder(&tmp.0, State::NeedsReview { held: Held::DispositionGate });
+        let text = tmp.0.join("text");
+        write(&text.join("sub-0.ocr.jsonl"), reading(&[(100.0, &["made-up line a"])]));
+        write(&text.join("sub-1.ocr.jsonl"), "{\"t\": 1.0, \"lines\": [\"made-up secret\"\n");
+        let (code, out, err) = run_sheet(&tmp.0, &[&job.display().to_string(), "--text", &text.display().to_string()]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("the subtitle reading could not be read"), "{out}");
+        assert!(out.contains("sub-1.ocr.jsonl"), "{out}");
+        assert!(!out.contains("made-up secret"), "{out}");
+    }
+
+    #[test]
+    fn a_stream_the_summary_records_as_not_read_says_why_on_the_sheet() {
+        let tmp = Scratch::new("sheet-unread");
+        let (job, _) = job_folder(&tmp.0, State::NeedsReview { held: Held::DispositionGate });
+        let text = tmp.0.join("text");
+        write(&text.join("sub-1.ocr.jsonl"), reading(&[(200.0, &["made-up line c"])]));
+        let summary = json!({"streams": [{"n": 0, "read": false, "why": "made-up reason it was cut off"}]});
+        write(&job.join(KEY).join("subs-ocr/summary.json"), summary.to_string());
+        let (code, out, err) = run_sheet(&tmp.0, &[&job.display().to_string(), "--text", &text.display().to_string()]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("made-up reason it was cut off"), "{out}");
+        assert!(out.contains("made-up line c"), "{out}");
     }
 
     #[test]
