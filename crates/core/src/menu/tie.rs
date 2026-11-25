@@ -236,8 +236,8 @@ pub struct Unplaced {
 }
 
 /// What `audio_roles` found for one title: why no stream is tied (MR-8; None when the block was read), the labelled
-/// streams ascending, the audio choices that label none in map order, and the off-decisions that name no audio choice
-/// with a role word.
+/// streams ascending, the audio choices that label none in map order, the off-decisions that are not stale and name
+/// no audio choice with a role word, the stale ones, and the stream plain Play selects.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RolesReport {
     /// Why no stream of the title is tied (MR-8); None when the block was read.
@@ -246,8 +246,13 @@ pub struct RolesReport {
     pub audio: Vec<StreamRole>,
     /// The audio choices that label no stream, in map order.
     pub unplaced: Vec<Unplaced>,
-    /// The off-decisions that name no audio choice with a role word, in id order.
+    /// The off-decisions that are not stale and name no audio choice with a role word, in id order; the stale ids are
+    /// left out, being in `off_stale`.
     pub off_unused: Vec<String>,
+    /// The off-decisions whose line text differs from the wording of the audio choice they name, in id order.
+    pub off_stale: Vec<String>,
+    /// The scan stream plain Play selects (MR-17); None when it is not known and when the title is untied.
+    pub play: Option<u32>,
 }
 
 /// The `roles` key of decide's menu block.
@@ -263,6 +268,12 @@ pub struct RolesBlock {
     pub unplaced: Vec<Unplaced>,
     /// `RolesReport::off_unused`.
     pub off_unused: Vec<String>,
+    /// `RolesReport::off_stale`.
+    #[serde(default)]
+    pub off_stale: Vec<String>,
+    /// `RolesReport::play`.
+    #[serde(default)]
+    pub play: Option<u32>,
 }
 
 impl RolesReport {
@@ -281,20 +292,30 @@ impl RolesReport {
             audio: self.audio,
             unplaced: self.unplaced,
             off_unused: self.off_unused,
+            off_stale: self.off_stale,
+            play: self.play,
         }
     }
 }
 
-/// The off-decision ids that name no audio choice of the map, or one whose `role_text` holds no role word; id order.
-fn unused_decisions(map: &MenuMap, off: &OffDecisions) -> Vec<String> {
-    let used = |id: &str| {
-        map.choices.iter().any(|choice| {
-            choice.kind == Kind::Audio
-                && choice.id == id
-                && !audio_roles_in(&role_text(&choice.section, &choice.label)).is_empty()
-        })
-    };
-    off.ids().into_iter().filter(|id| !used(id)).map(str::to_string).collect()
+/// The off-decision ids split in two, each in id order: the stale ones, where the map has an audio choice with that id
+/// whose `role_text` differs from the line's text, and the unused ones, which are not stale and name no audio choice of
+/// the map, or one whose `role_text` holds no role word.
+fn split_decisions(map: &MenuMap, off: &OffDecisions) -> (Vec<String>, Vec<String>) {
+    let (mut stale, mut unused) = (Vec::new(), Vec::new());
+    for id in off.ids() {
+        let wording = map
+            .choices
+            .iter()
+            .find(|choice| choice.kind == Kind::Audio && choice.id == id)
+            .map(|choice| role_text(&choice.section, &choice.label));
+        match wording {
+            Some(text) if off.text(id) != Some(text.as_str()) => stale.push(id.to_string()),
+            Some(text) if !audio_roles_in(&text).is_empty() => {}
+            _ => unused.push(id.to_string()),
+        }
+    }
+    (stale, unused)
 }
 
 /// The title's own playlist (the block) and its name, or why no stream of the title is tied (MR-8).
@@ -458,7 +479,7 @@ struct Labelled<'a> {
 }
 
 /// The roles of `title`'s audio streams from `map`'s audio choices (design 5.4a, MR-6, MR-8, MR-9). `playlists` holds
-/// the recording's playlists by name without `.mpls`. In order: the unused off-decisions; the block, or `untied` with
+/// the recording's playlists by name without `.mpls`. In order: the stale and unused off-decisions; the block, or `untied` with
 /// nothing placed; each audio choice in map order placed on a block number (directly, or through a twin by PID) and
 /// the scan stream M3-1 names for it, with its tie, or unplaced with the reason; Play's own stream, its effect placed
 /// the same way (MR-17; not known when it cannot be placed); then per labelled stream, ascending, its choices, the
@@ -470,10 +491,19 @@ pub fn audio_roles(
     title: &Title,
     playlists: &BTreeMap<String, Result<Playlist, String>>,
 ) -> RolesReport {
-    let off_unused = unused_decisions(map, off);
+    let (off_stale, off_unused) = split_decisions(map, off);
     let (block_name, block) = match block_of(title, playlists) {
         Ok(found) => found,
-        Err(why) => return RolesReport { untied: Some(why), audio: Vec::new(), unplaced: Vec::new(), off_unused },
+        Err(why) => {
+            return RolesReport {
+                untied: Some(why),
+                audio: Vec::new(),
+                unplaced: Vec::new(),
+                off_unused,
+                off_stale,
+                play: Option::None,
+            }
+        }
     };
     let scan = map_streams(title).audio;
     let mut unplaced = Vec::new();
@@ -512,7 +542,7 @@ pub fn audio_roles(
             stream_role_of(number, k, stream, &labelled, block, scan.len(), play, off)
         })
         .collect();
-    RolesReport { untied: Option::None, audio, unplaced, off_unused }
+    RolesReport { untied: Option::None, audio, unplaced, off_unused, off_stale, play: play_stream }
 }
 
 /// The `StreamRole` of scan stream `number` (block entry `k`) from the choices that label it, in map order; `play`
@@ -1122,7 +1152,7 @@ mod tests {
                 "playlist 00800: its play items carry differing stream tables",
             ),
         ];
-        let off = parse_off("off\tc099\n").unwrap();
+        let off = parse_off("off\tc099\tX\n").unwrap();
         for (title, lists, why) in cases {
             let no_effect = choice("c001", Kind::Audio, "AUDIO", "X", Option::None, Level::Read);
             let choices = vec![commentary(Level::Replayed), no_effect];
@@ -1140,8 +1170,8 @@ mod tests {
         let switch = choice("c010", Kind::Audio, "COMMENTARY", "Off", Some(effect("00800", Some(3))), Level::Replayed);
         let cases = [
             ("", Option::None, "undecided: c010 (menu-off.tsv)"),
-            ("off\tc010\n", Option::None, "no role word"),
-            ("role\tc010\n", Some(AudioRole::Commentary), ""),
+            ("off\tc010\tCOMMENTARY: Off\n", Option::None, "no role word"),
+            ("role\tc010\tCOMMENTARY: Off\n", Some(AudioRole::Commentary), ""),
         ];
         for (text, role, why) in cases {
             let off = parse_off(text).unwrap();
@@ -1178,9 +1208,42 @@ mod tests {
             choice("c020", Kind::Subtitle, "SUBTITLES", "Commentary", Some(effect("00800", Some(1))), Level::Replayed),
             audio("c021", "Language A", "00800", 2, Level::Replayed),
         ];
-        let off = parse_off("off\tc099\noff\tc020\nrole\tc021\nrole\tc010\n").unwrap();
+        let off = parse_off(
+            "off\tc099\tX\noff\tc020\tSUBTITLES: Commentary\nrole\tc021\tAUDIO: Language A\n\
+             role\tc010\tAUDIO: Commentary by Person A\n",
+        ).unwrap();
         let report = audio_roles(&map(play(), choices), &off, &title(), &block_only());
         assert_eq!(report.off_unused, vec!["c020".to_string(), "c021".to_string(), "c099".to_string()]);
+    }
+
+    /// A decision whose line text differs from the audio choice's wording is stale; one that names no choice is unused.
+    #[test]
+    fn a_decision_whose_text_no_longer_fits_is_stale_and_one_that_names_no_choice_is_unused() {
+        // The map's c010 reads "AUDIO: Commentary Off"; the line for it was written for other wording.
+        let at = Some(effect("00800", Some(3)));
+        let switch = choice("c010", Kind::Audio, "AUDIO", "Commentary Off", at, Level::Replayed);
+        let off = parse_off("off\tc010\tAUDIO: Commentary None\noff\tc099\tAUDIO: Anything\n").unwrap();
+        let report = audio_roles(&map(play(), vec![switch]), &off, &title(), &block_only());
+        assert_eq!(report.off_stale, ["c010"]);
+        assert_eq!(report.off_unused, ["c099"]);
+        let row = report.audio.iter().find(|row| row.choices.contains(&"c010".to_string())).unwrap();
+        assert_eq!((row.role, row.why.as_str()), (Option::None, "undecided: c010 (menu-off.tsv)"));
+    }
+
+    /// The block says which stream plain Play selects, and still reads without the new fields.
+    #[test]
+    fn the_block_says_which_stream_plain_play_selects() {
+        let identity = Identity::Matches("0123".to_string());
+        let choices = vec![commentary(Level::Replayed)];
+        let block = roles(&map(play(), choices.clone()), &title(), &block_only()).block(&identity);
+        assert_eq!(block.play, Some(1));
+        let untied = roles(&map(play(), choices), &title(), &playlists(vec![])).block(&identity);
+        assert_eq!(untied.play, Option::None);
+        let want = r#"{"acts":false,"why":"playlist 00800 was not read","audio":[],"unplaced":[],"off_unused":[],"off_stale":[],"play":null}"#;
+        assert_eq!(serde_json::to_string(&untied).unwrap(), want);
+        let old: RolesBlock =
+            serde_json::from_str(r#"{"acts":false,"why":"x","audio":[],"unplaced":[],"off_unused":[]}"#).unwrap();
+        assert_eq!((old.off_stale, old.play), (Vec::new(), Option::None));
     }
 
     /// The block acts on a matching identity only, and never on an untied report (MR-5, MR-8).
@@ -1205,7 +1268,7 @@ mod tests {
         let block = untied.block(&Identity::Matches("0123".to_string()));
         assert_eq!((block.acts, block.why.as_str()), (false, "playlist 00800 was not read"));
         let text = serde_json::to_string(&block).unwrap();
-        let want = r#"{"acts":false,"why":"playlist 00800 was not read","audio":[],"unplaced":[],"off_unused":[]}"#;
+        let want = r#"{"acts":false,"why":"playlist 00800 was not read","audio":[],"unplaced":[],"off_unused":[],"off_stale":[],"play":null}"#;
         assert_eq!(text, want);
     }
 
@@ -1277,6 +1340,28 @@ mod tests {
             let role = &report.audio[0];
             assert_eq!((role.stream, role.tie, role.play, role.why.as_str()), (1, tie, false, ""), "{play:?}");
             assert_eq!(role.confirms(), Some(AudioRole::Commentary), "{play:?}");
+        }
+    }
+
+    /// A Play effect that cannot be placed leaves the block acting on a matching identity, with `play` None.
+    #[test]
+    fn a_block_whose_play_effect_cannot_be_placed_acts_with_no_play_stream() {
+        let block_audio = [(0x1100, 0x83, "eng"), (0x1101, 0x81, "fra"), (0x1102, 0x81, "fra")];
+        let lists = playlists(vec![
+            ("00800", Ok(playlist(&[("00001", 0, 900)], &block_audio))),
+            ("00801", Ok(playlist(&[("00001", 0, 900)], &[(0x1100, 0x83, "eng"), (0x1105, 0x81, "eng")]))),
+        ]);
+        let scan = scan_title(
+            "00800.mpls",
+            &[("eng", "TrueHD", "0"), ("eng", "AC3", "256"), ("fra", "AC3", "0"), ("fra", "AC3", "0")],
+        );
+        for play in [Option::None, Some(effect("00800", Option::None)), Some(effect("00900", Some(1)))] {
+            let choice = audio("c010", "Commentary English", "00800", 1, Level::Replayed);
+            let report = roles(&map(play.clone(), vec![choice]), &scan, &lists);
+            assert_eq!(report.play, Option::None, "{play:?}");
+            let block = report.block(&Identity::Matches("0123".to_string()));
+            assert_eq!((block.acts, block.why.as_str(), block.play), (true, "", Option::None), "{play:?}");
+            assert_eq!(block.audio.len(), 1, "{play:?}");
         }
     }
 

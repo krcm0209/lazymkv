@@ -676,3 +676,12 @@ fn an_own_kind_choice_without_a_number_labels_no_stream() {
     let subtitles: Vec<u32> = block.subtitles.iter().map(|row| row.stream).collect();
     assert_eq!((audio, subtitles), (vec![1, 3], vec![8]));
 }
+
+#[test]
+fn a_disc_folder_is_forty_hex_digits_upper_cased() {
+    let id = "0123456789abcdef0123456789ABCDEF01234567";
+    assert_eq!(disc_folder(&format!(" {id}\n")), Some(id.to_uppercase()));
+    for bad in ["", "0123", &id[1..], &format!("{id}0"), &id.replace('0', "g"), &id.replace('1', "/")] {
+        assert_eq!(disc_folder(bad), None, "{bad:?}");
+    }
+}

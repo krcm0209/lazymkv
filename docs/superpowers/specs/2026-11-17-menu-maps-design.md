@@ -5,7 +5,12 @@ day; its terms beyond the ruling's own words are proposals the owner can correct
 in `main`, and so is the menu-role rule of 5.4a (pull request #35, 2026-11-24; `docs/menu-maps/format.md`, "The
 rule"); the owner's answer of that day is at the end of 5.4a. The owner's rulings after that merge widen the rule so
 that the menu's word alone drops the track, whatever the content rule says of it; the widening is built on its own
-branch (2026-11-24; 5.4a, "The owner's rulings after the merge"). Increment 1 (the tooling in
+branch (2026-11-24; 5.4a, "The owner's rulings after the merge"), merged as pull request #39. How the engine uses a
+map in a real job is the engine menu maps design, `docs/superpowers/specs/2026-11-24-engine-menu-maps-design.md`; its
+pull request 1 (2026-11-24) changes what `lazymkv-dev decide --menu` and `lazymkv-dev menu` do: the off-decisions
+bound to their choice's wording, a note for each menu drop, the rule on a title without a reference and against the
+reference, and `menu off` and `menu publish` (`docs/menu-maps/format.md`). The engine gives no map yet, and the
+non-goal of 3 that keeps map making off the mini PC stands. Increment 1 (the tooling in
 `experiments/menu-spike/menu/` and the maps of the 13 trial discs) is built. Where it departs from this text the
 tooling's README is the description as built: set-up reuses an existing build of the library instead of building it
 from pinned source, screenshots are converted without ffmpeg, and `made.profile` records no UHD capability.
