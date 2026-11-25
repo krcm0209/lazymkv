@@ -236,8 +236,8 @@ pub struct Unplaced {
 }
 
 /// What `audio_roles` found for one title: why no stream is tied (MR-8; None when the block was read), the labelled
-/// streams ascending, the audio choices that label none in map order, and the off-decisions that name no audio choice
-/// with a role word.
+/// streams ascending, the audio choices that label none in map order, the off-decisions that are not stale and name
+/// no audio choice with a role word, the stale ones, and the stream plain Play selects.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RolesReport {
     /// Why no stream of the title is tied (MR-8); None when the block was read.

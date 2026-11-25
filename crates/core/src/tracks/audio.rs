@@ -123,9 +123,9 @@ pub enum AudioDrop {
 /// whatever the content rule's verdict (MA-1). The candidates of a title all end alike, the first that holds: every
 /// one is `ReferenceDisputed` when a confirmation of the title is `Reference` (EO-11); `NoReference` when the title
 /// has no programme reference and Play's stream is not known, not kept or itself a candidate (EO-3, Ruling FR-1);
-/// `WouldLeaveNone` when dropping them would leave no kept track (MA-2), which can no longer be reached since EO-3
-/// keeps Play's stream, and stays as a guard; `ReferenceWouldChange` when it would move the reference (MR-4); else
-/// `Dropped`.
+/// `WouldLeaveNone` when dropping them would leave no kept track (MA-2), which can no longer be reached, since the
+/// reference is never a candidate and EO-3 keeps Play's stream where there is no reference, and stays as a guard;
+/// `ReferenceWouldChange` when it would move the reference (MR-4); else `Dropped`.
 /// Def: menu-role Task 4, menu-alone Task 1, engine menu maps Task 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,8 +149,9 @@ pub enum MenuOutcome {
     /// with audio_reference_unclear and the note `menu_reference_conflict` (EO-5).
     ReferenceWouldChange,
     /// Dropping the confirmed streams would leave the title no kept audio track, so none is dropped (MA-2). It can no
-    /// longer be reached, through `decide --menu` or by a direct call, since `NoReference` refuses first whenever
-    /// Play's stream is not a kept track left beside the candidates (Ruling FR-1); it stays as a guard.
+    /// longer be reached, through `decide --menu` or by a direct call: with a reference the reference stays, being
+    /// never a candidate, and without one `NoReference` refuses first unless Play's stream is a kept track that is no
+    /// candidate (Ruling FR-1). It stays as a guard.
     WouldLeaveNone,
 }
 
@@ -697,8 +698,8 @@ fn arrange(
 
 /// Every confirmation of a commentary or an audio description in `facts.menu`, ascending stream, with its outcome on
 /// the first arrangement (design 5.4a, MR-1, MR-3, MA-1): `Dropped` marks a candidate, which `decide_audio` keeps or
-/// turns into `ReferenceDisputed` (EO-11), `NoReference` (EO-3), `WouldLeaveNone` (MA-2) or `ReferenceWouldChange`
-/// (MR-4). A programme confirmation is not listed.
+/// turns into `ReferenceDisputed` (EO-11), `NoReference` (EO-3), `WouldLeaveNone` (MA-2, a guard that can no longer be
+/// reached) or `ReferenceWouldChange` (MR-4). A programme confirmation is not listed.
 fn menu_outcomes(
     facts: &AudioFacts<'_>,
     first: &Arrangement,

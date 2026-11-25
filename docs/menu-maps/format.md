@@ -681,7 +681,7 @@ Then every candidate gets the same outcome, the first that holds of these five, 
 The kept streams are arranged again only when neither `reference_disputed` nor `no_reference` holds.
 `would_leave_none` stays as a guard, but it can no longer be reached, through `decide --menu` or by a direct call
 (EP-7; amended on 2026-11-24, Ruling FR-1): with a reference the reference stays, and without one nothing is dropped
-unless Play's own stream is kept and is not itself a candidate, so it stays. A confirmation that the wiring never gives,
+unless Play's own stream is kept and is not itself a candidate, so it stays. A candidate that the wiring never gives,
 on Play's own stream and handed to `decide_audio` directly, gets `no_reference`.
 
 **The review.** A menu drop raises no review, as a flag or a description raises none (MR-11's "no review" stands), so a
